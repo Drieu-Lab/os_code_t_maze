@@ -1,0 +1,53 @@
+Hardware:
+
+Arduino DAC0
+(connection via RG-174 coaxial cable -22 AWG stranded, PVC jacket-)
+WIMA Polypropylene Film Capacitor, 1nF, 100V, ±1% (in parallel)
+100 Ω ohm Resistor 1/4W ±1% Tolerance
+(connection via RG-174 coaxial cable -22 AWG stranded, PVC jacket-)
+OPA2134PA OpAmp
+(connection via RG-174 coaxial cable -22 AWG stranded, PVC jacket-)
+PAM8403 Audio Power Amplifier Module
+(connection via 18 AWG speaker wire)
+22 µF (non-polar) capacitor in series
+2–3 Ω, 5 W resistor
+Peerless XT25TG30-04 1" Dual Ring Radiator Tweeter
+
+Arduino Due DAC0
+   │
+   │
+   ├── RG-174 coax (signal)
+   │
+   └─┬─> 100 Ω resistor (series, 1/4 W)
+      │
+      ├─┐
+      │ │
+      │ └─ WIMA 1 nF polypropylene capacitor to GND (parallel RC filter for DAC)
+      │
+      │
+   RG-174 coax (signal)
+      │
+OPA2134PA Op-Amp
+   │  (buffer/gain stage, powered from ±V or single rail with virtual ground)
+   │
+   │
+   ├── RG-174 coax (signal)
+   │
+PAM8403 Audio Power Amplifier Module (stereo, line-level input) Connect directly to PAM8403 – output pad with your 18 AWG speaker wire.
+   │
+   │
+   ├── 18 AWG speaker wire
+   │
+   └─ Series Protection (per tweeter channel)
+        ├── 22 µF non-polar capacitor (series high-pass) Solder one leg to the PAM8403 + output pad.
+        └── 2–3 Ω, 5 W resistor (optional current limiter) Solder one leg of the resistor to the free leg of the capacitor. Connect the free end of the resistor to 18 AWG wire that goes to the tweeter’s + terminal.
+   │
+Peerless XT25TG30-04 1" Tweeter
+
+
+ PAM8403 + Output
+       |
+       |-----> [ 22 µF Capacitor (non-polar) ] -----> [ 2–3 Ω, 5 W Resistor ] -----> Tweeter (+)
+                                                                                   
+ PAM8403 – Output -------------------------------------------------------------> Tweeter (–)
+
