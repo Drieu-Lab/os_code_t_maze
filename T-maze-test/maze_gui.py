@@ -5,7 +5,7 @@ import time
 from functools import partial
 
 # ================= CONFIG =================
-PORT = "COM3"
+PORT = "COM4"
 BAUD = 115200
 
 ser = serial.Serial(PORT, BAUD, timeout=1)
