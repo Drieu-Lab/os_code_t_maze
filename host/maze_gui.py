@@ -1,17 +1,13 @@
-import serial
+import sys
 import tkinter as tk
-import threading
-import time
 from functools import partial
+from tkinter import messagebox
+
+from rig_io import RigClient
 
 # ================= CONFIG =================
-PORT = "COM4"
-BAUD = 115200
-
-ser = serial.Serial(PORT, BAUD, timeout=1)
-
-time.sleep(2)
-ser.reset_input_buffer()
+BROKER_HOST = "127.0.0.1"
+BROKER_PORT = 5555
 
 # ================= GUI =================
 root = tk.Tk()
@@ -52,8 +48,11 @@ def sol_color(name):
         return "#ADD8E6"
     return "lightgray"
 
+# ---- Connect to broker (must exist before send/handle_line are wired up) ----
+client = RigClient(root, host=BROKER_HOST, port=BROKER_PORT)
+
 def send(cmd):
-    ser.write((cmd + "\n").encode())
+    client.send(cmd)
 
 tk.Label(root, text="Solenoids").grid(row=4, column=0, columnspan=5)
 
@@ -72,6 +71,11 @@ for port in range(3):
 # ---- Log ----
 log = tk.Text(root, height=12, width=60)
 log.grid(row=10, column=0, columnspan=6)
+
+# ---- Status ----
+status_var = tk.StringVar(value="Connecting...")
+status_lbl = tk.Label(root, textvariable=status_var, anchor="w")
+status_lbl.grid(row=11, column=0, columnspan=6, sticky="we")
 
 # ================= HANDLER =================
 
@@ -102,21 +106,35 @@ def handle_line(line):
     except Exception as e:
         print("Parse error:", e)
 
-# ================= SERIAL THREAD =================
 
-def serial_loop():
-    while True:
-        try:
-            line = ser.readline().decode("utf-8", errors="ignore").strip()
+def set_status(text):
+    status_var.set(text)
 
-            if line:
-                print(line)
-                root.after(0, handle_line, line)
 
-        except Exception as e:
-            print("Serial error:", e)
+# ================= CLIENT START =================
+client.on_line(handle_line)
+client.on_status(set_status)
 
-threading.Thread(target=serial_loop, daemon=True).start()
+try:
+    client.start()
+except Exception as e:
+    err = (f"Could not connect to rig broker on {BROKER_HOST}:{BROKER_PORT}: {e}\n\n"
+           "Is rig_broker.py running? Try start_rig.bat.")
+    print(f"[maze_gui] {err}", file=sys.stderr, flush=True)
+    messagebox.showerror("T-Maze Monitor - broker not reachable", err)
+    root.destroy()
+    sys.exit(1)
+
+
+def on_close():
+    client.stop()
+    root.destroy()
+
+
+root.protocol("WM_DELETE_WINDOW", on_close)
 
 # ================= RUN =================
-root.mainloop()
+try:
+    root.mainloop()
+except KeyboardInterrupt:
+    on_close()

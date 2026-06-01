@@ -1,0 +1,319 @@
+"""
+rig_broker.py - Single-owner serial bridge for the T-maze rig.
+
+Owns the Arduino Due's COM port and exposes its byte stream over a local
+TCP socket. Multiple GUIs / tools (e.g. maze_gui.py, lick_tuner.py, future
+loggers) can connect at the same time:
+
+    Arduino Due  <--USB--> rig_broker.py <--TCP localhost:5555--> N clients
+
+The broker is fully transparent. Every line the Due prints is fanned out
+verbatim to every connected client; every line a client sends is forwarded
+verbatim to the Due. Lines are newline-terminated ASCII in both directions.
+
+Run from os_code_t_maze/host/:
+    python rig_broker.py
+
+Dependencies: pyserial (already required by the original GUIs).
+"""
+
+from __future__ import annotations
+
+import argparse
+import signal
+import socket
+import sys
+import threading
+import time
+from typing import List, Optional
+
+import serial
+
+# ================= DEFAULTS =================
+DEFAULT_PORT = "COM4"          # Arduino Due native USB
+DEFAULT_BAUD = 115200
+DEFAULT_HOST = "127.0.0.1"     # localhost only; safe default
+DEFAULT_TCP_PORT = 5555
+SERIAL_REOPEN_DELAY_S = 2.0
+STATS_INTERVAL_S = 10.0
+
+
+# ================= STATE =================
+stop_event = threading.Event()
+
+clients_lock = threading.Lock()
+clients: List[socket.socket] = []
+
+serial_lock = threading.Lock()  # serializes writes to the Due
+ser: Optional[serial.Serial] = None
+
+# Lightweight throughput counters for the periodic stats line.
+stats_lock = threading.Lock()
+stats = {"from_due": 0, "to_due": 0}
+
+
+def log(msg: str) -> None:
+    """Write a timestamped line to stdout."""
+    print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
+
+
+# ================= SERIAL =================
+def open_serial(port: str, baud: int) -> serial.Serial:
+    s = serial.Serial(port, baud, timeout=0.1)
+    time.sleep(2.0)  # let the Due settle (matches existing GUIs)
+    try:
+        s.reset_input_buffer()
+    except Exception:
+        pass
+    return s
+
+
+def serial_reader_thread(port: str, baud: int) -> None:
+    """Read lines from the Due and broadcast them to every connected client."""
+    global ser
+    while not stop_event.is_set():
+        if ser is None:
+            try:
+                log(f"opening serial {port} @ {baud} ...")
+                ser = open_serial(port, baud)
+                log("serial open")
+            except Exception as e:
+                log(f"serial open failed: {e}; retry in {SERIAL_REOPEN_DELAY_S:.0f}s")
+                _sleep_until_stop(SERIAL_REOPEN_DELAY_S)
+                continue
+
+        try:
+            raw = ser.readline()
+        except Exception as e:
+            if stop_event.is_set():
+                return
+            log(f"serial read error: {e}; will reopen")
+            _close_serial()
+            _sleep_until_stop(SERIAL_REOPEN_DELAY_S)
+            continue
+
+        if not raw:
+            continue
+        try:
+            line = raw.decode("utf-8", errors="ignore").rstrip("\r\n")
+        except Exception:
+            continue
+        if not line:
+            continue
+
+        with stats_lock:
+            stats["from_due"] += 1
+        broadcast(line)
+
+
+def _close_serial() -> None:
+    global ser
+    with serial_lock:
+        s, ser = ser, None
+    if s is not None:
+        try:
+            s.close()
+        except Exception:
+            pass
+
+
+# ================= TCP =================
+def broadcast(line: str) -> None:
+    """Send ``line + "\\n"`` to every connected client; drop any that fail."""
+    payload = (line + "\n").encode("utf-8", errors="ignore")
+    dropped: List[socket.socket] = []
+    with clients_lock:
+        for c in clients:
+            try:
+                c.sendall(payload)
+            except Exception:
+                dropped.append(c)
+        for c in dropped:
+            try:
+                clients.remove(c)
+            except ValueError:
+                pass
+    for c in dropped:
+        peer = _peer_str(c)
+        try:
+            c.close()
+        except Exception:
+            pass
+        log(f"client dropped (send failed): {peer}")
+
+
+def client_reader_thread(client_sock: socket.socket, addr) -> None:
+    """Forward each newline-terminated command from the client to the Due."""
+    peer = f"{addr[0]}:{addr[1]}"
+    buf = b""
+    try:
+        while not stop_event.is_set():
+            try:
+                chunk = client_sock.recv(4096)
+            except OSError as e:
+                log(f"client {peer} recv error: {e}")
+                break
+            if not chunk:
+                break
+            buf += chunk
+            while b"\n" in buf:
+                raw, buf = buf.split(b"\n", 1)
+                cmd = raw.decode("utf-8", errors="ignore").rstrip("\r")
+                if not cmd:
+                    continue
+                _forward_to_due(cmd, peer)
+    finally:
+        with clients_lock:
+            try:
+                clients.remove(client_sock)
+            except ValueError:
+                pass
+        try:
+            client_sock.close()
+        except Exception:
+            pass
+        log(f"client disconnected: {peer}")
+
+
+def _forward_to_due(cmd: str, peer: str) -> None:
+    payload = (cmd + "\n").encode("utf-8", errors="ignore")
+    with serial_lock:
+        s = ser
+        if s is None:
+            log(f"command from {peer} dropped (serial not open): {cmd!r}")
+            return
+        try:
+            s.write(payload)
+        except Exception as e:
+            log(f"serial write failed forwarding {cmd!r} from {peer}: {e}")
+            return
+    with stats_lock:
+        stats["to_due"] += 1
+
+
+def _peer_str(sock: socket.socket) -> str:
+    try:
+        addr = sock.getpeername()
+        return f"{addr[0]}:{addr[1]}"
+    except OSError:
+        return "<closed>"
+
+
+# ================= STATS =================
+def stats_thread() -> None:
+    while not stop_event.is_set():
+        if _sleep_until_stop(STATS_INTERVAL_S):
+            return
+        with stats_lock:
+            from_due = stats["from_due"]
+            to_due = stats["to_due"]
+            stats["from_due"] = 0
+            stats["to_due"] = 0
+        with clients_lock:
+            n = len(clients)
+        log(f"stats: clients={n}  from_due={from_due}/{STATS_INTERVAL_S:.0f}s  "
+            f"to_due={to_due}/{STATS_INTERVAL_S:.0f}s")
+
+
+def _sleep_until_stop(seconds: float) -> bool:
+    """Sleep up to `seconds`; return True if stop was signaled meanwhile."""
+    return stop_event.wait(timeout=seconds)
+
+
+# ================= MAIN =================
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="T-maze rig serial broker")
+    p.add_argument("--port", default=DEFAULT_PORT, help="serial port (default %(default)s)")
+    p.add_argument("--baud", type=int, default=DEFAULT_BAUD, help="serial baud (default %(default)s)")
+    p.add_argument("--host", default=DEFAULT_HOST, help="TCP bind host (default %(default)s)")
+    p.add_argument("--tcp-port", type=int, default=DEFAULT_TCP_PORT,
+                   help="TCP listen port (default %(default)s)")
+    return p.parse_args()
+
+
+def install_signal_handlers() -> None:
+    def handler(signum, _frame):
+        log(f"signal {signum} received; shutting down")
+        stop_event.set()
+
+    signal.signal(signal.SIGINT, handler)
+    try:
+        signal.signal(signal.SIGTERM, handler)
+    except (AttributeError, ValueError):
+        pass  # Windows does not support SIGTERM the same way
+
+
+def main() -> int:
+    args = parse_args()
+    install_signal_handlers()
+
+    log(f"rig_broker starting (serial={args.port}@{args.baud}, "
+        f"tcp={args.host}:{args.tcp_port})")
+
+    reader = threading.Thread(target=serial_reader_thread,
+                              args=(args.port, args.baud),
+                              name="serial-reader", daemon=True)
+    reader.start()
+
+    stats_t = threading.Thread(target=stats_thread, name="stats", daemon=True)
+    stats_t.start()
+
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        server.bind((args.host, args.tcp_port))
+    except OSError as e:
+        log(f"could not bind {args.host}:{args.tcp_port}: {e}")
+        stop_event.set()
+        return 1
+    server.listen(8)
+    server.settimeout(0.5)
+    log(f"listening on {args.host}:{args.tcp_port}")
+
+    try:
+        while not stop_event.is_set():
+            try:
+                client_sock, addr = server.accept()
+            except socket.timeout:
+                continue
+            except OSError as e:
+                if stop_event.is_set():
+                    break
+                log(f"accept error: {e}")
+                continue
+            peer = f"{addr[0]}:{addr[1]}"
+            log(f"client connected: {peer}")
+            with clients_lock:
+                clients.append(client_sock)
+            t = threading.Thread(
+                target=client_reader_thread,
+                args=(client_sock, addr),
+                name=f"client-{peer}",
+                daemon=True,
+            )
+            t.start()
+    finally:
+        log("shutting down")
+        stop_event.set()
+        try:
+            server.close()
+        except Exception:
+            pass
+        with clients_lock:
+            for c in clients:
+                try:
+                    c.shutdown(socket.SHUT_RDWR)
+                except Exception:
+                    pass
+                try:
+                    c.close()
+                except Exception:
+                    pass
+            clients.clear()
+        _close_serial()
+        log("bye")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

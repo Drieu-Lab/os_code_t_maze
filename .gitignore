@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Build / IDE artifacts
+build/
+dist/
+.vscode/
+.idea/
+
+# OS cruft
+.DS_Store
+Thumbs.db

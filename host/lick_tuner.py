@@ -4,22 +4,22 @@ lick_tuner.py - Real-time visualization of D12DAB6 lick-detector output.
 Use this when tuning the Gain and Hold dials on the three Banner D12DAB6
 amplifiers so each lick produces exactly one clean rising/falling edge pair.
 
-The script connects to the Arduino Due (running tmaze_test.ino) over serial,
-listens for "L,<i>,<state>" edge messages, and renders three stacked step
-traces as a function of time. The visible time window is adjustable from
-1 to 60 seconds; press Pause to freeze the display while inspecting an event.
+The script connects to the rig broker (rig_broker.py) over TCP, listens for
+"L,<i>,<state>" edge messages, and renders three stacked step traces as a
+function of time. The visible time window is adjustable from 1 to 60
+seconds; press Pause to freeze the display while inspecting an event.
 
 Two diagnostics for tuning are shown below the plot:
   - Edges per channel since reset (a single lick = 2 edges; more = chatter).
   - Width of the most recent HIGH pulse in ms (this is what Hold sets).
 
-NOTE: only one process can hold the COM port at a time. Close maze_gui.py
-or the Arduino IDE Serial Monitor before launching this script.
+NOTE: rig_broker.py must already be running. Use start_rig.bat to launch
+the broker and both GUIs together, or run "python rig_broker.py" first.
 
 Dependencies:
     pip install pyserial matplotlib
 
-Run from os_code_t_maze/T-maze-test/:
+Run from os_code_t_maze/host/:
     python lick_tuner.py
 """
 
@@ -33,16 +33,17 @@ from tkinter import messagebox, ttk
 import matplotlib
 
 matplotlib.use("TkAgg")  # noqa: E402
-import serial  # noqa: E402
 from matplotlib.backends.backend_tkagg import (  # noqa: E402
     FigureCanvasTkAgg,
     NavigationToolbar2Tk,
 )
 from matplotlib.figure import Figure  # noqa: E402
 
+from rig_io import RigClient  # noqa: E402
+
 # ================= CONFIG =================
-PORT = "COM4"
-BAUD = 115200
+BROKER_HOST = "127.0.0.1"
+BROKER_PORT = 5555
 
 N_CHANNELS = 3
 
@@ -81,20 +82,21 @@ pause_snapshot_t = [None]
 
 # ================= GUI =================
 root = tk.Tk()
-root.withdraw()  # do not show until serial is confirmed open
+root.withdraw()  # do not show until the broker connection is confirmed
 
-# Open the serial port up front, on the main thread, so failures are immediate
+# Connect to the rig broker on the main thread so failures are immediate
 # and visible (rather than hiding behind a background retry loop).
+client = RigClient(root, host=BROKER_HOST, port=BROKER_PORT)
 try:
-    print(f"[lick_tuner] opening {PORT} @ {BAUD} ...", flush=True)
-    ser = serial.Serial(PORT, BAUD, timeout=0.1)
-    time.sleep(2.0)  # let the Due settle (matches maze_gui.py)
-    ser.reset_input_buffer()
-    print(f"[lick_tuner] connected to {PORT}", flush=True)
+    print(f"[lick_tuner] connecting to broker {BROKER_HOST}:{BROKER_PORT} ...",
+          flush=True)
+    client.start()
+    print(f"[lick_tuner] connected", flush=True)
 except Exception as e:
-    err = f"Could not open {PORT}: {e}"
+    err = (f"Could not connect to rig broker on {BROKER_HOST}:{BROKER_PORT}: {e}\n\n"
+           "Is rig_broker.py running? Try start_rig.bat.")
     print(f"[lick_tuner] {err}", file=sys.stderr, flush=True)
-    messagebox.showerror("Lick tuner - serial error", err)
+    messagebox.showerror("Lick tuner - broker not reachable", err)
     root.destroy()
     sys.exit(1)
 
@@ -262,63 +264,55 @@ def refresh_loop():
         root.after(REFRESH_MS, refresh_loop)
 
 
-# ================= SERIAL =================
-status_var.set(f"Connected to {PORT} @ {BAUD}")
-stop_event = threading.Event()
+# ================= LINE HANDLER =================
+status_var.set(f"Connected to broker {BROKER_HOST}:{BROKER_PORT}")
 
 
-def serial_loop():
-    """Read L,i,state edge messages and update the per-channel buffers."""
-    while not stop_event.is_set():
-        try:
-            line = ser.readline().decode("utf-8", errors="ignore").strip()
-        except Exception as e:
-            if stop_event.is_set():
-                return
-            print(f"[lick_tuner] serial read error: {e}",
-                  file=sys.stderr, flush=True)
-            root.after(0, lambda msg=str(e):
-                       status_var.set(f"Serial error: {msg}"))
-            time.sleep(0.5)
-            continue
+def handle_line(line: str) -> None:
+    """Parse a "L,i,state" edge line and update the per-channel buffers.
 
-        if not line:
-            continue
-        parts = line.split(",")
-        if parts[0] != "L" or len(parts) != 3:
-            continue
-        try:
-            i = int(parts[1])
-            s = int(parts[2])
-        except ValueError:
-            continue
-        if not (0 <= i < N_CHANNELS) or s not in (0, 1):
-            continue
+    All other line types (S, SOL, READY, ...) are ignored here. Runs on the
+    Tk main thread (RigClient dispatches via root.after).
+    """
+    parts = line.split(",")
+    if parts[0] != "L" or len(parts) != 3:
+        return
+    try:
+        i = int(parts[1])
+        s = int(parts[2])
+    except ValueError:
+        return
+    if not (0 <= i < N_CHANNELS) or s not in (0, 1):
+        return
 
-        t = now_s()
-        with data_lock:
-            data[i].append((t, s))
-            cutoff = t - HISTORY_S
-            while data[i] and data[i][0][0] < cutoff:
-                data[i].popleft()
+    t = now_s()
+    with data_lock:
+        data[i].append((t, s))
+        cutoff = t - HISTORY_S
+        while data[i] and data[i][0][0] < cutoff:
+            data[i].popleft()
 
-        edge_count[i] += 1
-        last_edge_t[i] = t
-        if s == 1:
-            last_rise_t[i] = t
-        elif last_rise_t[i] is not None:
-            last_pulse_ms[i] = (t - last_rise_t[i]) * 1000.0
+    edge_count[i] += 1
+    last_edge_t[i] = t
+    if s == 1:
+        last_rise_t[i] = t
+    elif last_rise_t[i] is not None:
+        last_pulse_ms[i] = (t - last_rise_t[i]) * 1000.0
 
 
-threading.Thread(target=serial_loop, daemon=True).start()
+def set_status(text: str) -> None:
+    status_var.set(text)
+
+
+client.on_line(handle_line)
+client.on_status(set_status)
 
 
 # ================= LIFECYCLE =================
 def on_close():
     print("[lick_tuner] closing", flush=True)
-    stop_event.set()
     try:
-        ser.close()
+        client.stop()
     except Exception:
         pass
     root.destroy()
