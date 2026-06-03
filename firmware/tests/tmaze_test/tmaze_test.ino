@@ -3,12 +3,10 @@
 // ../../common/rig_config.h (see docs/decisions/0006).
 #include "rig_config.h"
 
-// Body sensors (6), in this sketch's physical order:
-// left, center, right, right-choice, center-end, left-choice
-const int sensorPins[6] = {
-  PIN_BEAM_LEFT, PIN_BEAM_CENTER, PIN_BEAM_RIGHT,
-  PIN_BEAM_RCHOICE, PIN_BEAM_CENTER_END, PIN_BEAM_LCHOICE
-};
+// Body sensors (6): single source of truth = SENSOR_PINS in rig_config.h.
+// Both this sketch and cue-guided-task index S,i the same way (Beam/role order:
+// ENTRY, EXIT, L_CHOICE, R_CHOICE, L_RETURN, R_RETURN) so rig-view matches both.
+const int sensorPins[6] = SENSOR_PINS;
 // Lick sensors (3)
 const int lickPins[3] = LICK_PINS;
 

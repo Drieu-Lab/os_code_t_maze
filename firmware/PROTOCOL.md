@@ -50,7 +50,7 @@ Emitted once, in order, before the session begins:
 | `L` | `<i>,<state>` | lick `i` edge; `state` 1=active, 0=idle |
 | `CHOICE` | `LEFT\|RIGHT` | arm chosen |
 | `OUTCOME` | `CORRECT\|INCORRECT` | choice correctness |
-| `REWARD` | `LEFT\|RIGHT\|START` | reward valve pulsed |
+| `REWARD` | `CENTER` | reward valve pulsed (v1: always the central port; see ADR-0007) |
 | `RETURN_ARM` | `ENTRY` | return-arm beam entered; trial advances |
 | `STATUS` | `<count>,<index>,<active>` | reply to `STATUS` command |
 | `PONG` | (none) | reply to `PING` |

@@ -50,3 +50,5 @@ The chain of records is the audit trail.
 | [0004](0004-launcher-external-conda-activation.md) | Start the rig via start_rig.bat, with conda activation done externally | Accepted | 2026-06-01 |
 | [0005](0005-per-sketch-rig-config-copy.md) | Duplicate rig_config.h per sketch instead of a shared common/ header | Superseded | 2026-06-03 |
 | [0006](0006-symlink-rig-config-per-sketch.md) | Symlink the shared rig_config.h into each sketch folder | Accepted | 2026-06-03 |
+| [0007](0007-reward-at-central-port.md) | Deliver reward at the central port (v1 cue-guided task) | Accepted | 2026-06-03 |
+| [0008](0008-wavetable-tone-isr.md) | Generate the tone cue from a wavetable, not sin() in the ISR | Accepted | 2026-06-03 |

@@ -46,8 +46,8 @@ REM ---- Launch broker, then GUIs after a brief delay so the TCP port is up ----
 start "Rig Broker" cmd /k python rig_broker.py --port %RIG_PORT%
 timeout /t 2 /nobreak >nul
 
-start "Maze GUI"   python maze_gui.py
-start "Lick Tuner" python lick_tuner.py
+REM start "Maze GUI"   python maze_gui.py
+REM start "Lick Tuner" python lick_tuner.py
 start "Experiment Control" python experiment_control.py
 
 endlocal

@@ -109,7 +109,8 @@ static void test_full_correct_trial() {
   assert(s.trial.phase == Phase::AwaitChoice);
   assert(countTag(fx, FxTag::StopTone) == 1);
 
-  /* left choice (correct) -> CHOICE/OUTCOME/REWARD + valve */
+  /* left choice (correct) -> CHOICE/OUTCOME + central reward at the choice-arm
+     beam (v1 trigger point). */
   in = mkin(40); in.beam[B_LCHOICE] = true;
   fx = Effects{};
   s = step(s, in, c, seq, fx);
@@ -117,17 +118,19 @@ static void test_full_correct_trial() {
   assert(s.trial.choiceArm == 0);
   assert(hasLog(fx, "CHOICE"));
   assert(std::strcmp(findLog(fx, "OUTCOME")->detail, "CORRECT") == 0);
-  assert(countTag(fx, FxTag::OpenValve) == 1);
-  assert(hasLog(fx, "REWARD"));
+  assert(countTag(fx, FxTag::OpenValve) == 1);    /* reward at the central port */
+  assert(std::strcmp(findLog(fx, "REWARD")->detail, "CENTER") == 0);
 
-  /* return -> RETURN_ARM, advance trial */
+  /* return -> RETURN_ARM only (reward already dispensed), advance trial */
   in = mkin(50); in.beam[B_LRETURN] = true;
   fx = Effects{};
   s = step(s, in, c, seq, fx);
   assert(s.trial.phase == Phase::Idle);
   assert(s.trial.index == 1 && s.trial.count == 1);
   assert(hasLog(fx, "RETURN_ARM"));
-  printf("  ok: full correct trial flow + reward + advance\n");
+  assert(countTag(fx, FxTag::OpenValve) == 0);    /* no second reward on return */
+  assert(!hasLog(fx, "REWARD"));
+  printf("  ok: full correct trial flow + central reward at choice + advance\n");
 }
 
 static void test_incorrect_no_reward() {
@@ -143,7 +146,38 @@ static void test_incorrect_no_reward() {
   assert(std::strcmp(findLog(fx, "OUTCOME")->detail, "INCORRECT") == 0);
   assert(countTag(fx, FxTag::OpenValve) == 0);
   assert(!hasLog(fx, "REWARD"));
-  printf("  ok: incorrect choice -> no reward\n");
+
+  /* return after an incorrect choice (startRewardEnabled=false) -> still no
+     reward at the central port */
+  in = mkin(40); in.beam[B_RRETURN] = true; fx = Effects{};
+  s = step(s, in, c, seq, fx);
+  assert(hasLog(fx, "RETURN_ARM"));
+  assert(countTag(fx, FxTag::OpenValve) == 0);
+  assert(!hasLog(fx, "REWARD"));
+  printf("  ok: incorrect choice -> no reward (choice or center)\n");
+}
+
+static void test_shaping_rewards_incorrect_at_center() {
+  TaskConfig c = mkcfg();
+  c.startRewardEnabled = true;             /* shaping: reward even when wrong */
+  int8_t seq[20]; for (int i = 0; i < 20; i++) seq[i] = 0;  /* LEFT correct */
+  Session s = initialSession(0, 7u);
+  Inputs in = mkin(10); in.beam[B_ENTRY] = true; Effects fx{};
+  s = step(s, in, c, seq, fx);                 /* CueRunning */
+  in = mkin(20); in.beam[B_EXIT] = true; fx = Effects{};
+  s = step(s, in, c, seq, fx);                 /* AwaitChoice */
+  in = mkin(30); in.beam[B_RCHOICE] = true; fx = Effects{};   /* wrong arm */
+  s = step(s, in, c, seq, fx);
+  assert(std::strcmp(findLog(fx, "OUTCOME")->detail, "INCORRECT") == 0);
+  /* central reward dispensed anyway at the choice-arm beam (shaping) */
+  assert(countTag(fx, FxTag::OpenValve) == 1);
+  assert(std::strcmp(findLog(fx, "REWARD")->detail, "CENTER") == 0);
+  /* return -> no second reward */
+  in = mkin(40); in.beam[B_RRETURN] = true; fx = Effects{};
+  s = step(s, in, c, seq, fx);
+  assert(countTag(fx, FxTag::OpenValve) == 0);
+  assert(!hasLog(fx, "REWARD"));
+  printf("  ok: startRewardEnabled rewards incorrect trials at center (shaping)\n");
 }
 
 static void test_simultaneous_choice_resolves_once() {
@@ -245,6 +279,7 @@ int main() {
   test_sequence_balanced();
   test_full_correct_trial();
   test_incorrect_no_reward();
+  test_shaping_rewards_incorrect_at_center();
   test_simultaneous_choice_resolves_once();
   test_abort();
   test_timeout();

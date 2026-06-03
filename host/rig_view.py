@@ -1,14 +1,18 @@
 """
 rig_view.py - live maze illustration module for experiment_control.py.
 
-Draws a schematic of the Y/T maze and lights a marker at each body-sensor and
-lick-port location as protocol-v2 edges arrive from the rig broker.
+Draws a schematic of the Y/T maze and lights a marker at each body-sensor,
+lick-port, and reward-solenoid location as protocol-v2 lines arrive from the rig
+broker. Sensor/lick markers track on/off edges (S/L); solenoid markers flash
+momentarily on each SOL pulse (the ack tmaze_test emits for an R<port><sol>
+command) and on each task REWARD line (cue-guided-task emits REWARD, not SOL).
 
 Design (functional core + thin Tk shell):
   - parse_line() and update() are pure: no Tk, no I/O. They turn a serial line
     into an event and fold it into an immutable RigState.
-  - RigView is the only side-effecting part: it builds the canvas once and just
-    recolors marker items when the state changes.
+  - RigView is the only side-effecting part: it builds the canvas once, recolors
+    sensor/lick markers when the state changes, and flashes solenoid markers
+    (which are momentary, so they live in the view, not in RigState).
 
 Marker positions are best-effort from the rig photos/sketch
 (os_code_t_maze_resources/rig-hardware/circuit_pictures_small: IMG_1136,
@@ -18,6 +22,15 @@ below, so they are easy to nudge after a first run.
 Sensor markers are labeled with the cue-guided-task roles and ordered to match
 the firmware SENSOR_PINS order (ENTRY, EXIT, L_CHOICE, R_CHOICE, L_RETURN,
 R_RETURN), so "S,i" lights marker i.
+
+Solenoid markers are keyed by (port, sol) and labeled by port and function
+(e.g. "L.R1", "C.drain"), so when a SOL ack arrives the matching marker flashes.
+There are fifteen, five per port: sol 0-2 = reward (R1/R2/R3), sol 3 = drain,
+sol 4 = rinse (the marker outline color also encodes the role). The fire command
+for a marker is "R<port><sol>" (port L/R/C = 0/1/2), shown on the experiment_-
+control buttons. The on-canvas position of each solenoid is a best-effort GUESS;
+the pin -> physical-location mapping is TBD - fire each command and confirm which
+valve actually clicks, then nudge the positions below.
 """
 
 from __future__ import annotations
@@ -41,18 +54,38 @@ class LickEdge:
     active: bool
 
 
-Event = Union[SensorEdge, LickEdge]
+@dataclass(frozen=True)
+class SolenoidPulse:
+    """A momentary solenoid fire, from a "SOL,<port>,<sol>" ack."""
+    port: int
+    sol: int
+
+
+Event = Union[SensorEdge, LickEdge, SolenoidPulse]
+
+# Which solenoid column the task's REWARD line maps to (so the reward marker
+# flashes even though the task emits REWARD, not SOL). Keep in sync with
+# REWARD_SOLENOID_INDEX in firmware/common/rig_config.h (currently 1 == R2).
+REWARD_SOL_INDEX = 1
+_REWARD_PORT = {"LEFT": 0, "RIGHT": 1, "CENTER": 2, "START": 2}
 
 
 def parse_line(line: str) -> Optional[Event]:
-    """Parse a protocol-v2 line "<ms>,S|L,<i>,<state>" into an Event.
+    """Parse a protocol-v2 line into an Event.
 
-    Returns None for any line that is not a sensor/lick edge. Pure.
+    Handles "<ms>,S|L,<i>,<state>" (sensor/lick edge), "<ms>,SOL,<port>,<sol>"
+    (solenoid pulse), and "<ms>,REWARD,<LEFT|RIGHT|CENTER>" (task reward, mapped
+    to the reward-column marker at that port). Returns None otherwise. Pure.
     """
     parts = line.split(",")
-    if len(parts) < 4 or not parts[0].isdigit():
+    if len(parts) < 3 or not parts[0].isdigit():
         return None
     typ = parts[1]
+    if typ == "REWARD":
+        port = _REWARD_PORT.get(parts[2].strip().upper())
+        return SolenoidPulse(port, REWARD_SOL_INDEX) if port is not None else None
+    if len(parts) < 4:
+        return None
     try:
         index = int(parts[2])
         state = int(parts[3])
@@ -62,6 +95,8 @@ def parse_line(line: str) -> Optional[Event]:
         return SensorEdge(index, state == 1)
     if typ == "L":
         return LickEdge(index, state == 1)
+    if typ == "SOL":
+        return SolenoidPulse(port=index, sol=state)
     return None
 
 
@@ -103,13 +138,24 @@ def update(state: RigState, event: Optional[Event]) -> RigState:
 # All coordinates are isolated here so they are easy to nudge after a run.
 
 CANVAS_W = 480
-CANVAS_H = 540
+CANVAS_H = 560            # extra bottom margin for the center-port solenoids
 
 MARKER_R = 12
+SOL_MARKER_R = 7         # solenoids are smaller, three-to-a-cluster
+SOL_FLASH_MS = 300       # how long a solenoid marker stays lit per pulse
+
+# Legend anchors: in the empty triangles flanking the funnel's lower half.
+LEGEND_LEFT_X, LEGEND_LEFT_Y = 16, 384     # bottom-left: marker states
+LEGEND_RIGHT_X, LEGEND_RIGHT_Y = 316, 414  # bottom-right: solenoid role key
 
 COLOR_IDLE = "#cfcfcf"
 COLOR_SENSOR = "#2ca02c"   # green
 COLOR_LICK = "#1f77b4"     # blue
+COLOR_SOLENOID = "#ff7f0e" # orange flash (fill) on any SOL pulse
+# Solenoid role shown by the marker OUTLINE (fill flashes orange when pulsed):
+COLOR_SOL_REWARD = "#333333"  # sol 0-2 (R1/R2/R3)
+COLOR_SOL_DRAIN = "#8c564b"   # sol 3   (brown)
+COLOR_SOL_RINSE = "#9467bd"   # sol 4   (purple)
 COLOR_FLOOR = "#f2f2f2"
 COLOR_WEDGE = "#4a4a4a"
 COLOR_WALL = "#333333"
@@ -165,6 +211,57 @@ LICK_MARKERS = (
 )
 
 
+@dataclass(frozen=True)
+class SolenoidMarker:
+    port: int
+    sol: int
+    x: int
+    y: int
+    label: str   # port-function role, e.g. "L\u00b7R1", "C\u00b7drain"
+
+
+# Solenoids: fifteen total, five per port (sol 0-2 = reward R1/R2/R3, sol 3 =
+# drain, sol 4 = rinse - per SOLENOID_TABLE and the green-circled valves in the
+# rig photos). Keyed by (port, sol) so a "SOL,<port>,<sol>" ack flashes the
+# matching marker. ports: 0=left, 1=right, 2=center/start. Role is shown by both
+# the label (port-function, e.g. "L.R1") and the marker outline color; the fire
+# command is "R<port><sol>".
+#
+# POSITIONS ARE SCHEMATIC GUESSES laid out per-port (left edge, right edge, and a
+# bottom row), loosely following the photo (drain above / rinse below the reward
+# cluster; center: rinse, drain, then the three reward). The command -> physical-
+# valve mapping is unknown: fire one command at a time, confirm which valve
+# clicks, then nudge x/y here.
+SOLENOID_MARKERS = (
+    # Left port: vertical column on the left edge (drain, R1-3, rinse).
+    SolenoidMarker(0, 3, 40, 110, "L\u00b7drain"),
+    SolenoidMarker(0, 0, 40, 136, "L\u00b7R1"),
+    SolenoidMarker(0, 1, 40, 162, "L\u00b7R2"),
+    SolenoidMarker(0, 2, 40, 188, "L\u00b7R3"),
+    SolenoidMarker(0, 4, 40, 214, "L\u00b7rinse"),
+    # Right port: vertical column on the right edge (drain, R1-3, rinse).
+    SolenoidMarker(1, 3, 440, 110, "R\u00b7drain"),
+    SolenoidMarker(1, 0, 440, 136, "R\u00b7R1"),
+    SolenoidMarker(1, 1, 440, 162, "R\u00b7R2"),
+    SolenoidMarker(1, 2, 440, 188, "R\u00b7R3"),
+    SolenoidMarker(1, 4, 440, 214, "R\u00b7rinse"),
+    # Center/start port: bottom row below the start box (rinse, drain, R1-3).
+    SolenoidMarker(2, 4, 150, 532, "C\u00b7rinse"),
+    SolenoidMarker(2, 3, 188, 532, "C\u00b7drain"),
+    SolenoidMarker(2, 0, 236, 532, "C\u00b7R1"),
+    SolenoidMarker(2, 1, 264, 532, "C\u00b7R2"),
+    SolenoidMarker(2, 2, 292, 532, "C\u00b7R3"),
+)
+
+
+def _sol_outline(sol: int) -> str:
+    if sol <= 2:
+        return COLOR_SOL_REWARD
+    if sol == 3:
+        return COLOR_SOL_DRAIN
+    return COLOR_SOL_RINSE
+
+
 # ========================= Side-effecting view ==========================
 
 
@@ -183,6 +280,12 @@ class RigView:
         self._draw_maze()
         self._sensor_items = [self._make_marker(m) for m in SENSOR_MARKERS]
         self._lick_items = [self._make_marker(m) for m in LICK_MARKERS]
+        # Solenoids: (port, sol) -> canvas item, plus a pending after-job per
+        # marker so rapid repeats just restart the flash instead of stacking.
+        self._sol_items = {
+            (sm.port, sm.sol): self._make_sol_marker(sm) for sm in SOLENOID_MARKERS
+        }
+        self._sol_jobs: dict = {}
         self._draw_legend()
 
     # ---- module contract ----
@@ -190,10 +293,13 @@ class RigView:
         return self.canvas
 
     def apply(self, line: str) -> None:
-        new_state = update(self.state, parse_line(line))
+        event = parse_line(line)
+        new_state = update(self.state, event)
         if new_state != self.state:
             self.state = new_state
             self._render()
+        if isinstance(event, SolenoidPulse):
+            self._flash_solenoid(event.port, event.sol)
 
     # ---- drawing ----
     def _draw_maze(self) -> None:
@@ -231,14 +337,58 @@ class RigView:
                                 font=("TkDefaultFont", 8))
         return circle
 
+    def _make_sol_marker(self, sm: SolenoidMarker) -> int:
+        r = SOL_MARKER_R
+        circle = self.canvas.create_oval(
+            sm.x - r, sm.y - r, sm.x + r, sm.y + r,
+            fill=COLOR_IDLE, outline=_sol_outline(sm.sol), width=2,
+        )
+        cx = CANVAS_W / 2
+        # Side columns sit in narrow margins, so role labels read inward (over
+        # the open floor) to avoid clipping off-canvas; bottom row labels below.
+        if sm.x < cx - 120:        # left margin -> label inward (right)
+            tx, ty, anchor = sm.x + r + 3, sm.y, "w"
+        elif sm.x > cx + 120:      # right margin -> label inward (left)
+            tx, ty, anchor = sm.x - r - 3, sm.y, "e"
+        else:                      # bottom cluster -> label below
+            tx, ty, anchor = sm.x, sm.y + r + 3, "n"
+        self.canvas.create_text(tx, ty, text=sm.label, anchor=anchor,
+                                font=("TkDefaultFont", 7))
+        return circle
+
+    def _flash_solenoid(self, port: int, sol: int) -> None:
+        item = self._sol_items.get((port, sol))
+        if item is None:
+            return
+        self.canvas.itemconfig(item, fill=COLOR_SOLENOID)
+        job = self._sol_jobs.get((port, sol))
+        if job is not None:
+            try:
+                self.canvas.after_cancel(job)
+            except Exception:
+                pass
+        self._sol_jobs[(port, sol)] = self.canvas.after(
+            SOL_FLASH_MS, lambda: self.canvas.itemconfig(item, fill=COLOR_IDLE))
+
+    def _legend_row(self, x: int, y: int, fill: str, outline: str, text: str) -> None:
+        self.canvas.create_oval(x, y, x + 14, y + 14, fill=fill, outline=outline, width=2)
+        self.canvas.create_text(x + 22, y + 7, anchor="w", text=text,
+                                font=("TkDefaultFont", 8))
+
     def _draw_legend(self) -> None:
-        x, y = 16, 16
-        self.canvas.create_oval(x, y, x + 14, y + 14, fill=COLOR_SENSOR, outline="#333333")
-        self.canvas.create_text(x + 22, y + 7, anchor="w", text="sensor active",
-                                font=("TkDefaultFont", 8))
-        self.canvas.create_oval(x, y + 20, x + 14, y + 34, fill=COLOR_LICK, outline="#333333")
-        self.canvas.create_text(x + 22, y + 27, anchor="w", text="lick active",
-                                font=("TkDefaultFont", 8))
+        # The legend lives in the empty triangles flanking the funnel's lower
+        # half, so it never collides with the top reward ports / lick markers.
+        # Bottom-left: marker states (fill color). Bottom-right: solenoid role
+        # (outline color, matching the idle markers).
+        self._legend_row(LEGEND_LEFT_X, LEGEND_LEFT_Y, COLOR_SENSOR, "#333333", "sensor active")
+        self._legend_row(LEGEND_LEFT_X, LEGEND_LEFT_Y + 20, COLOR_LICK, "#333333", "lick active")
+        self._legend_row(LEGEND_LEFT_X, LEGEND_LEFT_Y + 40, COLOR_SOLENOID, "#333333", "solenoid pulsed")
+
+        self.canvas.create_text(LEGEND_RIGHT_X, LEGEND_RIGHT_Y - 16, anchor="w",
+                                text="solenoid role:", font=("TkDefaultFont", 8))
+        self._legend_row(LEGEND_RIGHT_X, LEGEND_RIGHT_Y, COLOR_IDLE, COLOR_SOL_REWARD, "reward")
+        self._legend_row(LEGEND_RIGHT_X, LEGEND_RIGHT_Y + 20, COLOR_IDLE, COLOR_SOL_DRAIN, "drain")
+        self._legend_row(LEGEND_RIGHT_X, LEGEND_RIGHT_Y + 40, COLOR_IDLE, COLOR_SOL_RINSE, "rinse")
 
     def _render(self) -> None:
         for i, item in enumerate(self._sensor_items):

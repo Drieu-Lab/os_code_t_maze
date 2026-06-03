@@ -32,8 +32,11 @@ enum Beam : uint8_t {
   BEAM_COUNT = 6
 };
 
-/* Valve indices: order MUST match VALVE_PINS in rig_config.h. */
+/* Valve indices: order MUST match VALVE_PINS in rig_config.h.
+ * V_START is the central/start port; in the v1 cue-guided task it is the reward
+ * port (dispensed at center on a correct choice). see docs/decisions/0007 */
 enum Valve : uint8_t { V_LEFT = 0, V_RIGHT = 1, V_START = 2 };
+static const Valve V_REWARD = V_START;   /* v1 reward port alias (central) */
 
 /* ------------------------------- Values --------------------------------- */
 enum class Phase : uint8_t { Idle, CueRunning, AwaitChoice, AwaitReturn, Done };
@@ -220,9 +223,13 @@ inline Session step(const Session& s, const Inputs& in, const TaskConfig& cfg,
         emit(fx, pulseChoice());
         emit(fx, logEv("CHOICE", arm == 0 ? "LEFT" : "RIGHT"));
         emit(fx, logEv("OUTCOME", correct ? "CORRECT" : "INCORRECT"));
-        if (correct) {
-          emit(fx, openValve(arm));
-          emit(fx, logEv("REWARD", arm == 0 ? "LEFT" : "RIGHT"));
+        /* v1 reward model: the trigger is the choice-arm beam. Reward is
+         * dispensed to the central port (V_REWARD) on a correct choice;
+         * startRewardEnabled additionally rewards incorrect trials (shaping).
+         * The rat collects it at center on its way back. see docs/decisions/0007 */
+        if (correct || cfg.startRewardEnabled) {
+          emit(fx, openValve(V_REWARD));
+          emit(fx, logEv("REWARD", "CENTER"));
         }
       }
       break;
@@ -231,10 +238,6 @@ inline Session step(const Session& s, const Inputs& in, const TaskConfig& cfg,
       if (in.beam[B_LRETURN] || in.beam[B_RRETURN]) {
         emit(fx, pulseReturn());
         emit(fx, logEv("RETURN_ARM", "ENTRY"));
-        if (cfg.startRewardEnabled) {
-          emit(fx, openValve(V_START));
-          emit(fx, logEv("REWARD", "START"));
-        }
         n.trial = Trial{ Phase::Idle, -1, -1,
                          (uint16_t)(s.trial.index + 1), (uint16_t)(s.trial.count + 1) };
         if (n.trial.index >= cfg.maxTrials) {

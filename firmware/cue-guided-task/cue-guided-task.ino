@@ -17,6 +17,22 @@
 
 #include <string.h>
 
+// Arduino Due console: Native USB (SerialUSB) by default, matching tmaze_test so
+// the broker/GUIs use the same port. To use the Programming port instead, set
+// DUE_USE_NATIVE_USB 0 below (or -D it). CONSOLE replaces Serial throughout.
+#if defined(__SAM3X8E__)
+#ifndef DUE_USE_NATIVE_USB
+#define DUE_USE_NATIVE_USB 1
+#endif
+#if DUE_USE_NATIVE_USB
+#define CONSOLE SerialUSB
+#else
+#define CONSOLE Serial
+#endif
+#else
+#define CONSOLE Serial
+#endif
+
 // ---------------- Pin tables (from rig_config.h) ----------------
 const int sensorPins[BEAM_COUNT] = SENSOR_PINS;   // order matches Beam enum
 const int lickPins[3]            = LICK_PINS;     // display/monitor only
@@ -48,17 +64,17 @@ uint8_t cmdLen = 0;
 
 // ---------------- Serial output (protocol v2) ----------------
 void printSL(unsigned long ms, const char* type, int idx, int state) {
-  Serial.print(ms); Serial.print(','); Serial.print(type);
-  Serial.print(','); Serial.print(idx);
-  Serial.print(','); Serial.println(state);
+  CONSOLE.print(ms); CONSOLE.print(','); CONSOLE.print(type);
+  CONSOLE.print(','); CONSOLE.print(idx);
+  CONSOLE.print(','); CONSOLE.println(state);
 }
 
 void printLog(unsigned long ms, const Effect& e) {
-  Serial.print(ms); Serial.print(','); Serial.print(e.type);
-  if (e.a != FX_NONE) { Serial.print(','); Serial.print(e.a); }
-  if (e.b != FX_NONE) { Serial.print(','); Serial.print(e.b); }
-  if (e.detail && e.detail[0]) { Serial.print(','); Serial.print(e.detail); }
-  Serial.println();
+  CONSOLE.print(ms); CONSOLE.print(','); CONSOLE.print(e.type);
+  if (e.a != FX_NONE) { CONSOLE.print(','); CONSOLE.print(e.a); }
+  if (e.b != FX_NONE) { CONSOLE.print(','); CONSOLE.print(e.b); }
+  if (e.detail && e.detail[0]) { CONSOLE.print(','); CONSOLE.print(e.detail); }
+  CONSOLE.println();
 }
 
 // ---------------- Reward valves ----------------
@@ -91,8 +107,8 @@ Command parseCommand(const char* b) {
 
 Command drainSerial() {
   Command last = {Command::None, 0};
-  while (Serial.available()) {
-    char c = Serial.read();
+  while (CONSOLE.available()) {
+    char c = CONSOLE.read();
     if (c == '\r') continue;
     if (c == '\n') {
       cmdBuf[cmdLen] = '\0';
@@ -197,17 +213,20 @@ uint32_t makeSeed() {
 }
 
 void logTrialSequence() {
-  Serial.print("0,SEQ_START,"); Serial.println(cfg.maxTrials);
+  CONSOLE.print("0,SEQ_START,"); CONSOLE.println(cfg.maxTrials);
   for (int i = 0; i < cfg.maxTrials; i++) {
-    Serial.print("0,SEQ,"); Serial.print(i + 1);
-    Serial.print(','); Serial.println(gSeq[i] == 0 ? "LEFT" : "RIGHT");
+    CONSOLE.print("0,SEQ,"); CONSOLE.print(i + 1);
+    CONSOLE.print(','); CONSOLE.println(gSeq[i] == 0 ? "LEFT" : "RIGHT");
   }
-  Serial.println("0,SEQ_END");
+  CONSOLE.println("0,SEQ_END");
 }
 
 // ---------------- Setup ----------------
 void setup() {
-  Serial.begin(115200);
+  CONSOLE.begin(115200);
+#if defined(__SAM3X8E__) && DUE_USE_NATIVE_USB
+  while (!SerialUSB) { delay(10); }  // wait for the native USB CDC host to attach
+#endif
 
   for (int i = 0; i < BEAM_COUNT; i++) {
     pinMode(sensorPins[i], INPUT_PULLUP);
@@ -236,9 +255,9 @@ void setup() {
   session.rng = generateSequence(gSeq, cfg, seed);
 
   // Startup protocol lines (ms = 0 by convention before the session clock starts)
-  Serial.println("0,PROTO,2");
-  Serial.print("0,ANIMAL,"); Serial.println(ANIMAL_ID);
-  Serial.print("0,SEED,");   Serial.println(seed);
+  CONSOLE.println("0,PROTO,2");
+  CONSOLE.print("0,ANIMAL,"); CONSOLE.println(ANIMAL_ID);
+  CONSOLE.print("0,SEED,");   CONSOLE.println(seed);
   logTrialSequence();
 
   // Begin the session clock now, so trial timestamps start near 0.

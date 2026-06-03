@@ -26,25 +26,73 @@
 
 /* ============================ Physical wiring ============================ */
 /* Body-beam sensors (active-LOW, INPUT_PULLUP). Pins from tmaze_test. */
-#define PIN_BEAM_LEFT        38
-#define PIN_BEAM_CENTER      39
-#define PIN_BEAM_RIGHT       40
-#define PIN_BEAM_RCHOICE     41
-#define PIN_BEAM_CENTER_END  42
-#define PIN_BEAM_LCHOICE     43
+#define PIN_BEAM_LEFT        39 /* 39 */
+#define PIN_BEAM_CENTER      42 /* 42 */
+#define PIN_BEAM_RIGHT       43 /* 43 */
+#define PIN_BEAM_RCHOICE     41 /* CONFIRM */
+#define PIN_BEAM_CENTER_END  38 /* 38 */
+#define PIN_BEAM_LCHOICE     40 /* 40 */
 
-/* Lick detectors (active-HIGH event per tmaze_test). */
-#define PIN_LICK_0  35
-#define PIN_LICK_1  36
-#define PIN_LICK_2  37
+/* Lick detectors (active-HIGH event per tmaze_test). Raw, index-ordered pins;
+ * the L,i serial protocol and monitor GUIs use this 0..2 order. */
+#define PIN_LICK_0  37 /* CONFIRM */
+#define PIN_LICK_1  36 /* 37 */
+#define PIN_LICK_2  35 /* 36 */
 
-/* Reward solenoids [port][R1,R2,R3,DRAIN,RINSE]; ports: 0=left 1=right 2=center.
- * Primarily used by tmaze_test; the cue-guided task drives one spout per port. */
+/* --- Lick ports: geometric labels (parallel to the beam labels above) ------
+ * Physical pin<->port mapping is UNVERIFIED. Confirm on the rig with
+ * tmaze_test: lick each port and watch which "L,i" index fires. The mapping
+ * below follows the working assumption in host/rig_view.py (L0=left, L1=right,
+ * L2=start/center, i.e. center == pin 37). */
+#define PIN_LICK_CENTER  PIN_LICK_0   /* CONFIRM (center/start port) */
+#define PIN_LICK_RIGHT   PIN_LICK_1   /* CONFIRM */
+#define PIN_LICK_LEFT    PIN_LICK_2   /* CONFIRM which physical port */
+
+/* Lick-port task roles. v1 cue-guided task: reward is dispensed to the CENTRAL
+ * port on a correct choice (triggered at the choice-arm beam) and the rat
+ * collects it at center; the left/right lick ports have no task role
+ * (monitor-only). The reward is actually dispensed by the central valve
+ * (V_START / PIN_VALVE_START); PIN_LICK_REWARD names the co-located lick
+ * detector for monitoring and possible future lick-gating of reward.
+ * This mapping may change in a different task. see docs/decisions/0007 */
+#define PIN_LICK_REWARD  PIN_LICK_CENTER   /* CONFIRM */
+
+/* Reward solenoids. Each reward port (left/right/center) carries five valves:
+ * three reward spouts (R1,R2,R3), a DRAIN, and a RINSE. The per-pin
+ * geometric+function labels below are the single source of the pin numbers
+ * (parallel to the beam/lick labels above); SOLENOID_TABLE and the reward-valve
+ * pins are derived from them. ports: 0=left 1=right 2=center(start).
+ * CONFIRM the physical port and the R/DRAIN/RINSE assignment on the rig: fire
+ * R<port><sol> (tmaze_test / experiment_control) and watch which valve clicks. */
 #define SOLENOIDS_PER_PORT 5
-#define SOLENOID_TABLE { {23,24,25,26,44}, {27,28,29,30,45}, {31,32,33,34,46} }
+
+#define PIN_SOL_LEFT_R1      23  /* CONFIRM */
+#define PIN_SOL_LEFT_R2      24  /* CONFIRM */
+#define PIN_SOL_LEFT_R3      25  /* CONFIRM */
+#define PIN_SOL_LEFT_DRAIN   26  /* CONFIRM */
+#define PIN_SOL_LEFT_RINSE   44  /* CONFIRM */
+
+#define PIN_SOL_RIGHT_R1     27  /* CONFIRM */
+#define PIN_SOL_RIGHT_R2     28  /* CONFIRM */
+#define PIN_SOL_RIGHT_R3     29  /* CONFIRM */
+#define PIN_SOL_RIGHT_DRAIN  30  /* CONFIRM */
+#define PIN_SOL_RIGHT_RINSE  45  /* CONFIRM */
+
+#define PIN_SOL_CENTER_R1    31  /* CONFIRM (center == start port) */
+#define PIN_SOL_CENTER_R2    32  /* CONFIRM */
+#define PIN_SOL_CENTER_R3    33  /* CONFIRM */
+#define PIN_SOL_CENTER_DRAIN 34  /* CONFIRM */
+#define PIN_SOL_CENTER_RINSE 46  /* CONFIRM */
+
+/* [port][R1,R2,R3,DRAIN,RINSE]; the column index matches the SOL,<port>,<sol>
+ * serial index (sol 0-2 reward, 3 drain, 4 rinse). */
+#define SOLENOID_TABLE { \
+  { PIN_SOL_LEFT_R1,   PIN_SOL_LEFT_R2,   PIN_SOL_LEFT_R3,   PIN_SOL_LEFT_DRAIN,   PIN_SOL_LEFT_RINSE   }, \
+  { PIN_SOL_RIGHT_R1,  PIN_SOL_RIGHT_R2,  PIN_SOL_RIGHT_R3,  PIN_SOL_RIGHT_DRAIN,  PIN_SOL_RIGHT_RINSE  }, \
+  { PIN_SOL_CENTER_R1, PIN_SOL_CENTER_R2, PIN_SOL_CENTER_R3, PIN_SOL_CENTER_DRAIN, PIN_SOL_CENTER_RINSE } }
 
 /* Which solenoid index (column) per port the task pulses as the reward spout. */
-#define REWARD_SOLENOID_INDEX 0          /* CONFIRM */
+#define REWARD_SOLENOID_INDEX 1          /* 1 == R2 (v1 reward spout) */
 
 /* ======================= Open Ephys TTL outputs ========================= */
 /* Free pins (not used by beams/licks/solenoids). CONFIRM each is wired to Open Ephys. */
@@ -57,12 +105,17 @@
  * The order of the Beam enum in task_core.h is:
  *   0 ENTRY, 1 EXIT, 2 LCHOICE, 3 RCHOICE, 4 LRETURN, 5 RRETURN
  * SENSOR_PINS below must be listed in that exact order. */
-#define PIN_S_CENTRAL_ENTRY  PIN_BEAM_CENTER       /* CONFIRM */
-#define PIN_S_CENTRAL_EXIT   PIN_BEAM_CENTER_END   /* CONFIRM */
-#define PIN_S_LEFT_CHOICE    PIN_BEAM_LCHOICE      /* confident */
-#define PIN_S_RIGHT_CHOICE   PIN_BEAM_RCHOICE      /* confident */
-#define PIN_S_LEFT_RETURN    PIN_BEAM_LEFT         /* CONFIRM */
-#define PIN_S_RIGHT_RETURN   PIN_BEAM_RIGHT        /* CONFIRM */
+/* Role->pin mapping verified on the rig with tmaze_test + rig_view: breaking a
+ * physical beam lights the geometrically-correct marker. The PIN_BEAM_* NAMES do
+ * not reflect physical position (they were labeled by slot order at wiring time),
+ * so the aliases below look mismatched but the resulting pin NUMBERS are correct.
+ * Physical truth: ENTRY=39 EXIT=42 LCHOICE=43 RCHOICE=41 LRETURN=38 RRETURN=40. */
+#define PIN_S_CENTRAL_ENTRY  PIN_BEAM_LEFT         /* pin 39 - verified */
+#define PIN_S_CENTRAL_EXIT   PIN_BEAM_CENTER       /* pin 42 - verified */
+#define PIN_S_LEFT_CHOICE    PIN_BEAM_RIGHT        /* pin 43 - verified */
+#define PIN_S_RIGHT_CHOICE   PIN_BEAM_RCHOICE      /* pin 41 - verified */
+#define PIN_S_LEFT_RETURN    PIN_BEAM_CENTER_END   /* pin 38 - verified */
+#define PIN_S_RIGHT_RETURN   PIN_BEAM_LCHOICE      /* pin 40 - verified */
 
 #define SENSOR_PINS { PIN_S_CENTRAL_ENTRY, PIN_S_CENTRAL_EXIT, \
                       PIN_S_LEFT_CHOICE,   PIN_S_RIGHT_CHOICE, \
@@ -71,12 +124,13 @@
 #define LICK_PINS { PIN_LICK_0, PIN_LICK_1, PIN_LICK_2 }
 
 /* ===================== Reward valve pins (one per port) ==================
- * These are SOLENOID_TABLE[port][REWARD_SOLENOID_INDEX]. Listed in the order
- * the Valve enum in task_core.h expects: 0 LEFT, 1 RIGHT, 2 START(center).
- * If REWARD_SOLENOID_INDEX changes, update these too. CONFIRM. */
-#define PIN_VALVE_LEFT   23   /* left[0]   CONFIRM */
-#define PIN_VALVE_RIGHT  27   /* right[0]  CONFIRM */
-#define PIN_VALVE_START  31   /* center[0] CONFIRM (center port == "Start") */
+ * These are SOLENOID_TABLE[port][REWARD_SOLENOID_INDEX], named by the per-pin
+ * labels above. Listed in the order the Valve enum in task_core.h expects:
+ * 0 LEFT, 1 RIGHT, 2 START(center). These track REWARD_SOLENOID_INDEX (== R2);
+ * v1 only fires the center spout, but all three use R2 for consistency. */
+#define PIN_VALVE_LEFT   PIN_SOL_LEFT_R2     /* left reward spout    CONFIRM */
+#define PIN_VALVE_RIGHT  PIN_SOL_RIGHT_R2    /* right reward spout   CONFIRM */
+#define PIN_VALVE_START  PIN_SOL_CENTER_R2   /* center/start spout (v1 reward = C.R2) */
 
 #define VALVE_PINS { PIN_VALVE_LEFT, PIN_VALVE_RIGHT, PIN_VALVE_START }
 
@@ -88,15 +142,20 @@
 /* ========================= Session / cue tunables ======================= */
 #define ANIMAL_ID            "RAT001"
 #define HIGH_TONE_IS_LEFT    true    /* true: high tone -> left, low -> right */
-#define START_REWARD_ENABLED false   /* optional reward at start/center port on return */
+/* v1 reward is delivered at the central port, contingent on a correct choice
+ * (see docs/decisions/0007). This flag additionally rewards the central port on
+ * INCORRECT trials too (free/shaping reward); false = correct-only. */
+#define START_REWARD_ENABLED false
 #define MAX_TRIALS           200
 #define MAX_TIME_MS          3600000UL   /* 1 h */
 #define BLOCK_SIZE           20          /* must divide MAX_TRIALS; half L / half R */
 #define TONE_HIGH_HZ         8000
 #define TONE_LOW_HZ          4000
 
-/* DAC / audio (Arduino Due). */
-#define DAC_SAMPLE_RATE      100000.0f   /* Hz */
+/* DAC / audio (Arduino Due). The tone ISR is wavetable-based (integer-only, see
+ * sound.h), so this is cheap. 80 kHz gives a clean sine (>=10 samples/cycle at
+ * the 8 kHz tone) with large CPU headroom for loop() + native USB. */
+#define DAC_SAMPLE_RATE      80000.0f    /* Hz */
 
 /* ================================ Protocol ============================== */
 #define PROTO_VERSION        2
