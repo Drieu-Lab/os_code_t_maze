@@ -95,6 +95,7 @@ def serial_reader_thread(port: str, baud: int) -> None:
         if not raw:
             continue
         try:
+            # Verbatim line relay: no reframing/metadata. see docs/decisions/0002
             line = raw.decode("utf-8", errors="ignore").rstrip("\r\n")
         except Exception:
             continue
@@ -118,6 +119,7 @@ def _close_serial() -> None:
 
 
 # ================= TCP =================
+# Single-owner broker fans every Due line out to all clients. see docs/decisions/0001
 def broadcast(line: str) -> None:
     """Send ``line + "\\n"`` to every connected client; drop any that fail."""
     payload = (line + "\n").encode("utf-8", errors="ignore")

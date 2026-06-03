@@ -1,0 +1,94 @@
+// os_code_t_maze runtime architecture (rqt_graph-style node/edge view)
+//
+// Render to an image with:  python docs/render_graph.py
+// or directly with Graphviz: dot -Tpng docs/architecture.dot -o docs/architecture.png
+//
+// Conventions (mirrors rqt_graph intuition):
+//   ellipse  = a running process / node
+//   3d box   = a hardware device (not a process)
+//   solid edge   = USB serial link (protocol v2, newline-delimited ASCII)
+//   bold edge    = TCP fan-out on localhost:5555 (the "topic" bus)
+//   dashed edge  = in-process Python function call
+//   dotted edge  = hardware TTL signal (parallel to serial, not on the wire)
+
+digraph os_code_t_maze {
+    rankdir=LR;
+    labelloc="t";
+    fontname="Helvetica";
+    fontsize=16;
+    label="os_code_t_maze - runtime architecture";
+    node [fontname="Helvetica", fontsize=11];
+    edge [fontname="Helvetica", fontsize=9];
+
+    // ---- Hardware ----
+    subgraph cluster_hw {
+        label="Hardware";
+        style="rounded,filled";
+        color="#cccccc";
+        fillcolor="#f5f5f5";
+        fontname="Helvetica";
+
+        due  [label="Arduino Due\n(cue-guided-task / tmaze_test)",
+              shape=box3d, style=filled, fillcolor="#ffe0b2"];
+        oe   [label="Open Ephys\n(acquisition)",
+              shape=box3d, style=filled, fillcolor="#ffe0b2"];
+    }
+
+    // ---- Host: the broker bus ----
+    subgraph cluster_bus {
+        label="serial owner / TCP bus";
+        style="rounded,filled";
+        color="#90caf9";
+        fillcolor="#e3f2fd";
+
+        broker [label="rig_broker.py\nTCP :5555",
+                shape=ellipse, style=filled, fillcolor="#bbdefb"];
+    }
+
+    // ---- Host: broker clients (GUIs) ----
+    subgraph cluster_clients {
+        label="broker clients (RigClient over TCP)";
+        style="rounded,filled";
+        color="#a5d6a7";
+        fillcolor="#e8f5e9";
+
+        maze   [label="maze_gui.py\nsensors / licks / solenoids",
+                shape=ellipse, style=filled, fillcolor="#c8e6c9"];
+        lick   [label="lick_tuner.py\nlick-amp tuning traces",
+                shape=ellipse, style=filled, fillcolor="#c8e6c9"];
+        exp    [label="experiment_control.py\ntabbed experiment shell",
+                shape=ellipse, style=filled, fillcolor="#c8e6c9"];
+        view   [label="rig_view.RigView\nmaze illustration",
+                shape=ellipse, style=filled, fillcolor="#dcedc8"];
+    }
+
+    // ---- Legacy / standalone ----
+    legacy [label="tools/test_sensors_licks.py\n(legacy, direct serial)",
+            shape=ellipse, style="filled,dashed", fillcolor="#eeeeee"];
+
+    // ===== Edges =====
+
+    // USB serial (protocol v2) between Due and broker
+    due -> broker [dir=both, color="#e65100", penwidth=1.6,
+                   label="USB serial 115200\nprotocol v2 lines"];
+
+    // TCP fan-out bus: broker -> every client (telemetry)
+    broker -> maze [color="#1565c0", penwidth=2.2, label="TCP :5555\nS,L,TRIAL,CHOICE,..."];
+    broker -> lick [color="#1565c0", penwidth=2.2, label="TCP :5555\nL edges"];
+    broker -> exp  [color="#1565c0", penwidth=2.2, label="TCP :5555\nall lines"];
+
+    // Commands back to the Due (only maze_gui sends today)
+    maze -> broker [color="#6a1b9a", penwidth=1.4, style=dashed,
+                    label="R** solenoid cmds"];
+
+    // In-process function call inside experiment_control
+    exp -> view [color="#2e7d32", penwidth=1.2, style=dashed, label="apply(line)"];
+
+    // Legacy direct serial path (bypasses broker)
+    due -> legacy [dir=both, color="#9e9e9e", penwidth=1.2, style=dashed,
+                   label="direct serial COM3\n(bypasses broker)"];
+
+    // Hardware TTL signalling, parallel to the serial wire
+    due -> oe [color="#455a64", penwidth=1.2, style=dotted,
+               label="TTL pins 4-7\n(events / sweep)"];
+}

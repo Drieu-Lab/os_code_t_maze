@@ -40,26 +40,23 @@ for i in range(3):
 # ================= DATA HANDLER =================
 
 def handle_line(line):
+    # Protocol v2: "<ms>,<TYPE>,<i>,<state>"; firmware already inverts so 1 = active.
     parts = line.split(",")
 
-    if len(parts) < 3:
+    if len(parts) < 4 or not parts[0].isdigit():
         return
 
     try:
-        if parts[0] == "S":
-            idx = int(parts[1])
-            state = int(parts[2])
+        typ = parts[1]
+        if typ == "S":
+            idx = int(parts[2])
+            state = int(parts[3])
+            sensor_labels[idx].config(bg="green" if state == 1 else "gray")
 
-            # INPUT_PULLUP logic: 0 = active
-            color = "green" if state == 0 else "gray"
-            sensor_labels[idx].config(bg=color)
-
-        elif parts[0] == "L":
-            idx = int(parts[1])
-            state = int(parts[2])
-
-            color = "blue" if state == 0 else "gray"
-            lick_labels[idx].config(bg=color)
+        elif typ == "L":
+            idx = int(parts[2])
+            state = int(parts[3])
+            lick_labels[idx].config(bg="blue" if state == 1 else "gray")
 
     except Exception as e:
         print("Parse error:", e, line)

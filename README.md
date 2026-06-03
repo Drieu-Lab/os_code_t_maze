@@ -38,5 +38,8 @@ can share the rig at once.
 
 ## Getting started
 
+See [`PROGRAMS.md`](PROGRAMS.md) for the full list of programs and the exact
+commands to run each one (Anaconda env `drieu_t_maze`).
+
 See [`host/README.md`](host/README.md) for how to install dependencies and launch
 the rig. Open a `firmware/` sketch in the Arduino IDE to flash the Due.

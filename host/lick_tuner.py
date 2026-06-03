@@ -5,8 +5,8 @@ Use this when tuning the Gain and Hold dials on the three Banner D12DAB6
 amplifiers so each lick produces exactly one clean rising/falling edge pair.
 
 The script connects to the rig broker (rig_broker.py) over TCP, listens for
-"L,<i>,<state>" edge messages, and renders three stacked step traces as a
-function of time. The visible time window is adjustable from 1 to 60
+protocol-v2 "<ms>,L,<i>,<state>" edge messages, and renders three stacked step
+traces as a function of time. The visible time window is adjustable from 1 to 60
 seconds; press Pause to freeze the display while inspecting an event.
 
 Two diagnostics for tuning are shown below the plot:
@@ -269,17 +269,17 @@ status_var.set(f"Connected to broker {BROKER_HOST}:{BROKER_PORT}")
 
 
 def handle_line(line: str) -> None:
-    """Parse a "L,i,state" edge line and update the per-channel buffers.
+    """Parse a protocol-v2 "<ms>,L,<i>,<state>" edge line and update buffers.
 
-    All other line types (S, SOL, READY, ...) are ignored here. Runs on the
+    All other line types (S, SOL, TRIAL, ...) are ignored here. Runs on the
     Tk main thread (RigClient dispatches via root.after).
     """
     parts = line.split(",")
-    if parts[0] != "L" or len(parts) != 3:
+    if len(parts) != 4 or parts[1] != "L" or not parts[0].isdigit():
         return
     try:
-        i = int(parts[1])
-        s = int(parts[2])
+        i = int(parts[2])
+        s = int(parts[3])
     except ValueError:
         return
     if not (0 <= i < N_CHANNELS) or s not in (0, 1):

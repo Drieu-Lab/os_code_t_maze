@@ -1,249 +1,263 @@
-#include "sound.h"
+/*
+ * cue-guided-task.ino - imperative shell for the cue-guided T-maze task.
+ *
+ * Architecture: functional core + imperative shell.
+ *   - task_core.h holds the pure decision logic (Session, step(), no I/O).
+ *   - This .ino reads hardware into Inputs, calls step(), and performs the
+ *     returned Effects (DAC tone, TTL pulses, valves, serial logging).
+ *
+ * Pin map and tunables live in rig_config.h, a symlink to the canonical
+ * ../common/rig_config.h (see docs/decisions/0006). Serial output follows
+ * protocol v2: every line is "<ms>,<TYPE>,<payload...>". See ../PROTOCOL.md.
+ */
 
-// ---------------- Animal-specific configuration ----------------
-#define ANIMAL_ID "RAT001"
-// true: high sweep -> left, low sweep -> right
-// false: high sweep -> right, low sweep -> left
-bool highSweepIsLeft = true;
+#include "rig_config.h"
+#include "sound.h"        // DAC tone engine + TTLPulse + tone TTLs (owns tone TTL timing)
+#include "task_core.h"    // pure core
 
-// ---------------- Pin Assignments ----------------
-// Maze sensors (inputs)
-const int sensorPins[6] = {2,3,4,5,6,7};    // central entry, central exit, L mid, R mid, L return, R return
+#include <string.h>
 
-// Reward valves (outputs)
-const int valvePins[3]  = {22,23,24};       // Left, Right, Start
+// ---------------- Pin tables (from rig_config.h) ----------------
+const int sensorPins[BEAM_COUNT] = SENSOR_PINS;   // order matches Beam enum
+const int lickPins[3]            = LICK_PINS;     // display/monitor only
+const int valvePins[3]           = VALVE_PINS;    // order matches Valve enum
 
-// TTL outputs from Arduino (to Open Ephys)
-const int ttlChoicePin    = 36;
-const int ttlReturnArmPin = 38;
+// ---------------- Choice / return-arm TTLs (shell-owned) ----------------
+// (tone on/off TTLs are owned by sound.h, driven next to the DAC ISR.)
+TTLPulse ttlChoice    = {PIN_TTL_CHOICE,     0, TTL_PULSE_MS, false};
+TTLPulse ttlReturnArm = {PIN_TTL_RETURN_ARM, 0, TTL_PULSE_MS, false};
 
-// TTL inputs from maze (left/right/start licks)
-const int ttlLicks[3] = {30,31,32}; // these go directly to Open Ephys
+// ---------------- Shell state ----------------
+TaskConfig cfg;
+Session    session;
+int8_t     gSeq[MAX_TRIALS];
 
-// ---------------- Session control ----------------
-const int MAX_TRIALS = 200;
-const unsigned long MAX_TIME = 3600000UL; // 1h in ms
-unsigned long startTime;
-int trialCount = 0;
-bool sessionActive = true;
+// Non-blocking reward valves
+unsigned long valveOffAt[3] = {0, 0, 0};
+bool          valveActive[3] = {false, false, false};
 
-// ---------------- Trial sequence ----------------
-const int BLOCK_SIZE = 20;
-const int HALF_BLOCK = 10;
-int trialSequence[MAX_TRIALS];
-int trialIndex = 0;
-int correctArm = -1;
-int choiceArm = -1;
-bool trialActive = false;
-bool sweepsOn = false;
+// Sensor / lick debounce state
+bool          sensRaw[BEAM_COUNT], sensStable[BEAM_COUNT];
+unsigned long sensLastChange[BEAM_COUNT];
+bool          lickRaw[3], lickStable[3];
+unsigned long lickLastChange[3];
 
-bool startRewardEnabled = false; // optional start port reward
+// Serial command accumulator
+char    cmdBuf[16];
+uint8_t cmdLen = 0;
 
-// ---------------- Sensor names for logging ----------------
-const char* sensorNames[6] = {
-  "CENTRAL_ENTRY","CENTRAL_EXIT",
-  "LEFT_CHOICE","RIGHT_CHOICE",
-  "LEFT_RETURN","RIGHT_RETURN"
-};
+// ---------------- Serial output (protocol v2) ----------------
+void printSL(unsigned long ms, const char* type, int idx, int state) {
+  Serial.print(ms); Serial.print(','); Serial.print(type);
+  Serial.print(','); Serial.print(idx);
+  Serial.print(','); Serial.println(state);
+}
 
-// ---------------- Non-blocking reward structure ----------------
-struct RewardValve {
-  int pin;
-  unsigned long startTime;
-  unsigned long duration;
-  bool active;
-};
+void printLog(unsigned long ms, const Effect& e) {
+  Serial.print(ms); Serial.print(','); Serial.print(e.type);
+  if (e.a != FX_NONE) { Serial.print(','); Serial.print(e.a); }
+  if (e.b != FX_NONE) { Serial.print(','); Serial.print(e.b); }
+  if (e.detail && e.detail[0]) { Serial.print(','); Serial.print(e.detail); }
+  Serial.println();
+}
 
-RewardValve rewardValves[3] = {
-  {22,0,100,false},
-  {23,0,100,false},
-  {24,0,100,false}
-};
+// ---------------- Reward valves ----------------
+void openValvePin(int port) {
+  if (port < 0 || port > 2) return;
+  digitalWrite(valvePins[port], HIGH);
+  valveOffAt[port] = millis() + REWARD_PULSE_MS;
+  valveActive[port] = true;
+}
 
-// ---------------- Non-blocking TTL pulse structure ----------------
-struct TTLPulse {
-    int pin;
-    unsigned long startTime;
-    unsigned long duration;
-    bool active;
-};
+void updateValves() {
+  unsigned long now = millis();
+  for (int i = 0; i < 3; i++) {
+    if (valveActive[i] && (long)(now - valveOffAt[i]) >= 0) {
+      digitalWrite(valvePins[i], LOW);
+      valveActive[i] = false;
+    }
+  }
+}
 
-// Add choice and return arm TTLs
-TTLPulse ttlChoice  = {ttlChoicePin,0,5,false};
-TTLPulse ttlReturnArm = {ttlReturnArmPin,0,5,false};
+// ---------------- Serial command channel ----------------
+Command parseCommand(const char* b) {
+  if (!strcmp(b, "ABORT") || !strcmp(b, "STOP")) return Command{Command::Abort, 0};
+  if (!strcmp(b, "PING"))   return Command{Command::Ping, 0};
+  if (!strcmp(b, "STATUS")) return Command{Command::Status, 0};
+  // R<port>[<sol>] - manual valve flush; trailing solenoid digit (maze_gui) ignored
+  if (b[0] == 'R' && b[1] >= '0' && b[1] <= '2') return Command{Command::Flush, (int8_t)(b[1] - '0')};
+  return Command{Command::None, 0};
+}
+
+Command drainSerial() {
+  Command last = {Command::None, 0};
+  while (Serial.available()) {
+    char c = Serial.read();
+    if (c == '\r') continue;
+    if (c == '\n') {
+      cmdBuf[cmdLen] = '\0';
+      if (cmdLen > 0) {
+        Command k = parseCommand(cmdBuf);
+        if (k.kind != Command::None) last = k;
+      }
+      cmdLen = 0;
+    } else if (cmdLen < sizeof(cmdBuf) - 1) {
+      cmdBuf[cmdLen++] = c;
+    } else {
+      cmdLen = 0;  // overrun: drop the line
+    }
+  }
+  return last;
+}
+
+// ---------------- Inputs: debounce + edges + commands ----------------
+Inputs readInputs() {
+  Inputs in;
+  unsigned long now = millis();
+  unsigned long t = now - session.startMs;
+  in.now = now;
+
+  // Body beams: active-LOW, debounced; beam[i] is a RISING-edge flag for the core.
+  for (int i = 0; i < BEAM_COUNT; i++) {
+    bool raw = (digitalRead(sensorPins[i]) == LOW);
+    if (raw != sensRaw[i]) { sensRaw[i] = raw; sensLastChange[i] = now; }
+    bool rising = false;
+    if (raw != sensStable[i] && (now - sensLastChange[i]) >= SENSOR_DEBOUNCE_MS) {
+      sensStable[i] = raw;
+      printSL(t, "S", i, raw ? 1 : 0);
+      if (raw) rising = true;
+    }
+    in.beam[i] = rising;
+  }
+
+  // Lick detectors: active-HIGH, debounced; monitor/display only (not fed to core).
+  for (int i = 0; i < 3; i++) {
+    bool raw = (digitalRead(lickPins[i]) == HIGH);
+    if (raw != lickRaw[i]) { lickRaw[i] = raw; lickLastChange[i] = now; }
+    if (raw != lickStable[i] && (now - lickLastChange[i]) >= SENSOR_DEBOUNCE_MS) {
+      lickStable[i] = raw;
+      printSL(t, "L", i, raw ? 1 : 0);
+    }
+  }
+
+  in.tonePlaying = tonePlaying;
+  in.cmd         = drainSerial();
+  return in;
+}
+
+// ---------------- Apply described effects to hardware ----------------
+void applyEffects(const Effects& fx) {
+  unsigned long t = millis() - session.startMs;
+  for (uint8_t i = 0; i < fx.n; i++) {
+    const Effect& e = fx.items[i];
+    switch (e.tag) {
+      case FxTag::StartTone:
+        startToneAsync((float)e.a);
+        break;
+      case FxTag::StopTone:
+        stopToneAsync();
+        break;
+      case FxTag::PulseChoice:
+        ttlChoice.startTime = millis(); ttlChoice.active = true;
+        digitalWrite(ttlChoice.pin, HIGH);
+        break;
+      case FxTag::PulseReturn:
+        ttlReturnArm.startTime = millis(); ttlReturnArm.active = true;
+        digitalWrite(ttlReturnArm.pin, HIGH);
+        break;
+      case FxTag::OpenValve:
+        openValvePin((int)e.a);
+        break;
+      case FxTag::Log:
+        printLog(t, e);
+        break;
+    }
+  }
+}
+
+// ---------------- Config + seeding + startup dump ----------------
+TaskConfig makeConfig() {
+  TaskConfig c;
+  c.highToneIsLeft     = HIGH_TONE_IS_LEFT;
+  c.startRewardEnabled = START_REWARD_ENABLED;
+  c.maxTrials          = MAX_TRIALS;
+  c.maxTimeMs          = MAX_TIME_MS;
+  c.blockSize          = BLOCK_SIZE;
+  c.highToneHz         = TONE_HIGH_HZ;
+  c.lowToneHz          = TONE_LOW_HZ;
+  return c;
+}
+
+uint32_t makeSeed() {
+  // Floating analog pin -> per-session entropy. CONFIRM A0 is unconnected.
+  uint32_t s = 0;
+  for (int i = 0; i < 32; i++) s = (s << 1) ^ (uint32_t)analogRead(A0);
+  if (s == 0) s = 0xA5A5A5A5u;
+  return s;
+}
+
+void logTrialSequence() {
+  Serial.print("0,SEQ_START,"); Serial.println(cfg.maxTrials);
+  for (int i = 0; i < cfg.maxTrials; i++) {
+    Serial.print("0,SEQ,"); Serial.print(i + 1);
+    Serial.print(','); Serial.println(gSeq[i] == 0 ? "LEFT" : "RIGHT");
+  }
+  Serial.println("0,SEQ_END");
+}
 
 // ---------------- Setup ----------------
 void setup() {
   Serial.begin(115200);
 
-  // Sensors input
-  for(int i=0;i<6;i++) pinMode(sensorPins[i], INPUT_PULLUP);
-  // Valves output
-  for(int i=0;i<3;i++) { pinMode(valvePins[i], OUTPUT); digitalWrite(valvePins[i], LOW);}
-  
-  // TTL outputs
-  pinMode(ttlChoice.pin, OUTPUT); digitalWrite(ttlChoice.pin, LOW);
+  for (int i = 0; i < BEAM_COUNT; i++) {
+    pinMode(sensorPins[i], INPUT_PULLUP);
+    sensRaw[i] = (digitalRead(sensorPins[i]) == LOW);
+    sensStable[i] = sensRaw[i];
+    sensLastChange[i] = millis();
+  }
+  for (int i = 0; i < 3; i++) {
+    pinMode(lickPins[i], INPUT_PULLUP);
+    lickRaw[i] = (digitalRead(lickPins[i]) == HIGH);
+    lickStable[i] = lickRaw[i];
+    lickLastChange[i] = millis();
+  }
+  for (int i = 0; i < 3; i++) { pinMode(valvePins[i], OUTPUT); digitalWrite(valvePins[i], LOW); }
+
+  pinMode(ttlChoice.pin,    OUTPUT); digitalWrite(ttlChoice.pin,    LOW);
   pinMode(ttlReturnArm.pin, OUTPUT); digitalWrite(ttlReturnArm.pin, LOW);
+  pinMode(ttlToneOn.pin,    OUTPUT); digitalWrite(ttlToneOn.pin,    LOW);
+  pinMode(ttlToneOff.pin,   OUTPUT); digitalWrite(ttlToneOff.pin,   LOW);
 
-  pinMode(ttlSweepOn.pin, OUTPUT); digitalWrite(ttlSweepOn.pin, LOW);
-  pinMode(ttlSweepOff.pin, OUTPUT); digitalWrite(ttlSweepOff.pin, LOW);
+  setupSound();   // DAC + timer ISR
 
-  setupSound();       // DAC initialization
-  generateAllBlocks(); // 20-trial pseudo-random blocks
-  logTrialSequence();  // send planned trial list over Serial
-  startTime = millis();
+  cfg = makeConfig();
+  uint32_t seed = makeSeed();
+  session = initialSession(millis(), seed);
+  session.rng = generateSequence(gSeq, cfg, seed);
+
+  // Startup protocol lines (ms = 0 by convention before the session clock starts)
+  Serial.println("0,PROTO,2");
+  Serial.print("0,ANIMAL,"); Serial.println(ANIMAL_ID);
+  Serial.print("0,SEED,");   Serial.println(seed);
+  logTrialSequence();
+
+  // Begin the session clock now, so trial timestamps start near 0.
+  session.startMs = millis();
 }
 
 // ---------------- Loop ----------------
 void loop() {
-  if(!sessionActive) return;
+  Inputs in = readInputs();   // also drains serial + prints S,/L, edges
 
-  // Check session timeout
-  if(millis()-startTime >= MAX_TIME){
-    stopSession();
-    return;
+  if (session.active) {
+    Effects fx; fx.n = 0;
+    session = step(session, in, cfg, gSeq, fx);
+    applyEffects(fx);
   }
 
-  // Start trial on central entry
-  if(!trialActive && sensorTriggered(0)){
-    if(trialCount >= MAX_TRIALS){ stopSession(); return; }
-    startTrial();
-  }
-
-  // ---------------- Repeated sweeps until central exit ----------------
-  if(trialActive && !sensorTriggered(1)){ // central exit not triggered
-    if(canStartNextSweep()){
-      if(highSweepIsLeft){
-        if(correctArm==0) startSweepAsync(8000,32000,100); // high->left
-        else startSweepAsync(4000,16000,100);             // low->right
-      } else {
-        if(correctArm==0) startSweepAsync(4000,16000,100); // low->left
-        else startSweepAsync(8000,32000,100);             // high->right
-      }
-    }
-  }
-
-  // Stop sweep at central exit
-  if(trialActive && sensorTriggered(1) && sweepPlaying){
-    stopSweepAsync();
-  }
-
-  // Choice detection
-  if(trialActive && choiceArm == -1){
-    if(sensorTriggered(2)) { choiceArm=0; evaluateChoice(); }
-    if(sensorTriggered(3)) { choiceArm=1; evaluateChoice(); }
-  }
-
-  // Return arm detection
-  if(trialActive && (sensorTriggered(4) || sensorTriggered(5))){
-    // Start non-blocking TTL pulse
-    ttlReturnArm.startTime = millis();
-    ttlReturnArm.active = true;
-    digitalWrite(ttlReturnArm.pin,HIGH);
-
-    logEvent("RETURN_ARM","ENTRY");
-
-    if(startRewardEnabled) deliverReward(2); // optional start port
-    resetTrial();
-  }
-
-  // ---------------- Non-blocking TTL update ----------------
-  updateTTLPulse(ttlSweepOn);
-  updateTTLPulse(ttlSweepOff);
+  updateTTLPulse(ttlToneOn);
+  updateTTLPulse(ttlToneOff);
   updateTTLPulse(ttlChoice);
   updateTTLPulse(ttlReturnArm);
-
-  // ---------------- Non-blocking reward update ----------------
-  for(int i=0;i<3;i++){
-    if(rewardValves[i].active && millis() - rewardValves[i].startTime >= rewardValves[i].duration){
-      digitalWrite(rewardValves[i].pin, LOW);
-      rewardValves[i].active = false;
-    }
-  }
-
-  // Log sensor HIGH events
-  static bool prevState[6] = {0,0,0,0,0,0};
-  for(int i=0;i<6;i++){
-    bool curr = sensorTriggered(i);
-    if(curr && !prevState[i]) logEvent("SENSOR",sensorNames[i]);
-    prevState[i]=curr;
-  }
-}
-
-// ---------------- Trial functions ----------------
-void startTrial(){
-  correctArm = trialSequence[trialIndex];
-  trialActive = true;
-  sweepsOn = true;
-
-  logEvent("TRIAL", correctArm==0?"LEFT":"RIGHT");
-}
-
-void evaluateChoice(){
-  // Start non-blocking TTL pulse for choice
-  ttlChoice.startTime = millis();
-  ttlChoice.active = true;
-  digitalWrite(ttlChoice.pin,HIGH);
-
-  if(choiceArm==correctArm) deliverReward(choiceArm);
-}
-
-// ---------------- Non-blocking reward ----------------
-void deliverReward(int port){
-  digitalWrite(rewardValves[port].pin, HIGH);
-  rewardValves[port].startTime = millis();
-  rewardValves[port].active = true;
-
-  logEvent("REWARD", port==0?"LEFT":(port==1?"RIGHT":"START"));
-}
-
-void resetTrial(){
-  trialActive=false;
-  choiceArm=-1;
-  trialIndex++;
-  trialCount++;
-  if(trialIndex>=MAX_TRIALS) stopSession();
-}
-
-void stopSession(){
-  sessionActive=false;
-  stopSweepAsync();
-  for(int i=0;i<3;i++) digitalWrite(valvePins[i],LOW);
-  Serial.println("SESSION_COMPLETE");
-}
-
-// ---------------- Utilities ----------------
-bool sensorTriggered(int idx){ return digitalRead(sensorPins[idx])==LOW; }
-
-void logEvent(const char* type,const char* detail){
-  unsigned long timestamp=millis()-startTime;
-  Serial.print(type); Serial.print(","); Serial.print(timestamp); Serial.print(","); Serial.println(detail);
-}
-
-// ---------------- Trial sequence ----------------
-void generateAllBlocks(){
-  for(int block=0; block<MAX_TRIALS/BLOCK_SIZE; block++){
-    int offset=block*BLOCK_SIZE;
-    for(int i=0;i<HALF_BLOCK;i++){
-      trialSequence[offset+i]=0;              // left
-      trialSequence[offset+i+HALF_BLOCK]=1;   // right
-    }
-    // shuffle block
-    for(int i=BLOCK_SIZE-1;i>0;i--){
-      int j=random(0,i+1);
-      int temp=trialSequence[offset+i];
-      trialSequence[offset+i]=trialSequence[offset+j];
-      trialSequence[offset+j]=temp;
-    }
-  }
-  trialIndex=0;
-}
-
-void logTrialSequence(){
-  Serial.println("TRIAL_SEQUENCE_START");
-  for(int i=0;i<MAX_TRIALS;i++){
-    Serial.print(i+1); Serial.print(",");
-    Serial.println(trialSequence[i]==0?"LEFT":"RIGHT");
-  }
-  Serial.println("TRIAL_SEQUENCE_END");
+  updateValves();
 }

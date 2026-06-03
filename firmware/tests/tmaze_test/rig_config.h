@@ -1,0 +1,1 @@
+../../common/rig_config.h

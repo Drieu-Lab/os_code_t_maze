@@ -80,31 +80,25 @@ status_lbl.grid(row=11, column=0, columnspan=6, sticky="we")
 # ================= HANDLER =================
 
 def handle_line(line):
+    # Protocol v2: every line is "<ms>,<TYPE>,<payload...>".
     parts = line.split(",")
-
-    if len(parts) != 3:
+    if len(parts) < 2 or not parts[0].isdigit():
         return
 
+    typ = parts[1]
     try:
-        t = parts[0]
-        idx = int(parts[1])
-        state = int(parts[2])
-
-        log.insert(tk.END, line + "\n")
-        log.see(tk.END)
-
-        if t == "S":
-            sensor_labels[idx].config(
-                bg="green" if state == 1 else "gray"
-            )
-
-        elif t == "L":
-            lick_labels[idx].config(
-                bg="blue" if state == 1 else "gray"
-            )
-
-    except Exception as e:
-        print("Parse error:", e)
+        if typ == "S" and len(parts) >= 4:
+            idx, state = int(parts[2]), int(parts[3])
+            sensor_labels[idx].config(bg="green" if state == 1 else "gray")
+        elif typ == "L" and len(parts) >= 4:
+            idx, state = int(parts[2]), int(parts[3])
+            lick_labels[idx].config(bg="blue" if state == 1 else "gray")
+        else:
+            # everything else (TRIAL/CHOICE/OUTCOME/REWARD/PROTO/...) goes to the log
+            log.insert(tk.END, line + "\n")
+            log.see(tk.END)
+    except (ValueError, IndexError) as e:
+        print("Parse error:", e, line)
 
 
 def set_status(text):

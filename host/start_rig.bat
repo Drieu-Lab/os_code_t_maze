@@ -15,6 +15,8 @@ REM   - The two GUIs are TCP clients of the broker, so both can run at once.
 REM
 REM   Override the serial port from the command line if needed, e.g.
 REM       start_rig.bat COM5
+REM
+REM   Launcher + external conda activation rationale: see docs/decisions/0004
 REM ============================================================================
 
 setlocal
@@ -46,5 +48,6 @@ timeout /t 2 /nobreak >nul
 
 start "Maze GUI"   python maze_gui.py
 start "Lick Tuner" python lick_tuner.py
+start "Experiment Control" python experiment_control.py
 
 endlocal

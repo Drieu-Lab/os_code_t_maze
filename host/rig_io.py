@@ -67,6 +67,10 @@ class RigClient:
         Raises ConnectionError (or the underlying OSError) on initial failure
         so the caller can show a clean error dialog instead of silently
         retrying. Subsequent disconnects are recovered automatically.
+
+        Clients are broker-only: there is no direct-serial fallback, so a
+        first-connect failure is surfaced rather than worked around.
+        see docs/decisions/0003
         """
         self._connect_once()  # may raise; we want this visible at startup
         self._thread = threading.Thread(

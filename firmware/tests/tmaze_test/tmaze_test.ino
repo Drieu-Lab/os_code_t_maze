@@ -1,18 +1,19 @@
 // ================= PIN SETUP =================
+// Pins come from rig_config.h, a symlink to the canonical
+// ../../common/rig_config.h (see docs/decisions/0006).
+#include "rig_config.h"
 
-// Body sensors (6)
-const int sensorPins[6] = {38, 39, 40, 41, 42, 43};
-// 38 = left, 39 = center, 40 = right, 41 = right choice,
-// 42 = center end, 43 = left choice
-// Lick sensors (3)
-const int lickPins[3] = {35, 36, 37};
-
-// Solenoids
-const int solenoidPins[3][5] = {
-  {23, 24, 25, 26, 44}, // left
-  {27, 28, 29, 30, 45}, // right
-  {31, 32, 33, 34, 46}  // center
+// Body sensors (6), in this sketch's physical order:
+// left, center, right, right-choice, center-end, left-choice
+const int sensorPins[6] = {
+  PIN_BEAM_LEFT, PIN_BEAM_CENTER, PIN_BEAM_RIGHT,
+  PIN_BEAM_RCHOICE, PIN_BEAM_CENTER_END, PIN_BEAM_LCHOICE
 };
+// Lick sensors (3)
+const int lickPins[3] = LICK_PINS;
+
+// Solenoids [port][R1,R2,R3,DRAIN,RINSE]; ports: left, right, center
+const int solenoidPins[3][5] = SOLENOID_TABLE;
 
 int lastSensor[6];
 int lastLick[3];
@@ -84,7 +85,8 @@ void setup() {
     }
   }
 
-  CONSOLE.println("READY");
+  CONSOLE.println("0,PROTO,2");
+  CONSOLE.print(millis()); CONSOLE.println(",READY");
   CONSOLE.flush();
 
   digitalWrite(LED_BUILTIN, HIGH);
@@ -113,7 +115,8 @@ void updateSensors() {
     if (state != lastSensor[i]) {
       lastSensor[i] = state;
 
-      CONSOLE.print("S,");
+      CONSOLE.print(millis());
+      CONSOLE.print(",S,");
       CONSOLE.print(i);
       CONSOLE.print(",");
       CONSOLE.println(state);
@@ -134,7 +137,8 @@ void updateLicks() {
     if (state != lastLick[i]) {
       lastLick[i] = state;
 
-      CONSOLE.print("L,");
+      CONSOLE.print(millis());
+      CONSOLE.print(",L,");
       CONSOLE.print(i);
       CONSOLE.print(",");
       CONSOLE.println(state);
@@ -156,7 +160,8 @@ void handleSerial() {
 
     if (port < 0 || port > 2 || sol < 0 || sol > 4) return;
 
-    CONSOLE.print("SOL,");
+    CONSOLE.print(millis());
+    CONSOLE.print(",SOL,");
     CONSOLE.print(port);
     CONSOLE.print(",");
     CONSOLE.println(sol);
