@@ -93,6 +93,10 @@
 
 /* Which solenoid index (column) per port the task pulses as the reward spout. */
 #define REWARD_SOLENOID_INDEX 1          /* 1 == R2 (v1 reward spout) */
+/* DRAIN/RINSE column indices (match the SOLENOID_TABLE layout above). Used by the
+ * auto well-clean (rinse-then-drain at trial start). see docs/decisions/0010 */
+#define DRAIN_SOLENOID_INDEX  3          /* 3 == DRAIN */
+#define RINSE_SOLENOID_INDEX  4          /* 4 == RINSE */
 
 /* ======================= Open Ephys TTL outputs ========================= */
 /* Free pins (not used by beams/licks/solenoids). CONFIRM each is wired to Open Ephys. */
@@ -136,11 +140,19 @@
 
 /* ============================ Timing / debounce ========================= */
 #define SENSOR_DEBOUNCE_MS   5      /* CONFIRM against IR-sensor behavior */
-#define REWARD_PULSE_MS      100
+/* Single source of truth for valve-open time. Used by cue-guided-task (reward
+ * + manual flush) and tmaze_test (R<port><sol> default), and is the default for
+ * experiment_control's configurable pulse field. */
+#define REWARD_PULSE_MS      300
 #define TTL_PULSE_MS         5
 
 /* ========================= Session / cue tunables ======================= */
 #define ANIMAL_ID            "RAT001"
+/* Default training mode at boot (Mode enum lives in task_core.h; this macro is
+ * only expanded inside makeConfig() where Mode is in scope). FreeRoam is the
+ * safe default: no trials run until the experimenter sends MODE,FULL.
+ * see docs/decisions/0009 */
+#define DEFAULT_MODE         Mode::FreeRoam
 #define HIGH_TONE_IS_LEFT    true    /* true: high tone -> left, low -> right */
 /* v1 reward is delivered at the central port, contingent on a correct choice
  * (see docs/decisions/0007). This flag additionally rewards the central port on
@@ -149,6 +161,19 @@
 #define MAX_TRIALS           200
 #define MAX_TIME_MS          3600000UL   /* 1 h */
 #define BLOCK_SIZE           20          /* must divide MAX_TRIALS; half L / half R */
+/* Anti-bias: max consecutive same-side trials allowed in the generated
+ * sequence (0 disables). Long same-side runs let rats develop a side bias;
+ * cf. Holleman et al. 2019, Sci Rep 9:12589. see docs/decisions/0009 */
+#define MAX_SAME_RUN         3
+/* Auto well-clean: at the start of each trial - the return-arm -> central-entry
+ * transition the trial state machine already enforces - rinse then drain the
+ * central well so each trial's reward is fresh and the line stays clean. The
+ * DRAIN must evacuate faster than the RINSE fills, and the clean fires near cue
+ * onset (an added solenoid click during the cue) - both acceptable but noted.
+ * Set AUTO_DRAIN_ON_TRIAL false to disable. see docs/decisions/0010 */
+#define AUTO_DRAIN_ON_TRIAL  true
+#define WELL_RINSE_MS        150         /* CONFIRM against the well/plumbing */
+#define WELL_DRAIN_MS        300         /* CONFIRM: must clear what the rinse adds */
 #define TONE_HIGH_HZ         8000
 #define TONE_LOW_HZ          4000
 
@@ -158,6 +183,10 @@
 #define DAC_SAMPLE_RATE      80000.0f    /* Hz */
 
 /* ================================ Protocol ============================== */
-#define PROTO_VERSION        2
+/* v3 adds: training modes (MODE command + 0,MODE,<name> line), manual-reward
+ * logging (REWARD,<port>,MANUAL), and SESSION_SUMMARY (see docs/decisions/0009);
+ * plus full manual solenoid control in cue-guided-task (R<port><sol>[,<ms>] ->
+ * SOL ack) and auto well-clean SOL lines at trial start (docs/decisions/0010). */
+#define PROTO_VERSION        3
 
 #endif /* RIG_CONFIG_H */

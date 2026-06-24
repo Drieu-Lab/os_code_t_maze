@@ -27,6 +27,7 @@ running. Run each in its own terminal (or use the launcher below).
 | Program | Description | Command (from `host/`) |
 |---------|-------------|------------------------|
 | `rig_broker.py` | Owns the Arduino Due's COM port and fans its serial stream out over TCP `localhost:5555`. Run this first. | `python rig_broker.py --port COM4` |
+| `rig_logger.py` | Headless broker client that records every firmware line to `host/data/<animal>_<time>.csv` (wall-clock-stamped). | `python rig_logger.py` |
 | `maze_gui.py` | Live monitor for body sensors, lick sensors, and solenoid flush buttons. | `python maze_gui.py` |
 | `lick_tuner.py` | Real-time lick-edge traces for tuning the lick-detector amplifiers. | `python lick_tuner.py` |
 | `experiment_control.py` | Extensible tabbed experiment-control GUI (first tab is a live maze illustration). | `python experiment_control.py` |

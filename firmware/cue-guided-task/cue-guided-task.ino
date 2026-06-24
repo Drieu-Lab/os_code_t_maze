@@ -8,7 +8,7 @@
  *
  * Pin map and tunables live in rig_config.h, a symlink to the canonical
  * ../common/rig_config.h (see docs/decisions/0006). Serial output follows
- * protocol v2: every line is "<ms>,<TYPE>,<payload...>". See ../PROTOCOL.md.
+ * protocol v3: every line is "<ms>,<TYPE>,<payload...>". See ../PROTOCOL.md.
  */
 
 #include "rig_config.h"
@@ -36,7 +36,9 @@
 // ---------------- Pin tables (from rig_config.h) ----------------
 const int sensorPins[BEAM_COUNT] = SENSOR_PINS;   // order matches Beam enum
 const int lickPins[3]            = LICK_PINS;     // display/monitor only
-const int valvePins[3]           = VALVE_PINS;    // order matches Valve enum
+// Full 15-solenoid table [port][R1,R2,R3,DRAIN,RINSE]; ports 0=left 1=right
+// 2=center(start). Same layout as tmaze_test so SOL,<port>,<sol> matches.
+const int solenoidPins[3][SOLENOIDS_PER_PORT] = SOLENOID_TABLE;
 
 // ---------------- Choice / return-arm TTLs (shell-owned) ----------------
 // (tone on/off TTLs are owned by sound.h, driven next to the DAC ISR.)
@@ -48,9 +50,13 @@ TaskConfig cfg;
 Session    session;
 int8_t     gSeq[MAX_TRIALS];
 
-// Non-blocking reward valves
-unsigned long valveOffAt[3] = {0, 0, 0};
-bool          valveActive[3] = {false, false, false};
+// Non-blocking 15-solenoid pulse manager. Each valve can be scheduled with an
+// optional start delay (onAt) so a sequence like rinse-then-drain runs without
+// ever blocking loop(). Mirrors tmaze_test's capability minus its delay().
+unsigned long solOnAt[3][SOLENOIDS_PER_PORT];   // scheduled turn-on (millis); valid while pending
+unsigned long solOffAt[3][SOLENOIDS_PER_PORT];  // scheduled turn-off (millis); valid while active/pending
+bool          solPending[3][SOLENOIDS_PER_PORT]; // waiting for its delayed start
+bool          solActive[3][SOLENOIDS_PER_PORT];  // currently energized
 
 // Sensor / lick debounce state
 bool          sensRaw[BEAM_COUNT], sensStable[BEAM_COUNT];
@@ -62,7 +68,7 @@ unsigned long lickLastChange[3];
 char    cmdBuf[16];
 uint8_t cmdLen = 0;
 
-// ---------------- Serial output (protocol v2) ----------------
+// ---------------- Serial output (protocol v3) ----------------
 void printSL(unsigned long ms, const char* type, int idx, int state) {
   CONSOLE.print(ms); CONSOLE.print(','); CONSOLE.print(type);
   CONSOLE.print(','); CONSOLE.print(idx);
@@ -73,25 +79,72 @@ void printLog(unsigned long ms, const Effect& e) {
   CONSOLE.print(ms); CONSOLE.print(','); CONSOLE.print(e.type);
   if (e.a != FX_NONE) { CONSOLE.print(','); CONSOLE.print(e.a); }
   if (e.b != FX_NONE) { CONSOLE.print(','); CONSOLE.print(e.b); }
+  if (e.c != FX_NONE) { CONSOLE.print(','); CONSOLE.print(e.c); }
   if (e.detail && e.detail[0]) { CONSOLE.print(','); CONSOLE.print(e.detail); }
   CONSOLE.println();
 }
 
-// ---------------- Reward valves ----------------
-void openValvePin(int port) {
-  if (port < 0 || port > 2) return;
-  digitalWrite(valvePins[port], HIGH);
-  valveOffAt[port] = millis() + REWARD_PULSE_MS;
-  valveActive[port] = true;
+// ---------------- Solenoids (non-blocking) ----------------
+// Energize solenoid [port][sol] for `dur` ms, optionally starting `startDelay` ms
+// from now (0 = immediately). Re-firing a valve simply reschedules its off-time.
+void openSolenoid(int port, int sol, unsigned long dur, unsigned long startDelay = 0) {
+  if (port < 0 || port > 2 || sol < 0 || sol >= SOLENOIDS_PER_PORT) return;
+  unsigned long now = millis();
+  if (startDelay == 0) {
+    digitalWrite(solenoidPins[port][sol], HIGH);
+    solPending[port][sol] = false;
+    solActive[port][sol]  = true;
+    solOffAt[port][sol]   = now + dur;
+  } else {
+    solPending[port][sol] = true;
+    solActive[port][sol]  = false;
+    solOnAt[port][sol]    = now + startDelay;
+    solOffAt[port][sol]   = now + startDelay + dur;
+  }
 }
 
 void updateValves() {
   unsigned long now = millis();
-  for (int i = 0; i < 3; i++) {
-    if (valveActive[i] && (long)(now - valveOffAt[i]) >= 0) {
-      digitalWrite(valvePins[i], LOW);
-      valveActive[i] = false;
+  for (int p = 0; p < 3; p++) {
+    for (int s = 0; s < SOLENOIDS_PER_PORT; s++) {
+      if (solPending[p][s] && (long)(now - solOnAt[p][s]) >= 0) {
+        digitalWrite(solenoidPins[p][s], HIGH);
+        solPending[p][s] = false;
+        solActive[p][s]  = true;
+      }
+      if (solActive[p][s] && (long)(now - solOffAt[p][s]) >= 0) {
+        digitalWrite(solenoidPins[p][s], LOW);
+        solActive[p][s] = false;
+      }
     }
+  }
+}
+
+// Manual solenoid fire: R<port><sol>[,<ms>]. Handled entirely shell-side and
+// independent of session.active (so the buttons work in any mode, even after a
+// session completes), mirroring tmaze_test but NON-BLOCKING. Emits a SOL ack so
+// the Rig view flashes the exact marker, and for the reward spout also
+// REWARD,<port>,MANUAL for the behavioral log. A bare R<port> fires the reward
+// spout (REWARD_SOLENOID_INDEX). see docs/decisions/0010
+void handleManualSolenoid(const char* b) {
+  if (b[0] != 'R' || b[1] < '0' || b[1] > '2') return;
+  int port = b[1] - '0';
+  int sol  = REWARD_SOLENOID_INDEX;
+  if (b[2] >= '0' && b[2] <= '4') sol = b[2] - '0';
+  unsigned long dur = REWARD_PULSE_MS;
+  const char* comma = strchr(b, ',');
+  if (comma && comma[1]) {
+    long v = 0;
+    for (const char* p = comma + 1; *p >= '0' && *p <= '9'; p++) v = v * 10 + (*p - '0');
+    if (v > 0) dur = (unsigned long)(v > 5000 ? 5000 : v);
+  }
+  openSolenoid(port, sol, dur);
+  unsigned long t = millis() - session.startMs;
+  CONSOLE.print(t); CONSOLE.print(",SOL,"); CONSOLE.print(port);
+  CONSOLE.print(','); CONSOLE.println(sol);
+  if (sol == REWARD_SOLENOID_INDEX) {
+    CONSOLE.print(t); CONSOLE.print(",REWARD,"); CONSOLE.print(port);
+    CONSOLE.println(",MANUAL");
   }
 }
 
@@ -100,8 +153,11 @@ Command parseCommand(const char* b) {
   if (!strcmp(b, "ABORT") || !strcmp(b, "STOP")) return Command{Command::Abort, 0};
   if (!strcmp(b, "PING"))   return Command{Command::Ping, 0};
   if (!strcmp(b, "STATUS")) return Command{Command::Status, 0};
-  // R<port>[<sol>] - manual valve flush; trailing solenoid digit (maze_gui) ignored
-  if (b[0] == 'R' && b[1] >= '0' && b[1] <= '2') return Command{Command::Flush, (int8_t)(b[1] - '0')};
+  // MODE,FREE | MODE,FULL - switch training mode (and (re)start the session)
+  if (!strcmp(b, "MODE,FREE")) return Command{Command::SetMode, (int8_t)Mode::FreeRoam};
+  if (!strcmp(b, "MODE,FULL")) return Command{Command::SetMode, (int8_t)Mode::FullTask};
+  // R<port><sol>[,<ms>] is NOT a core command: it is handled shell-side in
+  // drainSerial() via handleManualSolenoid().
   return Command{Command::None, 0};
 }
 
@@ -113,8 +169,14 @@ Command drainSerial() {
     if (c == '\n') {
       cmdBuf[cmdLen] = '\0';
       if (cmdLen > 0) {
-        Command k = parseCommand(cmdBuf);
-        if (k.kind != Command::None) last = k;
+        // Manual solenoid fires are a shell concern (session-independent); all
+        // other lines parse into a core Command.
+        if (cmdBuf[0] == 'R' && cmdBuf[1] >= '0' && cmdBuf[1] <= '2') {
+          handleManualSolenoid(cmdBuf);
+        } else {
+          Command k = parseCommand(cmdBuf);
+          if (k.kind != Command::None) last = k;
+        }
       }
       cmdLen = 0;
     } else if (cmdLen < sizeof(cmdBuf) - 1) {
@@ -182,8 +244,22 @@ void applyEffects(const Effects& fx) {
         digitalWrite(ttlReturnArm.pin, HIGH);
         break;
       case FxTag::OpenValve:
-        openValvePin((int)e.a);
+        // Automatic task reward: the configured reward spout (R2) of the port.
+        openSolenoid((int)e.a, REWARD_SOLENOID_INDEX, REWARD_PULSE_MS);
         break;
+      case FxTag::CleanWell: {
+        // Auto well-clean at trial start: rinse the central well now, then drain
+        // after the rinse (non-blocking). Emit a SOL ack for each so the Rig view
+        // flashes and the clean is in the log. e.a=rinse ms, e.b=drain ms.
+        const int port = (int)V_START;   // central/start well
+        openSolenoid(port, RINSE_SOLENOID_INDEX, (unsigned long)e.a, 0);
+        openSolenoid(port, DRAIN_SOLENOID_INDEX, (unsigned long)e.b, (unsigned long)e.a);
+        CONSOLE.print(t); CONSOLE.print(",SOL,"); CONSOLE.print(port);
+        CONSOLE.print(','); CONSOLE.println(RINSE_SOLENOID_INDEX);
+        CONSOLE.print(t); CONSOLE.print(",SOL,"); CONSOLE.print(port);
+        CONSOLE.print(','); CONSOLE.println(DRAIN_SOLENOID_INDEX);
+        break;
+      }
       case FxTag::Log:
         printLog(t, e);
         break;
@@ -194,11 +270,16 @@ void applyEffects(const Effects& fx) {
 // ---------------- Config + seeding + startup dump ----------------
 TaskConfig makeConfig() {
   TaskConfig c;
+  c.mode               = DEFAULT_MODE;
   c.highToneIsLeft     = HIGH_TONE_IS_LEFT;
   c.startRewardEnabled = START_REWARD_ENABLED;
   c.maxTrials          = MAX_TRIALS;
   c.maxTimeMs          = MAX_TIME_MS;
   c.blockSize          = BLOCK_SIZE;
+  c.maxSameRun         = MAX_SAME_RUN;
+  c.autoDrainOnTrial   = AUTO_DRAIN_ON_TRIAL;
+  c.rinseMs            = WELL_RINSE_MS;
+  c.drainMs            = WELL_DRAIN_MS;
   c.highToneHz         = TONE_HIGH_HZ;
   c.lowToneHz          = TONE_LOW_HZ;
   return c;
@@ -221,6 +302,34 @@ void logTrialSequence() {
   CONSOLE.println("0,SEQ_END");
 }
 
+// Emit a session-boundary MODE marker (ms = 0 by convention, like the handshake).
+void logModeLine(const char* name) {
+  CONSOLE.print("0,MODE,"); CONSOLE.println(name);
+}
+
+// ---------------- Mode / session lifecycle ----------------
+// Both helpers (re)initialize the session clock; switching mode at runtime via
+// the MODE command starts a fresh session. FreeRoam has no trial sequence; the
+// trial state machine is gated off in task_core's step(). see docs/decisions/0009
+void startFreeRoam() {
+  cfg.mode = Mode::FreeRoam;
+  uint32_t seed = makeSeed();
+  session = initialSession(millis(), seed);
+  logModeLine("FREEROAM");
+  session.startMs = millis();
+}
+
+void startFullTask() {
+  cfg.mode = Mode::FullTask;
+  uint32_t seed = makeSeed();
+  session = initialSession(millis(), seed);
+  session.rng = generateSequence(gSeq, cfg, seed);
+  CONSOLE.print("0,SEED,"); CONSOLE.println(seed);
+  logTrialSequence();
+  logModeLine("FULLTASK");
+  session.startMs = millis();
+}
+
 // ---------------- Setup ----------------
 void setup() {
   CONSOLE.begin(115200);
@@ -240,7 +349,14 @@ void setup() {
     lickStable[i] = lickRaw[i];
     lickLastChange[i] = millis();
   }
-  for (int i = 0; i < 3; i++) { pinMode(valvePins[i], OUTPUT); digitalWrite(valvePins[i], LOW); }
+  for (int p = 0; p < 3; p++) {
+    for (int s = 0; s < SOLENOIDS_PER_PORT; s++) {
+      pinMode(solenoidPins[p][s], OUTPUT);
+      digitalWrite(solenoidPins[p][s], LOW);
+      solPending[p][s] = false;
+      solActive[p][s]  = false;
+    }
+  }
 
   pinMode(ttlChoice.pin,    OUTPUT); digitalWrite(ttlChoice.pin,    LOW);
   pinMode(ttlReturnArm.pin, OUTPUT); digitalWrite(ttlReturnArm.pin, LOW);
@@ -250,25 +366,28 @@ void setup() {
   setupSound();   // DAC + timer ISR
 
   cfg = makeConfig();
-  uint32_t seed = makeSeed();
-  session = initialSession(millis(), seed);
-  session.rng = generateSequence(gSeq, cfg, seed);
 
   // Startup protocol lines (ms = 0 by convention before the session clock starts)
-  CONSOLE.println("0,PROTO,2");
+  CONSOLE.print("0,PROTO,");  CONSOLE.println(PROTO_VERSION);
   CONSOLE.print("0,ANIMAL,"); CONSOLE.println(ANIMAL_ID);
-  CONSOLE.print("0,SEED,");   CONSOLE.println(seed);
-  logTrialSequence();
 
-  // Begin the session clock now, so trial timestamps start near 0.
-  session.startMs = millis();
+  // Boot into the configured default mode. FreeRoam is the safe default: no
+  // trials run until the experimenter selects Full task (MODE,FULL), so a
+  // session never auto-starts on the wrong animal. see docs/decisions/0009
+  if (cfg.mode == Mode::FullTask) startFullTask();
+  else                            startFreeRoam();
 }
 
 // ---------------- Loop ----------------
 void loop() {
   Inputs in = readInputs();   // also drains serial + prints S,/L, edges
 
-  if (session.active) {
+  // Mode switch is a shell concern (it re-seeds, regenerates the sequence, and
+  // re-dumps the handshake), so it is handled here rather than in the pure core.
+  if (in.cmd.kind == Command::SetMode) {
+    if (in.cmd.arg == (int8_t)Mode::FullTask) startFullTask();
+    else                                      startFreeRoam();
+  } else if (session.active) {
     Effects fx; fx.n = 0;
     session = step(session, in, cfg, gSeq, fx);
     applyEffects(fx);

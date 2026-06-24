@@ -12,6 +12,13 @@ dist/
 .vscode/
 .idea/
 
+# Recorded session data (rig_logger.py output)
+host/data/
+
+# Compiled unit-test binaries (firmware/.../test)
+test_task_core
+test_task_core.exe
+
 # OS cruft
 .DS_Store
 Thumbs.db

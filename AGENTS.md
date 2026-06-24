@@ -2,6 +2,46 @@
 
 Guidance for AI coding agents working in this repository.
 
+## Orientation — read these, don't ask the user to point you at them
+
+This file is loaded automatically at the start of every session, so you already
+have it. You do **not** need the user to tell you to "review the material."
+Instead, use the map below and read the specific doc the task calls for — read on
+demand, don't bulk-read everything.
+
+This project spans **two sibling folders**:
+
+- **`os_code_t_maze/`** (this repo) — experiment code only: Arduino firmware and
+  the PC-side Python control/monitoring tools. Start here:
+  - [`README.md`](README.md) — architecture overview (broker + TCP clients).
+  - [`PROGRAMS.md`](PROGRAMS.md) — every runnable program and its exact launch
+    command (conda env `drieu_t_maze`).
+  - [`firmware/PROTOCOL.md`](firmware/PROTOCOL.md) — serial/TCP message protocol.
+  - [`docs/decisions/`](docs/decisions/) — ADRs explaining *why* key choices
+    were made (read the index in [`docs/decisions/README.md`](docs/decisions/README.md)).
+  - `host/README.md`, `firmware/README.md` — component-level details.
+- **`../os_code_t_maze_resources/`** (sibling repo) — planning, hardware
+ references, lab notes, and mockups. Its own
+ [`AGENTS.md`](../os_code_t_maze_resources/AGENTS.md) has the full file map and
+ maintenance rules; start there for the rig manual/schematics, the Gantt/
+ dependency planning, and the Obsidian notes. It also holds the project's
+ *why* and governing constraints — read these when you need scientific or
+ procedural context for a task:
+ - `research_question/BRAINK99_Drieu.pdf` — the Drieu K99/R00 BRAIN grant. The
+ rig implements its cue-guided, reward-directed task: rats learn to map two
+ auditory cues to left/right choices for distinct rewards while the
+ AC–VS–DS–HPC network is recorded (Neuropixels) to study wake/sleep neuronal
+ reactivations.
+ - `animal_protocol/RA23A232.pdf` — the JHU ACUC protocol (PI Janak) the
+ experiments run under: Long-Evans rats, water restriction, viral
+ injections, and survival surgery for probe implants.
+ - `rig-hardware/neural_recording/` — neural-recording hardware references and
+ vendor orders (probes, headstages).
+
+To get both folders auto-loaded in one Cursor window, open
+[`os_code_t_maze.code-workspace`](os_code_t_maze.code-workspace) (a multi-root
+workspace) instead of opening this folder alone.
+
 ## Keep `PROGRAMS.md` up to date
 
 [`PROGRAMS.md`](PROGRAMS.md) is the canonical list of runnable programs, their
@@ -42,3 +82,18 @@ from the code (`// see docs/decisions/NNNN`) and the commit/PR body
 (`Refs ADR-NNNN`). Never rewrite an existing ADR's reasoning — supersede it with
 a new one. See [`docs/decisions/README.md`](docs/decisions/README.md) for the
 full workflow. Skip ADRs for obvious, mechanical, or cosmetic changes.
+
+## Track future work
+
+[`docs/future-work.md`](docs/future-work.md) is a mutable backlog of **candidate
+code changes that were deliberately deferred** — distinct from ADRs (decisions
+already made) and from the planning/Gantt in the `os_code_t_maze_resources` repo
+(project timeline).
+
+Whenever you defer a non-trivial idea — something a future reader would want to
+pick up but that's out of scope for the current change — **add an entry** using
+the template in that file (copy it, take the next `FW-NNNN` id, add an index
+row). Capture enough context to reconstruct it: motivation, affected modules,
+related ADRs, a sketch of the approach, and how to evaluate it. When an item is
+implemented, record the reasoning in a new ADR and remove (or mark `Done`) its
+backlog entry.

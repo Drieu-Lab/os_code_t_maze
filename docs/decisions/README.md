@@ -52,3 +52,5 @@ The chain of records is the audit trail.
 | [0006](0006-symlink-rig-config-per-sketch.md) | Symlink the shared rig_config.h into each sketch folder | Accepted | 2026-06-03 |
 | [0007](0007-reward-at-central-port.md) | Deliver reward at the central port (v1 cue-guided task) | Accepted | 2026-06-03 |
 | [0008](0008-wavetable-tone-isr.md) | Generate the tone cue from a wavetable, not sin() in the ISR | Accepted | 2026-06-03 |
+| [0009](0009-runtime-training-modes-and-logging.md) | Runtime training modes (Free Roam / Full task), anti-bias sequencing, persistent logger | Accepted | 2026-06-23 |
+| [0010](0010-manual-solenoid-control-in-task.md) | Full manual solenoid control + auto well-clean at trial start in cue-guided-task | Accepted | 2026-06-24 |

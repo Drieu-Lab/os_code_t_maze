@@ -19,11 +19,16 @@
 /* ------------------------------ helpers -------------------------------- */
 static TaskConfig mkcfg() {
   TaskConfig c;
+  c.mode = Mode::FullTask;
   c.highToneIsLeft = true;
   c.startRewardEnabled = false;
   c.maxTrials = 20;
   c.maxTimeMs = 3600000UL;
   c.blockSize = 20;
+  c.maxSameRun = 3;
+  c.autoDrainOnTrial = false;   /* most tests don't exercise the auto well-clean */
+  c.rinseMs = 150;
+  c.drainMs = 300;
   c.highToneHz = 8000;
   c.lowToneHz  = 4000;
   return c;
@@ -199,6 +204,128 @@ static void test_simultaneous_choice_resolves_once() {
   printf("  ok: simultaneous L+R resolves to exactly one choice\n");
 }
 
+static void test_free_roam() {
+  TaskConfig c = mkcfg();
+  c.mode = Mode::FreeRoam;
+  int8_t seq[20]; for (int i = 0; i < 20; i++) seq[i] = 0;
+  Session s = initialSession(0, 5u);
+
+  /* entry beam must NOT start a trial or a tone in free roam */
+  Inputs in = mkin(10); in.beam[B_ENTRY] = true; Effects fx{};
+  s = step(s, in, c, seq, fx);
+  assert(s.trial.phase == Phase::Idle);
+  assert(!hasLog(fx, "TRIAL"));
+  assert(countTag(fx, FxTag::StartTone) == 0);
+
+  /* choice beams do nothing either */
+  in = mkin(20); in.beam[B_LCHOICE] = true; fx = Effects{};
+  s = step(s, in, c, seq, fx);
+  assert(s.trial.phase == Phase::Idle);
+  assert(!hasLog(fx, "CHOICE"));
+
+  /* the core dispenses no automatic reward in free roam (manual reward is a
+     shell-side solenoid fire, R<port>, not a core command) */
+  assert(countTag(fx, FxTag::OpenValve) == 0);
+
+  /* free roam never times out */
+  in = mkin(c.maxTimeMs + 1); fx = Effects{};
+  s = step(s, in, c, seq, fx);
+  assert(s.active);
+  assert(!hasLog(fx, "SESSION_COMPLETE"));
+  printf("  ok: free roam = no trials/tone/auto-reward, no timeout\n");
+}
+
+static void test_anti_bias_run_length() {
+  TaskConfig c = mkcfg();
+  c.maxTrials = 200; c.blockSize = 20; c.maxSameRun = 3;
+  int8_t seq[200];
+  uint32_t r1 = generateSequence(seq, c, 24680u);
+
+  /* never more than 3 consecutive same-side trials */
+  assert(maxRunOk(seq, 200, 3));
+
+  /* balance is still exact within each block */
+  for (int off = 0; off < 200; off += 20) {
+    int l = 0, rr = 0;
+    for (int i = 0; i < 20; i++) (seq[off + i] == 0 ? l : rr)++;
+    assert(l == 10 && rr == 10);
+  }
+
+  /* deterministic from the seed */
+  int8_t seq2[200];
+  uint32_t r2 = generateSequence(seq2, c, 24680u);
+  assert(r1 == r2);
+  for (int i = 0; i < 200; i++) assert(seq[i] == seq2[i]);
+  printf("  ok: anti-bias caps runs at 3, keeps block balance, deterministic\n");
+}
+
+static void test_session_summary() {
+  TaskConfig c = mkcfg();
+  c.maxTrials = 2; c.blockSize = 2;
+  int8_t seq[2] = { 0, 0 };   /* both LEFT correct */
+  Session s = initialSession(0, 3u);
+
+  /* trial 1: correct (chose LEFT) */
+  Inputs in = mkin(10); in.beam[B_ENTRY] = true; Effects fx{}; s = step(s, in, c, seq, fx);
+  in = mkin(20); in.beam[B_EXIT] = true; in.tonePlaying = true; fx = Effects{}; s = step(s, in, c, seq, fx);
+  in = mkin(30); in.beam[B_LCHOICE] = true; fx = Effects{}; s = step(s, in, c, seq, fx);
+  in = mkin(40); in.beam[B_LRETURN] = true; fx = Effects{}; s = step(s, in, c, seq, fx);
+  assert(s.correctCount == 1 && s.trial.count == 1 && s.active);
+
+  /* trial 2: incorrect (chose RIGHT); returning on the final trial ends it */
+  in = mkin(50); in.beam[B_ENTRY] = true; fx = Effects{}; s = step(s, in, c, seq, fx);
+  in = mkin(60); in.beam[B_EXIT] = true; in.tonePlaying = true; fx = Effects{}; s = step(s, in, c, seq, fx);
+  in = mkin(70); in.beam[B_RCHOICE] = true; fx = Effects{}; s = step(s, in, c, seq, fx);
+  in = mkin(80); in.beam[B_RRETURN] = true; fx = Effects{}; s = step(s, in, c, seq, fx);
+
+  assert(!s.active);
+  const Effect* sum = findLog(fx, "SESSION_SUMMARY");
+  assert(sum && sum->a == 2 && sum->b == 1 && sum->c == 1);   /* trials, correct, incorrect */
+  assert(hasLog(fx, "SESSION_COMPLETE"));
+  printf("  ok: SESSION_SUMMARY reports trials/correct/incorrect at completion\n");
+}
+
+static void test_auto_drain() {
+  /* helper: run a full correct LEFT trial from Idle back to Idle */
+  TaskConfig c = mkcfg();
+  c.autoDrainOnTrial = true; c.maxTrials = 4; c.blockSize = 4;
+  int8_t seq[4] = { 0, 0, 0, 0 };   /* all LEFT correct */
+  Session s = initialSession(0, 9u);
+
+  /* trial 1 (index 0): entry starts the trial but emits NO CleanWell (first trial) */
+  Inputs in = mkin(10); in.beam[B_ENTRY] = true; Effects fx{};
+  s = step(s, in, c, seq, fx);
+  assert(hasLog(fx, "TRIAL"));
+  assert(countTag(fx, FxTag::CleanWell) == 0);
+
+  /* finish trial 1 */
+  in = mkin(20); in.beam[B_EXIT] = true; in.tonePlaying = true; fx = Effects{}; s = step(s, in, c, seq, fx);
+  in = mkin(30); in.beam[B_LCHOICE] = true; fx = Effects{}; s = step(s, in, c, seq, fx);
+  in = mkin(40); in.beam[B_LRETURN] = true; fx = Effects{}; s = step(s, in, c, seq, fx);
+  assert(s.trial.index == 1 && s.trial.phase == Phase::Idle);
+
+  /* trial 2 (index 1): entry now emits a CleanWell carrying the configured durations */
+  in = mkin(50); in.beam[B_ENTRY] = true; fx = Effects{};
+  s = step(s, in, c, seq, fx);
+  assert(hasLog(fx, "TRIAL"));
+  assert(countTag(fx, FxTag::CleanWell) == 1);
+  const Effect* cw = nullptr;
+  for (int i = 0; i < fx.n; i++) if (fx.items[i].tag == FxTag::CleanWell) cw = &fx.items[i];
+  assert(cw && cw->a == (int32_t)c.rinseMs && cw->b == (int32_t)c.drainMs);
+
+  /* with the toggle off, no CleanWell even on a later trial */
+  TaskConfig c2 = mkcfg();
+  c2.autoDrainOnTrial = false; c2.maxTrials = 4; c2.blockSize = 4;
+  Session s2 = initialSession(0, 9u);
+  Inputs i2 = mkin(10); i2.beam[B_ENTRY] = true; Effects f2{}; s2 = step(s2, i2, c2, seq, f2);
+  i2 = mkin(20); i2.beam[B_EXIT] = true; i2.tonePlaying = true; f2 = Effects{}; s2 = step(s2, i2, c2, seq, f2);
+  i2 = mkin(30); i2.beam[B_LCHOICE] = true; f2 = Effects{}; s2 = step(s2, i2, c2, seq, f2);
+  i2 = mkin(40); i2.beam[B_LRETURN] = true; f2 = Effects{}; s2 = step(s2, i2, c2, seq, f2);
+  i2 = mkin(50); i2.beam[B_ENTRY] = true; f2 = Effects{}; s2 = step(s2, i2, c2, seq, f2);
+  assert(countTag(f2, FxTag::CleanWell) == 0);
+  printf("  ok: auto well-clean fires at trial start (not the first), gated by the toggle\n");
+}
+
 static void test_abort() {
   TaskConfig c = mkcfg();
   int8_t seq[20]; for (int i = 0; i < 20; i++) seq[i] = 0;
@@ -245,10 +372,11 @@ static void test_max_trials() {
 static void test_no_overflow_exhaustive() {
   TaskConfig c = mkcfg();
   c.startRewardEnabled = true;          /* worst case: extra start reward */
+  c.autoDrainOnTrial = true;            /* worst case: extra CleanWell at trial start */
   int8_t seq[20]; for (int i = 0; i < 20; i++) seq[i] = 0;
 
   Phase phases[] = { Phase::Idle, Phase::CueRunning, Phase::AwaitChoice, Phase::AwaitReturn, Phase::Done };
-  Command::Kind cmds[] = { Command::None, Command::Abort, Command::Flush, Command::Ping, Command::Status };
+  Command::Kind cmds[] = { Command::None, Command::Abort, Command::Ping, Command::Status };
 
   unsigned long checked = 0;
   for (Phase ph : phases)
@@ -281,6 +409,10 @@ int main() {
   test_incorrect_no_reward();
   test_shaping_rewards_incorrect_at_center();
   test_simultaneous_choice_resolves_once();
+  test_free_roam();
+  test_anti_bias_run_length();
+  test_session_summary();
+  test_auto_drain();
   test_abort();
   test_timeout();
   test_max_trials();

@@ -42,12 +42,15 @@ if errorlevel 1 (
     exit /b 1
 )
 
-REM ---- Launch broker, then GUIs after a brief delay so the TCP port is up ----
+REM ---- Launch broker, then clients after a brief delay so the TCP port is up ----
 start "Rig Broker" cmd /k python rig_broker.py --port %RIG_PORT%
 timeout /t 2 /nobreak >nul
 
+REM Persistent session logger: writes every line to host\data\<animal>_<time>.csv
+start "Rig Logger" cmd /k python rig_logger.py
+
 REM start "Maze GUI"   python maze_gui.py
-REM start "Lick Tuner" python lick_tuner.py
+start "Lick Tuner" python lick_tuner.py
 start "Experiment Control" python experiment_control.py
 
 endlocal

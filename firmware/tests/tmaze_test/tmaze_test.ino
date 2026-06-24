@@ -16,7 +16,9 @@ const int solenoidPins[3][5] = SOLENOID_TABLE;
 int lastSensor[6];
 int lastLick[3];
 
-const int pulseTime = 150;
+// Default solenoid pulse width; single source of truth in rig_config.h.
+// A command may override it per-pulse (see handleSerial).
+const int pulseTime = REWARD_PULSE_MS;
 
 // ----- Arduino Due: use Programming port for Serial Monitor (optional) -----
 // Native USB (default): the USB socket next to the reset button → SerialUSB → CONSOLE.
@@ -152,11 +154,21 @@ void handleSerial() {
   String cmd = CONSOLE.readStringUntil('\n');
   cmd.trim();
 
-  if (cmd.length() == 3 && cmd[0] == 'R') {
+  // R<port><sol>[,<ms>] - pulse one solenoid. The optional duration overrides
+  // the pulseTime (REWARD_PULSE_MS) default and is clamped to <= 5000 ms; this
+  // is what experiment_control's configurable pulse field sends.
+  if (cmd.length() >= 3 && cmd[0] == 'R') {
     int port = cmd[1] - '0';
     int sol  = cmd[2] - '0';
 
     if (port < 0 || port > 2 || sol < 0 || sol > 4) return;
+
+    unsigned long dur = pulseTime;
+    int comma = cmd.indexOf(',');
+    if (comma > 0) {
+      long v = cmd.substring(comma + 1).toInt();
+      if (v > 0) dur = (unsigned long)(v > 5000 ? 5000 : v);
+    }
 
     CONSOLE.print(millis());
     CONSOLE.print(",SOL,");
@@ -165,7 +177,7 @@ void handleSerial() {
     CONSOLE.println(sol);
 
     digitalWrite(solenoidPins[port][sol], HIGH);
-    delay(pulseTime);
+    delay(dur);
     digitalWrite(solenoidPins[port][sol], LOW);
   }
 }

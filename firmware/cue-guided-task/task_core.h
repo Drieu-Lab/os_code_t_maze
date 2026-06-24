@@ -41,6 +41,12 @@ static const Valve V_REWARD = V_START;   /* v1 reward port alias (central) */
 /* ------------------------------- Values --------------------------------- */
 enum class Phase : uint8_t { Idle, CueRunning, AwaitChoice, AwaitReturn, Done };
 
+/* Training mode. FreeRoam: no cues, no trials, no automatic reward - the animal
+ * roams and the experimenter refills the central well with a manual solenoid
+ * fire (handled shell-side; see docs/decisions/0010); the trial state machine is
+ * skipped. FullTask: the cued two-alternative task. */
+enum class Mode : uint8_t { FreeRoam, FullTask };
+
 struct Trial {
   Phase    phase;
   int8_t   correctArm;   /* 0=L, 1=R, -1 none */
@@ -50,8 +56,8 @@ struct Trial {
 };
 
 struct Command {
-  enum Kind : uint8_t { None, Abort, Flush, Ping, Status } kind;
-  int8_t arg;            /* Flush: valve/port index */
+  enum Kind : uint8_t { None, Abort, Ping, Status, SetMode } kind;
+  int8_t arg;            /* SetMode: Mode value */
 };
 
 struct Session {
@@ -59,6 +65,7 @@ struct Session {
   uint32_t startMs;
   bool     active;
   uint32_t rng;          /* threaded PRNG state */
+  uint16_t correctCount; /* completed trials scored CORRECT (FullTask) */
 };
 
 struct Inputs {
@@ -69,22 +76,28 @@ struct Inputs {
 };
 
 struct TaskConfig {
+  Mode     mode;
   bool     highToneIsLeft;
   bool     startRewardEnabled;
   uint16_t maxTrials;
   uint32_t maxTimeMs;
   uint16_t blockSize;        /* must divide maxTrials; half L / half R */
+  uint8_t  maxSameRun;       /* anti-bias: max consecutive same-side trials (0=off) */
+  bool     autoDrainOnTrial; /* rinse+drain the central well at each trial start */
+  uint16_t rinseMs;          /* auto well-clean: fresh-water rinse duration (ms) */
+  uint16_t drainMs;          /* auto well-clean: drain duration after the rinse (ms) */
   uint16_t highToneHz;
   uint16_t lowToneHz;
 };
 
 /* ------------------------------- Effects -------------------------------- */
-enum class FxTag : uint8_t { StartTone, StopTone, PulseChoice, PulseReturn, OpenValve, Log };
+enum class FxTag : uint8_t { StartTone, StopTone, PulseChoice, PulseReturn, OpenValve, CleanWell, Log };
 
 struct Effect {
   FxTag       tag;
-  int32_t     a;        /* StartTone: freq; OpenValve: port; Log: numeric field 1 */
-  int32_t     b;        /* Log: numeric field 2 */
+  int32_t     a;        /* StartTone: freq; OpenValve: port; CleanWell: rinse ms; Log: numeric field 1 */
+  int32_t     b;        /* CleanWell: drain ms; Log: numeric field 2 */
+  int32_t     c;        /* Log: numeric field 3 */
   const char* type;     /* Log: line TYPE token */
   const char* detail;   /* Log: trailing detail token ("" if none) */
 };
@@ -98,21 +111,23 @@ inline void emit(Effects& fx, const Effect& e) {
   if (fx.n < FX_CAP - 1) {
     fx.items[fx.n++] = e;
   } else if (fx.n == FX_CAP - 1) {
-    Effect over = { FxTag::Log, FX_NONE, FX_NONE, "FX_OVERFLOW", "" };
+    Effect over = { FxTag::Log, FX_NONE, FX_NONE, FX_NONE, "FX_OVERFLOW", "" };
     fx.items[fx.n] = over;
     fx.n = FX_CAP;          /* saturate; further emits are no-ops */
   }
 }
 
 /* ---------------------------- Effect builders --------------------------- */
-inline Effect startTone(uint16_t freq) { return Effect{ FxTag::StartTone, (int32_t)freq, FX_NONE, "", "" }; }
-inline Effect stopTone()           { return Effect{ FxTag::StopTone, FX_NONE, FX_NONE, "", "" }; }
-inline Effect pulseChoice()        { return Effect{ FxTag::PulseChoice, FX_NONE, FX_NONE, "", "" }; }
-inline Effect pulseReturn()        { return Effect{ FxTag::PulseReturn, FX_NONE, FX_NONE, "", "" }; }
-inline Effect openValve(int port)  { return Effect{ FxTag::OpenValve, (int32_t)port, FX_NONE, "", "" }; }
-inline Effect logEv(const char* type, const char* detail)               { return Effect{ FxTag::Log, FX_NONE, FX_NONE, type, detail }; }
-inline Effect logN1(const char* type, int32_t a, const char* detail)    { return Effect{ FxTag::Log, a, FX_NONE, type, detail }; }
-inline Effect logN2(const char* type, int32_t a, int32_t b, const char* detail) { return Effect{ FxTag::Log, a, b, type, detail }; }
+inline Effect startTone(uint16_t freq) { return Effect{ FxTag::StartTone, (int32_t)freq, FX_NONE, FX_NONE, "", "" }; }
+inline Effect stopTone()           { return Effect{ FxTag::StopTone, FX_NONE, FX_NONE, FX_NONE, "", "" }; }
+inline Effect pulseChoice()        { return Effect{ FxTag::PulseChoice, FX_NONE, FX_NONE, FX_NONE, "", "" }; }
+inline Effect pulseReturn()        { return Effect{ FxTag::PulseReturn, FX_NONE, FX_NONE, FX_NONE, "", "" }; }
+inline Effect openValve(int port)  { return Effect{ FxTag::OpenValve, (int32_t)port, FX_NONE, FX_NONE, "", "" }; }
+inline Effect cleanWell(uint16_t rinseMs, uint16_t drainMs) { return Effect{ FxTag::CleanWell, (int32_t)rinseMs, (int32_t)drainMs, FX_NONE, "", "" }; }
+inline Effect logEv(const char* type, const char* detail)               { return Effect{ FxTag::Log, FX_NONE, FX_NONE, FX_NONE, type, detail }; }
+inline Effect logN1(const char* type, int32_t a, const char* detail)    { return Effect{ FxTag::Log, a, FX_NONE, FX_NONE, type, detail }; }
+inline Effect logN2(const char* type, int32_t a, int32_t b, const char* detail) { return Effect{ FxTag::Log, a, b, FX_NONE, type, detail }; }
+inline Effect logN3(const char* type, int32_t a, int32_t b, int32_t c, const char* detail) { return Effect{ FxTag::Log, a, b, c, type, detail }; }
 
 /* ----------------------------- Pure helpers ----------------------------- */
 inline uint32_t lcg(uint32_t s) { return s * 1664525u + 1013904223u; }
@@ -123,25 +138,50 @@ inline uint16_t cueFor(int8_t correctArm, const TaskConfig& c) {
   return high ? c.highToneHz : c.lowToneHz;
 }
 
+/* True if seq[0..n) never has more than maxRun consecutive identical sides.
+ * maxRun == 0 disables the check (always true). */
+inline bool maxRunOk(const int8_t* seq, uint16_t n, uint8_t maxRun) {
+  if (maxRun == 0 || n < 2) return true;
+  uint8_t run = 1;
+  for (uint16_t i = 1; i < n; i++) {
+    if (seq[i] == seq[i - 1]) { if (++run > maxRun) return false; }
+    else run = 1;
+  }
+  return true;
+}
+
 /* Fill seq[0..maxTrials) with balanced, per-block-shuffled L/R using a threaded
  * PRNG; returns the advanced rng state. maxTrials should be a multiple of
- * blockSize (any remainder is left as 0=LEFT). */
+ * blockSize (any remainder is left as 0=LEFT).
+ *
+ * Anti-bias: each block keeps an exact L/R balance, but a block whose shuffle
+ * would create a same-side run longer than c.maxSameRun (counting across the
+ * boundary with the already-fixed previous blocks) is re-rolled, up to
+ * MAX_ATTEMPTS. This discourages the side-bias rats develop on long repeats
+ * (cf. Holleman et al. 2019, Sci Rep 9:12589) while staying deterministic from
+ * the seed and host-testable. The last attempt is accepted unconditionally so
+ * generation always terminates. */
 inline uint32_t generateSequence(int8_t* seq, const TaskConfig& c, uint32_t rng) {
   const uint16_t n = c.maxTrials;
   const uint16_t block = c.blockSize;
   const uint16_t half = block / 2;
+  const uint16_t MAX_ATTEMPTS = 200;
   for (uint16_t i = 0; i < n; i++) seq[i] = 0;
   for (uint16_t off = 0; off + block <= n; off += block) {
-    for (uint16_t i = 0; i < half; i++) {
-      seq[off + i] = 0;          /* left  */
-      seq[off + i + half] = 1;   /* right */
-    }
-    for (int i = block - 1; i > 0; i--) {  /* Fisher-Yates within the block */
-      rng = lcg(rng);
-      uint32_t j = (rng >> 16) % (uint32_t)(i + 1);
-      int8_t t = seq[off + i];
-      seq[off + i] = seq[off + j];
-      seq[off + j] = t;
+    for (uint16_t attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+      for (uint16_t i = 0; i < half; i++) {
+        seq[off + i] = 0;          /* left  */
+        seq[off + i + half] = 1;   /* right */
+      }
+      for (int i = block - 1; i > 0; i--) {  /* Fisher-Yates within the block */
+        rng = lcg(rng);
+        uint32_t j = (rng >> 16) % (uint32_t)(i + 1);
+        int8_t t = seq[off + i];
+        seq[off + i] = seq[off + j];
+        seq[off + j] = t;
+      }
+      /* validate the prefix so far (catches runs spanning the block boundary) */
+      if (maxRunOk(seq, (uint16_t)(off + block), c.maxSameRun)) break;
     }
   }
   return rng;
@@ -153,7 +193,21 @@ inline Session initialSession(uint32_t now, uint32_t seed) {
   s.startMs = now;
   s.active = true;
   s.rng = seed;
+  s.correctCount = 0;
   return s;
+}
+
+/* End the session: append SESSION_SUMMARY (FullTask only; counts are meaningless
+ * in FreeRoam) then SESSION_COMPLETE, and mark the session done. */
+inline void completeSession(Session& n, const TaskConfig& cfg, Effects& fx) {
+  n.active = false;
+  n.trial.phase = Phase::Done;
+  if (cfg.mode == Mode::FullTask) {
+    int32_t trials = (int32_t)n.trial.count;
+    int32_t correct = (int32_t)n.correctCount;
+    emit(fx, logN3("SESSION_SUMMARY", trials, correct, trials - correct, ""));
+  }
+  emit(fx, logEv("SESSION_COMPLETE", ""));
 }
 
 /* ----------------------------- Transition ------------------------------- */
@@ -164,26 +218,25 @@ inline Session step(const Session& s, const Inputs& in, const TaskConfig& cfg,
 
   /* --- Commands (host control) --- */
   if (in.cmd.kind == Command::Abort) {
-    n.active = false;
-    n.trial.phase = Phase::Done;
     emit(fx, stopTone());
-    emit(fx, logEv("SESSION_COMPLETE", ""));
+    completeSession(n, cfg, fx);
     return n;
   }
   if (in.cmd.kind == Command::Ping) {
     emit(fx, logEv("PONG", ""));
   } else if (in.cmd.kind == Command::Status) {
     emit(fx, logN2("STATUS", (int32_t)s.trial.count, (int32_t)s.trial.index, s.active ? "1" : "0"));
-  } else if (in.cmd.kind == Command::Flush) {
-    emit(fx, openValve(in.cmd.arg));   /* orthogonal manual flush */
   }
 
-  /* --- Session timeout --- */
+  /* --- Free Roam: no trials, no cues, no timeout. Commands above still apply
+   * (ping / status / abort); the trial state machine is off. Manual reward in
+   * FreeRoam is a shell-side solenoid fire (R<port>), not a core command. --- */
+  if (cfg.mode == Mode::FreeRoam) return n;
+
+  /* --- Session timeout (FullTask only) --- */
   if (in.now - s.startMs >= cfg.maxTimeMs) {
-    n.active = false;
-    n.trial.phase = Phase::Done;
     emit(fx, stopTone());
-    emit(fx, logEv("SESSION_COMPLETE", ""));
+    completeSession(n, cfg, fx);
     return n;
   }
 
@@ -192,9 +245,7 @@ inline Session step(const Session& s, const Inputs& in, const TaskConfig& cfg,
     case Phase::Idle:
       if (in.beam[B_ENTRY]) {
         if (s.trial.index >= cfg.maxTrials) {
-          n.active = false;
-          n.trial.phase = Phase::Done;
-          emit(fx, logEv("SESSION_COMPLETE", ""));
+          completeSession(n, cfg, fx);
           break;
         }
         n.trial.correctArm = seq[s.trial.index];
@@ -202,6 +253,13 @@ inline Session step(const Session& s, const Inputs& in, const TaskConfig& cfg,
         n.trial.phase = Phase::CueRunning;
         emit(fx, logN1("TRIAL", (int32_t)(s.trial.index + 1),
                        n.trial.correctArm == 0 ? "LEFT" : "RIGHT"));
+        /* Auto well-clean: the animal has just left the central well (a return
+         * beam preceded this entry, so the FSM already encodes the
+         * return-arm -> central-entry direction). Rinse then drain so the next
+         * reward is fresh. Skip the first trial (index 0): nothing to clear and
+         * no preceding return. see docs/decisions/0010 */
+        if (cfg.autoDrainOnTrial && s.trial.index > 0)
+          emit(fx, cleanWell(cfg.rinseMs, cfg.drainMs));
       }
       break;
 
@@ -238,12 +296,12 @@ inline Session step(const Session& s, const Inputs& in, const TaskConfig& cfg,
       if (in.beam[B_LRETURN] || in.beam[B_RRETURN]) {
         emit(fx, pulseReturn());
         emit(fx, logEv("RETURN_ARM", "ENTRY"));
+        /* score the just-completed trial (choiceArm is set by AwaitChoice) */
+        if (s.trial.choiceArm == s.trial.correctArm) n.correctCount = s.correctCount + 1;
         n.trial = Trial{ Phase::Idle, -1, -1,
                          (uint16_t)(s.trial.index + 1), (uint16_t)(s.trial.count + 1) };
         if (n.trial.index >= cfg.maxTrials) {
-          n.active = false;
-          n.trial.phase = Phase::Done;
-          emit(fx, logEv("SESSION_COMPLETE", ""));
+          completeSession(n, cfg, fx);
         }
       }
       break;
