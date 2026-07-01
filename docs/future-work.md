@@ -59,6 +59,9 @@ criteria).
 | ID | Title | Area | Status |
 |----|-------|------|--------|
 | [FW-0001](#fw-0001-6040-sameswitch-transition-bias-in-sequence-generation) | ~60/40 same/switch transition bias | Trial-sequence generation | Deferred |
+| [FW-0002](#fw-0002-head-vs-body-orientation-heading-from-the-tracker) | Head-vs-body orientation (heading) | Markerless tracker | Deferred |
+| [FW-0003](#fw-0003-multi-animal-association-and-irlow-saturation-tracking) | Multi-animal association + IR/low-saturation | Markerless tracker | Proposed |
+| [FW-0004](#fw-0004-position-based-task-rule-engine-over-landmarks) | Position-based task-rule engine over landmarks | Tracker + GUI + protocol | Proposed |
 
 ## Entries
 
@@ -111,3 +114,141 @@ meaningful?
 
 **ADR needed?** Yes - it changes how trial sequences are generated and relaxes
 the per-block balance guarantee from ADR-era behavior.
+
+### FW-0002: Head-vs-body orientation (heading) from the tracker
+
+- **Status:** Deferred
+- **Date added:** 2026-06-29
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** `host/tracker.py` (`Detection`/`RatModel` already compute the
+  body axis via 2nd-moment elongation; add a heading output + disambiguation),
+  `host/blob_tracker_prototype.py` (overlay + CSV), later the GUI overlay/sidecar
+- **Related ADRs:** ADR-0014 (markerless tracking, planned in Phase 4)
+
+**Motivation / context.** The cue-guided task is about reward-directed *choices*
+and the grant studies navigation/reactivation, so the animal's **head direction**
+is a valuable behavioral (and neural-correlate) variable. The blob's major axis
+is already available essentially for free from the second central moments used for
+the shape model. Note the *left/right choice* itself is better read from
+**position/ROI** (which arm the centroid enters) than from heading, so this is an
+enrichment, not a prerequisite for scoring choices.
+
+**Sketch of approach.** Emit `body_axis_deg` (0-180, from the moment
+eigenvector). Resolve the 180 deg head/tail ambiguity using the **Kalman
+velocity** (assume forward motion: pick the axis end aligned with travel),
+emitting `heading_deg` (0-360) plus a `heading_valid` flag that is false when the
+blob is near-round (eccentricity below a threshold -> axis ill-defined) or the
+speed is below a threshold (direction unreliable). Smooth heading **circularly**
+(EMA on sin/cos, after resolving body-axis flips), separate from the position
+Kalman. Optionally add a morphology tie-break (head end bulkier than the tapering
+tail) once real video is available. Heading is an OUTPUT only - never a model
+feature (it is orientation-dependent by construction). Document that it is in
+image space (post rot180 + undistort), not maze/world coordinates.
+
+**Evaluation / acceptance.** Validate against **recorded real-rat video** (the
+trigger for deferring this): check `body_axis_deg` is rotation-stable on straight
+runs; that velocity-based disambiguation matches the visible nose direction on
+runs; that `heading_valid` correctly goes false during rearing/grooming and when
+stationary; and that circular smoothing has no wrap artifacts. Add the fields to
+the prototype CSV for offline scoring.
+
+**Effort / risk.** Low-medium. Body axis is nearly free; the real work and risk
+are head/tail disambiguation and validity gating, which is exactly why it waits on
+real video. Low hardware risk (output only).
+
+**Open questions.** Eccentricity/speed thresholds for `heading_valid`? Is
+velocity-only disambiguation enough, or is a morphology tie-break needed for slow
+turns? Should heading later be mapped from image space into maze coordinates?
+
+**ADR needed?** Fold into ADR-0014 (tracking architecture) when implemented, or a
+small follow-up ADR if the disambiguation strategy is non-obvious.
+
+### FW-0003: Multi-animal association and IR/low-saturation tracking
+
+- **Status:** Proposed
+- **Date added:** 2026-06-29
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** `host/tracker.py` (`_associate`, `RatModel`, state machine),
+  `host/tracker_view.py` (per-animal controls), recording sidecar columns
+- **Related ADRs:** [ADR-0014](decisions/0014-markerless-position-tracking.md)
+  (single-rat design these defer), [ADR-0015](decisions/0015-undistort-at-source.md)
+
+**Motivation / context.** ADR-0014 deliberately tracks a **single** rat and leans
+on a **colour** histogram as a strong cue. Two foreseeable needs break those
+assumptions: (a) tracking **more than one animal** at once (e.g. social/again-two-
+in-rig scenarios), which the current "pick one best blob" association can't do;
+and (b) **IR or low-light** imaging, where saturation collapses and the colour
+histogram becomes nearly useless, so association must lean on geometry/size/shape.
+
+**Sketch of approach.** *Multi-animal:* keep one `RatModel` per identity and run a
+proper assignment per frame (Hungarian / linear-sum assignment on a cost matrix of
+gated detections vs. tracks, cost = blend of distance + appearance + form), with
+per-track Kalman states and birth/death (ACQUIRING/LOST) logic; emit per-identity
+sidecar columns. *IR/low-saturation:* detect the low-saturation regime (or a
+manual toggle) and **re-weight** the score toward `w_dist`/`w_form` and away from
+`w_hist` (optionally swap the H-S histogram for an intensity/texture descriptor);
+the FORM Gaussian (size+shape) already works in greyscale.
+
+**Evaluation / acceptance.** Multi-animal: on clips with two animals, identities
+stay stable across crossings within tolerance (few ID swaps), validated against
+hand-labeled frames. IR: with saturation artificially reduced, tracking + intruder
+rejection still hold using geometry/size/shape; confirm the re-weighting kicks in.
+
+**Effort / risk.** Medium-high (multi-animal association + ID management is the
+bulk). IR re-weighting is small. Main risk is ID swaps during occlusion/crossings
+- the classic multi-object-tracking failure mode.
+
+**Open questions.** Is multi-animal actually in scope for this task, or only
+single-rat + occasional experimenter hand (already handled)? Auto-detect the IR
+regime from saturation stats, or expose a manual "low-saturation" mode? Per-
+identity vs. shared models?
+
+**ADR needed?** Yes - multi-object association and the appearance-weighting change
+are non-obvious enough to warrant their own ADR (or an extension of ADR-0014).
+
+### FW-0004: Position-based task-rule engine over landmarks
+
+- **Status:** Proposed
+- **Date added:** 2026-06-30
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** `host/tracker.py` (consume `get_landmarks()` + the tracked
+  centroid), a new rule module in `host/` (or `tracker_view.py` controls), the
+  recording sidecar, possibly `firmware/PROTOCOL.md` (host -> firmware triggers)
+- **Related ADRs:** [ADR-0018](decisions/0018-landmark-annotations.md) (landmark
+  annotations this consumes), [ADR-0014](decisions/0014-markerless-position-tracking.md)
+  (tracker), [ADR-0007](decisions/0007-reward-at-central-port.md) (reward path)
+
+**Motivation / context.** ADR-0018 adds the *marking* of reward wells and
+body-sensor beams as image-space points; the point of marking them is to drive
+**task rules from the animal's position** - e.g. "rat is within R px of the left
+reward well", "rat entered the choice arm", dwell-time at a port, or arming/
+gating a reward based on trajectory. The fixed landmarks carry an `index` tying
+each to its firmware `L,i`/`S,i` event, so position-derived rules can be
+cross-checked against (or substitute for) the hardware beams/licks.
+
+**Sketch of approach.** A small, pure rule layer that takes the latest
+`TrackResult` centroid (full-frame px) + `get_landmarks()` (normalized -> px via
+frame size) and evaluates predicates: distance-to-landmark thresholds (the
+per-rule proximity radius lives here, *not* in the marker - see ADR-0018),
+enter/exit zone transitions with debounce/dwell, and simple sequencing (e.g.
+center -> choice arm -> reward). Emit rule events into the recording sidecar
+and/or the standalone track log; optionally let a rule fire a host->firmware
+command (e.g. an `R<port>` reward) with explicit safety gating. Keep evaluation
+UI-free and testable; expose enable/threshold controls in the Tracking tab.
+
+**Evaluation / acceptance.** Headless tests over synthetic trajectories: zone
+enter/exit fires once with debounce; distance thresholds match expectation under
+scaling; sequence rules only trip in order. On the rig, confirm position-derived
+"at well" agrees with the corresponding lick/beam events within tolerance.
+
+**Effort / risk.** Medium. Main risks: tuning thresholds/debounce to the tracker's
+noise, and (if rules trigger firmware) reward-safety gating - any auto-reward path
+needs the same care as ADR-0007/0010.
+
+**Open questions.** Do rules ever *actuate* (fire reward) or only *log*? Per-rule
+radius vs a shared default? Should rule events go in the video sidecar, the track
+log, or a dedicated events file? How do position rules coexist with the firmware's
+own beam/lick-driven task logic (authority/override)?
+
+**ADR needed?** Yes - rule semantics (and especially any position-triggered
+actuation) are a behavioral-design decision worth recording.

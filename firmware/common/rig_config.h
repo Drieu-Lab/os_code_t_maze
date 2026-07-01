@@ -183,10 +183,14 @@
 #define DAC_SAMPLE_RATE      80000.0f    /* Hz */
 
 /* ================================ Protocol ============================== */
-/* v3 adds: training modes (MODE command + 0,MODE,<name> line), manual-reward
+/* v4 adds a trailing pulse-duration field (ms) to the reward/solenoid lines so
+ * the host can map each pulse to a calibrated dispensed volume:
+ * REWARD,CENTER,<dur_ms>, REWARD,<port>,MANUAL,<dur_ms>, and SOL,<port>,<sol>,
+ * <dur_ms> (cue-guided-task only). see docs/decisions/0019.
+ * v3 added: training modes (MODE command + 0,MODE,<name> line), manual-reward
  * logging (REWARD,<port>,MANUAL), and SESSION_SUMMARY (see docs/decisions/0009);
  * plus full manual solenoid control in cue-guided-task (R<port><sol>[,<ms>] ->
  * SOL ack) and auto well-clean SOL lines at trial start (docs/decisions/0010). */
-#define PROTO_VERSION        3
+#define PROTO_VERSION        4
 
 #endif /* RIG_CONFIG_H */

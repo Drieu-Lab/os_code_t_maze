@@ -15,6 +15,15 @@ dist/
 # Recorded session data (rig_logger.py output)
 host/data/
 
+# Camera recordings + sidecars (experiment_control.py / camera_view.py output)
+host/recordings/
+
+# Tracker artifacts (learned appearance models + saved ROI + landmark points;
+# per-rig, regenerated)
+host/ratmodels/
+host/roi_polygon.json
+host/landmarks.json
+
 # Compiled unit-test binaries (firmware/.../test)
 test_task_core
 test_task_core.exe

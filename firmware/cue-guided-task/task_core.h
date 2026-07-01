@@ -86,6 +86,9 @@ struct TaskConfig {
   bool     autoDrainOnTrial; /* rinse+drain the central well at each trial start */
   uint16_t rinseMs;          /* auto well-clean: fresh-water rinse duration (ms) */
   uint16_t drainMs;          /* auto well-clean: drain duration after the rinse (ms) */
+  uint16_t rewardPulseMs;    /* automatic reward valve-open time (ms); = REWARD_PULSE_MS.
+                              * Logged on the REWARD,CENTER line so the host can map the
+                              * pulse to a calibrated dispensed volume. see docs/decisions/0019 */
   uint16_t highToneHz;
   uint16_t lowToneHz;
 };
@@ -99,7 +102,8 @@ struct Effect {
   int32_t     b;        /* CleanWell: drain ms; Log: numeric field 2 */
   int32_t     c;        /* Log: numeric field 3 */
   const char* type;     /* Log: line TYPE token */
-  const char* detail;   /* Log: trailing detail token ("" if none) */
+  const char* detail;   /* Log: detail token printed after the numeric fields ("" if none) */
+  int32_t     tail;     /* Log: numeric field printed AFTER detail (e.g. trailing duration ms); FX_NONE if absent. see docs/decisions/0019 */
 };
 
 static const uint8_t FX_CAP = 12;
@@ -111,23 +115,26 @@ inline void emit(Effects& fx, const Effect& e) {
   if (fx.n < FX_CAP - 1) {
     fx.items[fx.n++] = e;
   } else if (fx.n == FX_CAP - 1) {
-    Effect over = { FxTag::Log, FX_NONE, FX_NONE, FX_NONE, "FX_OVERFLOW", "" };
+    Effect over = { FxTag::Log, FX_NONE, FX_NONE, FX_NONE, "FX_OVERFLOW", "", FX_NONE };
     fx.items[fx.n] = over;
     fx.n = FX_CAP;          /* saturate; further emits are no-ops */
   }
 }
 
 /* ---------------------------- Effect builders --------------------------- */
-inline Effect startTone(uint16_t freq) { return Effect{ FxTag::StartTone, (int32_t)freq, FX_NONE, FX_NONE, "", "" }; }
-inline Effect stopTone()           { return Effect{ FxTag::StopTone, FX_NONE, FX_NONE, FX_NONE, "", "" }; }
-inline Effect pulseChoice()        { return Effect{ FxTag::PulseChoice, FX_NONE, FX_NONE, FX_NONE, "", "" }; }
-inline Effect pulseReturn()        { return Effect{ FxTag::PulseReturn, FX_NONE, FX_NONE, FX_NONE, "", "" }; }
-inline Effect openValve(int port)  { return Effect{ FxTag::OpenValve, (int32_t)port, FX_NONE, FX_NONE, "", "" }; }
-inline Effect cleanWell(uint16_t rinseMs, uint16_t drainMs) { return Effect{ FxTag::CleanWell, (int32_t)rinseMs, (int32_t)drainMs, FX_NONE, "", "" }; }
-inline Effect logEv(const char* type, const char* detail)               { return Effect{ FxTag::Log, FX_NONE, FX_NONE, FX_NONE, type, detail }; }
-inline Effect logN1(const char* type, int32_t a, const char* detail)    { return Effect{ FxTag::Log, a, FX_NONE, FX_NONE, type, detail }; }
-inline Effect logN2(const char* type, int32_t a, int32_t b, const char* detail) { return Effect{ FxTag::Log, a, b, FX_NONE, type, detail }; }
-inline Effect logN3(const char* type, int32_t a, int32_t b, int32_t c, const char* detail) { return Effect{ FxTag::Log, a, b, c, type, detail }; }
+inline Effect startTone(uint16_t freq) { return Effect{ FxTag::StartTone, (int32_t)freq, FX_NONE, FX_NONE, "", "", FX_NONE }; }
+inline Effect stopTone()           { return Effect{ FxTag::StopTone, FX_NONE, FX_NONE, FX_NONE, "", "", FX_NONE }; }
+inline Effect pulseChoice()        { return Effect{ FxTag::PulseChoice, FX_NONE, FX_NONE, FX_NONE, "", "", FX_NONE }; }
+inline Effect pulseReturn()        { return Effect{ FxTag::PulseReturn, FX_NONE, FX_NONE, FX_NONE, "", "", FX_NONE }; }
+inline Effect openValve(int port)  { return Effect{ FxTag::OpenValve, (int32_t)port, FX_NONE, FX_NONE, "", "", FX_NONE }; }
+inline Effect cleanWell(uint16_t rinseMs, uint16_t drainMs) { return Effect{ FxTag::CleanWell, (int32_t)rinseMs, (int32_t)drainMs, FX_NONE, "", "", FX_NONE }; }
+inline Effect logEv(const char* type, const char* detail)               { return Effect{ FxTag::Log, FX_NONE, FX_NONE, FX_NONE, type, detail, FX_NONE }; }
+/* logEvDur: like logEv but appends a trailing numeric field after the detail
+ * (e.g. "REWARD,CENTER,<dur_ms>"). see docs/decisions/0019 */
+inline Effect logEvDur(const char* type, const char* detail, int32_t tail)  { return Effect{ FxTag::Log, FX_NONE, FX_NONE, FX_NONE, type, detail, tail }; }
+inline Effect logN1(const char* type, int32_t a, const char* detail)    { return Effect{ FxTag::Log, a, FX_NONE, FX_NONE, type, detail, FX_NONE }; }
+inline Effect logN2(const char* type, int32_t a, int32_t b, const char* detail) { return Effect{ FxTag::Log, a, b, FX_NONE, type, detail, FX_NONE }; }
+inline Effect logN3(const char* type, int32_t a, int32_t b, int32_t c, const char* detail) { return Effect{ FxTag::Log, a, b, c, type, detail, FX_NONE }; }
 
 /* ----------------------------- Pure helpers ----------------------------- */
 inline uint32_t lcg(uint32_t s) { return s * 1664525u + 1013904223u; }
@@ -287,7 +294,9 @@ inline Session step(const Session& s, const Inputs& in, const TaskConfig& cfg,
          * The rat collects it at center on its way back. see docs/decisions/0007 */
         if (correct || cfg.startRewardEnabled) {
           emit(fx, openValve(V_REWARD));
-          emit(fx, logEv("REWARD", "CENTER"));
+          /* Append the reward pulse duration so the host maps it to a calibrated
+           * dispensed volume (REWARD,CENTER,<dur_ms>). see docs/decisions/0019 */
+          emit(fx, logEvDur("REWARD", "CENTER", (int32_t)cfg.rewardPulseMs));
         }
       }
       break;

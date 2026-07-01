@@ -21,9 +21,20 @@ Arduino Due  <--USB serial-->  rig_broker.py  <--TCP localhost:5555-->  N client
 - `rig_io.py` - `RigClient`, the shared TCP client used by the GUIs.
 - `maze_gui.py` - live monitor for body sensors, lick sensors, and solenoids.
 - `lick_tuner.py` - real-time traces for tuning the lick-detector amplifiers.
-- `experiment_control.py` - extensible experiment-control GUI; first module is a
-  live maze illustration that lights sensor/lick locations. Add modules as tabs.
+- `experiment_control.py` - extensible experiment-control GUI; modules fill
+  tabs (the first tab shows the maze schematic beside the camera). Add modules
+  via the TABS registry.
 - `rig_view.py` - the maze-illustration module used by `experiment_control.py`.
+- `camera_view.py` - the camera module (beside the schematic): live Basler
+  preview + recording (free-run), rotated to match the schematic. A **Format**
+  dropdown picks per recording between lossless FFV1 (`.mkv`, bit-exact, large)
+  and compressed H.264 (`.mp4`, lossy, ~25-100x smaller, with a CRF quality
+  spinbox); see docs/decisions/0013. Needs `pypylon` (pip only), `numpy`,
+  `pillow`, OpenCV (pip `opencv-python` or conda-forge `py-opencv` - install only
+  one), and `av` (PyAV) for recording (preview works without `av`; recording is
+  disabled until it's installed). Degrades to a message if a preview dep or the
+  camera is unavailable. Close Pylon Viewer first - only one app can grab the
+  camera at a time.
 - `tools/test_sensors_licks.py` - legacy standalone test that opens the serial
   port directly (does **not** use the broker); handy for quick bring-up.
 

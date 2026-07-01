@@ -1,2 +1,15 @@
 pyserial
 matplotlib
+
+# Camera module (experiment_control.py, beside the schematic). pypylon is the
+# Basler SDK and is not on conda - install it with pip (`pip install pypylon`).
+# numpy/pillow ship with Anaconda. For OpenCV (preview + orientation), either the
+# pip wheel below or conda-forge `py-opencv` works; install only one to avoid a
+# duplicate cv2. av (PyAV) is used for multithreaded lossless FFV1 recording
+# (preview works without it); conda-forge also has it (`conda install -c
+# conda-forge av`). See docs/decisions/0012.
+pypylon
+numpy
+pillow
+opencv-python
+av

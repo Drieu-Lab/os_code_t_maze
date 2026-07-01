@@ -8,7 +8,7 @@
  *
  * Pin map and tunables live in rig_config.h, a symlink to the canonical
  * ../common/rig_config.h (see docs/decisions/0006). Serial output follows
- * protocol v3: every line is "<ms>,<TYPE>,<payload...>". See ../PROTOCOL.md.
+ * protocol v4: every line is "<ms>,<TYPE>,<payload...>". See ../PROTOCOL.md.
  */
 
 #include "rig_config.h"
@@ -68,7 +68,7 @@ unsigned long lickLastChange[3];
 char    cmdBuf[16];
 uint8_t cmdLen = 0;
 
-// ---------------- Serial output (protocol v3) ----------------
+// ---------------- Serial output (protocol v4) ----------------
 void printSL(unsigned long ms, const char* type, int idx, int state) {
   CONSOLE.print(ms); CONSOLE.print(','); CONSOLE.print(type);
   CONSOLE.print(','); CONSOLE.print(idx);
@@ -81,6 +81,8 @@ void printLog(unsigned long ms, const Effect& e) {
   if (e.b != FX_NONE) { CONSOLE.print(','); CONSOLE.print(e.b); }
   if (e.c != FX_NONE) { CONSOLE.print(','); CONSOLE.print(e.c); }
   if (e.detail && e.detail[0]) { CONSOLE.print(','); CONSOLE.print(e.detail); }
+  // Trailing numeric field after the detail (e.g. REWARD,CENTER,<dur_ms>). see docs/decisions/0019
+  if (e.tail != FX_NONE) { CONSOLE.print(','); CONSOLE.print(e.tail); }
   CONSOLE.println();
 }
 
@@ -140,11 +142,13 @@ void handleManualSolenoid(const char* b) {
   }
   openSolenoid(port, sol, dur);
   unsigned long t = millis() - session.startMs;
+  // Trailing <dur_ms> lets the host map the pulse to a calibrated volume. see docs/decisions/0019
   CONSOLE.print(t); CONSOLE.print(",SOL,"); CONSOLE.print(port);
-  CONSOLE.print(','); CONSOLE.println(sol);
+  CONSOLE.print(','); CONSOLE.print(sol);
+  CONSOLE.print(','); CONSOLE.println(dur);
   if (sol == REWARD_SOLENOID_INDEX) {
     CONSOLE.print(t); CONSOLE.print(",REWARD,"); CONSOLE.print(port);
-    CONSOLE.println(",MANUAL");
+    CONSOLE.print(",MANUAL,"); CONSOLE.println(dur);
   }
 }
 
@@ -245,7 +249,9 @@ void applyEffects(const Effects& fx) {
         break;
       case FxTag::OpenValve:
         // Automatic task reward: the configured reward spout (R2) of the port.
-        openSolenoid((int)e.a, REWARD_SOLENOID_INDEX, REWARD_PULSE_MS);
+        // Drive from cfg.rewardPulseMs so the fired duration matches the value the
+        // core logs on the REWARD,CENTER line (both == REWARD_PULSE_MS). see docs/decisions/0019
+        openSolenoid((int)e.a, REWARD_SOLENOID_INDEX, cfg.rewardPulseMs);
         break;
       case FxTag::CleanWell: {
         // Auto well-clean at trial start: rinse the central well now, then drain
@@ -254,10 +260,13 @@ void applyEffects(const Effects& fx) {
         const int port = (int)V_START;   // central/start well
         openSolenoid(port, RINSE_SOLENOID_INDEX, (unsigned long)e.a, 0);
         openSolenoid(port, DRAIN_SOLENOID_INDEX, (unsigned long)e.b, (unsigned long)e.a);
+        // Trailing <dur_ms> on each SOL line (rinse=e.a, drain=e.b). see docs/decisions/0019
         CONSOLE.print(t); CONSOLE.print(",SOL,"); CONSOLE.print(port);
-        CONSOLE.print(','); CONSOLE.println(RINSE_SOLENOID_INDEX);
+        CONSOLE.print(','); CONSOLE.print(RINSE_SOLENOID_INDEX);
+        CONSOLE.print(','); CONSOLE.println((unsigned long)e.a);
         CONSOLE.print(t); CONSOLE.print(",SOL,"); CONSOLE.print(port);
-        CONSOLE.print(','); CONSOLE.println(DRAIN_SOLENOID_INDEX);
+        CONSOLE.print(','); CONSOLE.print(DRAIN_SOLENOID_INDEX);
+        CONSOLE.print(','); CONSOLE.println((unsigned long)e.b);
         break;
       }
       case FxTag::Log:
@@ -280,6 +289,7 @@ TaskConfig makeConfig() {
   c.autoDrainOnTrial   = AUTO_DRAIN_ON_TRIAL;
   c.rinseMs            = WELL_RINSE_MS;
   c.drainMs            = WELL_DRAIN_MS;
+  c.rewardPulseMs      = REWARD_PULSE_MS;   // logged on REWARD,CENTER for host volume calc
   c.highToneHz         = TONE_HIGH_HZ;
   c.lowToneHz          = TONE_LOW_HZ;
   return c;

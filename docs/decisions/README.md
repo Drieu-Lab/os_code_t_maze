@@ -54,3 +54,13 @@ The chain of records is the audit trail.
 | [0008](0008-wavetable-tone-isr.md) | Generate the tone cue from a wavetable, not sin() in the ISR | Accepted | 2026-06-03 |
 | [0009](0009-runtime-training-modes-and-logging.md) | Runtime training modes (Free Roam / Full task), anti-bias sequencing, persistent logger | Accepted | 2026-06-23 |
 | [0010](0010-manual-solenoid-control-in-task.md) | Full manual solenoid control + auto well-clean at trial start in cue-guided-task | Accepted | 2026-06-24 |
+| [0011](0011-camera-tab-freerun-ffv1.md) | Add the Basler camera as an in-GUI tab (free-run, FFV1, decoupled grab/encode) | Accepted | 2026-06-24 |
+| [0012](0012-pyav-multithreaded-ffv1.md) | Encode the camera's FFV1 video with PyAV slice multithreading | Accepted | 2026-06-24 |
+| [0013](0013-selectable-lossless-lossy-recording.md) | Let the GUI pick lossless FFV1 or compressed H.264 per recording | Accepted | 2026-06-24 |
+| [0014](0014-markerless-position-tracking.md) | Markerless rat position tracking (shared CV core + appearance model) | Accepted | 2026-06-29 |
+| [0015](0015-undistort-at-source.md) | Apply lens-distortion correction at the camera source (preview, tracking, recording) | Accepted | 2026-06-29 |
+| [0016](0016-quit-rig-session-tagging.md) | Tag rig processes with a session id so one "Quit rig" button can close them all | Accepted | 2026-06-30 |
+| [0017](0017-live-scoring-tolerance-knobs.md) | Expose appearance-model tolerances as live, scoring-time knobs | Accepted | 2026-06-30 |
+| [0018](0018-landmark-annotations.md) | Annotate reward wells and body sensors as image-space landmarks | Accepted | 2026-06-30 |
+| [0019](0019-reward-volume-and-pulse-duration-logging.md) | Log reward pulse duration on the wire and track dispensed volume on the host | Accepted | 2026-06-30 |
+| [0020](0020-save-background-image-with-recordings.md) | Save the empty-rig background image alongside recordings | Accepted | 2026-06-30 |

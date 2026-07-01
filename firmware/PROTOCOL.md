@@ -1,12 +1,18 @@
-# Rig serial protocol v3
+# Rig serial protocol v4
 
 Both firmware sketches (`cue-guided-task`, `tmaze_test`) and the host tools
-(`maze_gui.py`, `lick_tuner.py`, `rig_logger.py`) speak this protocol. It is
-strict v3: there is no backward/dual-format support, so all devices and GUIs
-must be on v3 together. v3 adds training modes (the `MODE` command and the
-`0,MODE,<name>` line), manual-reward logging (`REWARD,<port>,MANUAL`), and the
-end-of-session `SESSION_SUMMARY` line (see docs/decisions/0009); plus full manual
-solenoid control in `cue-guided-task` (`R<port><sol>[,<ms>]` -> `SOL` ack) and an
+(`maze_gui.py`, `lick_tuner.py`, `rig_logger.py`) speak this protocol. v4 adds a
+trailing pulse-duration field (`<dur_ms>`) to the `cue-guided-task` reward/
+solenoid lines (`REWARD,CENTER,<dur_ms>`, `REWARD,<port>,MANUAL,<dur_ms>`,
+`SOL,<port>,<sol>,<dur_ms>`) so the host can map each pulse to a calibrated
+dispensed volume (see docs/decisions/0019). The field is appended, so a
+type-dispatching parser that ignores trailing fields it does not need is
+unaffected; only consumers that want the volume read it.
+
+v3 added training modes (the `MODE` command and the `0,MODE,<name>` line),
+manual-reward logging (`REWARD,<port>,MANUAL`), and the end-of-session
+`SESSION_SUMMARY` line (see docs/decisions/0009); plus full manual solenoid
+control in `cue-guided-task` (`R<port><sol>[,<ms>]` -> `SOL` ack) and an
 automatic central-well rinse/drain at trial start (docs/decisions/0010).
 
 ## Line format
@@ -39,7 +45,7 @@ Emitted at boot, in order, before the session begins:
 
 | Line | Meaning |
 |------|---------|
-| `0,PROTO,3` | protocol version (assert this on the client) |
+| `0,PROTO,4` | protocol version (assert this on the client) |
 | `0,ANIMAL,<id>` | configured animal id |
 
 The firmware then starts in its default **training mode** (Free Roam unless
@@ -73,9 +79,9 @@ log can contain several of them.
 | `MODE` | `FREEROAM\|FULLTASK` | training mode entered (at boot or on a `MODE` command) |
 | `CHOICE` | `LEFT\|RIGHT` | arm chosen |
 | `OUTCOME` | `CORRECT\|INCORRECT` | choice correctness |
-| `REWARD` | `CENTER` | automatic reward valve pulsed on a correct choice (central port; see ADR-0007) |
-| `REWARD` | `<port>,MANUAL` | manual reward-spout fire (`R<port>` / `R<port>1`): the experimenter delivered reward at `port` (0=left,1=right,2=center). The Free Roam reward path; emitted alongside the `SOL` ack. |
-| `SOL` | `<port>,<sol>` | a solenoid was pulsed: a manual `R<port><sol>` fire, or the automatic well-clean (`SOL,2,4` rinse then `SOL,2,3` drain) at trial start. Drives the Rig-view marker flash. |
+| `REWARD` | `CENTER,<dur_ms>` | automatic reward valve pulsed on a correct choice (central port; see ADR-0007). `<dur_ms>` is the valve-open time (`REWARD_PULSE_MS`); the host maps it to a calibrated dispensed volume (see ADR-0019). |
+| `REWARD` | `<port>,MANUAL,<dur_ms>` | manual reward-spout fire (`R<port>` / `R<port>1`): the experimenter delivered reward at `port` (0=left,1=right,2=center) for `<dur_ms>` ms. The Free Roam reward path; emitted alongside the `SOL` ack. |
+| `SOL` | `<port>,<sol>,<dur_ms>` | a solenoid was pulsed for `<dur_ms>` ms: a manual `R<port><sol>` fire, or the automatic well-clean (`SOL,2,4,<rinse_ms>` rinse then `SOL,2,3,<drain_ms>` drain) at trial start. Drives the Rig-view marker flash. |
 | `RETURN_ARM` | `ENTRY` | return-arm beam entered; trial advances |
 | `SESSION_SUMMARY` | `<trials>,<correct>,<incorrect>` | emitted before `SESSION_COMPLETE` for a Full task session |
 | `STATUS` | `<count>,<index>,<active>` | reply to `STATUS` command |
@@ -84,8 +90,9 @@ log can contain several of them.
 | `FX_OVERFLOW` | (none) | diagnostic: per-tick effect buffer saturated (should never occur) |
 
 When `AUTO_DRAIN_ON_TRIAL` is set, every `TRIAL` after the first is immediately
-followed by `SOL,2,4` (rinse) and `SOL,2,3` (drain) on the central well; the drain
-energizes after the rinse finishes (non-blocking). see docs/decisions/0010
+followed by `SOL,2,4,<rinse_ms>` (rinse) and `SOL,2,3,<drain_ms>` (drain) on the
+central well; the drain energizes after the rinse finishes (non-blocking).
+see docs/decisions/0010
 
 TTL pulses to Open Ephys (choice, return-arm, tone on/off) are hardware
 signals, not serial lines.
@@ -108,7 +115,7 @@ Commands are newline-terminated and are NOT part of the `ms,TYPE` line schema.
 |---------|--------|---------|
 | `ABORT` / `STOP` | cue-guided-task | end the session now |
 | `MODE,FREE` / `MODE,FULL` | cue-guided-task | switch training mode and (re)start the session (Free Roam / Full task) |
-| `R<port><sol>[,<ms>]` | cue-guided-task, tmaze_test | pulse solenoid `[port][sol]` (port 0=left,1=right,2=center; sol 0-2 reward, 3 drain, 4 rinse); optional `<ms>` overrides `REWARD_PULSE_MS` (clamped <=5000). Both sketches ack with `SOL,<port>,<sol>`. In `cue-guided-task` the pulse is non-blocking, works in any mode (independent of an active session), and a reward-spout fire (`<sol>` omitted or `=1`) also logs `REWARD,<port>,MANUAL`. A bare `R<port>` fires that port's reward spout. |
+| `R<port><sol>[,<ms>]` | cue-guided-task, tmaze_test | pulse solenoid `[port][sol]` (port 0=left,1=right,2=center; sol 0-2 reward, 3 drain, 4 rinse); optional `<ms>` overrides `REWARD_PULSE_MS` (clamped <=5000). Both sketches ack with `SOL,<port>,<sol>` (`cue-guided-task` appends the pulse `<dur_ms>`: `SOL,<port>,<sol>,<dur_ms>`; `tmaze_test` does not). In `cue-guided-task` the pulse is non-blocking, works in any mode (independent of an active session), and a reward-spout fire (`<sol>` omitted or `=1`) also logs `REWARD,<port>,MANUAL,<dur_ms>`. A bare `R<port>` fires that port's reward spout. |
 | `PING` | cue-guided-task | -> `PONG` |
 | `STATUS` | cue-guided-task | -> `STATUS,<count>,<index>,<active>` |
 

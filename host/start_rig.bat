@@ -25,6 +25,15 @@ cd /d "%~dp0"
 set "RIG_PORT=%~1"
 if "%RIG_PORT%"=="" set "RIG_PORT=COM4"
 
+REM ---- Tag every program we launch with one shared session id ----------------
+REM Each python process below is started with "-X rigsid=%RIG_SID%". That option
+REM is harmless (Python ignores unknown -X options and it never reaches argv) but
+REM it shows up in the process command line, so the "Quit rig" button in
+REM Experiment Control can find and close exactly the windows this launcher
+REM opened (broker, logger, lick tuner, control GUI) and nothing else.
+REM See docs/decisions/0016.
+set "RIG_SID=rig_%RANDOM%_%RANDOM%_%RANDOM%"
+
 REM ---- Pre-flight: confirm required packages are importable in this shell ----
 REM Catches the "forgot to activate the conda env" case here, in one place,
 REM rather than letting all three windows pop and fail individually.
@@ -43,14 +52,14 @@ if errorlevel 1 (
 )
 
 REM ---- Launch broker, then clients after a brief delay so the TCP port is up ----
-start "Rig Broker" cmd /k python rig_broker.py --port %RIG_PORT%
+start "Rig Broker" cmd /k python -X rigsid=%RIG_SID% rig_broker.py --port %RIG_PORT%
 timeout /t 2 /nobreak >nul
 
 REM Persistent session logger: writes every line to host\data\<animal>_<time>.csv
-start "Rig Logger" cmd /k python rig_logger.py
+start "Rig Logger" cmd /k python -X rigsid=%RIG_SID% rig_logger.py
 
 REM start "Maze GUI"   python maze_gui.py
-start "Lick Tuner" python lick_tuner.py
-start "Experiment Control" python experiment_control.py
+start "Lick Tuner" python -X rigsid=%RIG_SID% lick_tuner.py
+start "Experiment Control" python -X rigsid=%RIG_SID% experiment_control.py
 
 endlocal

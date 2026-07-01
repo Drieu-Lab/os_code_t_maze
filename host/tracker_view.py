@@ -1,0 +1,1015 @@
+"""
+tracker_view.py - "Tracking" tab for experiment_control.py.
+
+A Tk control surface for the shared markerless tracker (tracker.RatTracker). The
+heavy lifting lives in tracker.py and runs on the camera grab thread (see
+camera_view.py); this tab only *controls* the tracker and *reads* its latest
+result, following the same module contract as the other tabs:
+
+    widget() -> a Tk widget to place in its tab
+    apply(line: str) -> None  to handle each serial line (learns the animal id)
+    close() -> None           to finalize any standalone track log
+
+What it offers:
+  - Enable tracking (drives CameraView.enable_tracking; off by default).
+  - Grab background (empty-rig reference) and a live state/confidence readout.
+  - Register the rat: accumulate the colour+size+shape appearance model over a
+    window of frames; optional online enrichment while tracking.
+  - Tuning sliders (threshold, min area, blur, gate, accept score, coast frames).
+  - Optional binary-mask view (stacked under the live preview) with the
+    currently tracked blob filled green.
+  - Save/Load the appearance model (.npz, per animal) and the maze ROI polygon
+    (host/roi_polygon.json), the latter drawn back on the camera preview.
+  - Define the ROI by clicking a captured still frame (precise, and the moving
+    rat doesn't interfere).
+  - Start/stop a standalone track CSV (independent of video recording).
+
+Heavy deps (numpy, OpenCV, Pillow) are imported defensively so importing this
+module never breaks experiment_control.py.
+"""
+
+from __future__ import annotations
+
+import csv
+import os
+import time
+import tkinter as tk
+from tkinter import filedialog, messagebox, simpledialog, ttk
+from typing import Optional
+
+try:
+    import numpy as np  # type: ignore
+    _NUMPY_ERR: Optional[str] = None
+except Exception as e:  # pragma: no cover
+    np = None  # type: ignore
+    _NUMPY_ERR = f"{type(e).__name__}: {e}"
+
+try:
+    import cv2  # type: ignore
+    _CV2_ERR: Optional[str] = None
+except Exception as e:  # pragma: no cover
+    cv2 = None  # type: ignore
+    _CV2_ERR = f"{type(e).__name__}: {e}"
+
+try:
+    from PIL import Image, ImageTk  # type: ignore
+    _PIL_ERR: Optional[str] = None
+except Exception as e:  # pragma: no cover
+    Image = None  # type: ignore
+    ImageTk = None  # type: ignore
+    _PIL_ERR = f"{type(e).__name__}: {e}"
+
+# Shared tracking-overlay drawing (so this preview matches the camera tab's).
+try:
+    from tracker import draw_overlay as _draw_overlay  # noqa: E402
+except Exception:  # pragma: no cover
+    _draw_overlay = None  # type: ignore
+
+# Canonical fixed landmark set (reward wells + body-sensor beams). Guarded so a
+# missing tracker core doesn't break this module's import.
+try:
+    from tracker import FIXED_LANDMARKS as _FIXED_LANDMARKS  # noqa: E402
+except Exception:  # pragma: no cover
+    _FIXED_LANDMARKS = ()  # type: ignore
+
+# Recordings folder default (camera_view guards its heavy imports, so this is
+# safe even without pypylon/OpenCV). Track logs live in a subfolder of whatever
+# recordings folder the camera is actually using.
+try:
+    from camera_view import DEFAULT_OUTPUT_DIR as _RECORDINGS_DIR  # noqa: E402
+except Exception:  # pragma: no cover
+    _RECORDINGS_DIR = "recordings"
+
+
+# ================================== CONFIG ===================================
+_HERE = os.path.dirname(os.path.abspath(__file__))
+ROI_PATH = os.path.join(_HERE, "roi_polygon.json")   # shared with the prototype
+LANDMARKS_PATH = os.path.join(_HERE, "landmarks.json")  # reward-well/body-sensor points
+MODEL_DIR = os.path.join(_HERE, "ratmodels")          # appearance models (.npz)
+TRACK_LOG_SUBDIR = "track_logs"   # subfolder of the recordings dir for track CSVs
+
+POLL_INTERVAL_MS = 150       # readout / mask / standalone-log refresh
+PREVIEW_INTERVAL_MS = 66     # ~15 fps live preview (only while the tab is visible)
+PREVIEW_MAX_W = 640          # live preview width on this tab (right column)
+MASK_VIEW_W = 420            # colorized mask width, stacked under the preview
+EDITOR_MAX_W = 960           # still-frame ROI editor display width
+
+# Tuning sliders: (label, param-name, lo, hi, is_float, scale-to-param).
+_SLIDERS = (
+    ("Threshold", "thresh", 0, 255, False, 1.0),
+    ("Min area", "min_area", 0, 8000, False, 1.0),
+    ("Blur", "blur", 1, 31, False, 1.0),
+    ("Gate (px)", "gate_radius", 0, 500, False, 1.0),
+    ("Accept", "accept_score", 0, 100, False, 0.01),   # slider 0..100 -> 0..1
+    ("Coast (frames)", "coast_max_frames", 1, 200, False, 1.0),
+)
+
+# Appearance-model tolerance knobs (live at scoring time; see ADR-0014). Shown in
+# a collapsible "Model tolerances" section so the main panel stays uncluttered.
+_TOL_SLIDERS = (
+    ("Size tol (k)", "area_gate_k", 1.0, 6.0, True, 1.0),       # exp(muA +/- k*sigmaA)
+    ("Appearance bias", "appearance_bias", 0.0, 1.0, True, 1.0),  # appearance vs distance
+    ("Shape tol", "form_tol", 0.2, 5.0, True, 1.0),            # Gaussian softness
+    ("Color gate", "hist_min", 0.0, 1.0, True, 1.0),           # min hue/sat correlation (0=off)
+)
+
+
+class TrackerControlView:
+    """Tk module: controls + live readout for the shared RatTracker."""
+
+    def __init__(self, parent: tk.Misc, tracker=None, camera=None):
+        self._parent = parent
+        self._tracker = tracker
+        self._camera = camera
+        self.frame = ttk.Frame(parent)
+        self._animal = ""
+        self._photo_mask = None       # keep refs so Tk doesn't GC images
+        self._photo_preview = None
+        self._log_file = None
+        self._log_writer = None
+        self._log_idx = 0
+        self._sliders = {}            # param-name -> (tk var, scale-factor)
+        self._closed = False
+
+        missing = self._missing_dependency()
+        if tracker is None or missing:
+            why = ("the tracker core is unavailable"
+                   if tracker is None else f"missing dependency:\n{missing}")
+            ttk.Label(self.frame, padding=24, anchor="center", justify="center",
+                      text=f"Tracking tab unavailable - {why}.").pack(
+                fill=tk.BOTH, expand=True)
+            return
+
+        self._build_ui()
+        # Reuse a previously drawn ROI (also written by the prototype), if any.
+        if os.path.exists(ROI_PATH):
+            try:
+                self._tracker.load_roi(ROI_PATH)
+                self._roi_status.set(f"ROI: loaded {os.path.basename(ROI_PATH)}")
+            except Exception:
+                pass
+        # Reuse previously marked landmarks (reward wells + body sensors), if any.
+        if os.path.exists(LANDMARKS_PATH):
+            try:
+                self._tracker.load_landmarks(LANDMARKS_PATH)
+            except Exception:
+                pass
+        self._set_landmark_status()
+        self._push_params()
+        self._schedule_poll()
+        self._schedule_preview()
+
+    # ------------------------------------------------------------ module API
+    def widget(self) -> tk.Widget:
+        return self.frame
+
+    def apply(self, line: str) -> None:
+        """Learn the animal id from the serial stream (for model filenames)."""
+        parts = line.split(",")
+        if len(parts) > 2 and parts[0].isdigit() and parts[1] == "ANIMAL":
+            self._animal = parts[2].strip()
+            if self._tracker is not None:
+                self._tracker.set_animal(self._animal)
+
+    def close(self) -> None:
+        self._closed = True
+        self._stop_log()
+
+    # ---------------------------------------------------------- dependencies
+    @staticmethod
+    def _missing_dependency() -> Optional[str]:
+        problems = []
+        if np is None:
+            problems.append(f"numpy ({_NUMPY_ERR})")
+        if cv2 is None:
+            problems.append(f"opencv-python ({_CV2_ERR})")
+        if Image is None or ImageTk is None:
+            problems.append(f"pillow ({_PIL_ERR})")
+        return "\n".join(problems) if problems else None
+
+    # ------------------------------------------------------------------- UI
+    def _build_ui(self) -> None:
+        pad = dict(padx=4, pady=2)
+
+        # Two columns: controls on the left, live preview filling the space on
+        # the right. The preview mirrors the camera tab and only renders while
+        # this tab is visible, so it costs nothing on the Rig view tab.
+        content = ttk.Frame(self.frame)
+        content.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        controls = ttk.Frame(content)
+        controls.pack(side=tk.LEFT, fill=tk.Y, anchor="n")
+        # Right column: live camera preview on top, colorized mask stacked below.
+        viewcol = ttk.Frame(content)
+        viewcol.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self._preview = ttk.Label(viewcol, anchor="center")
+        self._preview.pack(side=tk.TOP, fill=tk.BOTH, expand=True, **pad)
+        self._mask_label = ttk.Label(viewcol, anchor="center")
+        self._mask_label.pack(side=tk.TOP, anchor="center", **pad)
+
+        # Enable + background.
+        top = ttk.Frame(controls)
+        top.pack(side=tk.TOP, fill=tk.X, **pad)
+        self._enable_var = tk.BooleanVar(value=False)
+        cb = ttk.Checkbutton(top, text="Enable tracking", variable=self._enable_var,
+                             command=self._on_enable)
+        cb.pack(side=tk.LEFT)
+        if self._camera is None:
+            cb.configure(state=tk.DISABLED)
+            self._enable_var.set(False)
+        ttk.Button(top, text="Grab background", command=self._grab_bg).pack(
+            side=tk.LEFT, padx=(12, 2))
+        ttk.Button(top, text="Save background...", command=self._save_background).pack(
+            side=tk.LEFT, padx=2)
+        self._bg_status = tk.StringVar(value="reference: none")
+        ttk.Label(top, textvariable=self._bg_status).pack(side=tk.LEFT, padx=4)
+
+        # Registration + enrichment.
+        reg = ttk.LabelFrame(controls, text="Appearance model")
+        reg.pack(side=tk.TOP, fill=tk.X, **pad)
+        self._reg_btn = ttk.Button(reg, text="Register rat", command=self._toggle_register)
+        self._reg_btn.pack(side=tk.LEFT, padx=4, pady=4)
+        ttk.Button(reg, text="Cancel", command=self._cancel_register).pack(
+            side=tk.LEFT, padx=2)
+        self._enrich_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(reg, text="Enrich while tracking", variable=self._enrich_var,
+                        command=self._push_params).pack(side=tk.LEFT, padx=(12, 2))
+        self._model_status = tk.StringVar(value="model: none")
+        ttk.Label(reg, textvariable=self._model_status).pack(side=tk.LEFT, padx=6)
+
+        # Model + ROI persistence.
+        persist = ttk.Frame(controls)
+        persist.pack(side=tk.TOP, fill=tk.X, **pad)
+        ttk.Button(persist, text="Save model...", command=self._save_model).pack(
+            side=tk.LEFT, padx=2)
+        ttk.Button(persist, text="Load model...", command=self._load_model).pack(
+            side=tk.LEFT, padx=2)
+        ttk.Button(persist, text="Clear model", command=self._clear_model).pack(
+            side=tk.LEFT, padx=2)
+
+        region = ttk.Frame(controls)
+        region.pack(side=tk.TOP, fill=tk.X, **pad)
+        ttk.Button(region, text="Define region...", command=self._define_region).pack(
+            side=tk.LEFT, padx=2)
+        ttk.Button(region, text="Clear region", command=self._clear_region).pack(
+            side=tk.LEFT, padx=2)
+        ttk.Button(region, text="Save ROI", command=self._save_roi).pack(
+            side=tk.LEFT, padx=2)
+        ttk.Button(region, text="Load ROI", command=self._load_roi).pack(
+            side=tk.LEFT, padx=2)
+        self._roi_status = tk.StringVar(value="ROI: none")
+        ttk.Label(region, textvariable=self._roi_status).pack(side=tk.LEFT, padx=6)
+
+        # Landmark annotations: reward wells + body-sensor points (and any custom
+        # points) marked on a still frame, drawn back on the camera preview.
+        marks = ttk.Frame(controls)
+        marks.pack(side=tk.TOP, fill=tk.X, **pad)
+        ttk.Button(marks, text="Define landmarks...",
+                   command=self._define_landmarks).pack(side=tk.LEFT, padx=2)
+        ttk.Button(marks, text="Clear landmarks",
+                   command=self._clear_landmarks).pack(side=tk.LEFT, padx=2)
+        self._landmark_status = tk.StringVar(value="landmarks: none")
+        ttk.Label(marks, textvariable=self._landmark_status).pack(side=tk.LEFT, padx=6)
+
+        # Tuning sliders.
+        tune = ttk.LabelFrame(controls, text="Tuning")
+        tune.pack(side=tk.TOP, fill=tk.X, **pad)
+        params = self._tracker.get_params()
+        for label, name, lo, hi, is_float, factor in _SLIDERS:
+            init = getattr(params, name) / factor if factor != 1.0 else getattr(params, name)
+            self._add_slider(tune, label, name, lo, hi, is_float, factor, init)
+
+        # Appearance-model tolerances (collapsed by default to save height).
+        tol = self._add_collapsible(controls, "Model tolerances", expanded=False)
+        for label, name, lo, hi, is_float, factor in _TOL_SLIDERS:
+            init = getattr(params, name) / factor if factor != 1.0 else getattr(params, name)
+            self._add_slider(tol, label, name, lo, hi, is_float, factor, init)
+
+        # Mask preview + readout.
+        bottom = ttk.Frame(controls)
+        bottom.pack(side=tk.TOP, fill=tk.BOTH, expand=True, **pad)
+        self._show_mask_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(bottom, text="Show mask (tracked blob in green)",
+                        variable=self._show_mask_var,
+                        command=self._on_show_mask).pack(side=tk.TOP, anchor="w")
+        self._readout = tk.StringVar(value="state: -")
+        ttk.Label(bottom, textvariable=self._readout, anchor="w").pack(
+            side=tk.TOP, fill=tk.X)
+
+        # Standalone track log.
+        logrow = ttk.Frame(controls)
+        logrow.pack(side=tk.TOP, fill=tk.X, **pad)
+        self._log_btn = ttk.Button(logrow, text="Start track log", command=self._toggle_log)
+        self._log_btn.pack(side=tk.LEFT, padx=2)
+        self._log_status = tk.StringVar(value="log: off")
+        ttk.Label(logrow, textvariable=self._log_status).pack(side=tk.LEFT, padx=6)
+
+    def _add_collapsible(self, parent, title, expanded=False):
+        """A simple expand/collapse section; returns the inner frame for content."""
+        holder = ttk.Frame(parent)
+        holder.pack(side=tk.TOP, fill=tk.X, padx=4, pady=2)
+        inner = ttk.Frame(holder)
+        state = {"open": bool(expanded)}
+        btn_text = tk.StringVar()
+
+        def render():
+            btn_text.set(("\u25be " if state["open"] else "\u25b8 ") + title)
+            if state["open"]:
+                inner.pack(side=tk.TOP, fill=tk.X)
+            else:
+                inner.pack_forget()
+
+        def toggle():
+            state["open"] = not state["open"]
+            render()
+
+        ttk.Button(holder, textvariable=btn_text, command=toggle).pack(
+            side=tk.TOP, fill=tk.X)
+        render()
+        return inner
+
+    def _add_slider(self, parent, label, name, lo, hi, is_float, factor, init) -> None:
+        row = ttk.Frame(parent)
+        row.pack(side=tk.TOP, fill=tk.X, pady=1)
+        ttk.Label(row, text=label, width=14, anchor="w").pack(side=tk.LEFT)
+        var = tk.DoubleVar(value=init)
+        val = ttk.Label(row, width=7, anchor="e")
+
+        def on_change(_=None):
+            v = var.get()
+            val.configure(text=(f"{v:.2f}" if is_float else f"{int(round(v))}"))
+            self._push_params()
+
+        scale = ttk.Scale(row, from_=lo, to=hi, variable=var, command=on_change)
+        scale.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
+        val.pack(side=tk.LEFT)
+        self._sliders[name] = (var, factor)
+        on_change()
+
+    # --------------------------------------------------------------- actions
+    def _push_params(self) -> None:
+        if self._tracker is None:
+            return
+        kwargs = {}
+        for name, (var, factor) in self._sliders.items():
+            v = var.get() * factor
+            if name in ("thresh", "blur", "coast_max_frames"):
+                v = int(round(v))
+            kwargs[name] = v
+        kwargs["adapt_enrich"] = bool(self._enrich_var.get())
+        try:
+            self._tracker.update_params(**kwargs)
+        except Exception:
+            pass
+
+    def _on_enable(self) -> None:
+        on = bool(self._enable_var.get())
+        if self._camera is not None:
+            self._camera.enable_tracking(on)
+
+    def _grab_bg(self) -> None:
+        self._tracker.grab_background()
+        self._bg_status.set("reference: requested")
+
+    def _save_background(self) -> None:
+        """Save the full-res colour empty-rig frame for offline tuning (ADR-0020)."""
+        bg = self._tracker.get_background_image()
+        if bg is None:
+            messagebox.showinfo("Save background",
+                                "No background yet - grab a background first.")
+            return
+        initialdir = _HERE
+        if self._camera is not None:
+            try:
+                initialdir = self._camera.get_output_dir()
+            except Exception:
+                pass
+        try:
+            os.makedirs(initialdir, exist_ok=True)
+        except OSError:
+            initialdir = _HERE
+        animal = self._animal or "animal"
+        default = f"{animal}_{time.strftime('%Y%m%d_%H%M%S')}_background.png"
+        path = filedialog.asksaveasfilename(
+            title="Save background image", initialdir=initialdir,
+            initialfile=default, defaultextension=".png",
+            filetypes=[("PNG image", "*.png"), ("All files", "*.*")])
+        if not path:
+            return
+        try:
+            if cv2.imwrite(path, bg):
+                self._bg_status.set(f"reference: saved {os.path.basename(path)}")
+            else:
+                messagebox.showerror("Save background", "OpenCV failed to write the image.")
+        except Exception as e:
+            messagebox.showerror("Save background", f"{type(e).__name__}: {e}")
+
+    def _toggle_register(self) -> None:
+        if self._tracker.is_registering():
+            self._tracker.finalize_registration()
+        elif not self._tracker.has_reference():
+            messagebox.showinfo("Register rat",
+                                "Grab a background first, then register the rat.")
+        else:
+            if not self.tracking_running():
+                messagebox.showinfo(
+                    "Register rat",
+                    "Enable tracking (and have the camera running) so the tracker "
+                    "sees frames during registration.")
+                return
+            self._tracker.start_registration()
+
+    def _cancel_register(self) -> None:
+        self._tracker.cancel_registration()
+
+    def tracking_running(self) -> bool:
+        return self._camera is not None and self._camera.tracking_enabled()
+
+    # ----------------------------------------------------------- model I/O
+    def _save_model(self) -> None:
+        if not self._tracker.has_model():
+            messagebox.showinfo("Save model", "No model yet - register the rat first.")
+            return
+        os.makedirs(MODEL_DIR, exist_ok=True)
+        animal = self._animal or "animal"
+        default = f"{animal}_ratmodel.npz"
+        path = filedialog.asksaveasfilename(
+            title="Save appearance model", initialdir=MODEL_DIR,
+            initialfile=default, defaultextension=".npz",
+            filetypes=[("RatModel", "*.npz"), ("All files", "*.*")])
+        if not path:
+            return
+        try:
+            self._tracker.save_model(path)
+            self._model_status.set(f"model: saved {os.path.basename(path)}")
+        except Exception as e:
+            messagebox.showerror("Save model", f"{type(e).__name__}: {e}")
+
+    def _load_model(self) -> None:
+        path = filedialog.askopenfilename(
+            title="Load appearance model", initialdir=MODEL_DIR,
+            filetypes=[("RatModel", "*.npz"), ("All files", "*.*")])
+        if not path:
+            return
+        try:
+            self._tracker.load_model(path)
+            m = self._tracker.get_model()
+            self._model_status.set(
+                f"model: {os.path.basename(path)} (n={m.n}, "
+                f"{'cov' if m.coverage_ok else 'thin'}"
+                f"{', ' + m.animal if m.animal else ''})")
+            messagebox.showinfo(
+                "Load model",
+                "Model loaded. Remember to grab a fresh background for this "
+                "session (lighting drifts day to day).")
+        except Exception as e:
+            messagebox.showerror("Load model", f"{type(e).__name__}: {e}")
+
+    def _clear_model(self) -> None:
+        self._tracker.clear_model()
+        self._model_status.set("model: none")
+
+    # ------------------------------------------------------------- ROI I/O
+    def _save_roi(self) -> None:
+        if self._tracker.save_roi(ROI_PATH):
+            self._roi_status.set(f"ROI: saved {os.path.basename(ROI_PATH)}")
+        else:
+            messagebox.showinfo("Save ROI", "No ROI to save - define a region first.")
+
+    def _load_roi(self) -> None:
+        path = filedialog.askopenfilename(
+            title="Load ROI polygon", initialdir=_HERE,
+            filetypes=[("ROI JSON", "*.json"), ("All files", "*.*")])
+        if not path:
+            return
+        try:
+            if self._tracker.load_roi(path):
+                self._roi_status.set(f"ROI: loaded {os.path.basename(path)}")
+            else:
+                messagebox.showerror("Load ROI", "File has fewer than 3 vertices.")
+        except Exception as e:
+            messagebox.showerror("Load ROI", f"{type(e).__name__}: {e}")
+
+    def _clear_region(self) -> None:
+        self._tracker.clear_roi()
+        self._roi_status.set("ROI: none")
+
+    def _define_region(self) -> None:
+        if self._camera is None:
+            messagebox.showinfo("Define region", "Camera is unavailable.")
+            return
+        frame = self._camera.get_latest_frame()
+        if frame is None:
+            messagebox.showinfo("Define region", "No camera frame yet.")
+            return
+        _RoiEditor(self.frame, frame, on_commit=self._on_roi_committed)
+
+    def _on_roi_committed(self, norm_verts) -> None:
+        self._tracker.set_roi_polygon(norm_verts)
+        self._roi_status.set(f"ROI: set ({len(norm_verts)} pts)")
+
+    # --------------------------------------------------------- landmark I/O
+    def _set_landmark_status(self) -> None:
+        placed = len(self._tracker.get_landmarks())
+        fixed = len(_FIXED_LANDMARKS)
+        if placed == 0:
+            self._landmark_status.set("landmarks: none")
+        else:
+            self._landmark_status.set(f"landmarks: {placed} placed (of {fixed} fixed)")
+
+    def _define_landmarks(self) -> None:
+        if self._camera is None:
+            messagebox.showinfo("Define landmarks", "Camera is unavailable.")
+            return
+        frame = self._camera.get_latest_frame()
+        if frame is None:
+            messagebox.showinfo("Define landmarks", "No camera frame yet.")
+            return
+        _LandmarkEditor(self.frame, frame, _FIXED_LANDMARKS,
+                        self._tracker.get_landmarks(),
+                        on_commit=self._on_landmarks_committed)
+
+    def _on_landmarks_committed(self, landmarks) -> None:
+        self._tracker.set_landmarks(landmarks)
+        self._tracker.save_landmarks(LANDMARKS_PATH)
+        self._set_landmark_status()
+
+    def _clear_landmarks(self) -> None:
+        self._tracker.clear_landmarks()
+        try:
+            if os.path.exists(LANDMARKS_PATH):
+                os.remove(LANDMARKS_PATH)
+        except OSError:
+            pass
+        self._set_landmark_status()
+
+    # ----------------------------------------------------- standalone log
+    def _toggle_log(self) -> None:
+        if self._log_file is not None:
+            self._stop_log()
+        else:
+            self._start_log()
+
+    def _log_dir(self) -> str:
+        """track_logs subfolder of the camera's current recordings folder."""
+        base = _RECORDINGS_DIR
+        if self._camera is not None:
+            try:
+                base = self._camera.get_output_dir()
+            except Exception:
+                pass
+        return os.path.join(base, TRACK_LOG_SUBDIR)
+
+    def _start_log(self) -> None:
+        try:
+            log_dir = self._log_dir()
+            os.makedirs(log_dir, exist_ok=True)
+            animal = self._animal or "animal"
+            path = os.path.join(
+                log_dir, f"{animal}_{time.strftime('%Y%m%d_%H%M%S')}_track.csv")
+            self._log_file = open(path, "w", newline="")
+            self._log_writer = csv.writer(self._log_file)
+            self._log_writer.writerow(
+                ["sample_idx", "host_unix_s", "state", "detected", "cx", "cy",
+                 "smooth_cx", "smooth_cy", "area", "elongation", "solidity",
+                 "confidence"])
+            self._log_idx = 0
+            self._log_btn.configure(text="Stop track log")
+            self._log_status.set(f"log: {os.path.basename(path)} (UI-rate)")
+        except Exception as e:
+            messagebox.showerror("Track log", f"{type(e).__name__}: {e}")
+            self._log_file = self._log_writer = None
+
+    def _stop_log(self) -> None:
+        if self._log_file is not None:
+            try:
+                self._log_file.close()
+            except Exception:
+                pass
+        self._log_file = self._log_writer = None
+        try:
+            self._log_btn.configure(text="Start track log")
+            self._log_status.set("log: off")
+        except tk.TclError:
+            pass
+
+    # --------------------------------------------------------- poll loop
+    def _on_show_mask(self) -> None:
+        if not self._show_mask_var.get():
+            self._mask_label.configure(image="")
+            self._photo_mask = None
+
+    def _schedule_preview(self) -> None:
+        if self._closed:
+            return
+        try:
+            self._render_preview()
+        finally:
+            try:
+                self.frame.after(PREVIEW_INTERVAL_MS, self._schedule_preview)
+            except tk.TclError:
+                pass
+
+    def _render_preview(self) -> None:
+        """Show the shared latest camera frame + overlay, only while visible."""
+        if self._camera is None:
+            return
+        try:
+            if not self._preview.winfo_viewable():
+                return  # on another tab / hidden -> don't spend any work
+        except tk.TclError:
+            return
+        frame = self._camera.get_latest_frame()
+        if frame is None:
+            return
+        try:
+            h, w = frame.shape[:2]
+            scale = min(1.0, PREVIEW_MAX_W / float(w)) if w else 1.0
+            if scale < 1.0:
+                disp = cv2.resize(frame, (max(1, int(w * scale)), max(1, int(h * scale))),
+                                  interpolation=cv2.INTER_AREA)
+            else:
+                disp = frame.copy()
+            result = self._tracker.snapshot_result() if self.tracking_running() else None
+            if _draw_overlay is not None:
+                _draw_overlay(disp, scale, self._tracker, result)
+            rgb = cv2.cvtColor(disp, cv2.COLOR_BGR2RGB)
+            self._photo_preview = ImageTk.PhotoImage(Image.fromarray(rgb))
+            self._preview.configure(image=self._photo_preview)
+            # Colorized binary mask, stacked under the camera (tracked blob green).
+            if self._show_mask_var.get() and result is not None and result.mask is not None:
+                self._render_mask(result.mask, result.chosen_contour)
+        except Exception:
+            pass
+
+    def _schedule_poll(self) -> None:
+        if self._closed:
+            return
+        try:
+            self._poll()
+        finally:
+            try:
+                self.frame.after(POLL_INTERVAL_MS, self._schedule_poll)
+            except tk.TclError:
+                pass
+
+    def _poll(self) -> None:
+        tr = self._tracker
+        if tr is None:
+            return
+        self._bg_status.set("reference: set" if tr.has_reference() else "reference: none")
+
+        registering, acc, target = tr.registration_status()
+        self._reg_btn.configure(text=("Finalize register" if registering else "Register rat"))
+
+        result = tr.snapshot_result()
+        if registering:
+            self._model_status.set(f"REGISTERING  acc={acc}/{target}")
+        elif tr.has_model():
+            m = tr.get_model()
+            cov = "cov" if m.coverage_ok else "thin"
+            self._model_status.set(f"model: set  n={m.n}  {cov}")
+        else:
+            self._model_status.set("model: none")
+
+        if not self.tracking_running():
+            self._readout.set("state: (tracking disabled)")
+        elif result is not None:
+            self._readout.set(
+                f"state: {result.state}   conf: {result.confidence:.2f}   "
+                f"area: {int(result.area)}   elong: {result.elongation:.2f}   "
+                f"sol: {result.solidity:.2f}")
+        else:
+            self._readout.set("state: -")
+
+        if self._log_writer is not None and result is not None:
+            self._write_log_row(result)
+
+    def _render_mask(self, mask, contour=None) -> None:
+        """Show the binary mask (white blobs) with the tracked blob filled green.
+
+        `mask` and `contour` are both at processing resolution, so the contour
+        aligns with the mask pixels before any display scaling.
+        """
+        try:
+            bgr = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+            if contour is not None:
+                cv2.drawContours(bgr, [contour], -1, (0, 255, 0), thickness=cv2.FILLED)
+            h, w = bgr.shape[:2]
+            scale = MASK_VIEW_W / float(w) if w else 1.0
+            dw, dh = max(1, int(w * scale)), max(1, int(h * scale))
+            bgr = cv2.resize(bgr, (dw, dh), interpolation=cv2.INTER_NEAREST)
+            rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+            self._photo_mask = ImageTk.PhotoImage(Image.fromarray(rgb))
+            self._mask_label.configure(image=self._photo_mask)
+        except Exception:
+            pass
+
+    def _write_log_row(self, result) -> None:
+        try:
+            cx, cy = result.centroid if result.centroid is not None else ("", "")
+            sx, sy = result.smoothed if result.smoothed is not None else ("", "")
+            self._log_writer.writerow([
+                self._log_idx, f"{time.time():.6f}", result.state,
+                int(result.detected),
+                f"{cx:.1f}" if cx != "" else "", f"{cy:.1f}" if cy != "" else "",
+                f"{sx:.1f}" if sx != "" else "", f"{sy:.1f}" if sy != "" else "",
+                int(result.area), f"{result.elongation:.3f}",
+                f"{result.solidity:.3f}", f"{result.confidence:.3f}"])
+            self._log_idx += 1
+        except Exception:
+            pass
+
+
+class _RoiEditor:
+    """Modal still-frame polygon editor (precise clicking; rat won't interfere).
+
+    Left-click adds a vertex, right-click / Enter / "Save" commits (>=3 verts),
+    "z" undoes, Esc / "Cancel" aborts. Display coords are normalized (0..1) on
+    commit so the polygon survives any later scaling.
+    """
+
+    def __init__(self, parent, frame_bgr, on_commit):
+        self._on_commit = on_commit
+        h, w = frame_bgr.shape[:2]
+        self._scale = min(1.0, EDITOR_MAX_W / float(w)) if w else 1.0
+        dw, dh = max(1, int(w * self._scale)), max(1, int(h * self._scale))
+        disp = cv2.resize(frame_bgr, (dw, dh), interpolation=cv2.INTER_AREA) \
+            if self._scale < 1.0 else frame_bgr.copy()
+        rgb = cv2.cvtColor(disp, cv2.COLOR_BGR2RGB)
+        self._dw, self._dh = dw, dh
+        self._pts = []
+
+        self._top = tk.Toplevel(parent)
+        self._top.title("Define region - L-click add, R-click/Enter commit, z undo, Esc cancel")
+        self._top.transient(parent.winfo_toplevel())
+        self._photo = ImageTk.PhotoImage(Image.fromarray(rgb))
+        self._canvas = tk.Canvas(self._top, width=dw, height=dh, highlightthickness=0)
+        self._canvas.pack()
+        self._canvas.create_image(0, 0, anchor="nw", image=self._photo)
+
+        bar = ttk.Frame(self._top)
+        bar.pack(fill=tk.X)
+        ttk.Button(bar, text="Save", command=self._commit).pack(side=tk.LEFT, padx=4, pady=4)
+        ttk.Button(bar, text="Undo", command=self._undo).pack(side=tk.LEFT, padx=4)
+        ttk.Button(bar, text="Cancel", command=self._cancel).pack(side=tk.LEFT, padx=4)
+
+        self._canvas.bind("<Button-1>", self._add)
+        self._canvas.bind("<Button-3>", lambda _e: self._commit())
+        self._top.bind("<Return>", lambda _e: self._commit())
+        self._top.bind("<Escape>", lambda _e: self._cancel())
+        self._top.bind("z", lambda _e: self._undo())
+        self._top.grab_set()
+
+    def _add(self, event) -> None:
+        self._pts.append((event.x, event.y))
+        self._redraw()
+
+    def _undo(self) -> None:
+        if self._pts:
+            self._pts.pop()
+            self._redraw()
+
+    def _redraw(self) -> None:
+        self._canvas.delete("ov")
+        for i, (x, y) in enumerate(self._pts):
+            self._canvas.create_oval(x - 3, y - 3, x + 3, y + 3, fill="yellow",
+                                     outline="black", tags="ov")
+            if i > 0:
+                px, py = self._pts[i - 1]
+                self._canvas.create_line(px, py, x, y, fill="yellow", tags="ov")
+        if len(self._pts) >= 3:
+            x0, y0 = self._pts[0]
+            xn, yn = self._pts[-1]
+            self._canvas.create_line(xn, yn, x0, y0, fill="yellow", dash=(4, 2),
+                                     tags="ov")
+
+    def _commit(self) -> None:
+        if len(self._pts) < 3:
+            messagebox.showinfo("Define region", "Need at least 3 points.")
+            return
+        norm = [(x / self._dw, y / self._dh) for x, y in self._pts]
+        self._on_commit(norm)
+        self._close()
+
+    def _cancel(self) -> None:
+        self._close()
+
+    def _close(self) -> None:
+        try:
+            self._top.grab_release()
+        except tk.TclError:
+            pass
+        try:
+            self._top.destroy()
+        except tk.TclError:
+            pass
+
+
+class _LandmarkEditor:
+    """Modal still-frame editor for single-point landmark annotations.
+
+    Shows the captured frame with a side list of landmarks: the fixed named set
+    (reward wells + body-sensor beams) pre-seeded, plus any existing custom
+    points. Select a landmark to "arm" it, then left-click the image to place it
+    (auto-advancing to the next unplaced). "Add custom point..." appends a named
+    point; "Clear selected"/"Clear all" remove placements. On Save the placed
+    landmarks (normalized 0..1) are handed back via on_commit. See ADR-0018.
+    """
+
+    def __init__(self, parent, frame_bgr, fixed_spec, existing, on_commit):
+        self._on_commit = on_commit
+        h, w = frame_bgr.shape[:2]
+        self._scale = min(1.0, EDITOR_MAX_W / float(w)) if w else 1.0
+        dw, dh = max(1, int(w * self._scale)), max(1, int(h * self._scale))
+        disp = cv2.resize(frame_bgr, (dw, dh), interpolation=cv2.INTER_AREA) \
+            if self._scale < 1.0 else frame_bgr.copy()
+        rgb = cv2.cvtColor(disp, cv2.COLOR_BGR2RGB)
+        self._dw, self._dh = dw, dh
+
+        # Working list of entries: {kind, index, label, x, y(or None)}. Seed the
+        # fixed set, pre-filling coords from any matching existing landmark, then
+        # append existing custom points not covered by the fixed set.
+        existing = existing or []
+
+        def find_existing(kind, index):
+            for lm in existing:
+                if lm.get("kind") == kind and lm.get("index") == index:
+                    return lm
+            return None
+
+        self._items = []
+        for kind, index, label in fixed_spec:
+            match = find_existing(kind, index)
+            self._items.append({
+                "kind": kind, "index": index, "label": label,
+                "x": (match["x"] if match else None),
+                "y": (match["y"] if match else None),
+            })
+        covered = {(k, i) for k, i, _ in fixed_spec}
+        for lm in existing:
+            if (lm.get("kind"), lm.get("index")) in covered:
+                continue
+            self._items.append({
+                "kind": lm.get("kind", "custom"), "index": lm.get("index"),
+                "label": lm.get("label", "custom"),
+                "x": lm.get("x"), "y": lm.get("y"),
+            })
+
+        self._top = tk.Toplevel(parent)
+        self._top.title("Define landmarks - select one, click to place; "
+                        "Enter/Save commit, Esc cancel")
+        self._top.transient(parent.winfo_toplevel())
+
+        body = ttk.Frame(self._top)
+        body.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        # Right: the list of landmarks.
+        side = ttk.Frame(body)
+        side.pack(side=tk.RIGHT, fill=tk.Y, padx=4, pady=4)
+        ttk.Label(side, text="Landmarks (select, then click image):").pack(
+            side=tk.TOP, anchor="w")
+        self._listbox = tk.Listbox(side, width=28, height=18,
+                                   exportselection=False)
+        self._listbox.pack(side=tk.TOP, fill=tk.Y, expand=True)
+        self._listbox.bind("<<ListboxSelect>>", lambda _e: None)
+        ttk.Button(side, text="Add custom point...",
+                   command=self._add_custom).pack(side=tk.TOP, fill=tk.X, pady=(4, 0))
+        ttk.Button(side, text="Clear selected",
+                   command=self._clear_selected).pack(side=tk.TOP, fill=tk.X)
+        ttk.Button(side, text="Clear all",
+                   command=self._clear_all).pack(side=tk.TOP, fill=tk.X)
+
+        # Left: the image canvas.
+        self._photo = ImageTk.PhotoImage(Image.fromarray(rgb))
+        self._canvas = tk.Canvas(body, width=dw, height=dh, highlightthickness=0)
+        self._canvas.pack(side=tk.LEFT)
+        self._canvas.create_image(0, 0, anchor="nw", image=self._photo)
+
+        bar = ttk.Frame(self._top)
+        bar.pack(fill=tk.X)
+        ttk.Button(bar, text="Save", command=self._commit).pack(
+            side=tk.LEFT, padx=4, pady=4)
+        ttk.Button(bar, text="Cancel", command=self._cancel).pack(
+            side=tk.LEFT, padx=4)
+
+        self._canvas.bind("<Button-1>", self._place)
+        self._top.bind("<Return>", lambda _e: self._commit())
+        self._top.bind("<Escape>", lambda _e: self._cancel())
+        self._top.grab_set()
+
+        self._refresh_list(select=self._first_unplaced())
+        self._redraw()
+
+    # ------------------------------------------------------------- helpers
+    def _first_unplaced(self) -> int:
+        for i, it in enumerate(self._items):
+            if it["x"] is None:
+                return i
+        return 0 if self._items else -1
+
+    def _selected_index(self) -> int:
+        sel = self._listbox.curselection()
+        return int(sel[0]) if sel else -1
+
+    def _refresh_list(self, select: int = -1) -> None:
+        self._listbox.delete(0, tk.END)
+        for it in self._items:
+            if it["x"] is None:
+                suffix = "  (unplaced)"
+            else:
+                suffix = f"  ({it['x']:.2f}, {it['y']:.2f})"
+            self._listbox.insert(tk.END, it["label"] + suffix)
+        if 0 <= select < len(self._items):
+            self._listbox.selection_clear(0, tk.END)
+            self._listbox.selection_set(select)
+            self._listbox.see(select)
+
+    def _redraw(self) -> None:
+        self._canvas.delete("ov")
+        sel = self._selected_index()
+        for i, it in enumerate(self._items):
+            if it["x"] is None:
+                continue
+            x, y = it["x"] * self._dw, it["y"] * self._dh
+            color = "#00ff00" if it["kind"] == "well" else (
+                "#ff66dd" if it["kind"] == "sensor" else "#ffaa22")
+            r = 5
+            outline = "red" if i == sel else "black"
+            self._canvas.create_line(x - r, y, x + r, y, fill=color, width=2,
+                                     tags="ov")
+            self._canvas.create_line(x, y - r, x, y + r, fill=color, width=2,
+                                     tags="ov")
+            self._canvas.create_oval(x - r, y - r, x + r, y + r, outline=outline,
+                                     tags="ov")
+            self._canvas.create_text(x + 8, y - 8, text=it["label"], anchor="w",
+                                     fill=color, tags="ov",
+                                     font=("TkDefaultFont", 7))
+
+    def _place(self, event) -> None:
+        idx = self._selected_index()
+        if idx < 0:
+            messagebox.showinfo("Define landmarks",
+                                "Select a landmark in the list first.")
+            return
+        self._items[idx]["x"] = max(0.0, min(1.0, event.x / self._dw))
+        self._items[idx]["y"] = max(0.0, min(1.0, event.y / self._dh))
+        nxt = self._first_unplaced()
+        self._refresh_list(select=(nxt if nxt >= 0 else idx))
+        self._redraw()
+
+    def _add_custom(self) -> None:
+        name = simpledialog.askstring("Add custom point", "Label:",
+                                      parent=self._top)
+        if not name:
+            return
+        self._items.append({"kind": "custom", "index": None,
+                            "label": name.strip() or "custom",
+                            "x": None, "y": None})
+        self._refresh_list(select=len(self._items) - 1)
+        self._redraw()
+
+    def _clear_selected(self) -> None:
+        idx = self._selected_index()
+        if idx < 0:
+            return
+        it = self._items[idx]
+        if it["kind"] == "custom":
+            # Custom points are removed entirely; fixed ones just unplaced.
+            del self._items[idx]
+            idx = min(idx, len(self._items) - 1)
+        else:
+            it["x"] = it["y"] = None
+        self._refresh_list(select=idx)
+        self._redraw()
+
+    def _clear_all(self) -> None:
+        kept = []
+        for it in self._items:
+            if it["kind"] != "custom":
+                it["x"] = it["y"] = None
+                kept.append(it)
+        self._items = kept
+        self._refresh_list(select=self._first_unplaced())
+        self._redraw()
+
+    def _commit(self) -> None:
+        placed = [
+            {"kind": it["kind"], "index": it["index"], "label": it["label"],
+             "x": it["x"], "y": it["y"]}
+            for it in self._items if it["x"] is not None and it["y"] is not None
+        ]
+        self._on_commit(placed)
+        self._close()
+
+    def _cancel(self) -> None:
+        self._close()
+
+    def _close(self) -> None:
+        try:
+            self._top.grab_release()
+        except tk.TclError:
+            pass
+        try:
+            self._top.destroy()
+        except tk.TclError:
+            pass

@@ -1,0 +1,1126 @@
+"""
+camera_view.py - Basler camera module for experiment_control.py (Step 0).
+
+A live-preview + lossless-recording tab for the rig's Basler acA1300-60gc GigE
+camera. It plugs into experiment_control.py with the same module contract the
+other modules use:
+
+    widget() -> a Tk widget to place in its tab
+    apply(line: str) -> None  to handle each serial line
+    close() -> None  (optional) to release threads/camera on app exit
+
+Design (free-run, no hardware trigger - see docs/decisions/0011):
+  - A background GRAB thread owns the camera (pypylon), runs it free-running,
+    debayers to BGR, updates a "latest frame" slot for preview, and - while
+    recording - hands frames to a bounded queue. It tracks dropped/incomplete
+    frames via the camera BlockID and GrabSucceeded().
+  - A background ENCODE thread drains the queue, writes video (PyAV: lossless
+    FFV1/.mkv or compressed H.264/.mp4, selected in the GUI) plus a per-frame
+    sidecar CSV. Decoupling grab from encode
+    means a slow disk back-pressures the queue (a controlled, counted frame drop)
+    instead of stalling acquisition or freezing the Tk GUI.
+  - The Tk main thread only does preview (throttled via after) and controls.
+
+All heavy dependencies (pypylon, OpenCV, numpy, Pillow) are imported defensively
+so that importing this module never breaks experiment_control.py; if anything is
+missing (or no camera is found, or the camera is busy because Pylon Viewer is
+open) the tab shows a clear message and the rest of the GUI runs normally.
+
+The camera is opened by a stable identifier (serial / IP / MAC), defaulting to
+the rig camera's known IP, so it always grabs the right interface.
+"""
+
+from __future__ import annotations
+
+import csv
+import os
+import queue
+import sys
+import threading
+import time
+import tkinter as tk
+from dataclasses import dataclass
+from tkinter import filedialog, ttk
+from typing import Optional, Tuple
+
+# ----------------------------- defensive imports -----------------------------
+# Importing this module must never crash experiment_control.py, so every heavy
+# optional dependency is guarded and the failure is surfaced in the tab instead.
+try:
+    from pypylon import pylon  # type: ignore
+    _PYLON_ERR: Optional[str] = None
+except Exception as e:  # pragma: no cover - depends on the host environment
+    pylon = None  # type: ignore
+    _PYLON_ERR = f"{type(e).__name__}: {e}"
+
+try:
+    import numpy as np  # type: ignore
+    _NUMPY_ERR: Optional[str] = None
+except Exception as e:  # pragma: no cover
+    np = None  # type: ignore
+    _NUMPY_ERR = f"{type(e).__name__}: {e}"
+
+try:
+    import cv2  # type: ignore
+    _CV2_ERR: Optional[str] = None
+except Exception as e:  # pragma: no cover
+    cv2 = None  # type: ignore
+    _CV2_ERR = f"{type(e).__name__}: {e}"
+
+try:
+    from PIL import Image, ImageTk  # type: ignore
+    _PIL_ERR: Optional[str] = None
+except Exception as e:  # pragma: no cover
+    Image = None  # type: ignore
+    ImageTk = None  # type: ignore
+    _PIL_ERR = f"{type(e).__name__}: {e}"
+
+# PyAV is required only for recording (preview works without it): OpenCV's FFV1
+# writer is single-threaded and can't keep up with 1.3 MP color at the rig's
+# frame rate, so we encode FFV1 with PyAV's slice multithreading. See
+# docs/decisions/0012.
+try:
+    import av  # type: ignore
+    _AV_ERR: Optional[str] = None
+except Exception as e:  # pragma: no cover
+    av = None  # type: ignore
+    _AV_ERR = f"{type(e).__name__}: {e}"
+
+# Shared lens-distortion loading + undistortion (also used by the tracker
+# prototype, so tuning matches this pipeline). See docs/decisions/0015.
+from calibration import Undistorter, load_calibration  # noqa: E402
+
+# Shared tracking-overlay drawing (also used by the Tracking tab so previews
+# match). Guarded: tracking deps may be absent without breaking the camera tab.
+try:
+    from tracker import draw_overlay as _draw_track_overlay_shared  # noqa: E402
+except Exception:  # pragma: no cover
+    _draw_track_overlay_shared = None  # type: ignore
+
+
+# ================================== CONFIG ===================================
+# Stable identifier for the rig camera. The grab thread matches a connected
+# device on (in order) serial, IP, then MAC; if none match it falls back to the
+# first device found. The known-good rig camera is on an isolated subnet.
+CAMERA_IP = "192.168.3.3"
+CAMERA_SERIAL = ""            # set if you prefer to pin by serial number
+CAMERA_MAC = "0030531AD4B0"   # 00:30:53:1A:D4:B0, colons stripped
+
+DEFAULT_OUTPUT_DIR = r"C:\Users\Celine\Documents\t-maze_recordings"
+DEFAULT_FPS = 30.0            # used for the video container if the camera can't report one
+
+# Orientation correction so the camera frame matches the Rig view schematic
+# (reward ports at top, start box at bottom). Applied at the source, so both the
+# live preview and the recorded video share the same orientation. One of:
+# "none", "rot180", "mirror_h", "flip_v", "rot90_cw", "rot90_ccw".
+ORIENTATION = "rot180"
+PREVIEW_INTERVAL_MS = 66      # ~15 fps preview, decoupled from capture rate
+PREVIEW_MAX_W = 480           # downscale preview to keep the GUI light
+RETRIEVE_TIMEOUT_MS = 1000    # how long RetrieveResult waits before we re-check stop
+QUEUE_SECONDS = 2.0           # bounded queue holds ~this many seconds of frames
+
+# Lens-distortion correction (see docs/decisions/0015). The calibration is
+# computed offline in MATLAB cameraCalibrator and exported to an OpenCV-
+# convention JSON (rig-hardware/camera/export_calibration_to_json.m -> .json,
+# versioned in the resources repo). When a valid calibration is loaded it is
+# applied at the source (debayer -> undistort -> orient), so the preview, the
+# tracking pipeline, and the recording all share the corrected geometry. The
+# default path resolves to the sibling resources repo, location-independently.
+CALIBRATION_PATH = os.path.normpath(os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), os.pardir, os.pardir,
+    "os_code_t_maze_resources", "rig-hardware", "camera", "camera_calibration.json"))
+# getOptimalNewCameraMatrix alpha: 0 scales so the undistorted image has no
+# invalid (black) border at the cost of cropping a little; 1 keeps all pixels
+# with black wedges. 0 keeps the recorded frame full and border-free.
+UNDISTORT_ALPHA = 0.0
+
+# Sidecar CSV columns (future-proofed: cam_block_id / cam_timestamp are written
+# now even though Step 0 doesn't analyze them, so early recordings stay usable).
+SIDECAR_COLUMNS = ("frame_idx", "host_unix_s", "rig_ms", "cam_block_id", "cam_timestamp")
+# Tracking columns appended to every recording's sidecar (blank when tracking is
+# off), so the per-frame track stays aligned with the video. See ADR-0014.
+TRACK_COLUMNS = ("track_state", "track_detected", "track_cx", "track_cy",
+                 "track_smooth_cx", "track_smooth_cy", "track_area",
+                 "track_elongation", "track_solidity", "track_confidence")
+_TRACK_BLANKS = ("",) * len(TRACK_COLUMNS)
+
+# How many FFV1 slices to split each frame into for multithreaded encoding. More
+# slices => more parallelism across cores (at a tiny size cost). See ADR-0012.
+FFV1_SLICES = 24
+
+# Selectable recording formats (GUI labels -> internal codec id). Lossless FFV1
+# is bit-exact but large (~250 GB/hr at 1.3 MP/42 fps); H.264 is lossy but
+# 25-100x smaller and fine for behavioral tracking. See docs/decisions/0013.
+RECORD_FORMATS = (("Lossless (FFV1)", "ffv1"), ("Compressed (H.264)", "h264"))
+FFV1_EXT, H264_EXT = ".mkv", ".mp4"
+H264_PRESET = "superfast"   # keeps up at full res with margin; good compression
+DEFAULT_CRF = 18            # H.264 quality: lower = better/larger (~18 visually lossless)
+
+
+@dataclass
+class _Counters:
+    """Live acquisition health, shown in the status bar. Guarded by a lock."""
+    grabbed: int = 0       # frames successfully retrieved from the camera
+    saved: int = 0         # frames written to the current/last recording
+    src_drops: int = 0     # frames the camera produced but we never received (BlockID gaps)
+    incomplete: int = 0    # grabs that arrived corrupt/partial
+    queue_drops: int = 0   # frames dropped because the encode queue was full
+
+
+@dataclass
+class _RecParams:
+    """Everything the encode thread needs to open a recording's outputs."""
+    video_path: str
+    csv_path: str
+    fps: float
+    size: Tuple[int, int]   # (width, height)
+    header: dict
+    codec: str = "ffv1"     # "ffv1" (lossless) or "h264" (compressed)
+    crf: int = DEFAULT_CRF  # H.264 quality (ignored for FFV1)
+
+
+class _VideoWriter:
+    """PyAV-backed video writer supporting lossless FFV1 or lossy H.264.
+
+    Input frames are BGR uint8 (HxWx3). FFV1 is intra-only and uses slice
+    multithreading, stored as "bgr0" (BGR + ignored pad byte), which is bit-exact
+    lossless for 8-bit BGR. (Plain 8-bit "gbrp" is not among FFmpeg's FFV1 pixel
+    formats - only gbrp9/10/12... - so bgr0 is the 8-bit lossless choice.) H.264
+    (libx264) encodes to yuv420p at the given CRF; much smaller, lossy.
+    """
+
+    def __init__(self, path: str, fps: float, size: Tuple[int, int],
+                 codec: str = "ffv1", crf: int = DEFAULT_CRF):
+        self.container = av.open(path, mode="w")
+        rate = max(1, int(round(fps)))
+        if codec == "h264":
+            self.stream = self.container.add_stream("libx264", rate=rate, options={
+                "crf": str(crf),
+                "preset": H264_PRESET,
+            })
+            self._enc_fmt = "yuv420p"
+        else:  # ffv1 lossless
+            self.stream = self.container.add_stream("ffv1", rate=rate, options={
+                "slices": str(FFV1_SLICES),
+                "slicecrc": "1",   # per-slice CRC: cheap integrity check
+            })
+            self._enc_fmt = "bgr0"  # BGR + pad byte: bit-exact lossless for 8-bit BGR
+        self.stream.width, self.stream.height = size
+        self.stream.pix_fmt = self._enc_fmt
+        # Enable multithreading across all cores.
+        for obj in (self.stream, getattr(self.stream, "codec_context", None)):
+            if obj is None:
+                continue
+            try:
+                obj.thread_type = "AUTO"
+            except Exception:
+                pass
+        try:
+            self.stream.codec_context.thread_count = 0  # 0 == auto (all cores)
+        except Exception:
+            pass
+        self._pts = 0
+
+    def write(self, frame_bgr) -> None:
+        vframe = av.VideoFrame.from_ndarray(frame_bgr, format="bgr24")
+        vframe = vframe.reformat(format=self._enc_fmt)
+        vframe.pts = self._pts
+        self._pts += 1
+        for packet in self.stream.encode(vframe):
+            self.container.mux(packet)
+
+    def close(self) -> None:
+        try:
+            for packet in self.stream.encode(None):  # flush the encoder
+                self.container.mux(packet)
+        except Exception:
+            pass
+        finally:
+            try:
+                self.container.close()
+            except Exception:
+                pass
+
+
+class CameraView:
+    """Tk module: live Basler preview + lossless FFV1 recording.
+
+    Module contract used by experiment_control.py: widget(), apply(line), and
+    (optionally) close().
+    """
+
+    def __init__(self, parent: tk.Misc, tracker=None):
+        self._parent = parent
+        self.frame = ttk.Frame(parent)
+
+        # ---- shared state across threads ----
+        self._stop = threading.Event()
+        self._recording = threading.Event()
+        self._latest_lock = threading.Lock()
+        self._latest_frame = None              # most recent BGR numpy frame (preview)
+
+        # Optional markerless tracker (shared RatTracker injected by
+        # experiment_control.py). Tracking is OFF by default - flipped on from the
+        # Tracking tab - so this tab behaves exactly as before unless requested.
+        # process() runs on the grab thread; the result drives the preview overlay
+        # and the per-frame sidecar track columns. See ADR-0014.
+        self._tracker = tracker
+        self._track_on = threading.Event()
+        self._latest_track = None              # most recent TrackResult (overlay)
+        self._counters_lock = threading.Lock()
+        self._counters = _Counters()
+        self._cam_fps = DEFAULT_FPS
+        self._animal_id = ""                   # learned from the serial ANIMAL line
+        self._latest_rig_ms = ""               # latest <ms> seen on the serial stream
+
+        # .pfs profile request (applied by the grab thread, which owns the camera)
+        self._pfs_lock = threading.Lock()
+        self._pfs_path: Optional[str] = None
+        self._pfs_pending = False
+
+        # Lens-distortion correction. The Undistorter (shared with the tracker
+        # prototype) builds/applies the remap on the grab thread; the calibration
+        # and enable flag are set from the Tk thread (startup auto-load / Load
+        # button). See docs/decisions/0015.
+        self._undistorter = Undistorter(alpha=UNDISTORT_ALPHA)
+        self._undistort_enabled = True
+        self._calib_mismatch_warned = False      # warn once when calib size != frame size
+
+        # recording handoff (set before _recording is set; read by encode thread)
+        self._rec_params: Optional[_RecParams] = None
+        # Bounded queue sized to absorb encoder spin-up / transient disk stalls.
+        # Each color frame is a few MB, so keep this modest (RAM = maxsize * frame).
+        maxsize = max(16, int(QUEUE_SECONDS * 45))
+        self._queue: "queue.Queue" = queue.Queue(maxsize=maxsize)
+        # Recording needs PyAV; preview does not. Gate the record button on it.
+        self._can_record = av is not None
+        self._encode_error_posted = False  # surface the first encode error, once
+
+        # session/record mismatch warning bookkeeping (one nag per session)
+        self._session_active = False
+        self._warned_not_recording = False
+        self._warned_still_recording = False
+
+        self._photo = None  # keep a reference so Tk doesn't GC the preview image
+
+        # If a hard dependency is missing, show why and stop here (no threads).
+        missing = self._missing_dependency()
+        if missing:
+            self._build_message(
+                f"Camera tab unavailable - missing dependency:\n{missing}\n\n"
+                "Install the host camera requirements (see host/requirements.txt) "
+                "and restart experiment_control.py.")
+            self._grab_thread = None
+            self._encode_thread = None
+            return
+
+        self._build_ui()
+
+        # Auto-load the rig calibration if present (failure is silent here; the
+        # status label shows whether a calibration is active).
+        if os.path.exists(CALIBRATION_PATH):
+            self._load_calibration(CALIBRATION_PATH, announce_failure=False)
+
+        # Start workers. The grab thread opens the camera and streams for preview
+        # immediately; recording only gates the queue + writer.
+        self._encode_thread = threading.Thread(
+            target=self._encode_loop, name="CameraView-encode", daemon=True)
+        self._grab_thread = threading.Thread(
+            target=self._grab_loop, name="CameraView-grab", daemon=True)
+        self._encode_thread.start()
+        self._grab_thread.start()
+
+        self._schedule_preview()
+
+    # ------------------------------------------------------------ module API
+    def widget(self) -> tk.Widget:
+        return self.frame
+
+    def apply(self, line: str) -> None:
+        """Handle one serial line (runs on the Tk main thread).
+
+        Captures the latest rig <ms> for the sidecar, learns the animal id, and
+        drives the dismissable session/record mismatch warnings.
+        """
+        parts = line.split(",")
+        if not parts or not parts[0].isdigit():
+            return
+        self._latest_rig_ms = parts[0]
+        typ = parts[1] if len(parts) > 1 else ""
+
+        if typ == "ANIMAL" and len(parts) > 2:
+            self._animal_id = parts[2].strip()
+            return
+
+        # Session start: first TRIAL (or the sequence dump that precedes it).
+        if typ in ("TRIAL", "SEQ_START"):
+            if not self._session_active:
+                self._session_active = True
+                self._warned_not_recording = False
+                self._warned_still_recording = False
+            if not self._recording.is_set() and not self._warned_not_recording:
+                self._warned_not_recording = True
+                self._show_warning(
+                    "Session started but the camera is NOT recording.")
+            return
+
+        if typ == "SESSION_COMPLETE":
+            if self._recording.is_set() and not self._warned_still_recording:
+                self._warned_still_recording = True
+                self._show_warning(
+                    "Session ended but the camera is STILL recording.")
+            self._session_active = False
+            return
+
+    def close(self) -> None:
+        """Stop threads and release the camera + any open recording."""
+        self._stop.set()
+        self._recording.clear()
+        for t in (self._grab_thread, self._encode_thread):
+            if t is not None and t.is_alive():
+                t.join(timeout=3.0)
+
+    # -------------------------------------------------- tracking integration
+    def get_latest_frame(self):
+        """Return a copy of the most recent oriented BGR frame (or None).
+
+        Used by the Tracking tab's still-frame ROI editor. Returns a copy so the
+        caller can hold/annotate it without racing the grab thread.
+        """
+        with self._latest_lock:
+            frame = self._latest_frame
+        return None if frame is None else frame.copy()
+
+    def enable_tracking(self, on: bool) -> None:
+        """Enable/disable running the tracker on each grabbed frame."""
+        if self._tracker is None:
+            return
+        if on:
+            self._track_on.set()
+        else:
+            self._track_on.clear()
+            with self._latest_lock:
+                self._latest_track = None
+
+    def tracking_enabled(self) -> bool:
+        return self._tracker is not None and self._track_on.is_set()
+
+    def get_output_dir(self) -> str:
+        """The currently-configured recordings folder (UI field, or the default).
+
+        Used by the Tracking tab so its track logs land under the same folder.
+        """
+        try:
+            return self._outdir_var.get().strip() or DEFAULT_OUTPUT_DIR
+        except Exception:
+            return DEFAULT_OUTPUT_DIR
+
+    # ---------------------------------------------------------- dependencies
+    @staticmethod
+    def _missing_dependency() -> Optional[str]:
+        problems = []
+        if pylon is None:
+            problems.append(f"pypylon ({_PYLON_ERR})")
+        if np is None:
+            problems.append(f"numpy ({_NUMPY_ERR})")
+        if cv2 is None:
+            problems.append(f"opencv-python ({_CV2_ERR})")
+        if Image is None or ImageTk is None:
+            problems.append(f"pillow ({_PIL_ERR})")
+        return "\n".join(problems) if problems else None
+
+    # ------------------------------------------------------------------- UI
+    def _build_message(self, text: str) -> None:
+        lbl = ttk.Label(self.frame, text=text, anchor="center", justify="center",
+                        padding=24)
+        lbl.pack(fill=tk.BOTH, expand=True)
+
+    def _build_ui(self) -> None:
+        # Dismissable warning banner (hidden until a mismatch fires).
+        self._banner = tk.Frame(self.frame, bg="#f0d000")
+        self._banner_var = tk.StringVar(value="")
+        tk.Label(self._banner, textvariable=self._banner_var, bg="#f0d000",
+                 fg="#222222", anchor="w").pack(side=tk.LEFT, fill=tk.X,
+                                                expand=True, padx=(8, 4), pady=4)
+        tk.Button(self._banner, text="Dismiss", command=self._hide_banner).pack(
+            side=tk.RIGHT, padx=4, pady=2)
+        # (packed/unpacked dynamically by _show_warning/_hide_banner)
+
+        # Live preview.
+        self._preview = ttk.Label(self.frame, anchor="center")
+        self._preview.pack(side=tk.TOP, fill=tk.BOTH, expand=True, padx=4, pady=4)
+
+        # Status line (connection + counters).
+        self._status_var = tk.StringVar(value="Opening camera...")
+        ttk.Label(self.frame, textvariable=self._status_var, anchor="w").pack(
+            side=tk.TOP, fill=tk.X, padx=6)
+
+        # Controls.
+        controls = ttk.Frame(self.frame)
+        controls.pack(side=tk.TOP, fill=tk.X, padx=4, pady=4)
+
+        self._record_btn = ttk.Button(
+            controls, text="Start recording", command=self._toggle_record,
+            state=tk.DISABLED)
+        self._record_btn.pack(side=tk.LEFT, padx=2)
+
+        if not self._can_record:
+            ttk.Label(controls, foreground="#a00000",
+                      text=f"(install 'av' to record: {_AV_ERR})").pack(
+                side=tk.LEFT, padx=(2, 12))
+
+        # Recording format: lossless FFV1 vs compressed H.264 (per recording).
+        ttk.Label(controls, text="Format:").pack(side=tk.LEFT, padx=(8, 0))
+        self._format_var = tk.StringVar(value=RECORD_FORMATS[0][0])
+        self._format_combo = ttk.Combobox(
+            controls, textvariable=self._format_var, state="readonly", width=18,
+            values=[label for label, _ in RECORD_FORMATS])
+        self._format_combo.pack(side=tk.LEFT, padx=2)
+        self._format_combo.bind("<<ComboboxSelected>>",
+                                lambda _e: self._on_format_change())
+        # H.264 quality (CRF): lower = better/larger. Only shown for compressed.
+        self._crf_lbl = ttk.Label(controls, text="quality (CRF):")
+        self._crf_var = tk.IntVar(value=DEFAULT_CRF)
+        self._crf_spin = ttk.Spinbox(controls, from_=0, to=51, width=4,
+                                     textvariable=self._crf_var)
+        self._on_format_change()  # set initial CRF widget visibility
+
+        ttk.Button(controls, text="Load .pfs...", command=self._choose_pfs).pack(
+            side=tk.LEFT, padx=2)
+        self._pfs_var = tk.StringVar(value="(camera defaults)")
+        ttk.Label(controls, textvariable=self._pfs_var).pack(side=tk.LEFT, padx=(2, 12))
+
+        ttk.Label(controls, text="Output:").pack(side=tk.LEFT)
+        self._outdir_var = tk.StringVar(value=DEFAULT_OUTPUT_DIR)
+        ttk.Entry(controls, textvariable=self._outdir_var, width=22).pack(
+            side=tk.LEFT, padx=2)
+        ttk.Button(controls, text="Browse...", command=self._choose_outdir).pack(
+            side=tk.LEFT, padx=2)
+
+        # Lens-distortion correction (camera source). Applied to preview,
+        # tracking, and recording when a valid calibration is loaded.
+        calib_row = ttk.Frame(self.frame)
+        calib_row.pack(side=tk.TOP, fill=tk.X, padx=4, pady=(0, 4))
+        self._undistort_var = tk.BooleanVar(value=self._undistort_enabled)
+        ttk.Checkbutton(calib_row, text="Undistort", variable=self._undistort_var,
+                        command=self._on_undistort_toggle).pack(side=tk.LEFT, padx=2)
+        ttk.Button(calib_row, text="Load calibration...",
+                   command=self._choose_calibration).pack(side=tk.LEFT, padx=2)
+        self._calib_var = tk.StringVar(value="(no calibration)")
+        ttk.Label(calib_row, textvariable=self._calib_var).pack(
+            side=tk.LEFT, padx=(2, 12))
+
+    def _show_warning(self, text: str) -> None:
+        self._banner_var.set(text)
+        # Insert the banner at the very top, above the preview.
+        self._banner.pack(side=tk.TOP, fill=tk.X, before=self._preview)
+
+    def _hide_banner(self) -> None:
+        self._banner.pack_forget()
+
+    def _choose_pfs(self) -> None:
+        path = filedialog.askopenfilename(
+            title="Select a Pylon feature file",
+            filetypes=[("Pylon feature stream", "*.pfs"), ("All files", "*.*")])
+        if not path:
+            return
+        with self._pfs_lock:
+            self._pfs_path = path
+            self._pfs_pending = True
+        self._pfs_var.set(os.path.basename(path))
+
+    def _choose_outdir(self) -> None:
+        path = filedialog.askdirectory(title="Select an output folder")
+        if path:
+            self._outdir_var.set(path)
+
+    # ---------------------------------------------------- lens distortion
+    def _choose_calibration(self) -> None:
+        path = filedialog.askopenfilename(
+            title="Select a camera calibration JSON",
+            filetypes=[("Calibration JSON", "*.json"), ("All files", "*.*")])
+        if path:
+            self._load_calibration(path)
+
+    def _on_undistort_toggle(self) -> None:
+        self._undistort_enabled = bool(self._undistort_var.get())
+
+    def _set_calib_status(self, text: str) -> None:
+        try:
+            self._calib_var.set(text)
+        except (tk.TclError, AttributeError):
+            pass
+
+    def _load_calibration(self, path: str, announce_failure: bool = True) -> bool:
+        """Load an OpenCV-convention calibration JSON and arm undistortion.
+
+        The JSON is produced from MATLAB by rig-hardware/camera/
+        export_calibration_to_json.m (see docs/decisions/0015).
+        """
+        try:
+            calib = load_calibration(path)
+        except Exception as e:
+            if announce_failure:
+                self._post(self._set_calib_status,
+                           f"Calibration load failed: {type(e).__name__}: {e}")
+            return False
+
+        self._undistorter.set_calibration(calib)
+        self._calib_mismatch_warned = False
+        cal_w, cal_h = calib["image_size"]
+        rms = calib["rms"]
+        rms_txt = f", rms={rms:.3f}" if isinstance(rms, (int, float)) else ""
+        self._post(self._set_calib_status,
+                   f"Calibration: {os.path.basename(path)} "
+                   f"({cal_w}x{cal_h}{rms_txt})")
+        return True
+
+    def _maybe_undistort(self, arr):
+        """Undistort a raw BGR frame if a matching calibration is active.
+
+        Runs on the grab thread. On a calibration/frame size mismatch it warns
+        once and returns the frame unchanged rather than applying a wrong map.
+        """
+        if not self._undistort_enabled:
+            return arr
+        out, status = self._undistorter.apply(arr)
+        if status == "mismatch" and not self._calib_mismatch_warned:
+            self._calib_mismatch_warned = True
+            calib = self._undistorter.calibration
+            cal_w, cal_h = calib["image_size"] if calib else (0, 0)
+            h, w = arr.shape[:2]
+            self._post(self._set_calib_status,
+                       f"Calibration is {cal_w}x{cal_h} but frames are "
+                       f"{w}x{h} - undistortion skipped")
+        return out
+
+    def _selected_codec(self) -> Tuple[str, str]:
+        """Return (codec_id, file_extension) for the current Format selection."""
+        label = self._format_var.get()
+        for lbl, codec in RECORD_FORMATS:
+            if lbl == label:
+                return codec, (H264_EXT if codec == "h264" else FFV1_EXT)
+        return "ffv1", FFV1_EXT
+
+    def _on_format_change(self) -> None:
+        """Show the CRF quality control only when the compressed codec is chosen."""
+        codec, _ = self._selected_codec()
+        if codec == "h264":
+            self._crf_lbl.pack(side=tk.LEFT, padx=(8, 0), after=self._format_combo)
+            self._crf_spin.pack(side=tk.LEFT, padx=2, after=self._crf_lbl)
+        else:
+            self._crf_spin.pack_forget()
+            self._crf_lbl.pack_forget()
+
+    # ---------------------------------------------------------- preview loop
+    def _schedule_preview(self) -> None:
+        if self._stop.is_set():
+            return
+        self._update_status()
+        with self._latest_lock:
+            frame = self._latest_frame
+        if frame is not None:
+            self._render_preview(frame)
+        try:
+            self.frame.after(PREVIEW_INTERVAL_MS, self._schedule_preview)
+        except tk.TclError:
+            pass  # widget torn down
+
+    def _render_preview(self, frame_bgr) -> None:
+        try:
+            h, w = frame_bgr.shape[:2]
+            scale = min(1.0, PREVIEW_MAX_W / float(w)) if w else 1.0
+            if scale < 1.0:
+                disp = cv2.resize(frame_bgr, (max(1, int(w * scale)),
+                                              max(1, int(h * scale))),
+                                  interpolation=cv2.INTER_AREA)
+            else:
+                disp = frame_bgr.copy() if self.tracking_enabled() else frame_bgr
+            if self.tracking_enabled():
+                self._draw_track_overlay(disp, scale)
+            rgb = cv2.cvtColor(disp, cv2.COLOR_BGR2RGB)
+            self._photo = ImageTk.PhotoImage(Image.fromarray(rgb))
+            self._preview.configure(image=self._photo)
+        except Exception:
+            pass  # never let a preview hiccup break the GUI
+
+    def _draw_track_overlay(self, disp, scale: float) -> None:
+        """Draw the (shared) tracking overlay on the preview."""
+        if _draw_track_overlay_shared is None:
+            return
+        with self._latest_lock:
+            result = self._latest_track
+        _draw_track_overlay_shared(disp, scale, self._tracker, result)
+
+    def _update_status(self) -> None:
+        with self._counters_lock:
+            c = self._counters
+            line = (f"frames: {c.grabbed}   saved: {c.saved}   "
+                    f"src-drop: {c.src_drops}   incomplete: {c.incomplete}   "
+                    f"q-drop: {c.queue_drops}   queue: {self._queue.qsize()}/"
+                    f"{self._queue.maxsize}")
+        rec = "  [RECORDING]" if self._recording.is_set() else ""
+        self._status_var.set(self._conn_status + "   |   " + line + rec)
+
+    # set by the grab thread via _post; read on the Tk thread
+    _conn_status = "Opening camera..."
+
+    def _post(self, fn, *args) -> None:
+        try:
+            self.frame.after(0, fn, *args)
+        except (tk.TclError, RuntimeError):
+            pass
+
+    def _set_conn_status(self, text: str) -> None:
+        self._conn_status = text
+
+    def _set_record_enabled(self, enabled: bool) -> None:
+        try:
+            self._record_btn.configure(
+                state=(tk.NORMAL if (enabled and self._can_record)
+                       else tk.DISABLED))
+        except tk.TclError:
+            pass
+
+    def _reset_record_button(self) -> None:
+        try:
+            self._record_btn.configure(text="Start recording")
+        except tk.TclError:
+            pass
+
+    # ------------------------------------------------------- recording control
+    def _toggle_record(self) -> None:
+        if self._recording.is_set():
+            self._recording.clear()  # encode thread finalizes the file
+            self._record_btn.configure(text="Start recording")
+            self._set_format_locked(False)
+            return
+
+        with self._latest_lock:
+            frame = self._latest_frame
+        if frame is None:
+            self._show_warning("No frames yet - cannot start recording.")
+            return
+
+        h, w = frame.shape[:2]
+        out_dir = self._outdir_var.get().strip() or DEFAULT_OUTPUT_DIR
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+        except OSError as e:
+            self._show_warning(f"Cannot create output folder: {e}")
+            return
+
+        codec, ext = self._selected_codec()
+        try:
+            crf = int(self._crf_var.get())
+        except (tk.TclError, ValueError):
+            crf = DEFAULT_CRF
+        crf = max(0, min(51, crf))
+
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        animal = self._animal_id or "animal"
+        base = os.path.join(out_dir, f"{animal}_{stamp}")
+        # Record whether the saved frames are lens-corrected, so downstream
+        # analysis knows the video is already undistorted (ADR-0015).
+        calib = self._undistorter.calibration
+        undistorted = self._undistort_enabled and self._undistorter.is_active()
+        calib_rms = calib["rms"] if (calib and isinstance(calib.get("rms"), (int, float))) else ""
+        # Pair the empty-rig background image with this recording so the tracker
+        # can be re-tuned offline against the video (which has no empty-rig
+        # frame). See docs/decisions/0020.
+        bg_name = ""
+        if self._tracker is not None:
+            try:
+                bg = self._tracker.get_background_image()
+            except Exception:
+                bg = None
+            if bg is not None:
+                bg_path = base + "_background.png"
+                try:
+                    if cv2.imwrite(bg_path, bg):
+                        bg_name = os.path.basename(bg_path)
+                except Exception:
+                    bg_name = ""
+        header = {
+            "animal": animal,
+            "fps": f"{self._cam_fps:.3f}",
+            "width": w,
+            "height": h,
+            "pfs": self._pfs_var.get(),
+            "codec": codec,
+            "crf": (crf if codec == "h264" else ""),
+            "start_wall_clock": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "camera": f"ip={CAMERA_IP} mac={CAMERA_MAC}",
+            "undistorted": undistorted,
+            "calibration": (os.path.basename(calib["path"]) if calib else ""),
+            "calib_rms": calib_rms,
+            "background": bg_name,
+        }
+        self._rec_params = _RecParams(
+            video_path=base + ext, csv_path=base + ".csv",
+            fps=self._cam_fps, size=(w, h), header=header, codec=codec, crf=crf)
+
+        # Clear any stale frames so frame_idx starts clean at 0.
+        self._drain_queue()
+        self._recording.set()
+        self._record_btn.configure(text="Stop recording")
+        self._set_format_locked(True)  # don't change format mid-recording
+
+    def _set_format_locked(self, locked: bool) -> None:
+        """Disable the format/quality controls while a recording is in progress."""
+        state = tk.DISABLED if locked else "readonly"
+        try:
+            self._format_combo.configure(state=state)
+            self._crf_spin.configure(state=(tk.DISABLED if locked else tk.NORMAL))
+        except tk.TclError:
+            pass
+
+    def _drain_queue(self) -> None:
+        try:
+            while True:
+                self._queue.get_nowait()
+        except queue.Empty:
+            pass
+
+    # --------------------------------------------------------------- threads
+    def _grab_loop(self) -> None:
+        """Own the camera: open it, stream free-running, feed preview + queue."""
+        camera = None
+        converter = None
+        last_block: Optional[int] = None
+        try:
+            device, factory = self._find_device()
+            if device is None:
+                self._post(self._set_conn_status, "No Basler camera found")
+                return
+            camera = pylon.InstantCamera(factory.CreateDevice(device))
+            camera.Open()
+            self._apply_pfs_if_pending(camera)
+            converter = pylon.ImageFormatConverter()
+            converter.OutputPixelFormat = pylon.PixelType_BGR8packed
+            converter.OutputBitAlignment = pylon.OutputBitAlignment_MsbAligned
+            self._read_fps(camera)
+            camera.StartGrabbing(pylon.GrabStrategy_OneByOne)
+            self._post(self._set_conn_status, self._describe_device(device))
+            self._post(self._set_record_enabled, True)
+        except Exception as e:  # camera busy (Pylon Viewer open), unreachable, etc.
+            self._post(self._set_conn_status,
+                       f"Camera open failed: {type(e).__name__}: {e} "
+                       "(is Pylon Viewer holding it?)")
+            self._safe_close_camera(camera)
+            return
+
+        try:
+            while not self._stop.is_set():
+                # Apply a freshly chosen .pfs (we own the camera here).
+                if self._pfs_pending:
+                    self._reload_pfs(camera)
+
+                try:
+                    grab = camera.RetrieveResult(
+                        RETRIEVE_TIMEOUT_MS, pylon.TimeoutHandling_Return)
+                except Exception:
+                    continue
+                if grab is None:
+                    continue
+                try:
+                    if not grab.IsValid():
+                        continue
+                    if not grab.GrabSucceeded():
+                        with self._counters_lock:
+                            self._counters.incomplete += 1
+                        continue
+
+                    block_id = self._safe_block_id(grab)
+                    cam_ts = self._safe_timestamp(grab)
+                    if last_block is not None and block_id is not None \
+                            and block_id > last_block + 1:
+                        with self._counters_lock:
+                            self._counters.src_drops += block_id - last_block - 1
+                    if block_id is not None:
+                        last_block = block_id
+
+                    arr = converter.Convert(grab).GetArray()  # HxWx3 BGR uint8
+                    arr = self._maybe_undistort(arr)          # lens correction (ADR-0015)
+                    frame = self._orient(arr)
+
+                    # Markerless tracking (optional, default off). Runs on this
+                    # grab thread so the result is frame-aligned with what we
+                    # preview and record. Never let a tracker hiccup kill grab.
+                    track_result = None
+                    if self._tracker is not None and self._track_on.is_set():
+                        try:
+                            track_result = self._tracker.process(frame)
+                        except Exception:
+                            track_result = None
+
+                    with self._latest_lock:
+                        self._latest_frame = frame
+                        self._latest_track = track_result
+                    with self._counters_lock:
+                        self._counters.grabbed += 1
+
+                    if self._recording.is_set():
+                        meta = (time.time(), self._latest_rig_ms,
+                                "" if block_id is None else block_id,
+                                "" if cam_ts is None else cam_ts,
+                                self._track_row(track_result))
+                        self._enqueue(frame, meta)
+                finally:
+                    grab.Release()
+        finally:
+            self._safe_stop_grabbing(camera)
+            self._safe_close_camera(camera)
+            self._post(self._set_record_enabled, False)
+
+    def _enqueue(self, frame, meta) -> None:
+        try:
+            self._queue.put_nowait((frame, meta))
+        except queue.Full:
+            with self._counters_lock:
+                self._counters.queue_drops += 1  # controlled, counted drop
+
+    def _encode_loop(self) -> None:
+        """Drain the queue to FFV1 + sidecar CSV while recording."""
+        writer = None
+        csv_file = None
+        csv_writer = None
+        saved_idx = 0
+        try:
+            while not self._stop.is_set():
+                recording = self._recording.is_set()
+
+                if recording and writer is None:
+                    params = self._rec_params
+                    if params is not None:
+                        self._encode_error_posted = False
+                        writer, csv_file, csv_writer = self._open_outputs(params)
+                        saved_idx = 0
+                        with self._counters_lock:
+                            self._counters.saved = 0
+                        if writer is None:
+                            self._recording.clear()  # open failed; bail cleanly
+                            self._post(self._reset_record_button)
+                            self._post(self._set_format_locked, False)
+
+                if not recording and writer is not None:
+                    self._flush_remaining(writer, csv_writer, saved_idx)
+                    path = self._close_outputs(writer, csv_file)
+                    writer = csv_file = csv_writer = None
+                    self._post(self._set_conn_status_keep(path))
+
+                try:
+                    frame, meta = self._queue.get(timeout=0.2)
+                except queue.Empty:
+                    continue
+
+                if writer is not None:
+                    ok = self._write_frame(writer, csv_writer, saved_idx, frame, meta)
+                    saved_idx += 1
+                    if not ok:
+                        # Surface the failure and stop cleanly rather than
+                        # silently producing an empty video + header-only CSV.
+                        self._recording.clear()
+                        self._post(self._reset_record_button)
+                        self._post(self._set_format_locked, False)
+        finally:
+            if writer is not None:
+                self._flush_remaining(writer, csv_writer, saved_idx)
+                self._close_outputs(writer, csv_file)
+
+    # ------------------------------------------------------ encode helpers
+    def _open_outputs(self, params: _RecParams):
+        try:
+            writer = _VideoWriter(params.video_path, params.fps, params.size,
+                                  codec=params.codec, crf=params.crf)
+            csv_file = open(params.csv_path, "w", newline="")
+            for k, v in params.header.items():
+                csv_file.write(f"# {k}: {v}\n")
+            csv_writer = csv.writer(csv_file)
+            csv_writer.writerow(SIDECAR_COLUMNS + TRACK_COLUMNS)
+            self._post(self._set_conn_status,
+                       f"Recording -> {os.path.basename(params.video_path)}")
+            return writer, csv_file, csv_writer
+        except Exception as e:
+            self._post(self._set_conn_status, f"Recording failed to start: {e}")
+            return None, None, None
+
+    def _write_frame(self, writer, csv_writer, idx, frame, meta) -> bool:
+        try:
+            writer.write(frame)
+            host_unix_s, rig_ms, block_id, cam_ts, track = meta
+            csv_writer.writerow(
+                [idx, f"{host_unix_s:.6f}", rig_ms, block_id, cam_ts] + list(track))
+            with self._counters_lock:
+                self._counters.saved = idx + 1
+            return True
+        except Exception as e:
+            if not self._encode_error_posted:
+                self._encode_error_posted = True
+                self._post(self._set_conn_status,
+                           f"Recording error: {type(e).__name__}: {e}")
+                print(f"[camera_view] encode error: {e}", file=sys.stderr, flush=True)
+            return False
+
+    def _flush_remaining(self, writer, csv_writer, saved_idx) -> None:
+        idx = saved_idx
+        try:
+            while True:
+                frame, meta = self._queue.get_nowait()
+                self._write_frame(writer, csv_writer, idx, frame, meta)
+                idx += 1
+        except queue.Empty:
+            pass
+
+    def _close_outputs(self, writer, csv_file) -> str:
+        path = ""
+        try:
+            if writer is not None:
+                writer.close()
+        except Exception:
+            pass
+        try:
+            if csv_file is not None:
+                path = csv_file.name
+                csv_file.close()
+        except Exception:
+            pass
+        return path
+
+    def _set_conn_status_keep(self, video_or_csv_path: str):
+        name = os.path.basename(video_or_csv_path).rsplit(".", 1)[0] if video_or_csv_path else ""
+        msg = f"Saved recording: {name}" if name else "Recording stopped"
+        return lambda: self._set_conn_status(msg)
+
+    # ------------------------------------------------------- camera helpers
+    def _find_device(self):
+        factory = pylon.TlFactory.GetInstance()
+        devices = factory.EnumerateDevices()
+        if not devices:
+            return None, factory
+        for d in devices:
+            if CAMERA_SERIAL and self._dev_attr(d, "GetSerialNumber") == CAMERA_SERIAL:
+                return d, factory
+        for d in devices:
+            if CAMERA_IP and self._dev_attr(d, "GetIpAddress") == CAMERA_IP:
+                return d, factory
+        for d in devices:
+            mac = (self._dev_attr(d, "GetMacAddress") or "").replace(":", "").upper()
+            if CAMERA_MAC and mac == CAMERA_MAC.upper():
+                return d, factory
+        return devices[0], factory
+
+    @staticmethod
+    def _dev_attr(device, attr: str) -> str:
+        try:
+            return getattr(device, attr)()
+        except Exception:
+            return ""
+
+    def _describe_device(self, device) -> str:
+        model = self._dev_attr(device, "GetModelName") or "Basler"
+        ip = self._dev_attr(device, "GetIpAddress")
+        serial = self._dev_attr(device, "GetSerialNumber")
+        extra = f" @ {ip}" if ip else (f" #{serial}" if serial else "")
+        return f"Connected: {model}{extra}"
+
+    def _read_fps(self, camera) -> None:
+        for attr in ("ResultingFrameRate", "ResultingFrameRateAbs",
+                     "AcquisitionFrameRate", "AcquisitionFrameRateAbs"):
+            try:
+                node = getattr(camera, attr)
+                val = float(node.GetValue())
+                if val > 0:
+                    self._cam_fps = val
+                    return
+            except Exception:
+                continue
+
+    def _apply_pfs_if_pending(self, camera) -> None:
+        with self._pfs_lock:
+            path = self._pfs_path if self._pfs_pending else None
+            self._pfs_pending = False
+        if path:
+            try:
+                pylon.FeaturePersistence.Load(path, camera.GetNodeMap(), True)
+            except Exception as e:
+                self._post(self._set_conn_status, f".pfs load failed: {e}")
+
+    def _reload_pfs(self, camera) -> None:
+        with self._pfs_lock:
+            path = self._pfs_path
+            self._pfs_pending = False
+        if not path:
+            return
+        try:
+            camera.StopGrabbing()
+            pylon.FeaturePersistence.Load(path, camera.GetNodeMap(), True)
+            self._read_fps(camera)
+            camera.StartGrabbing(pylon.GrabStrategy_OneByOne)
+            self._post(self._set_conn_status, f"Loaded {os.path.basename(path)}")
+        except Exception as e:
+            self._post(self._set_conn_status, f".pfs reload failed: {e}")
+
+    @staticmethod
+    def _track_row(result):
+        """Flatten a TrackResult into the TRACK_COLUMNS values (blanks if None)."""
+        if result is None:
+            return _TRACK_BLANKS
+
+        def fmt(pt):
+            return (f"{pt[0]:.1f}", f"{pt[1]:.1f}") if pt is not None else ("", "")
+
+        cx, cy = fmt(result.centroid)
+        sx, sy = fmt(result.smoothed)
+        return (result.state, int(result.detected), cx, cy, sx, sy,
+                int(result.area), f"{result.elongation:.3f}",
+                f"{result.solidity:.3f}", f"{result.confidence:.3f}")
+
+    @staticmethod
+    def _orient(frame):
+        """Apply the configured orientation so frames match the rig schematic.
+
+        Done once at the source, so preview and recording stay consistent. Note
+        rot90_* swap width/height; rot180/mirror/flip keep dimensions.
+        """
+        if ORIENTATION == "rot180":
+            return cv2.rotate(frame, cv2.ROTATE_180)
+        if ORIENTATION == "mirror_h":
+            return cv2.flip(frame, 1)
+        if ORIENTATION == "flip_v":
+            return cv2.flip(frame, 0)
+        if ORIENTATION == "rot90_cw":
+            return cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+        if ORIENTATION == "rot90_ccw":
+            return cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        return frame
+
+    @staticmethod
+    def _safe_block_id(grab) -> Optional[int]:
+        try:
+            return int(grab.BlockID)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _safe_timestamp(grab):
+        try:
+            return int(grab.TimeStamp)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _safe_stop_grabbing(camera) -> None:
+        try:
+            if camera is not None and camera.IsGrabbing():
+                camera.StopGrabbing()
+        except Exception:
+            pass
+
+    @staticmethod
+    def _safe_close_camera(camera) -> None:
+        try:
+            if camera is not None and camera.IsOpen():
+                camera.Close()
+        except Exception:
+            pass

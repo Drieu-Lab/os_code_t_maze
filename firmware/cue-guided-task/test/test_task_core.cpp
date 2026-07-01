@@ -29,6 +29,7 @@ static TaskConfig mkcfg() {
   c.autoDrainOnTrial = false;   /* most tests don't exercise the auto well-clean */
   c.rinseMs = 150;
   c.drainMs = 300;
+  c.rewardPulseMs = 300;        /* logged on REWARD,CENTER (see docs/decisions/0019) */
   c.highToneHz = 8000;
   c.lowToneHz  = 4000;
   return c;
@@ -125,6 +126,7 @@ static void test_full_correct_trial() {
   assert(std::strcmp(findLog(fx, "OUTCOME")->detail, "CORRECT") == 0);
   assert(countTag(fx, FxTag::OpenValve) == 1);    /* reward at the central port */
   assert(std::strcmp(findLog(fx, "REWARD")->detail, "CENTER") == 0);
+  assert(findLog(fx, "REWARD")->tail == (int32_t)c.rewardPulseMs);  /* dur logged for host volume calc */
 
   /* return -> RETURN_ARM only (reward already dispensed), advance trial */
   in = mkin(50); in.beam[B_LRETURN] = true;
