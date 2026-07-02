@@ -43,6 +43,8 @@ from rig_view import RigView
 from camera_view import CameraView
 from reward_volume import (reward_volume_ul, format_volume,
                            DEFAULT_REWARD_PULSE_MS)
+from rig_config import load_rig_config
+from tooltips import tip
 
 # Markerless tracker + its control tab are optional (need opencv/numpy/pillow);
 # guard the imports so the GUI still runs if they're missing.
@@ -57,11 +59,25 @@ try:
 except Exception as e:  # pragma: no cover
     TrackerControlView = None  # type: ignore
     _TRACKER_ERR = _TRACKER_ERR or f"{type(e).__name__}: {e}"
+# Position-based rules engine tab (consumes the tracker + landmarks; actuates
+# reward via the broker). Optional; guarded so a missing dep never breaks the
+# GUI. See docs/decisions/0023.
+try:
+    from rules_view import RulesControlView
+except Exception as e:  # pragma: no cover
+    RulesControlView = None  # type: ignore
+    _TRACKER_ERR = _TRACKER_ERR or f"{type(e).__name__}: {e}"
 
 # ================= CONFIG =================
 BROKER_HOST = "127.0.0.1"
 BROKER_PORT = 5555
 DEFAULT_PULSE_MS = 150   # matches REWARD_PULSE_MS in firmware/common/rig_config.h
+
+# Firmware pin map (single source of truth) - used to label the lick counters by
+# port role. Degrades gracefully if the header can't be parsed. NOTE: trusts
+# flashed == source (see rig_config.py) - reflash the Due after editing it.
+_RIG_CFG = load_rig_config()
+N_LICK = len(_RIG_CFG.lick_pins) if _RIG_CFG.ok and _RIG_CFG.lick_pins else 3
 
 # Scripts start_rig.bat launches; used as a fallback for the "Quit rig" button
 # when this GUI was started without a session id (e.g. run standalone).
@@ -203,6 +219,15 @@ def main() -> int:
         tabs.append(("Tracking", [
             lambda parent: TrackerControlView(
                 parent, tracker=tracker, camera=camera_ref.get("cam"))]))
+    # Rules tab: the position-based rules engine (off by default). It is injected
+    # with the shared tracker, the camera (for frames + still-frame calibration),
+    # and a send callback so it can actuate reward via the broker. The send
+    # closure resolves `client` at call time (created below). See ADR-0023.
+    if tracker is not None and RulesControlView is not None:
+        tabs.append(("Rules", [
+            lambda parent: RulesControlView(
+                parent, tracker=tracker, camera=camera_ref.get("cam"),
+                send=lambda cmd: client.send(cmd))]))
 
     # Build modules into tabs. Modules grouped in one tab are packed
     # left-to-right (schematic on the left, camera on the right). The Rig view
@@ -217,8 +242,10 @@ def main() -> int:
         if title == "Rig view":
             toolbar = ttk.Frame(tab)
             toolbar.pack(side=tk.TOP, fill=tk.X, padx=2, pady=(2, 0))
-            ttk.Button(toolbar, text="Quit rig (close all windows)",
-                       command=quit_rig).pack(side=tk.RIGHT)
+            quit_btn = ttk.Button(toolbar, text="Quit rig (close all windows)",
+                                  command=quit_rig)
+            quit_btn.pack(side=tk.RIGHT)
+            tip(quit_btn, "quit.rig")
             # Pack the bottom strip BEFORE the body so it reserves its space and
             # the body (schematic + camera) fills whatever remains.
             rig_controls_parent = ttk.Frame(tab)
@@ -277,7 +304,33 @@ def main() -> int:
         reward_totals[f"{prefix}_ul"] += vol
         render_rewards()
 
+    # Lick counts: per-port tally of rising lick edges (L,i,1) for the current
+    # session, labeled by the firmware port roles. Like the reward tally, it
+    # resets on a new session (MODE line) or the Reset button. Lets the
+    # experimenter watch lick behavior at the reward (center) port live.
+    lick_counts = [0] * N_LICK
+    lick_vars = [tk.StringVar() for _ in range(N_LICK)]
+
+    def _lick_name(i: int) -> str:
+        role = _RIG_CFG.lick_role(i) if _RIG_CFG.ok else None
+        return f"L{i} ({role})" if role else f"L{i}"
+
+    def render_licks() -> None:
+        for i in range(N_LICK):
+            lick_vars[i].set(f"{_lick_name(i)}: {lick_counts[i]}")
+
+    def reset_licks() -> None:
+        for i in range(N_LICK):
+            lick_counts[i] = 0
+        render_licks()
+
+    def add_lick(i: int) -> None:
+        if 0 <= i < N_LICK:
+            lick_counts[i] += 1
+            render_licks()
+
     reset_rewards()   # seed the display with zeros
+    reset_licks()
 
     # Connect to the broker (must exist before wiring callbacks).
     client = RigClient(root, host=BROKER_HOST, port=BROKER_PORT)
@@ -291,6 +344,11 @@ def main() -> int:
             name = fields[2].strip()
             mode_var.set(f"Mode: {MODE_LABELS.get(name, name)}")
             reset_rewards()   # a MODE line (re)starts the session: zero the tally
+            reset_licks()
+        elif len(fields) == 4 and fields[1] == "L":
+            # Lick edge "L,<i>,<state>": count rising edges (state == 1) per port.
+            if fields[2].isdigit() and fields[3].strip() == "1":
+                add_lick(int(fields[2]))
         elif len(fields) >= 3 and fields[1] == "REWARD":
             # REWARD,CENTER,<dur_ms> (automatic) or REWARD,<port>,MANUAL,<dur_ms>
             # (manual). Tolerate a missing trailing <dur_ms> (pre-v4 firmware /
@@ -330,14 +388,19 @@ def main() -> int:
                 "(a new trial sequence is generated for the Full task)."):
             client.send(cmd)
 
-    ttk.Button(mode_frame, text="Free Roam",
-               command=lambda: confirm_and_send_mode("Free Roam", "MODE,FREE")).grid(
-        row=0, column=0, padx=4, pady=4)
-    ttk.Button(mode_frame, text="Full task",
-               command=lambda: confirm_and_send_mode("Full task", "MODE,FULL")).grid(
-        row=0, column=1, padx=4, pady=4)
-    ttk.Label(mode_frame, textvariable=mode_var).grid(
-        row=0, column=2, sticky="w", padx=(12, 4), pady=4)
+    free_btn = ttk.Button(
+        mode_frame, text="Free Roam",
+        command=lambda: confirm_and_send_mode("Free Roam", "MODE,FREE"))
+    free_btn.grid(row=0, column=0, padx=4, pady=4)
+    tip(free_btn, "mode.free")
+    full_btn = ttk.Button(
+        mode_frame, text="Full task",
+        command=lambda: confirm_and_send_mode("Full task", "MODE,FULL"))
+    full_btn.grid(row=0, column=1, padx=4, pady=4)
+    tip(full_btn, "mode.full")
+    mode_lbl = ttk.Label(mode_frame, textvariable=mode_var)
+    mode_lbl.grid(row=0, column=2, sticky="w", padx=(12, 4), pady=4)
+    tip(mode_lbl, "mode.label")
 
     # Solenoid mapping helper: fire R<port><sol>,<ms> and watch which physical
     # valve clicks vs. which marker flashes in the Rig view tab. The SOL acks that
@@ -364,23 +427,29 @@ def main() -> int:
 
     # Column headers: sol 0-2 reward, 3 drain, 4 rinse.
     headers = ("", "reward", "reward", "reward", "drain", "rinse")
+    header_tips = (None, "sol.header.reward", "sol.header.reward",
+                   "sol.header.reward", "sol.header.drain", "sol.header.rinse")
     for col, text in enumerate(headers):
-        ttk.Label(sol_frame, text=text, font=("TkDefaultFont", 8)).grid(
-            row=0, column=col, padx=2, pady=(2, 0))
+        hdr = ttk.Label(sol_frame, text=text, font=("TkDefaultFont", 8))
+        hdr.grid(row=0, column=col, padx=2, pady=(2, 0))
+        if header_tips[col]:
+            tip(hdr, header_tips[col])
     port_rows = (("Left", 0), ("Right", 1), ("Center / start", 2))
     for row, (port_name, port) in enumerate(port_rows, start=1):
         ttk.Label(sol_frame, text=f"{port_name} (port {port}):").grid(
             row=row, column=0, sticky="w", padx=(6, 8), pady=2)
         for sol in range(5):
-            ttk.Button(sol_frame, text=f"R{port}{sol}", width=5,
-                       command=lambda p=port, s=sol: send_sol(p, s)).grid(
-                row=row, column=sol + 1, padx=2, pady=2)
+            btn = ttk.Button(sol_frame, text=f"R{port}{sol}", width=5,
+                             command=lambda p=port, s=sol: send_sol(p, s))
+            btn.grid(row=row, column=sol + 1, padx=2, pady=2)
+            tip(btn, "sol.button", port=port, sol=sol)
 
     ttk.Label(sol_frame, text="Pulse (ms):").grid(
         row=4, column=0, sticky="e", padx=(6, 8), pady=(6, 4))
-    ttk.Spinbox(sol_frame, from_=1, to=5000, increment=10, width=6,
-                textvariable=pulse_var).grid(
-        row=4, column=1, columnspan=2, sticky="w", pady=(6, 4))
+    pulse_spin = ttk.Spinbox(sol_frame, from_=1, to=5000, increment=10, width=6,
+                             textvariable=pulse_var)
+    pulse_spin.grid(row=4, column=1, columnspan=2, sticky="w", pady=(6, 4))
+    tip(pulse_spin, "sol.pulse")
     ttk.Label(sol_frame, text="per click (<= 5000)", font=("TkDefaultFont", 8)).grid(
         row=4, column=3, columnspan=3, sticky="w", pady=(6, 4))
 
@@ -394,14 +463,33 @@ def main() -> int:
     reward_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=4, pady=4)
     ttk.Label(reward_frame, text="Total:").grid(
         row=0, column=0, sticky="e", padx=(6, 4), pady=4)
-    ttk.Label(reward_frame, textvariable=reward_total_var,
-              font=("TkDefaultFont", 10, "bold")).grid(
-        row=0, column=1, sticky="w", padx=(0, 16), pady=4)
-    ttk.Label(reward_frame, textvariable=reward_detail_var,
-              font=("TkDefaultFont", 8)).grid(
-        row=0, column=2, sticky="w", padx=(0, 16), pady=4)
-    ttk.Button(reward_frame, text="Reset", command=reset_rewards).grid(
-        row=0, column=3, sticky="e", padx=4, pady=4)
+    reward_total_lbl = ttk.Label(reward_frame, textvariable=reward_total_var,
+                                 font=("TkDefaultFont", 10, "bold"))
+    reward_total_lbl.grid(row=0, column=1, sticky="w", padx=(0, 16), pady=4)
+    tip(reward_total_lbl, "reward.total")
+    reward_detail_lbl = ttk.Label(reward_frame, textvariable=reward_detail_var,
+                                  font=("TkDefaultFont", 8))
+    reward_detail_lbl.grid(row=0, column=2, sticky="w", padx=(0, 16), pady=4)
+    tip(reward_detail_lbl, "reward.detail")
+    reward_reset_btn = ttk.Button(reward_frame, text="Reset",
+                                  command=reset_rewards)
+    reward_reset_btn.grid(row=0, column=3, sticky="e", padx=4, pady=4)
+    tip(reward_reset_btn, "reward.reset")
+
+    # Lick counts: live per-port rising-edge tally for the current session,
+    # labeled by firmware port role (reward = center). Resets on a mode switch.
+    lick_frame = ttk.LabelFrame(
+        rig_controls_parent,
+        text="Lick counts  -  rising edges this session (resets on a mode switch)")
+    lick_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=4, pady=4)
+    for i in range(N_LICK):
+        lick_lbl = ttk.Label(lick_frame, textvariable=lick_vars[i],
+                             font=("TkDefaultFont", 10, "bold"))
+        lick_lbl.grid(row=0, column=i, sticky="w", padx=(6, 16), pady=4)
+        tip(lick_lbl, "lick.count", index=i)
+    lick_reset_btn = ttk.Button(lick_frame, text="Reset", command=reset_licks)
+    lick_reset_btn.grid(row=0, column=N_LICK, sticky="e", padx=4, pady=4)
+    tip(lick_reset_btn, "lick.reset")
 
     root.protocol("WM_DELETE_WINDOW", on_close)
 

@@ -37,6 +37,8 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 from typing import Optional
 
+from tooltips import tip
+
 try:
     import numpy as np  # type: ignore
     _NUMPY_ERR: Optional[str] = None
@@ -213,13 +215,17 @@ class TrackerControlView:
         cb = ttk.Checkbutton(top, text="Enable tracking", variable=self._enable_var,
                              command=self._on_enable)
         cb.pack(side=tk.LEFT)
+        tip(cb, "tracker.enable")
         if self._camera is None:
             cb.configure(state=tk.DISABLED)
             self._enable_var.set(False)
-        ttk.Button(top, text="Grab background", command=self._grab_bg).pack(
-            side=tk.LEFT, padx=(12, 2))
-        ttk.Button(top, text="Save background...", command=self._save_background).pack(
-            side=tk.LEFT, padx=2)
+        grab_bg_btn = ttk.Button(top, text="Grab background", command=self._grab_bg)
+        grab_bg_btn.pack(side=tk.LEFT, padx=(12, 2))
+        tip(grab_bg_btn, "tracker.grab_bg")
+        save_bg_btn = ttk.Button(top, text="Save background...",
+                                 command=self._save_background)
+        save_bg_btn.pack(side=tk.LEFT, padx=2)
+        tip(save_bg_btn, "tracker.save_bg")
         self._bg_status = tk.StringVar(value="reference: none")
         ttk.Label(top, textvariable=self._bg_status).pack(side=tk.LEFT, padx=4)
 
@@ -228,34 +234,51 @@ class TrackerControlView:
         reg.pack(side=tk.TOP, fill=tk.X, **pad)
         self._reg_btn = ttk.Button(reg, text="Register rat", command=self._toggle_register)
         self._reg_btn.pack(side=tk.LEFT, padx=4, pady=4)
-        ttk.Button(reg, text="Cancel", command=self._cancel_register).pack(
-            side=tk.LEFT, padx=2)
+        tip(self._reg_btn, "tracker.register")
+        cancel_btn = ttk.Button(reg, text="Cancel", command=self._cancel_register)
+        cancel_btn.pack(side=tk.LEFT, padx=2)
+        tip(cancel_btn, "tracker.cancel")
         self._enrich_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(reg, text="Enrich while tracking", variable=self._enrich_var,
-                        command=self._push_params).pack(side=tk.LEFT, padx=(12, 2))
+        enrich_cb = ttk.Checkbutton(reg, text="Enrich while tracking",
+                                    variable=self._enrich_var,
+                                    command=self._push_params)
+        enrich_cb.pack(side=tk.LEFT, padx=(12, 2))
+        tip(enrich_cb, "tracker.enrich")
         self._model_status = tk.StringVar(value="model: none")
         ttk.Label(reg, textvariable=self._model_status).pack(side=tk.LEFT, padx=6)
 
         # Model + ROI persistence.
         persist = ttk.Frame(controls)
         persist.pack(side=tk.TOP, fill=tk.X, **pad)
-        ttk.Button(persist, text="Save model...", command=self._save_model).pack(
-            side=tk.LEFT, padx=2)
-        ttk.Button(persist, text="Load model...", command=self._load_model).pack(
-            side=tk.LEFT, padx=2)
-        ttk.Button(persist, text="Clear model", command=self._clear_model).pack(
-            side=tk.LEFT, padx=2)
+        save_model_btn = ttk.Button(persist, text="Save model...",
+                                    command=self._save_model)
+        save_model_btn.pack(side=tk.LEFT, padx=2)
+        tip(save_model_btn, "tracker.save_model")
+        load_model_btn = ttk.Button(persist, text="Load model...",
+                                    command=self._load_model)
+        load_model_btn.pack(side=tk.LEFT, padx=2)
+        tip(load_model_btn, "tracker.load_model")
+        clear_model_btn = ttk.Button(persist, text="Clear model",
+                                     command=self._clear_model)
+        clear_model_btn.pack(side=tk.LEFT, padx=2)
+        tip(clear_model_btn, "tracker.clear_model")
 
         region = ttk.Frame(controls)
         region.pack(side=tk.TOP, fill=tk.X, **pad)
-        ttk.Button(region, text="Define region...", command=self._define_region).pack(
-            side=tk.LEFT, padx=2)
-        ttk.Button(region, text="Clear region", command=self._clear_region).pack(
-            side=tk.LEFT, padx=2)
-        ttk.Button(region, text="Save ROI", command=self._save_roi).pack(
-            side=tk.LEFT, padx=2)
-        ttk.Button(region, text="Load ROI", command=self._load_roi).pack(
-            side=tk.LEFT, padx=2)
+        define_region_btn = ttk.Button(region, text="Define region...",
+                                       command=self._define_region)
+        define_region_btn.pack(side=tk.LEFT, padx=2)
+        tip(define_region_btn, "tracker.define_region")
+        clear_region_btn = ttk.Button(region, text="Clear region",
+                                      command=self._clear_region)
+        clear_region_btn.pack(side=tk.LEFT, padx=2)
+        tip(clear_region_btn, "tracker.clear_region")
+        save_roi_btn = ttk.Button(region, text="Save ROI", command=self._save_roi)
+        save_roi_btn.pack(side=tk.LEFT, padx=2)
+        tip(save_roi_btn, "tracker.save_roi")
+        load_roi_btn = ttk.Button(region, text="Load ROI", command=self._load_roi)
+        load_roi_btn.pack(side=tk.LEFT, padx=2)
+        tip(load_roi_btn, "tracker.load_roi")
         self._roi_status = tk.StringVar(value="ROI: none")
         ttk.Label(region, textvariable=self._roi_status).pack(side=tk.LEFT, padx=6)
 
@@ -263,10 +286,14 @@ class TrackerControlView:
         # points) marked on a still frame, drawn back on the camera preview.
         marks = ttk.Frame(controls)
         marks.pack(side=tk.TOP, fill=tk.X, **pad)
-        ttk.Button(marks, text="Define landmarks...",
-                   command=self._define_landmarks).pack(side=tk.LEFT, padx=2)
-        ttk.Button(marks, text="Clear landmarks",
-                   command=self._clear_landmarks).pack(side=tk.LEFT, padx=2)
+        define_lm_btn = ttk.Button(marks, text="Define landmarks...",
+                                   command=self._define_landmarks)
+        define_lm_btn.pack(side=tk.LEFT, padx=2)
+        tip(define_lm_btn, "tracker.define_landmarks")
+        clear_lm_btn = ttk.Button(marks, text="Clear landmarks",
+                                  command=self._clear_landmarks)
+        clear_lm_btn.pack(side=tk.LEFT, padx=2)
+        tip(clear_lm_btn, "tracker.clear_landmarks")
         self._landmark_status = tk.StringVar(value="landmarks: none")
         ttk.Label(marks, textvariable=self._landmark_status).pack(side=tk.LEFT, padx=6)
 
@@ -288,18 +315,22 @@ class TrackerControlView:
         bottom = ttk.Frame(controls)
         bottom.pack(side=tk.TOP, fill=tk.BOTH, expand=True, **pad)
         self._show_mask_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(bottom, text="Show mask (tracked blob in green)",
-                        variable=self._show_mask_var,
-                        command=self._on_show_mask).pack(side=tk.TOP, anchor="w")
+        show_mask_cb = ttk.Checkbutton(
+            bottom, text="Show mask (tracked blob in green)",
+            variable=self._show_mask_var, command=self._on_show_mask)
+        show_mask_cb.pack(side=tk.TOP, anchor="w")
+        tip(show_mask_cb, "tracker.show_mask")
         self._readout = tk.StringVar(value="state: -")
-        ttk.Label(bottom, textvariable=self._readout, anchor="w").pack(
-            side=tk.TOP, fill=tk.X)
+        readout_lbl = ttk.Label(bottom, textvariable=self._readout, anchor="w")
+        readout_lbl.pack(side=tk.TOP, fill=tk.X)
+        tip(readout_lbl, "tracker.readout")
 
         # Standalone track log.
         logrow = ttk.Frame(controls)
         logrow.pack(side=tk.TOP, fill=tk.X, **pad)
         self._log_btn = ttk.Button(logrow, text="Start track log", command=self._toggle_log)
         self._log_btn.pack(side=tk.LEFT, padx=2)
+        tip(self._log_btn, "tracker.log")
         self._log_status = tk.StringVar(value="log: off")
         ttk.Label(logrow, textvariable=self._log_status).pack(side=tk.LEFT, padx=6)
 
@@ -342,6 +373,7 @@ class TrackerControlView:
         scale = ttk.Scale(row, from_=lo, to=hi, variable=var, command=on_change)
         scale.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
         val.pack(side=tk.LEFT)
+        tip(scale, f"tracker.{name}")
         self._sliders[name] = (var, factor)
         on_change()
 

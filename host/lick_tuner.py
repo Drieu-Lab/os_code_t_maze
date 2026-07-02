@@ -39,7 +39,9 @@ from matplotlib.backends.backend_tkagg import (  # noqa: E402
 )
 from matplotlib.figure import Figure  # noqa: E402
 
+from rig_config import load_rig_config  # noqa: E402
 from rig_io import RigClient  # noqa: E402
+from tooltips import tip  # noqa: E402
 
 # ================= CONFIG =================
 BROKER_HOST = "127.0.0.1"
@@ -47,14 +49,16 @@ BROKER_PORT = 5555
 
 N_CHANNELS = 3
 
-# Per IMG_1134 in the rig manual: lickPins[0] = pin 35 = Lick 3,
-# lickPins[1] = pin 36 = Lick 2, lickPins[2] = pin 37 = Lick 1.
-# Edit these strings if the firmware lickPins[] order changes.
-CHANNEL_LABELS = [
-    "L0  (pin 35 / Lick 3)",
-    "L1  (pin 36 / Lick 2)",
-    "L2  (pin 37 / Lick 1)",
-]
+# Channel labels come from firmware/common/rig_config.h (the single source of
+# truth) so the pin number and port role shown here cannot drift from the
+# firmware. Falls back to bare "L0/L1/L2" if the header can't be parsed.
+# NOTE: this trusts flashed == source (see rig_config.py) - reflash the Due
+# after editing the header.
+_RIG_CFG = load_rig_config()
+if _RIG_CFG.ok and _RIG_CFG.lick_pins:
+    CHANNEL_LABELS = [_RIG_CFG.lick_label(i) for i in range(N_CHANNELS)]
+else:
+    CHANNEL_LABELS = [f"L{i}" for i in range(N_CHANNELS)]
 CHANNEL_COLORS = ["#1f77b4", "#d62728", "#2ca02c"]
 
 Y_LOW_HIGH = 1.0   # vertical span of one channel (low to high)
@@ -114,8 +118,10 @@ window_scale = ttk.Scale(
     length=260, variable=window_var,
 )
 window_scale.pack(side=tk.LEFT, padx=6)
+tip(window_scale, "licktuner.window")
 window_value_label = ttk.Label(top, text="10.0 s", width=8)
 window_value_label.pack(side=tk.LEFT, padx=(0, 16))
+tip(window_value_label, "licktuner.window_value")
 
 
 def toggle_pause():
@@ -130,6 +136,7 @@ def toggle_pause():
 
 pause_btn = ttk.Button(top, text="Pause", command=toggle_pause)
 pause_btn.pack(side=tk.LEFT, padx=4)
+tip(pause_btn, "licktuner.pause")
 
 
 def reset_counts():
@@ -142,10 +149,12 @@ def reset_counts():
 
 reset_btn = ttk.Button(top, text="Reset edge counts", command=reset_counts)
 reset_btn.pack(side=tk.LEFT, padx=8)
+tip(reset_btn, "licktuner.reset")
 
 status_var = tk.StringVar(value="Connecting...")
 status_lbl = ttk.Label(top, textvariable=status_var)
 status_lbl.pack(side=tk.RIGHT)
+tip(status_lbl, "licktuner.status")
 
 # ---------- Plot ----------
 fig = Figure(figsize=(10, 5), dpi=100)
@@ -172,8 +181,10 @@ for i in range(N_CHANNELS):
     title.pack(anchor=tk.W)
     cl = tk.Label(f, text="edges: 0   last: --")
     cl.pack(anchor=tk.W)
+    tip(cl, "licktuner.edges")
     pl = tk.Label(f, text="last pulse: --")
     pl.pack(anchor=tk.W)
+    tip(pl, "licktuner.pulse")
     count_labels.append(cl)
     pulse_labels.append(pl)
 

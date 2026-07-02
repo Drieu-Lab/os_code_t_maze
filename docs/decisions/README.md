@@ -64,3 +64,6 @@ The chain of records is the audit trail.
 | [0018](0018-landmark-annotations.md) | Annotate reward wells and body sensors as image-space landmarks | Accepted | 2026-06-30 |
 | [0019](0019-reward-volume-and-pulse-duration-logging.md) | Log reward pulse duration on the wire and track dispensed volume on the host | Accepted | 2026-06-30 |
 | [0020](0020-save-background-image-with-recordings.md) | Save the empty-rig background image alongside recordings | Accepted | 2026-06-30 |
+| [0021](0021-host-reads-rig-config-pin-map.md) | Read rig_config.h on the host as the single source of truth for the pin map | Accepted | 2026-07-01 |
+| [0022](0022-verified-lick-port-pin-mapping.md) | Verified lick-port <-> pin/index mapping (left=L0/37, right=L1/36, center=L2/35) | Accepted | 2026-07-01 |
+| [0023](0023-position-based-rules-engine.md) | Position-based rules engine (pure core + Free-Roam-gated executor) with cm-based spatial calibration | Accepted | 2026-07-02 |

@@ -61,7 +61,8 @@ criteria).
 | [FW-0001](#fw-0001-6040-sameswitch-transition-bias-in-sequence-generation) | ~60/40 same/switch transition bias | Trial-sequence generation | Deferred |
 | [FW-0002](#fw-0002-head-vs-body-orientation-heading-from-the-tracker) | Head-vs-body orientation (heading) | Markerless tracker | Deferred |
 | [FW-0003](#fw-0003-multi-animal-association-and-irlow-saturation-tracking) | Multi-animal association + IR/low-saturation | Markerless tracker | Proposed |
-| [FW-0004](#fw-0004-position-based-task-rule-engine-over-landmarks) | Position-based task-rule engine over landmarks | Tracker + GUI + protocol | Proposed |
+| [FW-0004](#fw-0004-position-based-task-rule-engine-over-landmarks) | Position-based task-rule engine over landmarks | Tracker + GUI + protocol | Done ([ADR-0023](decisions/0023-position-based-rules-engine.md)) |
+| [FW-0005](#fw-0005-in-gui-rat-id-entry-firmware-animal-command--logger-file-roll) | In-GUI rat id entry (firmware `ANIMAL` command + logger file-roll) | Firmware + protocol + logger + GUI | Deferred |
 
 ## Entries
 
@@ -208,7 +209,9 @@ are non-obvious enough to warrant their own ADR (or an extension of ADR-0014).
 
 ### FW-0004: Position-based task-rule engine over landmarks
 
-- **Status:** Proposed
+- **Status:** Done - implemented in [ADR-0023](decisions/0023-position-based-rules-engine.md)
+  (`host/rules_engine.py` pure core + `host/rules_view.py` "Rules" tab,
+  `host/rules.json`, `host/rig_scale.json`, `host/test_rules_engine.py`).
 - **Date added:** 2026-06-30
 - **Author / Agent:** Agent (Cursor) on behalf of Celine
 - **Area / modules:** `host/tracker.py` (consume `get_landmarks()` + the tracked
@@ -252,3 +255,47 @@ own beam/lick-driven task logic (authority/override)?
 
 **ADR needed?** Yes - rule semantics (and especially any position-triggered
 actuation) are a behavioral-design decision worth recording.
+
+### FW-0005: In-GUI rat id entry (firmware `ANIMAL` command + logger file-roll)
+
+- **Status:** Deferred
+- **Date added:** 2026-07-01
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** `firmware/cue-guided-task/cue-guided-task.ino` (new `ANIMAL,<id>` command + re-emit), `firmware/common/rig_config.h` + `firmware/PROTOCOL.md` (`PROTO_VERSION` bump), `host/rig_logger.py` (roll file on a new `ANIMAL` line), `host/experiment_control.py` (rat-id field), a new ADR
+- **Related ADRs:** [ADR-0009](decisions/0009-runtime-training-modes-and-logging.md) (the `ANIMAL` handshake + session/mode logging this extends)
+
+**Motivation / context.** The log filename comes from the firmware's
+`0,ANIMAL,<id>` handshake, but `ANIMAL_ID` is hard-coded (`RAT001`), so every
+rat's session lands in `data/RAT001_<time>.csv` unless overridden. The interim
+fix (2026-07-01) is a `start_rig.bat` prompt that passes `--animal` to
+`rig_logger.py` - but that is set once at launch and can't be changed from the
+running GUI. The goal is to type (or change) the rat id directly in
+`experiment_control` and have new sessions attribute correctly.
+
+**Sketch of approach.** Add an `ANIMAL,<id>` command the firmware accepts
+(alongside `MODE`/`PING`/...): store the id and emit a fresh `0,ANIMAL,<id>`
+line. The broker fans that out, so `rig_logger.py` (which today opens one file
+per process and ignores later `ANIMAL` lines) rolls to a new
+`data/<id>_<time>.csv` on each new `ANIMAL` line. `experiment_control` gets a
+small rat-id entry + Apply button that sends the command. Bump `PROTO_VERSION`
+(v5) and document the command in `PROTOCOL.md`. Note the broker constraint
+([rig_broker.py](../host/rig_broker.py)) that forces this through the firmware:
+it forwards a client's line to the Due but does **not** echo it to the other
+clients, so a GUI-typed id can't reach the logger except via the firmware
+re-emitting the `ANIMAL` line.
+
+**Evaluation / acceptance.** Set an id in the GUI -> the logger opens
+`data/<id>_<time>.csv` and subsequent lines go there; changing the id rolls to a
+new file without losing buffered lines; blank/invalid ids are rejected/sanitized
+(reuse `rig_logger._sanitize`). Confirm a reflashed Due reports the command in
+its handshake/version.
+
+**Effort / risk.** Small-medium. Needs a Due reflash (protocol change). Main
+risks: not losing lines across a file roll, and id sanitization.
+
+**Open questions.** Allow changing the id mid-session (roll) or only when idle?
+Persist the last id across reboots? Should the GUI also reflect the current id
+from the `ANIMAL` line?
+
+**ADR needed?** Yes - it changes the serial protocol and the logger's
+file-naming behavior.

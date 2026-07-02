@@ -89,6 +89,7 @@ except Exception as e:  # pragma: no cover
 # Shared lens-distortion loading + undistortion (also used by the tracker
 # prototype, so tuning matches this pipeline). See docs/decisions/0015.
 from calibration import Undistorter, load_calibration  # noqa: E402
+from tooltips import tip  # noqa: E402
 
 # Shared tracking-overlay drawing (also used by the Tracking tab so previews
 # match). Guarded: tracking deps may be absent without breaking the camera tab.
@@ -452,8 +453,10 @@ class CameraView:
 
         # Status line (connection + counters).
         self._status_var = tk.StringVar(value="Opening camera...")
-        ttk.Label(self.frame, textvariable=self._status_var, anchor="w").pack(
-            side=tk.TOP, fill=tk.X, padx=6)
+        status_lbl = ttk.Label(self.frame, textvariable=self._status_var,
+                               anchor="w")
+        status_lbl.pack(side=tk.TOP, fill=tk.X, padx=6)
+        tip(status_lbl, "camera.status")
 
         # Controls.
         controls = ttk.Frame(self.frame)
@@ -463,6 +466,7 @@ class CameraView:
             controls, text="Start recording", command=self._toggle_record,
             state=tk.DISABLED)
         self._record_btn.pack(side=tk.LEFT, padx=2)
+        tip(self._record_btn, "camera.record")
 
         if not self._can_record:
             ttk.Label(controls, foreground="#a00000",
@@ -478,37 +482,50 @@ class CameraView:
         self._format_combo.pack(side=tk.LEFT, padx=2)
         self._format_combo.bind("<<ComboboxSelected>>",
                                 lambda _e: self._on_format_change())
+        tip(self._format_combo, "camera.format")
         # H.264 quality (CRF): lower = better/larger. Only shown for compressed.
         self._crf_lbl = ttk.Label(controls, text="quality (CRF):")
         self._crf_var = tk.IntVar(value=DEFAULT_CRF)
         self._crf_spin = ttk.Spinbox(controls, from_=0, to=51, width=4,
                                      textvariable=self._crf_var)
+        tip(self._crf_spin, "camera.crf")
         self._on_format_change()  # set initial CRF widget visibility
 
-        ttk.Button(controls, text="Load .pfs...", command=self._choose_pfs).pack(
-            side=tk.LEFT, padx=2)
+        pfs_btn = ttk.Button(controls, text="Load .pfs...",
+                             command=self._choose_pfs)
+        pfs_btn.pack(side=tk.LEFT, padx=2)
+        tip(pfs_btn, "camera.pfs")
         self._pfs_var = tk.StringVar(value="(camera defaults)")
         ttk.Label(controls, textvariable=self._pfs_var).pack(side=tk.LEFT, padx=(2, 12))
 
         ttk.Label(controls, text="Output:").pack(side=tk.LEFT)
         self._outdir_var = tk.StringVar(value=DEFAULT_OUTPUT_DIR)
-        ttk.Entry(controls, textvariable=self._outdir_var, width=22).pack(
-            side=tk.LEFT, padx=2)
-        ttk.Button(controls, text="Browse...", command=self._choose_outdir).pack(
-            side=tk.LEFT, padx=2)
+        outdir_entry = ttk.Entry(controls, textvariable=self._outdir_var, width=22)
+        outdir_entry.pack(side=tk.LEFT, padx=2)
+        tip(outdir_entry, "camera.output")
+        browse_btn = ttk.Button(controls, text="Browse...",
+                                command=self._choose_outdir)
+        browse_btn.pack(side=tk.LEFT, padx=2)
+        tip(browse_btn, "camera.browse")
 
         # Lens-distortion correction (camera source). Applied to preview,
         # tracking, and recording when a valid calibration is loaded.
         calib_row = ttk.Frame(self.frame)
         calib_row.pack(side=tk.TOP, fill=tk.X, padx=4, pady=(0, 4))
         self._undistort_var = tk.BooleanVar(value=self._undistort_enabled)
-        ttk.Checkbutton(calib_row, text="Undistort", variable=self._undistort_var,
-                        command=self._on_undistort_toggle).pack(side=tk.LEFT, padx=2)
-        ttk.Button(calib_row, text="Load calibration...",
-                   command=self._choose_calibration).pack(side=tk.LEFT, padx=2)
+        undistort_cb = ttk.Checkbutton(
+            calib_row, text="Undistort", variable=self._undistort_var,
+            command=self._on_undistort_toggle)
+        undistort_cb.pack(side=tk.LEFT, padx=2)
+        tip(undistort_cb, "camera.undistort")
+        calib_btn = ttk.Button(calib_row, text="Load calibration...",
+                               command=self._choose_calibration)
+        calib_btn.pack(side=tk.LEFT, padx=2)
+        tip(calib_btn, "camera.calibration")
         self._calib_var = tk.StringVar(value="(no calibration)")
-        ttk.Label(calib_row, textvariable=self._calib_var).pack(
-            side=tk.LEFT, padx=(2, 12))
+        calib_lbl = ttk.Label(calib_row, textvariable=self._calib_var)
+        calib_lbl.pack(side=tk.LEFT, padx=(2, 12))
+        tip(calib_lbl, "camera.calib_status")
 
     def _show_warning(self, text: str) -> None:
         self._banner_var.set(text)

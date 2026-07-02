@@ -39,6 +39,15 @@ import tkinter as tk
 from dataclasses import dataclass, replace
 from typing import Optional, Tuple, Union
 
+from rig_config import load_rig_config
+from tooltips import canvas_tip
+
+# firmware/common/rig_config.h is the single source of truth for the pin map;
+# read it once so lick roles / the reward column can't drift from the firmware.
+# Degrades gracefully (ok == False) if the header can't be parsed. NOTE: trusts
+# flashed == source (see rig_config.py) - reflash the Due after editing it.
+_RIG_CFG = load_rig_config()
+
 # ============================= Pure: events =============================
 
 
@@ -64,9 +73,10 @@ class SolenoidPulse:
 Event = Union[SensorEdge, LickEdge, SolenoidPulse]
 
 # Which solenoid column the task's REWARD line maps to (so the reward marker
-# flashes even though the task emits REWARD, not SOL). Keep in sync with
-# REWARD_SOLENOID_INDEX in firmware/common/rig_config.h (currently 1 == R2).
-REWARD_SOL_INDEX = 1
+# flashes even though the task emits REWARD, not SOL). Read from
+# REWARD_SOLENOID_INDEX in firmware/common/rig_config.h (1 == R2), with a
+# hard-coded fallback if the header can't be parsed.
+REWARD_SOL_INDEX = _RIG_CFG.reward_sol_index if _RIG_CFG.ok and _RIG_CFG.reward_sol_index is not None else 1
 _REWARD_PORT = {"LEFT": 0, "RIGHT": 1, "CENTER": 2, "START": 2}
 
 
@@ -201,13 +211,23 @@ SENSOR_MARKERS = (
     Marker(324, 300, "R_RETURN"),  # 5 - right return arm (Path3)
 )
 
-# Lick markers: index 0..2 == L,i.
-# Firmware LICK_PINS = {35, 36, 37}. Mapping to physical ports (Lick3 left,
-# Lick2 right, Lick1 start) is the working assumption - verify on the rig.
+# Lick markers: index 0..2 == L,i. The (x, y) positions are the rig geometry
+# verified on the bench (index 2 = bottom-center start port); the role text in
+# each label is read from firmware/common/rig_config.h via rig_config.py, so it
+# can't drift from the firmware. If the header's role aliases disagree with the
+# geometry here, that mismatch is the bug to fix in the header (then reflash).
+def _lick_marker_label(index: int) -> str:
+    if _RIG_CFG.ok:
+        role = _RIG_CFG.lick_role(index)
+        if role:
+            return f"L{index} ({role})"
+    return f"L{index}"
+
+
 LICK_MARKERS = (
-    Marker(80, 92, "L0 (Lick3)"),    # left reward port (left end of top T-arm)
-    Marker(400, 92, "L1 (Lick2)"),   # right reward port (right end of top T-arm)
-    Marker(240, 485, "L2 (Lick1)"),  # start port (bottom-center)
+    Marker(80, 92, _lick_marker_label(0)),    # left end of top T-arm
+    Marker(400, 92, _lick_marker_label(1)),   # right end of top T-arm
+    Marker(240, 485, _lick_marker_label(2)),  # bottom-center (start port)
 )
 
 
@@ -287,6 +307,17 @@ class RigView:
         }
         self._sol_jobs: dict = {}
         self._draw_legend()
+        self._add_marker_tooltips()
+
+    def _add_marker_tooltips(self) -> None:
+        """Attach hover tooltips (text from tooltip_text.py) to every marker."""
+        for i, item in enumerate(self._sensor_items):
+            canvas_tip(self.canvas, item, "marker.sensor", index=i)
+        for i, item in enumerate(self._lick_items):
+            canvas_tip(self.canvas, item, "marker.lick", index=i)
+        for sm in SOLENOID_MARKERS:
+            canvas_tip(self.canvas, self._sol_items[(sm.port, sm.sol)],
+                       "marker.solenoid", port=sm.port, sol=sm.sol)
 
     # ---- module contract ----
     def widget(self) -> tk.Widget:
@@ -370,25 +401,39 @@ class RigView:
         self._sol_jobs[(port, sol)] = self.canvas.after(
             SOL_FLASH_MS, lambda: self.canvas.itemconfig(item, fill=COLOR_IDLE))
 
-    def _legend_row(self, x: int, y: int, fill: str, outline: str, text: str) -> None:
-        self.canvas.create_oval(x, y, x + 14, y + 14, fill=fill, outline=outline, width=2)
+    def _legend_row(self, x: int, y: int, fill: str, outline: str, text: str) -> int:
+        swatch = self.canvas.create_oval(x, y, x + 14, y + 14, fill=fill,
+                                         outline=outline, width=2)
         self.canvas.create_text(x + 22, y + 7, anchor="w", text=text,
                                 font=("TkDefaultFont", 8))
+        return swatch
 
     def _draw_legend(self) -> None:
         # The legend lives in the empty triangles flanking the funnel's lower
         # half, so it never collides with the top reward ports / lick markers.
         # Bottom-left: marker states (fill color). Bottom-right: solenoid role
         # (outline color, matching the idle markers).
-        self._legend_row(LEGEND_LEFT_X, LEGEND_LEFT_Y, COLOR_SENSOR, "#333333", "sensor active")
-        self._legend_row(LEGEND_LEFT_X, LEGEND_LEFT_Y + 20, COLOR_LICK, "#333333", "lick active")
-        self._legend_row(LEGEND_LEFT_X, LEGEND_LEFT_Y + 40, COLOR_SOLENOID, "#333333", "solenoid pulsed")
+        canvas_tip(self.canvas, self._legend_row(
+            LEGEND_LEFT_X, LEGEND_LEFT_Y, COLOR_SENSOR, "#333333",
+            "sensor active"), "legend.sensor")
+        canvas_tip(self.canvas, self._legend_row(
+            LEGEND_LEFT_X, LEGEND_LEFT_Y + 20, COLOR_LICK, "#333333",
+            "lick active"), "legend.lick")
+        canvas_tip(self.canvas, self._legend_row(
+            LEGEND_LEFT_X, LEGEND_LEFT_Y + 40, COLOR_SOLENOID, "#333333",
+            "solenoid pulsed"), "legend.solenoid")
 
         self.canvas.create_text(LEGEND_RIGHT_X, LEGEND_RIGHT_Y - 16, anchor="w",
                                 text="solenoid role:", font=("TkDefaultFont", 8))
-        self._legend_row(LEGEND_RIGHT_X, LEGEND_RIGHT_Y, COLOR_IDLE, COLOR_SOL_REWARD, "reward")
-        self._legend_row(LEGEND_RIGHT_X, LEGEND_RIGHT_Y + 20, COLOR_IDLE, COLOR_SOL_DRAIN, "drain")
-        self._legend_row(LEGEND_RIGHT_X, LEGEND_RIGHT_Y + 40, COLOR_IDLE, COLOR_SOL_RINSE, "rinse")
+        canvas_tip(self.canvas, self._legend_row(
+            LEGEND_RIGHT_X, LEGEND_RIGHT_Y, COLOR_IDLE, COLOR_SOL_REWARD,
+            "reward"), "legend.role.reward")
+        canvas_tip(self.canvas, self._legend_row(
+            LEGEND_RIGHT_X, LEGEND_RIGHT_Y + 20, COLOR_IDLE, COLOR_SOL_DRAIN,
+            "drain"), "legend.role.drain")
+        canvas_tip(self.canvas, self._legend_row(
+            LEGEND_RIGHT_X, LEGEND_RIGHT_Y + 40, COLOR_IDLE, COLOR_SOL_RINSE,
+            "rinse"), "legend.role.rinse")
 
     def _render(self) -> None:
         for i, item in enumerate(self._sensor_items):

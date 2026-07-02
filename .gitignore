@@ -24,6 +24,11 @@ host/ratmodels/
 host/roi_polygon.json
 host/landmarks.json
 
+# Rules-engine per-rig scale calibration (cm/px + homography), regenerated in
+# the Rules tab. rules.json IS versioned (the documented example config).
+# see docs/decisions/0023
+host/rig_scale.json
+
 # Compiled unit-test binaries (firmware/.../test)
 test_task_core
 test_task_core.exe

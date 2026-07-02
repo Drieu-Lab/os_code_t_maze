@@ -35,18 +35,18 @@
 
 /* Lick detectors (active-HIGH event per tmaze_test). Raw, index-ordered pins;
  * the L,i serial protocol and monitor GUIs use this 0..2 order. */
-#define PIN_LICK_0  37 /* CONFIRM */
-#define PIN_LICK_1  36 /* 37 */
-#define PIN_LICK_2  35 /* 36 */
+#define PIN_LICK_0  37
+#define PIN_LICK_1  36
+#define PIN_LICK_2  35
 
 /* --- Lick ports: geometric labels (parallel to the beam labels above) ------
- * Physical pin<->port mapping is UNVERIFIED. Confirm on the rig with
- * tmaze_test: lick each port and watch which "L,i" index fires. The mapping
- * below follows the working assumption in host/rig_view.py (L0=left, L1=right,
- * L2=start/center, i.e. center == pin 37). */
-#define PIN_LICK_CENTER  PIN_LICK_0   /* CONFIRM (center/start port) */
-#define PIN_LICK_RIGHT   PIN_LICK_1   /* CONFIRM */
-#define PIN_LICK_LEFT    PIN_LICK_2   /* CONFIRM which physical port */
+ * Physical pin<->port mapping VERIFIED on the rig 2026-07-01 (lick each port,
+ * watch which pin/L,i fires in lick_tuner): LEFT = pin 37 (L0), RIGHT = pin 36
+ * (L1), CENTER/start = pin 35 (L2). This corrects the earlier assumption that
+ * center == pin 37 / L0. see docs/decisions/0022 */
+#define PIN_LICK_LEFT    PIN_LICK_0   /* pin 37 = L0 (verified) */
+#define PIN_LICK_RIGHT   PIN_LICK_1   /* pin 36 = L1 (verified) */
+#define PIN_LICK_CENTER  PIN_LICK_2   /* pin 35 = L2 (center/start, verified) */
 
 /* Lick-port task roles. v1 cue-guided task: reward is dispensed to the CENTRAL
  * port on a correct choice (triggered at the choice-arm beam) and the rat
@@ -55,7 +55,7 @@
  * (V_START / PIN_VALVE_START); PIN_LICK_REWARD names the co-located lick
  * detector for monitoring and possible future lick-gating of reward.
  * This mapping may change in a different task. see docs/decisions/0007 */
-#define PIN_LICK_REWARD  PIN_LICK_CENTER   /* CONFIRM */
+#define PIN_LICK_REWARD  PIN_LICK_CENTER   /* = pin 35 = L2 (verified) */
 
 /* Reward solenoids. Each reward port (left/right/center) carries five valves:
  * three reward spouts (R1,R2,R3), a DRAIN, and a RINSE. The per-pin

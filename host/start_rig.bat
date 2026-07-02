@@ -51,12 +51,21 @@ if errorlevel 1 (
     exit /b 1
 )
 
+REM ---- Ask which rat this session is for, so the logger names the file --------
+REM The firmware ANIMAL_ID is hard-coded (RAT001), so without this the log would
+REM be data\RAT001_<time>.csv for every rat. Entered once here and passed to the
+REM logger via --animal; leave blank to fall back to the firmware id.
+set "RIG_ANIMAL="
+set /p "RIG_ANIMAL=Enter rat id for the log filename (e.g. 600), blank to skip: "
+set "ANIMAL_ARG="
+if not "%RIG_ANIMAL%"=="" set "ANIMAL_ARG=--animal %RIG_ANIMAL%"
+
 REM ---- Launch broker, then clients after a brief delay so the TCP port is up ----
 start "Rig Broker" cmd /k python -X rigsid=%RIG_SID% rig_broker.py --port %RIG_PORT%
 timeout /t 2 /nobreak >nul
 
 REM Persistent session logger: writes every line to host\data\<animal>_<time>.csv
-start "Rig Logger" cmd /k python -X rigsid=%RIG_SID% rig_logger.py
+start "Rig Logger" cmd /k python -X rigsid=%RIG_SID% rig_logger.py %ANIMAL_ARG%
 
 REM start "Maze GUI"   python maze_gui.py
 start "Lick Tuner" python -X rigsid=%RIG_SID% lick_tuner.py
