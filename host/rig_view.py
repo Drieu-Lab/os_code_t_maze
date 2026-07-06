@@ -39,6 +39,7 @@ import tkinter as tk
 from dataclasses import dataclass, replace
 from typing import Optional, Tuple, Union
 
+import protocol
 from rig_config import load_rig_config
 from tooltips import canvas_tip
 
@@ -81,32 +82,25 @@ _REWARD_PORT = {"LEFT": 0, "RIGHT": 1, "CENTER": 2, "START": 2}
 
 
 def parse_line(line: str) -> Optional[Event]:
-    """Parse a protocol-v2 line into an Event.
+    """Parse a firmware line into an Event (via the shared protocol parser).
 
     Handles "<ms>,S|L,<i>,<state>" (sensor/lick edge), "<ms>,SOL,<port>,<sol>"
     (solenoid pulse), and "<ms>,REWARD,<LEFT|RIGHT|CENTER>" (task reward, mapped
     to the reward-column marker at that port). Returns None otherwise. Pure.
     """
-    parts = line.split(",")
-    if len(parts) < 3 or not parts[0].isdigit():
-        return None
-    typ = parts[1]
-    if typ == "REWARD":
-        port = _REWARD_PORT.get(parts[2].strip().upper())
+    edge = protocol.sensor_edge(line)
+    if edge is not None:
+        return SensorEdge(*edge)
+    edge = protocol.lick_edge(line)
+    if edge is not None:
+        return LickEdge(*edge)
+    pulse = protocol.sol_pulse(line)
+    if pulse is not None:
+        return SolenoidPulse(*pulse)
+    parsed = protocol.parse(line)
+    if parsed is not None and parsed.type == "REWARD" and parsed.fields:
+        port = _REWARD_PORT.get(parsed.fields[0].strip().upper())
         return SolenoidPulse(port, REWARD_SOL_INDEX) if port is not None else None
-    if len(parts) < 4:
-        return None
-    try:
-        index = int(parts[2])
-        state = int(parts[3])
-    except ValueError:
-        return None
-    if typ == "S":
-        return SensorEdge(index, state == 1)
-    if typ == "L":
-        return LickEdge(index, state == 1)
-    if typ == "SOL":
-        return SolenoidPulse(port=index, sol=state)
     return None
 
 

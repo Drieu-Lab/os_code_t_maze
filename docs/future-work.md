@@ -63,6 +63,8 @@ criteria).
 | [FW-0003](#fw-0003-multi-animal-association-and-irlow-saturation-tracking) | Multi-animal association + IR/low-saturation | Markerless tracker | Proposed |
 | [FW-0004](#fw-0004-position-based-task-rule-engine-over-landmarks) | Position-based task-rule engine over landmarks | Tracker + GUI + protocol | Done ([ADR-0023](decisions/0023-position-based-rules-engine.md)) |
 | [FW-0005](#fw-0005-in-gui-rat-id-entry-firmware-animal-command--logger-file-roll) | In-GUI rat id entry (firmware `ANIMAL` command + logger file-roll) | Firmware + protocol + logger + GUI | Deferred |
+| [FW-0006](#fw-0006-shared-base-class-for-still-frame-editors) | Shared base class for still-frame editors | Tracker tab UI | Deferred |
+| [FW-0007](#fw-0007-maze-state-consumers---rule-shaping-primitives--behavior-stats) | Maze-state consumers - rule-shaping primitives + behavior stats | Rules engine + stats + GUI | Proposed |
 
 ## Entries
 
@@ -299,3 +301,81 @@ from the `ANIMAL` line?
 
 **ADR needed?** Yes - it changes the serial protocol and the logger's
 file-naming behavior.
+
+### FW-0006: Shared base class for still-frame editors
+
+- **Status:** Deferred
+- **Date added:** 2026-07-06
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** `host/tracker_view.py` (`_RoiEditor`, `_LandmarkEditor`),
+  `host/maze_state_view.py` (`_ZoneEditor`)
+- **Related ADRs:** [ADR-0018](decisions/0018-landmark-annotations.md),
+  [ADR-0025](decisions/0025-maze-state-module.md)
+
+**Motivation / context.** During the host dedup refactor, `_RoiEditor` and
+`_LandmarkEditor` in `tracker_view.py` share still-frame setup (scale to
+`EDITOR_MAX_W`, `Toplevel`, `grab_set`, `_close`) but diverge enough in their
+interaction model (polygon vs. landmark list) that a shared base class was
+deferred as low payoff for the complexity it would add. A **third** such editor
+has now appeared - `maze_state_view._ZoneEditor` (multi-region polygon + point
+targets, ADR-0025) - which re-copies the same modal still-frame scaffolding, so
+the case for extracting a base is now stronger.
+
+**Sketch of approach.** Extract a `_StillFrameEditorBase` holding the scaled
+canvas, photo ref, and modal lifecycle; subclasses implement placement/commit
+semantics only.
+
+**Evaluation / acceptance.** No behavior change; both editors still work for ROI
+and landmark definition after the extraction.
+
+**Effort / risk.** Low-medium. Risk is over-abstracting two editors that may
+continue to diverge.
+
+**Open questions.** A third still-frame editor has appeared
+(`maze_state_view._ZoneEditor`); is now the time to extract, or wait to see if
+it keeps diverging?
+
+**ADR needed?** No - mechanical UI refactor only if pursued.
+
+### FW-0007: Maze-state consumers - rule-shaping primitives + behavior stats
+
+- **Status:** Proposed
+- **Date added:** 2026-07-06
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** `host/rules_engine.py` (new condition primitives over
+  `RatState`), a new `host/` behavior-statistics module + tab, both consuming
+  `host/maze_state.py`'s `RatState`
+- **Related ADRs:** [ADR-0025](decisions/0025-maze-state-module.md) (the
+  discrete maze-state producer these consume),
+  [ADR-0023](decisions/0023-position-based-rules-engine.md) (rules engine)
+
+**Motivation / context.** ADR-0025 deliberately builds only the *producer* of
+the discrete `RatState` stream (zone + direction + loops + `visited_since`); it
+is a coupling interface for two deferred consumers that were explicitly out of
+scope: (a) **task-rule shaping** primitives (e.g. `InState`/`EnteredState`,
+"reward on a correct stem->choice traversal") layered onto the rules engine, and
+(b) a **behavior-statistics** module (per-session zone dwell times, traversal
+counts, choice/alternation rates, latencies) reading the state-timeline CSV or
+the live stream.
+
+**Sketch of approach.** *Rules:* add `RatState`-based conditions to
+`rules_engine.py` alongside the existing `InZone`/`LickAt`, and a rule template
+that fires on a completed correct-side loop, gated exactly like the existing
+executor (Free Roam, confident track). *Stats:* a pure aggregator over the
+`RatState` stream + a read-only tab/CLI that summarizes a session; feed it the
+`*_mazestate.csv` the Maze state tab already writes.
+
+**Evaluation / acceptance.** Rules: headless tests over synthetic `RatState`
+sequences (fires once per qualifying traversal, respects gating). Stats: computed
+dwell/traversal/choice metrics match hand-worked synthetic sessions.
+
+**Effort / risk.** Medium. Main risk is choosing rule semantics that stay robust
+to the estimator's min-dwell latency; the beam-validation harness (ADR-0025)
+gives the latency budget to design against.
+
+**Open questions.** Do maze-state rules ever actuate reward, or only log? Live
+stats tab vs. an offline CLI over the CSV? Which metrics are primary for the
+grant's cue->action->reward analysis?
+
+**ADR needed?** Yes - rule semantics (especially any actuation) and the metric
+definitions are behavioral-design decisions worth recording.

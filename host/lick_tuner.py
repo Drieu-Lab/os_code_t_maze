@@ -39,6 +39,7 @@ from matplotlib.backends.backend_tkagg import (  # noqa: E402
 )
 from matplotlib.figure import Figure  # noqa: E402
 
+import protocol  # noqa: E402
 from rig_config import load_rig_config  # noqa: E402
 from rig_io import RigClient  # noqa: E402
 from tooltips import tip  # noqa: E402
@@ -280,20 +281,17 @@ status_var.set(f"Connected to broker {BROKER_HOST}:{BROKER_PORT}")
 
 
 def handle_line(line: str) -> None:
-    """Parse a protocol-v2 "<ms>,L,<i>,<state>" edge line and update buffers.
+    """Decode a "<ms>,L,<i>,<state>" lick-edge line and update the buffers.
 
     All other line types (S, SOL, TRIAL, ...) are ignored here. Runs on the
     Tk main thread (RigClient dispatches via root.after).
     """
-    parts = line.split(",")
-    if len(parts) != 4 or parts[1] != "L" or not parts[0].isdigit():
+    edge = protocol.lick_edge(line)
+    if edge is None:
         return
-    try:
-        i = int(parts[2])
-        s = int(parts[3])
-    except ValueError:
-        return
-    if not (0 <= i < N_CHANNELS) or s not in (0, 1):
+    i, active = edge
+    s = 1 if active else 0
+    if not (0 <= i < N_CHANNELS):
         return
 
     t = now_s()

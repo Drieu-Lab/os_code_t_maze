@@ -32,16 +32,14 @@ from __future__ import annotations
 
 import argparse
 import os
-import re
 import socket
 import sys
 import time
 from datetime import datetime
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+import protocol
 
-# Handshake line that carries the animal id, e.g. "0,ANIMAL,RAT001".
-ANIMAL_RE = re.compile(r"^\d+,ANIMAL,(.+)$")
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 RECV_BYTES = 4096
 RECONNECT_DELAY_S = 2.0
@@ -90,9 +88,10 @@ class SessionLog:
             if self._animal_override:
                 self._open(self._animal_override)
             else:
-                m = ANIMAL_RE.match(line)
-                if m:
-                    self._open(m.group(1))
+                # The "0,ANIMAL,<id>" handshake line carries the animal id.
+                animal = protocol.animal_id(line)
+                if animal:
+                    self._open(animal)
                 else:
                     self._buffer.append(line)
                     if len(self._buffer) >= self.MAX_BUFFER:

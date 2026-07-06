@@ -48,6 +48,8 @@ import math
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
+import protocol  # shared serial-line parser (pure stdlib; see docs/decisions/0024)
+
 # Tracker state string that means "confirmed lock" (kept local so this core does
 # not import tracker.py / opencv). Must match tracker.STATE_TRACKING.
 STATE_TRACKING = "TRACKING"
@@ -492,10 +494,9 @@ class RulesEngine:
     @staticmethod
     def _parse_lick(line: str) -> Optional[int]:
         """Return the port of a rising lick edge (``<ms>,L,<i>,1``) else None."""
-        fields = line.split(",")
-        if len(fields) == 4 and fields[1] == "L" and fields[2].strip().isdigit() \
-                and fields[3].strip() == "1":
-            return int(fields[2])
+        edge = protocol.lick_edge(line)
+        if edge is not None and edge[1]:
+            return edge[0]
         return None
 
     # ---------------------------------------------------------------- status

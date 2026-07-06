@@ -190,6 +190,21 @@ TIPS: Dict[str, Entry] = {
                            "segments (high CV suggests the single scale is "
                            "inaccurate across the frame - consider a homography).",
 
+    # ---- maze_state_view.py: Maze state tab ----
+    "maze.define_zones": "Draw the maze zones (central reward HUB, stem, "
+                         "junction, choice/return arms), the well region (inside "
+                         "the HUB), and the stem axis on a captured still frame.",
+    "maze.save_zones": "Save the zone map to zones.json.",
+    "maze.load_zones": "Load a zone map from disk.",
+    "maze.min_confidence": "Track confidence below which the maze state is "
+                           "UNKNOWN (no transitions emitted).",
+    "maze.min_dwell": "Ticks a new zone must persist before it commits "
+                      "(hysteresis against border jitter).",
+    "maze.readout": "Live discrete maze state: current zone/substate, direction "
+                    "along the stem, entered/exited edges, and completed loops.",
+    "maze.log": "Start/stop a state-timeline CSV in the recordings' track_logs "
+                "folder (for offline analysis / the stats module).",
+
     # ---- tracker_view.py: tuning sliders (keyed by param name) ----
     "tracker.thresh": "Foreground threshold on the background difference (0-255).",
     "tracker.min_area": "Minimum blob area (px) to be considered the rat.",

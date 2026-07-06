@@ -43,29 +43,10 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 from typing import Optional
 
+import protocol
+from gui_deps import cv2, missing_dependency
+from preview import render_bgr_to_label, safe_after
 from tooltips import tip
-
-try:
-    import numpy as np  # type: ignore
-    _NUMPY_ERR: Optional[str] = None
-except Exception as e:  # pragma: no cover
-    np = None  # type: ignore
-    _NUMPY_ERR = f"{type(e).__name__}: {e}"
-
-try:
-    import cv2  # type: ignore
-    _CV2_ERR: Optional[str] = None
-except Exception as e:  # pragma: no cover
-    cv2 = None  # type: ignore
-    _CV2_ERR = f"{type(e).__name__}: {e}"
-
-try:
-    from PIL import Image, ImageTk  # type: ignore
-    _PIL_ERR: Optional[str] = None
-except Exception as e:  # pragma: no cover
-    Image = None  # type: ignore
-    ImageTk = None  # type: ignore
-    _PIL_ERR = f"{type(e).__name__}: {e}"
 
 try:
     from tracker import draw_overlay as _draw_overlay  # noqa: E402
@@ -142,14 +123,14 @@ class RulesControlView:
 
     def apply(self, line: str) -> None:
         """Track firmware mode and feed lick edges to the engine."""
-        fields = line.split(",")
-        if len(fields) >= 3 and fields[1] == "MODE":
-            self._mode = fields[2].strip().upper()
+        mode = protocol.mode_name(line)
+        if mode is not None:
+            self._mode = mode.upper()
             return
         if self._engine is None:
             return
         # Feed lick lines; only acts when the gate is open (set on the engine).
-        if len(fields) == 4 and fields[1] == "L":
+        if protocol.lick_edge(line) is not None:
             self._engine.enabled = self._gate_open()
             if self._engine.enabled:
                 actions = self._engine.event(line, time.monotonic())
@@ -162,14 +143,7 @@ class RulesControlView:
     # ---------------------------------------------------------- dependencies
     @staticmethod
     def _missing_dependency() -> Optional[str]:
-        problems = []
-        if np is None:
-            problems.append(f"numpy ({_NUMPY_ERR})")
-        if cv2 is None:
-            problems.append(f"opencv-python ({_CV2_ERR})")
-        if Image is None or ImageTk is None:
-            problems.append(f"pillow ({_PIL_ERR})")
-        return "\n".join(problems) if problems else None
+        return missing_dependency("numpy", "opencv-python", "pillow")
 
     # -------------------------------------------------------------- loading
     def _load_rules(self) -> None:
@@ -558,10 +532,7 @@ class RulesControlView:
         try:
             self._poll()
         finally:
-            try:
-                self.frame.after(POLL_INTERVAL_MS, self._schedule_poll)
-            except tk.TclError:
-                pass
+            safe_after(self.frame, POLL_INTERVAL_MS, self._schedule_poll)
 
     def _poll(self) -> None:
         if self._engine is None:
@@ -592,10 +563,7 @@ class RulesControlView:
         try:
             self._render_preview()
         finally:
-            try:
-                self.frame.after(PREVIEW_INTERVAL_MS, self._schedule_preview)
-            except tk.TclError:
-                pass
+            safe_after(self.frame, PREVIEW_INTERVAL_MS, self._schedule_preview)
 
     def _render_preview(self) -> None:
         if self._camera is None:
@@ -608,23 +576,17 @@ class RulesControlView:
         frame = self._camera.get_latest_frame()
         if frame is None:
             return
-        try:
-            h, w = frame.shape[:2]
-            scale = min(1.0, PREVIEW_MAX_W / float(w)) if w else 1.0
-            if scale < 1.0:
-                disp = cv2.resize(frame, (max(1, int(w * scale)), max(1, int(h * scale))),
-                                  interpolation=cv2.INTER_AREA)
-            else:
-                disp = frame.copy()
-            result = self._tracker.snapshot_result() if self._tracking_running() else None
+        h, w = frame.shape[:2]
+        result = self._tracker.snapshot_result() if self._tracking_running() else None
+
+        def draw(disp, scale: float) -> None:
             if _draw_overlay is not None:
                 _draw_overlay(disp, scale, self._tracker, result)
             self._draw_zones(disp, scale, (w, h))
-            rgb = cv2.cvtColor(disp, cv2.COLOR_BGR2RGB)
-            self._photo_preview = ImageTk.PhotoImage(Image.fromarray(rgb))
-            self._preview.configure(image=self._photo_preview)
-        except Exception:
-            pass
+
+        photo = render_bgr_to_label(self._preview, frame, PREVIEW_MAX_W, draw=draw)
+        if photo is not None:
+            self._photo_preview = photo
 
     def _draw_zones(self, img, scale: float, frame_size) -> None:
         """Draw each enabled rule's proximity circle (cm -> px) on the preview."""

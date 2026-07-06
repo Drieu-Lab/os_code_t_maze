@@ -37,29 +37,11 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 from typing import Optional
 
+import protocol
+from gui_deps import Image, ImageTk, cv2, missing_dependency, np
+from preview import render_bgr_to_label, safe_after
 from tooltips import tip
-
-try:
-    import numpy as np  # type: ignore
-    _NUMPY_ERR: Optional[str] = None
-except Exception as e:  # pragma: no cover
-    np = None  # type: ignore
-    _NUMPY_ERR = f"{type(e).__name__}: {e}"
-
-try:
-    import cv2  # type: ignore
-    _CV2_ERR: Optional[str] = None
-except Exception as e:  # pragma: no cover
-    cv2 = None  # type: ignore
-    _CV2_ERR = f"{type(e).__name__}: {e}"
-
-try:
-    from PIL import Image, ImageTk  # type: ignore
-    _PIL_ERR: Optional[str] = None
-except Exception as e:  # pragma: no cover
-    Image = None  # type: ignore
-    ImageTk = None  # type: ignore
-    _PIL_ERR = f"{type(e).__name__}: {e}"
+from tracker import TRACK_COLUMNS, track_row
 
 # Shared tracking-overlay drawing (so this preview matches the camera tab's).
 try:
@@ -167,9 +149,9 @@ class TrackerControlView:
 
     def apply(self, line: str) -> None:
         """Learn the animal id from the serial stream (for model filenames)."""
-        parts = line.split(",")
-        if len(parts) > 2 and parts[0].isdigit() and parts[1] == "ANIMAL":
-            self._animal = parts[2].strip()
+        animal = protocol.animal_id(line)
+        if animal is not None:
+            self._animal = animal
             if self._tracker is not None:
                 self._tracker.set_animal(self._animal)
 
@@ -180,14 +162,7 @@ class TrackerControlView:
     # ---------------------------------------------------------- dependencies
     @staticmethod
     def _missing_dependency() -> Optional[str]:
-        problems = []
-        if np is None:
-            problems.append(f"numpy ({_NUMPY_ERR})")
-        if cv2 is None:
-            problems.append(f"opencv-python ({_CV2_ERR})")
-        if Image is None or ImageTk is None:
-            problems.append(f"pillow ({_PIL_ERR})")
-        return "\n".join(problems) if problems else None
+        return missing_dependency("numpy", "opencv-python", "pillow")
 
     # ------------------------------------------------------------------- UI
     def _build_ui(self) -> None:
@@ -601,9 +576,7 @@ class TrackerControlView:
             self._log_file = open(path, "w", newline="")
             self._log_writer = csv.writer(self._log_file)
             self._log_writer.writerow(
-                ["sample_idx", "host_unix_s", "state", "detected", "cx", "cy",
-                 "smooth_cx", "smooth_cy", "area", "elongation", "solidity",
-                 "confidence"])
+                ["sample_idx", "host_unix_s"] + list(TRACK_COLUMNS))
             self._log_idx = 0
             self._log_btn.configure(text="Stop track log")
             self._log_status.set(f"log: {os.path.basename(path)} (UI-rate)")
@@ -636,10 +609,7 @@ class TrackerControlView:
         try:
             self._render_preview()
         finally:
-            try:
-                self.frame.after(PREVIEW_INTERVAL_MS, self._schedule_preview)
-            except tk.TclError:
-                pass
+            safe_after(self.frame, PREVIEW_INTERVAL_MS, self._schedule_preview)
 
     def _render_preview(self) -> None:
         """Show the shared latest camera frame + overlay, only while visible."""
@@ -653,25 +623,17 @@ class TrackerControlView:
         frame = self._camera.get_latest_frame()
         if frame is None:
             return
-        try:
-            h, w = frame.shape[:2]
-            scale = min(1.0, PREVIEW_MAX_W / float(w)) if w else 1.0
-            if scale < 1.0:
-                disp = cv2.resize(frame, (max(1, int(w * scale)), max(1, int(h * scale))),
-                                  interpolation=cv2.INTER_AREA)
-            else:
-                disp = frame.copy()
-            result = self._tracker.snapshot_result() if self.tracking_running() else None
+        result = self._tracker.snapshot_result() if self.tracking_running() else None
+
+        def draw(disp, scale: float) -> None:
             if _draw_overlay is not None:
                 _draw_overlay(disp, scale, self._tracker, result)
-            rgb = cv2.cvtColor(disp, cv2.COLOR_BGR2RGB)
-            self._photo_preview = ImageTk.PhotoImage(Image.fromarray(rgb))
-            self._preview.configure(image=self._photo_preview)
-            # Colorized binary mask, stacked under the camera (tracked blob green).
+
+        photo = render_bgr_to_label(self._preview, frame, PREVIEW_MAX_W, draw=draw)
+        if photo is not None:
+            self._photo_preview = photo
             if self._show_mask_var.get() and result is not None and result.mask is not None:
                 self._render_mask(result.mask, result.chosen_contour)
-        except Exception:
-            pass
 
     def _schedule_poll(self) -> None:
         if self._closed:
@@ -679,10 +641,7 @@ class TrackerControlView:
         try:
             self._poll()
         finally:
-            try:
-                self.frame.after(POLL_INTERVAL_MS, self._schedule_poll)
-            except tk.TclError:
-                pass
+            safe_after(self.frame, POLL_INTERVAL_MS, self._schedule_poll)
 
     def _poll(self) -> None:
         tr = self._tracker
@@ -738,15 +697,8 @@ class TrackerControlView:
 
     def _write_log_row(self, result) -> None:
         try:
-            cx, cy = result.centroid if result.centroid is not None else ("", "")
-            sx, sy = result.smoothed if result.smoothed is not None else ("", "")
-            self._log_writer.writerow([
-                self._log_idx, f"{time.time():.6f}", result.state,
-                int(result.detected),
-                f"{cx:.1f}" if cx != "" else "", f"{cy:.1f}" if cy != "" else "",
-                f"{sx:.1f}" if sx != "" else "", f"{sy:.1f}" if sy != "" else "",
-                int(result.area), f"{result.elongation:.3f}",
-                f"{result.solidity:.3f}", f"{result.confidence:.3f}"])
+            self._log_writer.writerow(
+                [self._log_idx, f"{time.time():.6f}"] + list(track_row(result)))
             self._log_idx += 1
         except Exception:
             pass

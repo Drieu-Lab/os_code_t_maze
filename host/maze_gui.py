@@ -3,11 +3,33 @@ import tkinter as tk
 from functools import partial
 from tkinter import messagebox
 
+import protocol
+from rig_config import load_rig_config
 from rig_io import RigClient
 
 # ================= CONFIG =================
 BROKER_HOST = "127.0.0.1"
 BROKER_PORT = 5555
+
+_RIG_CFG = load_rig_config()
+# Port order matches firmware + experiment_control: 0=left, 1=right, 2=center.
+_PORT_PREFIX = ("L", "R", "C")
+_SOL_SUFFIX = ("R1", "R2", "R3", "DRAIN", "RINSE")
+
+
+def _sol_label(port: int, sol: int) -> str:
+    return f"{_PORT_PREFIX[port]}_{_SOL_SUFFIX[sol]}"
+
+
+def sol_color(name: str) -> str:
+    if "R" in name and "DRAIN" not in name and "RINSE" not in name:
+        return "#90EE90"
+    if "DRAIN" in name:
+        return "#FF9999"
+    if "RINSE" in name:
+        return "#ADD8E6"
+    return "lightgray"
+
 
 # ================= GUI =================
 root = tk.Tk()
@@ -28,45 +50,37 @@ for i in range(6):
 tk.Label(root, text="Lick Sensors").grid(row=2, column=0, columnspan=3)
 
 for i in range(3):
-    lbl = tk.Label(root, text=f"L{i}", width=10, bg="gray")
+    if _RIG_CFG.ok:
+        label = _RIG_CFG.lick_label(i)
+    else:
+        label = f"L{i}"
+    lbl = tk.Label(root, text=label, width=14, bg="gray")
     lbl.grid(row=3, column=i)
     lick_labels.append(lbl)
-
-# ---- Solenoids ----
-solenoid_names = [
-    ["C_R1", "C_R2", "C_R3", "C_DRAIN", "C_RINSE"],
-    ["L_R1", "L_R2", "L_R3", "L_DRAIN", "L_RINSE"],
-    ["R_R1", "R_R2", "R_R3", "R_DRAIN", "R_RINSE"]
-]
-
-def sol_color(name):
-    if "R" in name and "DRAIN" not in name and "RINSE" not in name:
-        return "#90EE90"
-    if "DRAIN" in name:
-        return "#FF9999"
-    if "RINSE" in name:
-        return "#ADD8E6"
-    return "lightgray"
 
 # ---- Connect to broker (must exist before send/handle_line are wired up) ----
 client = RigClient(root, host=BROKER_HOST, port=BROKER_PORT)
 
+
 def send(cmd):
     client.send(cmd)
 
+
+# ---- Solenoids (rows: left / right / center; cols: sol 0-4) ----
 tk.Label(root, text="Solenoids").grid(row=4, column=0, columnspan=5)
 
-for port in range(3):
+_port_names = ("Left (port 0)", "Right (port 1)", "Center (port 2)")
+for row, port in enumerate(range(3)):
+    tk.Label(root, text=_port_names[row]).grid(row=5 + row, column=0, sticky="w", padx=4)
     for sol in range(5):
-        name = solenoid_names[port][sol]
-
+        name = _sol_label(port, sol)
         tk.Button(
             root,
             text=name,
             width=12,
             bg=sol_color(name),
             command=partial(send, f"R{port}{sol}")
-        ).grid(row=5 + port, column=sol)
+        ).grid(row=5 + row, column=sol + 1)
 
 # ---- Log ----
 log = tk.Text(root, height=12, width=60)
@@ -79,25 +93,26 @@ status_lbl.grid(row=11, column=0, columnspan=6, sticky="we")
 
 # ================= HANDLER =================
 
+
 def handle_line(line):
-    # Protocol v2: every line is "<ms>,<TYPE>,<payload...>".
-    parts = line.split(",")
-    if len(parts) < 2 or not parts[0].isdigit():
+    # Every firmware line is "<ms>,<TYPE>,<payload...>" (see firmware/PROTOCOL.md);
+    # parsing goes through the shared protocol module.
+    if protocol.parse(line) is None:
         return
 
-    typ = parts[1]
     try:
-        if typ == "S" and len(parts) >= 4:
-            idx, state = int(parts[2]), int(parts[3])
-            sensor_labels[idx].config(bg="green" if state == 1 else "gray")
-        elif typ == "L" and len(parts) >= 4:
-            idx, state = int(parts[2]), int(parts[3])
-            lick_labels[idx].config(bg="blue" if state == 1 else "gray")
+        sensor = protocol.sensor_edge(line)
+        lick = protocol.lick_edge(line)
+        if sensor is not None:
+            idx, active = sensor
+            sensor_labels[idx].config(bg="green" if active else "gray")
+        elif lick is not None:
+            idx, active = lick
+            lick_labels[idx].config(bg="blue" if active else "gray")
         else:
-            # everything else (TRIAL/CHOICE/OUTCOME/REWARD/PROTO/...) goes to the log
             log.insert(tk.END, line + "\n")
             log.see(tk.END)
-    except (ValueError, IndexError) as e:
+    except IndexError as e:
         print("Parse error:", e, line)
 
 

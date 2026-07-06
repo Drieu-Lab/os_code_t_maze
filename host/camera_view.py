@@ -43,53 +43,14 @@ from dataclasses import dataclass
 from tkinter import filedialog, ttk
 from typing import Optional, Tuple
 
-# ----------------------------- defensive imports -----------------------------
-# Importing this module must never crash experiment_control.py, so every heavy
-# optional dependency is guarded and the failure is surfaced in the tab instead.
-try:
-    from pypylon import pylon  # type: ignore
-    _PYLON_ERR: Optional[str] = None
-except Exception as e:  # pragma: no cover - depends on the host environment
-    pylon = None  # type: ignore
-    _PYLON_ERR = f"{type(e).__name__}: {e}"
-
-try:
-    import numpy as np  # type: ignore
-    _NUMPY_ERR: Optional[str] = None
-except Exception as e:  # pragma: no cover
-    np = None  # type: ignore
-    _NUMPY_ERR = f"{type(e).__name__}: {e}"
-
-try:
-    import cv2  # type: ignore
-    _CV2_ERR: Optional[str] = None
-except Exception as e:  # pragma: no cover
-    cv2 = None  # type: ignore
-    _CV2_ERR = f"{type(e).__name__}: {e}"
-
-try:
-    from PIL import Image, ImageTk  # type: ignore
-    _PIL_ERR: Optional[str] = None
-except Exception as e:  # pragma: no cover
-    Image = None  # type: ignore
-    ImageTk = None  # type: ignore
-    _PIL_ERR = f"{type(e).__name__}: {e}"
-
-# PyAV is required only for recording (preview works without it): OpenCV's FFV1
-# writer is single-threaded and can't keep up with 1.3 MP color at the rig's
-# frame rate, so we encode FFV1 with PyAV's slice multithreading. See
-# docs/decisions/0012.
-try:
-    import av  # type: ignore
-    _AV_ERR: Optional[str] = None
-except Exception as e:  # pragma: no cover
-    av = None  # type: ignore
-    _AV_ERR = f"{type(e).__name__}: {e}"
-
-# Shared lens-distortion loading + undistortion (also used by the tracker
-# prototype, so tuning matches this pipeline). See docs/decisions/0015.
+from gui_deps import (  # noqa: E402
+    Image, ImageTk, _AV_ERR, av, cv2, missing_dependency, np, pylon,
+)
 from calibration import Undistorter, load_calibration  # noqa: E402
+import protocol  # noqa: E402  (shared serial-line parser; see docs/decisions/0024)
+from preview import render_bgr_to_label, safe_after  # noqa: E402
 from tooltips import tip  # noqa: E402
+from tracker import TRACK_COLUMNS, track_row  # noqa: E402
 
 # Shared tracking-overlay drawing (also used by the Tracking tab so previews
 # match). Guarded: tracking deps may be absent without breaking the camera tab.
@@ -138,12 +99,6 @@ UNDISTORT_ALPHA = 0.0
 # Sidecar CSV columns (future-proofed: cam_block_id / cam_timestamp are written
 # now even though Step 0 doesn't analyze them, so early recordings stay usable).
 SIDECAR_COLUMNS = ("frame_idx", "host_unix_s", "rig_ms", "cam_block_id", "cam_timestamp")
-# Tracking columns appended to every recording's sidecar (blank when tracking is
-# off), so the per-frame track stays aligned with the video. See ADR-0014.
-TRACK_COLUMNS = ("track_state", "track_detected", "track_cx", "track_cy",
-                 "track_smooth_cx", "track_smooth_cy", "track_area",
-                 "track_elongation", "track_solidity", "track_confidence")
-_TRACK_BLANKS = ("",) * len(TRACK_COLUMNS)
 
 # How many FFV1 slices to split each frame into for multithreaded encoding. More
 # slices => more parallelism across cores (at a tiny size cost). See ADR-0012.
@@ -343,14 +298,15 @@ class CameraView:
         Captures the latest rig <ms> for the sidecar, learns the animal id, and
         drives the dismissable session/record mismatch warnings.
         """
-        parts = line.split(",")
-        if not parts or not parts[0].isdigit():
+        parsed = protocol.parse(line)
+        if parsed is None:
             return
-        self._latest_rig_ms = parts[0]
-        typ = parts[1] if len(parts) > 1 else ""
+        self._latest_rig_ms = str(parsed.ms)
+        typ = parsed.type
 
-        if typ == "ANIMAL" and len(parts) > 2:
-            self._animal_id = parts[2].strip()
+        animal = protocol.animal_id(line)
+        if animal is not None:
+            self._animal_id = animal
             return
 
         # Session start: first TRIAL (or the sequence dump that precedes it).
@@ -419,16 +375,7 @@ class CameraView:
     # ---------------------------------------------------------- dependencies
     @staticmethod
     def _missing_dependency() -> Optional[str]:
-        problems = []
-        if pylon is None:
-            problems.append(f"pypylon ({_PYLON_ERR})")
-        if np is None:
-            problems.append(f"numpy ({_NUMPY_ERR})")
-        if cv2 is None:
-            problems.append(f"opencv-python ({_CV2_ERR})")
-        if Image is None or ImageTk is None:
-            problems.append(f"pillow ({_PIL_ERR})")
-        return "\n".join(problems) if problems else None
+        return missing_dependency("pypylon", "numpy", "opencv-python", "pillow")
 
     # ------------------------------------------------------------------- UI
     def _build_message(self, text: str) -> None:
@@ -638,28 +585,18 @@ class CameraView:
             frame = self._latest_frame
         if frame is not None:
             self._render_preview(frame)
-        try:
-            self.frame.after(PREVIEW_INTERVAL_MS, self._schedule_preview)
-        except tk.TclError:
-            pass  # widget torn down
+        safe_after(self.frame, PREVIEW_INTERVAL_MS, self._schedule_preview)
 
     def _render_preview(self, frame_bgr) -> None:
-        try:
-            h, w = frame_bgr.shape[:2]
-            scale = min(1.0, PREVIEW_MAX_W / float(w)) if w else 1.0
-            if scale < 1.0:
-                disp = cv2.resize(frame_bgr, (max(1, int(w * scale)),
-                                              max(1, int(h * scale))),
-                                  interpolation=cv2.INTER_AREA)
-            else:
-                disp = frame_bgr.copy() if self.tracking_enabled() else frame_bgr
+        def draw(disp, scale: float) -> None:
             if self.tracking_enabled():
                 self._draw_track_overlay(disp, scale)
-            rgb = cv2.cvtColor(disp, cv2.COLOR_BGR2RGB)
-            self._photo = ImageTk.PhotoImage(Image.fromarray(rgb))
-            self._preview.configure(image=self._photo)
-        except Exception:
-            pass  # never let a preview hiccup break the GUI
+
+        photo = render_bgr_to_label(
+            self._preview, frame_bgr, PREVIEW_MAX_W, draw=draw,
+            copy_unscaled=self.tracking_enabled())
+        if photo is not None:
+            self._photo = photo
 
     def _draw_track_overlay(self, disp, scale: float) -> None:
         """Draw the (shared) tracking overlay on the preview."""
@@ -683,10 +620,7 @@ class CameraView:
     _conn_status = "Opening camera..."
 
     def _post(self, fn, *args) -> None:
-        try:
-            self.frame.after(0, fn, *args)
-        except (tk.TclError, RuntimeError):
-            pass
+        safe_after(self.frame, 0, fn, *args)
 
     def _set_conn_status(self, text: str) -> None:
         self._conn_status = text
@@ -881,7 +815,7 @@ class CameraView:
                         meta = (time.time(), self._latest_rig_ms,
                                 "" if block_id is None else block_id,
                                 "" if cam_ts is None else cam_ts,
-                                self._track_row(track_result))
+                                track_row(track_result))
                         self._enqueue(frame, meta)
                 finally:
                     grab.Release()
@@ -1077,21 +1011,6 @@ class CameraView:
             self._post(self._set_conn_status, f"Loaded {os.path.basename(path)}")
         except Exception as e:
             self._post(self._set_conn_status, f".pfs reload failed: {e}")
-
-    @staticmethod
-    def _track_row(result):
-        """Flatten a TrackResult into the TRACK_COLUMNS values (blanks if None)."""
-        if result is None:
-            return _TRACK_BLANKS
-
-        def fmt(pt):
-            return (f"{pt[0]:.1f}", f"{pt[1]:.1f}") if pt is not None else ("", "")
-
-        cx, cy = fmt(result.centroid)
-        sx, sy = fmt(result.smoothed)
-        return (result.state, int(result.detected), cx, cy, sx, sy,
-                int(result.area), f"{result.elongation:.3f}",
-                f"{result.solidity:.3f}", f"{result.confidence:.3f}")
 
     @staticmethod
     def _orient(frame):

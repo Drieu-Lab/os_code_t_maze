@@ -67,3 +67,5 @@ The chain of records is the audit trail.
 | [0021](0021-host-reads-rig-config-pin-map.md) | Read rig_config.h on the host as the single source of truth for the pin map | Accepted | 2026-07-01 |
 | [0022](0022-verified-lick-port-pin-mapping.md) | Verified lick-port <-> pin/index mapping (left=L0/37, right=L1/36, center=L2/35) | Accepted | 2026-07-01 |
 | [0023](0023-position-based-rules-engine.md) | Position-based rules engine (pure core + Free-Roam-gated executor) with cm-based spatial calibration | Accepted | 2026-07-02 |
+| [0024](0024-shared-host-protocol-parser.md) | Centralize host-side serial-protocol parsing in protocol.py | Accepted | 2026-07-06 |
+| [0025](0025-maze-state-module.md) | Discrete maze-state module (zones + direction + loops) over the tracker | Accepted | 2026-07-06 |

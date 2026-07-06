@@ -24,6 +24,10 @@ host/ratmodels/
 host/roi_polygon.json
 host/landmarks.json
 
+# Maze-state zone map (per-rig maze geometry, drawn in the Maze state tab).
+# see docs/decisions/0025
+host/zones.json
+
 # Rules-engine per-rig scale calibration (cm/px + homography), regenerated in
 # the Rules tab. rules.json IS versioned (the documented example config).
 # see docs/decisions/0023

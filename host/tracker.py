@@ -425,6 +425,30 @@ class TrackResult:
     model_coverage: bool = False
 
 
+# Shared column set for per-frame track rows (video sidecar + standalone log).
+TRACK_COLUMNS = (
+    "track_state", "track_detected", "track_cx", "track_cy",
+    "track_smooth_cx", "track_smooth_cy", "track_area",
+    "track_elongation", "track_solidity", "track_confidence",
+)
+_TRACK_BLANKS = ("",) * len(TRACK_COLUMNS)
+
+
+def track_row(result: Optional[TrackResult]) -> tuple:
+    """Flatten a TrackResult into TRACK_COLUMNS values (blanks if None)."""
+    if result is None:
+        return _TRACK_BLANKS
+
+    def fmt(pt):
+        return (f"{pt[0]:.1f}", f"{pt[1]:.1f}") if pt is not None else ("", "")
+
+    cx, cy = fmt(result.centroid)
+    sx, sy = fmt(result.smoothed)
+    return (result.state, int(result.detected), cx, cy, sx, sy,
+            int(result.area), f"{result.elongation:.3f}",
+            f"{result.solidity:.3f}", f"{result.confidence:.3f}")
+
+
 class RatTracker:
     """Classic-CV single-rat position tracker (Phase 3)."""
 
