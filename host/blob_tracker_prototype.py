@@ -80,7 +80,7 @@ except Exception as e:  # pragma: no cover
     print(f"numpy is required: {type(e).__name__}: {e}", file=sys.stderr)
     sys.exit(1)
 
-from tracker import RatTracker
+from tracker import MODEL_REAPPLY_FIELDS, MODEL_SHAPING_FIELDS, RatTracker
 from calibration import Undistorter, load_calibration
 
 # Reuse the rig camera identity + orientation so this view matches camera_view.
@@ -536,8 +536,24 @@ def main(argv=None) -> int:
                                 key=os.path.getmtime, reverse=True)
                 if models:
                     try:
+                        before = tracker.get_params()
                         tracker.load_model(models[0])
                         print(f"Loaded model <- {models[0]}")
+                        m = tracker.get_model()
+                        if getattr(m, "acq_params", None) is None:
+                            print("  (no stored settings - current tuning kept)")
+                        else:
+                            after = tracker.get_params()
+                            changed = [f"{f}:{getattr(before, f)}->{getattr(after, f)}"
+                                       for f in MODEL_REAPPLY_FIELDS
+                                       if getattr(before, f) != getattr(after, f)]
+                            print("  restored settings"
+                                  + (": " + ", ".join(changed) if changed
+                                     else " (already matched)"))
+                            if any(getattr(before, f) != getattr(after, f)
+                                   for f in MODEL_SHAPING_FIELDS):
+                                print("  detection settings changed - re-grab "
+                                      "the background (b)")
                     except Exception as e:
                         print(f"Model load failed: {type(e).__name__}: {e}")
                 else:

@@ -1,60 +1,102 @@
 {
   "_schema": {
-    "about": "Declarative position-based task rules for the T-maze rig. Edit this file to add/tune rules without touching Python. Loaded by host/rules_view.py; evaluated by host/rules_engine.py. See docs/decisions/0023. Distances are in CENTIMETERS and converted to pixels via the spatial calibration in host/rig_scale.json (set it in the Rules tab's 'Measure scale' UI).",
-    "top_level": {
-      "version": "schema version (integer)",
-      "enabled": "master default (the GUI still forces the engine OFF at startup for safety)",
-      "defaults": "fallbacks applied to any rule that omits the field",
-      "rules": "list of rule objects"
+    "about": "Declarative position-based task rules for the T-maze rig. Edit this file to add/tune rules without touching Python. Loaded by host/rules_view.py; evaluated by host/rules_engine.py. See docs/decisions/0023 and 0026. Distances (radius_cm) are in CENTIMETERS and converted to pixels via host/rig_scale.json (Rules tab 'Measure scale'). Zone/loop templates instead use the maze zone map host/zones.json (Tracking tab) via the maze-state estimator - no cm scale needed.",
+    "layout": {
+      "flat": "A top-level 'rules' list (legacy): one active rule set.",
+      "profiles": "A 'profiles' map of named phases; 'active_profile' selects the default; the Rules tab exposes a Phase dropdown to switch. Each profile has a 'label', an optional 'defaults' override, and its own 'rules' list."
     },
     "defaults": {
       "min_confidence": "0..1; only act while the track is TRACKING with confidence >= this",
       "topup_cooldown_ms": "minimum ms between fires WITHIN a visit (prime->top-up, top-up->top-up); keep short",
-      "rearm_refractory_ms": "anti-camp timer: minimum ms since the last fire before the rule may PRIME again on a fresh visit",
+      "rearm_refractory_ms": "prime_and_lick_topup only: anti-camp timer before the rule may PRIME again on a fresh visit",
       "global_min_interval_ms": "runaway backstop: minimum ms between ANY two fires across all rules"
     },
     "rule_fields": {
       "id": "unique short name (used in logs)",
-      "template": "which rule template to instantiate; currently: 'prime_and_lick_topup'",
+      "template": "'prime_and_lick_topup' (landmark+scale) or 'well_reward_with_excursion' (zone/loop)",
       "enabled": "true/false; disable a rule without deleting it",
-      "landmark": "{kind, index} of the annotated point (well 0=left,1=right,2=center; sensor 0..5) - place it in the Tracking tab",
-      "radius_cm": "proximity RADIUS in cm around the landmark (a circle of this radius; diameter = 2x)",
       "port": "reward port to fire (0=left,1=right,2=center)",
       "pulse_ms": "reward valve open time (ms)",
       "max_topups": "max lick-triggered top-ups per visit (after the prime)",
-      "min_confidence": "override the default min track confidence",
-      "lick_debounce_ms": "ignore lick edges closer together than this (ms) - anti-chatter only; NOT a re-prime timer",
+      "lick_debounce_ms": "ignore lick edges closer together than this (ms) - anti-chatter only",
       "topup_cooldown_ms": "override the default within-visit top-up cooldown (ms)",
-      "rearm_refractory_ms": "override the default between-visit anti-camp refractory (ms)",
-      "rearm_on_exit": "re-arm (allow another prime) once the animal leaves the zone (still subject to rearm_refractory_ms)"
+      "min_confidence": "override the default min track confidence",
+      "landmark": "prime_and_lick_topup: {kind, index} of the annotated point (well 0=left,1=right,2=center)",
+      "radius_cm": "prime_and_lick_topup: proximity RADIUS in cm around the landmark",
+      "rearm_refractory_ms": "prime_and_lick_topup: between-visit anti-camp refractory (ms)",
+      "rearm_on_exit": "prime_and_lick_topup: re-arm once the animal leaves the zone",
+      "credential": "well_reward_with_excursion: which excursion earns the next well payout - 'choice' (enter either choice arm), 'choice_via_stem' (enter a choice arm, outbound leg used the central stem), or 'clean_loop' (a completed clean lap: stem out + matching return arm)",
+      "prime_on_arrival": "well_reward_with_excursion: true = prime the moment the animal reaches the well while credited; false = the first lick at the well fires the prime (lick-gated)",
+      "debias": "well_reward_with_excursion (clean_loop only): anti-bias cap on the same-side run - {mode:'fixed', n:3} or {mode:'uniform', min:3, max:5, seed:optional}. A clean loop beyond the cap is logged but WITHHELD, nudging the animal to the other side. Omit for no cap."
     },
     "templates": {
-      "prime_and_lick_topup": "On entering the zone (confident track within radius_cm of landmark): dispense once at 'port' (prime). Then each subsequent lick at 'port' while still inside dispenses again, up to 'max_topups' times, spaced by topup_cooldown_ms. To prime again the animal must LEAVE the zone AND wait out rearm_refractory_ms since the last fire; a re-entry inside the refractory pays nothing (no prime, so no top-ups)."
+      "prime_and_lick_topup": "On entering the zone (confident track within radius_cm of landmark): dispense once (prime), then each subsequent lick tops up up to max_topups. Re-prime requires leaving the zone AND waiting rearm_refractory_ms.",
+      "well_reward_with_excursion": "Reward at the central well is credentialed by a behavioral excursion (see 'credential'). The well pays out only after the credit is earned; the prime consumes the credit, so each payout needs a fresh excursion. Licks top up as in prime_and_lick_topup. This is the reward-shaping curriculum: Phase 1 = 'choice', Phase 2a = 'choice_via_stem', Phase 2b = 'clean_loop' (+ debias). Requires zones.json."
     }
   },
-  "version": 1,
-  "enabled": false,
+  "version": 2,
+  "active_profile": "phase1",
   "defaults": {
     "min_confidence": 0.5,
     "topup_cooldown_ms": 500,
     "rearm_refractory_ms": 5000,
     "global_min_interval_ms": 500
   },
-  "rules": [
-    {
-      "id": "center_prime_topup",
-      "template": "prime_and_lick_topup",
-      "enabled": true,
-      "landmark": { "kind": "well", "index": 2 },
-      "radius_cm": 20.0,
-      "port": 2,
-      "pulse_ms": 300,
-      "max_topups": 3,
-      "min_confidence": 0.5,
-      "lick_debounce_ms": 150,
-      "topup_cooldown_ms": 500,
-      "rearm_refractory_ms": 10000,
-      "rearm_on_exit": true
+  "profiles": {
+    "phase1": {
+      "label": "Phase 1 - well + explore (choice credit)",
+      "rules": [
+        {
+          "id": "p1_well_choice",
+          "template": "well_reward_with_excursion",
+          "enabled": true,
+          "credential": "choice",
+          "prime_on_arrival": true,
+          "port": 2,
+          "pulse_ms": 300,
+          "max_topups": 3,
+          "lick_debounce_ms": 150,
+          "topup_cooldown_ms": 500,
+          "min_confidence": 0.5
+        }
+      ]
+    },
+    "phase2a": {
+      "label": "Phase 2a - stem-gated choice",
+      "rules": [
+        {
+          "id": "p2a_well_stem",
+          "template": "well_reward_with_excursion",
+          "enabled": true,
+          "credential": "choice_via_stem",
+          "prime_on_arrival": true,
+          "port": 2,
+          "pulse_ms": 300,
+          "max_topups": 3,
+          "lick_debounce_ms": 150,
+          "topup_cooldown_ms": 500,
+          "min_confidence": 0.5
+        }
+      ]
+    },
+    "phase2b": {
+      "label": "Phase 2b - clean loop + anti-bias",
+      "rules": [
+        {
+          "id": "p2b_well_loop",
+          "template": "well_reward_with_excursion",
+          "enabled": true,
+          "credential": "clean_loop",
+          "prime_on_arrival": true,
+          "port": 2,
+          "pulse_ms": 300,
+          "max_topups": 3,
+          "lick_debounce_ms": 150,
+          "topup_cooldown_ms": 500,
+          "min_confidence": 0.5,
+          "debias": { "mode": "uniform", "min": 3, "max": 5 }
+        }
+      ]
     }
-  ]
+  }
 }

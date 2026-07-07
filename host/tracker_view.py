@@ -56,6 +56,16 @@ try:
 except Exception:  # pragma: no cover
     _FIXED_LANDMARKS = ()  # type: ignore
 
+# Parameter groups persisted with a saved model (see ADR-0027): which settings
+# get restored on load, and which of those are the correctness-critical shaping
+# knobs (a proc_max_w change means the background must be re-grabbed).
+try:
+    from tracker import (MODEL_REAPPLY_FIELDS as _MODEL_REAPPLY_FIELDS,  # noqa: E402
+                         MODEL_SHAPING_FIELDS as _MODEL_SHAPING_FIELDS)
+except Exception:  # pragma: no cover
+    _MODEL_REAPPLY_FIELDS = ()  # type: ignore
+    _MODEL_SHAPING_FIELDS = ()  # type: ignore
+
 # Recordings folder default (camera_view guards its heavy imports, so this is
 # safe even without pypylon/OpenCV). Track logs live in a subfolder of whatever
 # recordings folder the camera is actually using.
@@ -113,6 +123,7 @@ class TrackerControlView:
         self._log_writer = None
         self._log_idx = 0
         self._sliders = {}            # param-name -> (tk var, scale-factor)
+        self._slider_labels = {}      # param-name -> value Label (for refresh)
         self._closed = False
 
         missing = self._missing_dependency()
@@ -350,7 +361,20 @@ class TrackerControlView:
         val.pack(side=tk.LEFT)
         tip(scale, f"tracker.{name}")
         self._sliders[name] = (var, factor)
+        self._slider_labels[name] = (val, is_float)
         on_change()
+
+    def _refresh_controls(self, params) -> None:
+        """Re-read tracker params into the slider vars/labels (e.g. after a load
+        restores the model's saved settings). Does not push params back."""
+        for name, (var, factor) in self._sliders.items():
+            raw = getattr(params, name)
+            var.set(raw / factor if factor != 1.0 else raw)
+            entry = self._slider_labels.get(name)
+            if entry is not None:
+                lbl, is_float = entry
+                v = var.get()
+                lbl.configure(text=(f"{v:.2f}" if is_float else f"{int(round(v))}"))
 
     # --------------------------------------------------------------- actions
     def _push_params(self) -> None:
@@ -458,18 +482,49 @@ class TrackerControlView:
         if not path:
             return
         try:
+            before = self._tracker.get_params()
             self._tracker.load_model(path)
             m = self._tracker.get_model()
             self._model_status.set(
                 f"model: {os.path.basename(path)} (n={m.n}, "
                 f"{'cov' if m.coverage_ok else 'thin'}"
                 f"{', ' + m.animal if m.animal else ''})")
-            messagebox.showinfo(
-                "Load model",
-                "Model loaded. Remember to grab a fresh background for this "
-                "session (lighting drifts day to day).")
+            # load_model restored the model's saved settings; sync the controls.
+            after = self._tracker.get_params()
+            self._refresh_controls(after)
+            messagebox.showinfo("Load model",
+                                self._load_model_message(m, before, after))
         except Exception as e:
             messagebox.showerror("Load model", f"{type(e).__name__}: {e}")
+
+    @staticmethod
+    def _load_model_message(model, before, after) -> str:
+        """Human summary of what a model load restored (see ADR-0027)."""
+        if getattr(model, "acq_params", None) is None:
+            return ("Model loaded. It has no stored settings (older model), so "
+                    "your current tuning was kept - verify proc_max_w matches. "
+                    "Grab a fresh background for this session.")
+        changed = []
+        for name in _MODEL_REAPPLY_FIELDS:
+            old, new = getattr(before, name), getattr(after, name)
+            if old != new:
+                changed.append(f"  - {name}: {old} -> {new}")
+        lines = ["Model loaded; its saved settings were restored."]
+        if changed:
+            lines.append("")
+            lines.append("Changed to match the model:")
+            lines.extend(changed)
+        else:
+            lines.append("(Current settings already matched the model.)")
+        lines.append("")
+        regrab = any(getattr(before, f) != getattr(after, f)
+                     for f in _MODEL_SHAPING_FIELDS)
+        if regrab:
+            lines.append("Detection settings changed - grab a fresh background.")
+        else:
+            lines.append("Remember to grab a fresh background for this session "
+                         "(lighting drifts day to day).")
+        return "\n".join(lines)
 
     def _clear_model(self) -> None:
         self._tracker.clear_model()

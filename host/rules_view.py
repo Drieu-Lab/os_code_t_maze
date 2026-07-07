@@ -54,9 +54,23 @@ except Exception:  # pragma: no cover
     _draw_overlay = None  # type: ignore
 
 from rules_engine import (
-    FireReward, LogEvent, RulesEngine, Scale, load_rules_config,
+    EngineDefaults, FireReward, LogEvent, RulesEngine, Scale, load_rules_config,
     resolve_landmark,
 )
+
+# Maze-state estimator + task-event layer (pure stdlib; safe to import). Zone /
+# loop rule templates need the task-event context these produce. See ADR-0026.
+try:
+    from maze_state import (
+        MazeStateEstimator, MazeStateParams, ZoneMap, load_zone_map,
+    )
+    from task_events import TaskEvents
+    _MAZE_STATE_IMPORT_ERROR = None
+except Exception as e:  # pragma: no cover
+    MazeStateEstimator = MazeStateParams = ZoneMap = None  # type: ignore
+    load_zone_map = None  # type: ignore
+    TaskEvents = None  # type: ignore
+    _MAZE_STATE_IMPORT_ERROR = f"{type(e).__name__}: {e}"
 
 # Recordings folder default (mirrors tracker_view): rule-event logs live in a
 # subfolder of whatever recordings folder the camera is actually using.
@@ -70,6 +84,7 @@ except Exception:  # pragma: no cover
 _HERE = os.path.dirname(os.path.abspath(__file__))
 RULES_PATH = os.path.join(_HERE, "rules.json")       # versioned example config
 SCALE_PATH = os.path.join(_HERE, "rig_scale.json")   # per-rig scale (gitignored)
+ZONES_PATH = os.path.join(_HERE, "zones.json")       # per-rig zone map (gitignored)
 RULE_LOG_SUBDIR = "track_logs"                        # shared with track logs
 
 POLL_INTERVAL_MS = 100        # engine tick + status refresh
@@ -95,6 +110,15 @@ class RulesControlView:
         self._scale = Scale()
         self._measurements: list = []    # list of measurement dicts
         self._landmark_options: dict = {}  # combobox label -> landmark dict
+        # Profiles (reward-shaping phases) + task-event pipeline. See ADR-0026.
+        self._config: dict = {}
+        self._profiles: dict = {}        # name -> profile dict
+        self._active_profile: str = ""
+        self._defaults = None            # engine defaults from the loaded config
+        self._zone_map = ZoneMap() if ZoneMap is not None else None
+        self._estimator = None
+        self._task_events = None
+        self._gate_was_open = False      # gate rising-edge detector (resets state)
         self._log_file = None
         self._log_writer = None
         self._log_idx = 0
@@ -109,6 +133,7 @@ class RulesControlView:
                 fill=tk.BOTH, expand=True)
             return
 
+        self._load_zone_map()
         self._load_rules()
         self._load_scale()
         self._build_ui()
@@ -146,18 +171,79 @@ class RulesControlView:
         return missing_dependency("numpy", "opencv-python", "pillow")
 
     # -------------------------------------------------------------- loading
-    def _load_rules(self) -> None:
+    def _load_zone_map(self) -> None:
+        """Load the per-rig zone map + build the maze-state / task-event pipeline."""
+        self._zone_map_error = None
+        if ZoneMap is None or load_zone_map is None:
+            self._zone_map = None
+            self._zone_map_error = _MAZE_STATE_IMPORT_ERROR or "maze_state unavailable"
+            return
         try:
-            config = load_rules_config(RULES_PATH)
-            self._engine = RulesEngine.from_config(config)
+            self._zone_map = load_zone_map(ZONES_PATH) if os.path.exists(ZONES_PATH) \
+                else ZoneMap()
+        except Exception as e:
+            self._zone_map = ZoneMap()
+            self._zone_map_error = f"{type(e).__name__}: {e}"
+        try:
+            self._estimator = MazeStateEstimator(self._zone_map, MazeStateParams())
+            self._task_events = TaskEvents()
+        except Exception as e:
+            self._estimator = self._task_events = None
+            self._zone_map_error = f"{type(e).__name__}: {e}"
+
+    def _reset_state_pipeline(self) -> None:
+        """Drop stale zone/loop history so each arming session starts fresh."""
+        try:
+            if self._estimator is not None:
+                self._estimator.reset()
+            if self._task_events is not None:
+                self._task_events.reset()
+        except Exception:
+            pass
+
+    def _load_rules(self) -> None:
+        """Load rules.json. Supports either a flat top-level ``rules`` list or a
+        ``profiles`` map (reward-shaping phases); the active profile builds the
+        engine. See ADR-0026.
+        """
+        try:
+            self._config = load_rules_config(RULES_PATH)
+            self._defaults = EngineDefaults.from_dict(self._config.get("defaults"))
+            self._profiles = dict(self._config.get("profiles") or {})
+            if self._profiles:
+                # Pick the configured active profile (or the first defined).
+                want = self._config.get("active_profile")
+                if want not in self._profiles:
+                    want = next(iter(self._profiles))
+                self._active_profile = want
+            else:
+                self._active_profile = ""
+            self._build_engine_for_active()
             self._load_error = None
         except Exception as e:
             # Fall back to an empty engine so the tab still loads.
-            from rules_engine import EngineDefaults
             self._engine = RulesEngine([], EngineDefaults())
+            self._profiles = {}
+            self._active_profile = ""
             self._load_error = f"{type(e).__name__}: {e}"
         # The engine is always OFF until the user arms it (and the gate opens).
         self._engine.enabled = False
+
+    def _build_engine_for_active(self) -> None:
+        """(Re)build the engine from the active profile (or top-level rules)."""
+        if self._profiles:
+            prof = self._profiles.get(self._active_profile, {})
+            rules = prof.get("rules", [])
+            defaults = EngineDefaults.from_dict(
+                prof.get("defaults") or self._config.get("defaults"))
+        else:
+            rules = self._config.get("rules", [])
+            defaults = EngineDefaults.from_dict(self._config.get("defaults"))
+        cfg = {"version": self._config.get("version", 1),
+               "enabled": False, "defaults": defaults.__dict__, "rules": rules}
+        self._engine = RulesEngine.from_config(cfg)
+        self._engine.enabled = False
+        self._reset_state_pipeline()
 
     def _load_scale(self) -> None:
         if not os.path.exists(SCALE_PATH):
@@ -194,6 +280,28 @@ class RulesControlView:
         reload_btn = ttk.Button(top, text="Reload rules.json", command=self._reload_rules)
         reload_btn.pack(side=tk.LEFT, padx=4)
         tip(reload_btn, "rules.reload")
+
+        # Reward-shaping phase selector (only when rules.json defines profiles).
+        if self._profiles:
+            prow = ttk.Frame(controls)
+            prow.pack(side=tk.TOP, fill=tk.X, **pad)
+            ttk.Label(prow, text="Phase:").pack(side=tk.LEFT, padx=(4, 2))
+            self._profile_labels = {
+                (p.get("label") or name): name
+                for name, p in self._profiles.items()}
+            self._profile_var = tk.StringVar()
+            self._profile_cmb = ttk.Combobox(
+                prow, width=28, state="readonly",
+                values=list(self._profile_labels.keys()),
+                textvariable=self._profile_var)
+            # Preselect the active profile's label.
+            for label, name in self._profile_labels.items():
+                if name == self._active_profile:
+                    self._profile_var.set(label)
+                    break
+            self._profile_cmb.pack(side=tk.LEFT, padx=2)
+            self._profile_cmb.bind("<<ComboboxSelected>>", self._on_profile_change)
+            tip(self._profile_cmb, "rules.profile")
 
         self._status_var = tk.StringVar(value="rules: idle")
         status_lbl = ttk.Label(controls, textvariable=self._status_var,
@@ -250,15 +358,36 @@ class RulesControlView:
         tip(log_lbl, "rules.log")
 
     # ---------------------------------------------------------- enable/reload
+    def _on_profile_change(self, _evt=None) -> None:
+        """Switch the active reward-shaping phase and rebuild the engine."""
+        label = self._profile_var.get()
+        name = getattr(self, "_profile_labels", {}).get(label)
+        if not name or name == self._active_profile:
+            return
+        # Disarm on any phase change (the experimenter re-arms deliberately).
+        self._enable_var.set(False)
+        self._active_profile = name
+        self._build_engine_for_active()
+        self._engine.enabled = False
+
     def _on_enable(self) -> None:
-        if self._enable_var.get() and not self._scale.valid():
+        if not self._enable_var.get():
+            return
+        if self._needs_scale() and not self._scale.valid():
             messagebox.showinfo(
                 "Arm rules",
                 "No scale calibration yet. Measure the cm/px scale (below) so "
                 "the engine can convert rule radii to pixels.")
             self._enable_var.set(False)
             return
-        if self._enable_var.get() and self._load_error:
+        if self._needs_task() and not self._task_ready():
+            messagebox.showinfo(
+                "Arm rules",
+                "This phase needs a maze zone map (zones.json) and the maze-state "
+                "estimator. Define the zones in the Tracking tab first.")
+            self._enable_var.set(False)
+            return
+        if self._load_error:
             messagebox.showwarning(
                 "Arm rules",
                 f"rules.json failed to load ({self._load_error}); no rules are "
@@ -267,13 +396,25 @@ class RulesControlView:
     def _reload_rules(self) -> None:
         was_armed = self._enable_var.get()
         self._enable_var.set(False)
+        self._load_zone_map()
         self._load_rules()
+        # Refresh the phase dropdown to match the reloaded file.
+        if getattr(self, "_profile_cmb", None) is not None:
+            self._profile_labels = {
+                (p.get("label") or name): name
+                for name, p in self._profiles.items()}
+            self._profile_cmb["values"] = list(self._profile_labels.keys())
+            for label, name in self._profile_labels.items():
+                if name == self._active_profile:
+                    self._profile_var.set(label)
+                    break
         if self._load_error:
             messagebox.showerror("Reload rules", self._load_error)
         else:
+            profile = f" (phase: {self._active_profile})" if self._active_profile else ""
             messagebox.showinfo(
                 "Reload rules",
-                f"Loaded {len(self._engine.rules)} rule(s) from rules.json.")
+                f"Loaded {len(self._engine.rules)} rule(s) from rules.json{profile}.")
         if was_armed:
             messagebox.showinfo("Reload rules", "Re-arm the engine when ready.")
 
@@ -287,21 +428,43 @@ class RulesControlView:
     def _mode_is_freeroam(self) -> bool:
         return self._mode in FREEROAM_TOKENS
 
+    def _needs_scale(self) -> bool:
+        """True if any active rule measures cm distances (needs a valid Scale)."""
+        if self._engine is None:
+            return False
+        return any(getattr(r, "needs_scale", False) for r in self._engine.rules)
+
+    def _needs_task(self) -> bool:
+        """True if any active rule needs the zone/task-event context."""
+        if self._engine is None:
+            return False
+        return any(getattr(r, "needs_task", False) for r in self._engine.rules)
+
+    def _task_ready(self) -> bool:
+        return bool(self._estimator is not None and self._task_events is not None
+                    and self._zone_map is not None and self._zone_map.valid())
+
     def _gate_open(self) -> bool:
         """All conditions that must hold before the engine may actuate."""
-        return bool(self._enable_var.get()
-                    and self._engine is not None
-                    and self._scale.valid()
-                    and self._tracking_running()
-                    and self._mode_is_freeroam())
+        if not (self._enable_var.get() and self._engine is not None
+                and self._engine.rules and self._tracking_running()
+                and self._mode_is_freeroam()):
+            return False
+        if self._needs_scale() and not self._scale.valid():
+            return False
+        if self._needs_task() and not self._task_ready():
+            return False
+        return True
 
     def _gate_reason(self) -> str:
         if not self._enable_var.get():
             return ""
         if self._engine is None or not self._engine.rules:
             return "gated: no rules loaded"
-        if not self._scale.valid():
+        if self._needs_scale() and not self._scale.valid():
             return "gated: no scale calibration"
+        if self._needs_task() and not self._task_ready():
+            return "gated: no maze zone map (zones.json)"
         if not self._tracking_running():
             return "gated: tracking is not running"
         if not self._mode_is_freeroam():
@@ -539,19 +702,31 @@ class RulesControlView:
             return
         gate = self._gate_open()
         self._engine.enabled = gate
+        # On the gate's rising edge, drop any stale zone/loop history so an
+        # arming session starts from a clean maze state.
+        if gate and not self._gate_was_open:
+            self._reset_state_pipeline()
+        self._gate_was_open = gate
         if gate:
             try:
+                now = time.monotonic()
                 res = self._tracker.snapshot_result()
                 landmarks = self._tracker.get_landmarks()
-                actions = self._engine.tick(res, landmarks, self._scale,
-                                            time.monotonic())
+                task = None
+                if self._needs_task() and self._estimator is not None:
+                    rat_state = self._estimator.update(res, now)
+                    task = self._task_events.update(rat_state)
+                actions = self._engine.tick(res, landmarks, self._scale, now,
+                                            task=task)
                 self._execute(actions)
             except Exception:
                 pass
         # Status line: per-rule state + gate reason.
         parts = []
         for st in self._engine.status():
-            parts.append(f"{st['id']}: {st['state']} "
+            armed = " ARMED" if st.get("armed") else ""
+            cred = f" [{st['credential']}]" if st.get("credential") else ""
+            parts.append(f"{st['id']}{cred}: {st['state']}{armed} "
                          f"(top-ups {st['topups']}/{st['max_topups']}, "
                          f"fires {st['fires']})")
         self._status_var.set("  |  ".join(parts) if parts else "rules: none loaded")
@@ -588,8 +763,34 @@ class RulesControlView:
         if photo is not None:
             self._photo_preview = photo
 
+    def _draw_zone_polys(self, img, scale: float, frame_size) -> None:
+        """Outline the maze zones + well on the preview (task/loop phases)."""
+        zm = self._zone_map
+        if zm is None or not zm.valid():
+            return
+        w, h = frame_size
+
+        def to_px(pt):
+            return (int(pt[0] * w * scale), int(pt[1] * h * scale))
+
+        for z in zm.zones:
+            poly = z.polygon
+            if len(poly) < 2:
+                continue
+            for i in range(len(poly)):
+                cv2.line(img, to_px(poly[i]), to_px(poly[(i + 1) % len(poly)]),
+                         (120, 180, 120), 1, cv2.LINE_AA)
+            cv2.putText(img, z.name, to_px(poly[0]), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.35, (120, 200, 120), 1, cv2.LINE_AA)
+        if zm.well and len(zm.well) >= 2:
+            for i in range(len(zm.well)):
+                cv2.line(img, to_px(zm.well[i]), to_px(zm.well[(i + 1) % len(zm.well)]),
+                         (0, 215, 255), 2, cv2.LINE_AA)
+
     def _draw_zones(self, img, scale: float, frame_size) -> None:
-        """Draw each enabled rule's proximity circle (cm -> px) on the preview."""
+        """Draw the maze zones (task phases) + each legacy rule's proximity circle."""
+        if self._needs_task():
+            self._draw_zone_polys(img, scale, frame_size)
         if self._engine is None or not self._scale.valid():
             return
         try:

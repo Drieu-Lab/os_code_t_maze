@@ -69,3 +69,5 @@ The chain of records is the audit trail.
 | [0023](0023-position-based-rules-engine.md) | Position-based rules engine (pure core + Free-Roam-gated executor) with cm-based spatial calibration | Accepted | 2026-07-02 |
 | [0024](0024-shared-host-protocol-parser.md) | Centralize host-side serial-protocol parsing in protocol.py | Accepted | 2026-07-06 |
 | [0025](0025-maze-state-module.md) | Discrete maze-state module (zones + direction + loops) over the tracker | Accepted | 2026-07-06 |
+| [0026](0026-reward-shaping-phases.md) | Host-side reward-shaping phases via a task-event layer and a credential-gated well rule | Accepted | 2026-07-06 |
+| [0027](0027-embed-acquisition-params-in-model.md) | Embed acquisition-time tracker settings in the saved model and restore them on load | Accepted | 2026-07-07 |

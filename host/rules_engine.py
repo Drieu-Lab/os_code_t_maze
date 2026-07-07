@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import json
 import math
+import random
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -150,7 +151,13 @@ def resolve_landmark(landmarks: List[dict], ref: dict,
 # ============================== frame context ================================
 @dataclass
 class Frame:
-    """Per-tick context handed to condition primitives."""
+    """Per-tick context handed to condition primitives.
+
+    ``task`` is the optional task-semantic context (a task_events.TaskEventFrame)
+    for zone/loop-based rule templates; it is None for the legacy landmark/scale
+    templates, which ignore it. Kept duck-typed (no import of task_events here) so
+    this pure core stays free of that dependency. See docs/decisions/0026.
+    """
     centroid_px: Optional[Tuple[float, float]]
     frame_size: Tuple[int, int]
     confidence: float
@@ -158,6 +165,7 @@ class Frame:
     now: float
     landmarks: List[dict]
     scale: Scale
+    task: Optional[object] = None
 
 
 # ============================ condition primitives ===========================
@@ -265,6 +273,8 @@ class PrimeAndLickTopupRule:
     """
 
     TEMPLATE = "prime_and_lick_topup"
+    needs_scale = True   # cm<->px distances require a valid Scale
+    needs_task = False   # landmark/scale based; no zone/task context
 
     def __init__(self, params: dict, defaults: EngineDefaults):
         self.id = str(params.get("id", "prime_and_lick_topup"))
@@ -384,8 +394,221 @@ class PrimeAndLickTopupRule:
                 "max_topups": self.max_topups, "fires": self.fires}
 
 
+class WellRewardWithExcursionRule:
+    """Credential-gated well reward for the reward-shaping curriculum.
+
+    Reward at the central well is CREDENTIALED by a behavioral excursion. The
+    animal must first earn a credit somewhere in the maze; only then does the
+    next visit to the well pay out (a single "prime"), after which licks top up
+    (up to ``max_topups``) as in prime_and_lick_topup. The credit is consumed by
+    the prime, so each payout requires a fresh excursion - this is the
+    anti-camping / build-on-each-other mechanism of the phases (see ADR-0026).
+
+    The ``credential`` parameter selects the phase, all reading the SAME
+    task-event vocabulary (task_events.py), so the phases are pure config, not
+    new code:
+      - "choice"          (Phase 1): entering EITHER choice arm credits. Teaches
+                          well = reward and encourages whole-maze exploration.
+      - "choice_via_stem" (Phase 2a): entering a choice arm credits ONLY if the
+                          outbound leg used the central stem. Shapes
+                          unidirectional stem travel.
+      - "clean_loop"      (Phase 2b): a completed clean loop (stem out + matching
+                          return arm) credits, subject to an optional anti-bias
+                          debias cap on the same-side run length.
+
+    ``prime_on_arrival`` (default True): prime fires the moment the animal
+    arrives at the well while credited. If False, the prime is lick-gated (the
+    first lick at the well while credited fires the prime), which can sharpen the
+    well-lick association in later phases.
+
+    Debias (``clean_loop`` only): ``debias`` = {"mode":"fixed","n":3} caps the
+    same-side run at a fixed N; {"mode":"uniform","min":3,"max":5,"seed":...}
+    redraws the cap uniformly each time the run resets (a side switch), so the
+    animal cannot learn a fixed alternation period. When the current same-side
+    run exceeds the cap, the clean loop is logged but WITHHELD (no credit),
+    gently pushing the animal to the other side. The run counts every completed
+    loop, rewarded or withheld (task_events.py), so the pressure reflects actual
+    behavior. See ADR-0026.
+
+    State: OUTSIDE / AT_WELL, mirroring prime_and_lick_topup, plus ``armed`` (a
+    pending credit). Fail-safe: with no confident position (task None / invalid)
+    nothing fires, and the well visit is only exited on a confident outside
+    reading so a brief track loss does not drop the visit or double-prime.
+    """
+
+    TEMPLATE = "well_reward_with_excursion"
+    needs_scale = False   # zone/loop based; no cm scale required
+    needs_task = True     # requires the task-event context (zone map + estimator)
+    _CREDENTIALS = ("choice", "choice_via_stem", "clean_loop")
+
+    def __init__(self, params: dict, defaults: EngineDefaults):
+        self.id = str(params.get("id", "well_reward_with_excursion"))
+        self.enabled = bool(params.get("enabled", True))
+        self.port = int(params.get("port", 2))
+        self.pulse_ms = int(params.get("pulse_ms", 300))
+        self.max_topups = int(params.get("max_topups", 3))
+        self.lick_debounce_ms = int(params.get("lick_debounce_ms", 150))
+        legacy = params.get("cooldown_ms")
+        self.topup_cooldown_ms = int(params.get(
+            "topup_cooldown_ms",
+            legacy if legacy is not None else defaults.topup_cooldown_ms))
+        self.prime_on_arrival = bool(params.get("prime_on_arrival", True))
+        self.credential = str(params.get("credential", "choice"))
+        if self.credential not in self._CREDENTIALS:
+            raise ValueError(
+                f"unknown credential {self.credential!r}; "
+                f"known: {list(self._CREDENTIALS)}")
+
+        # Anti-bias debias (clean_loop only).
+        db = params.get("debias") or {}
+        self._debias_enabled = bool(db) and self.credential == "clean_loop"
+        self._debias_mode = str(db.get("mode", "fixed"))
+        self._debias_n = int(db.get("n", 3))
+        self._debias_min = int(db.get("min", 3))
+        self._debias_max = int(db.get("max", 5))
+        self._rng = random.Random(db.get("seed"))
+        self._cap = self._draw_cap()
+
+        self._lick = LickAt(self.port)
+
+        # Mutable state.
+        self.state = "OUTSIDE"
+        self.armed = False
+        self.topups = 0
+        self.fires = 0
+        self._primed_this_visit = False
+        self._at_well = False
+        self._last_tick_now: Optional[float] = None
+        self._last_fire_now: Optional[float] = None
+        self._last_lick_now: Optional[float] = None
+
+    # --------------------------------------------------------------- helpers
+    def _draw_cap(self) -> int:
+        if not self._debias_enabled:
+            return 1 << 30           # effectively no cap
+        if self._debias_mode == "fixed":
+            return self._debias_n
+        return self._rng.randint(self._debias_min, self._debias_max)
+
+    def _topup_ok(self, now: float) -> bool:
+        if self._last_fire_now is None:
+            return True
+        return (now - self._last_fire_now) * 1000.0 >= self.topup_cooldown_ms
+
+    def _fire(self, now: float, reason: str) -> FireReward:
+        self._last_fire_now = now
+        self.fires += 1
+        return FireReward(self.port, self.pulse_ms, self.id, reason)
+
+    # ---------------------------------------------------- credential earning
+    def _earn_credential(self, task) -> List:
+        out: List = []
+        if self.credential == "choice":
+            if task.choice_entered is not None and not self.armed:
+                self.armed = True
+                out.append(LogEvent("armed", self.id,
+                                    {"credential": "choice",
+                                     "side": task.choice_entered}))
+        elif self.credential == "choice_via_stem":
+            if task.choice_entered is not None:
+                if task.outbound_used_stem:
+                    if not self.armed:
+                        self.armed = True
+                        out.append(LogEvent("armed", self.id,
+                                            {"credential": "choice_via_stem",
+                                             "side": task.choice_entered}))
+                else:
+                    out.append(LogEvent("credit_denied", self.id,
+                                        {"reason": "no_stem",
+                                         "side": task.choice_entered}))
+        elif self.credential == "clean_loop":
+            if task.loop_closed is not None:
+                side = task.loop_closed
+                if task.same_side_run == 1:     # side switch (or first) -> redraw
+                    self._cap = self._draw_cap()
+                if not task.loop_clean:
+                    out.append(LogEvent("credit_denied", self.id,
+                                        {"reason": "unclean", "side": side}))
+                elif self._debias_enabled and task.same_side_run > self._cap:
+                    out.append(LogEvent("debias_withhold", self.id,
+                                        {"side": side, "run": task.same_side_run,
+                                         "cap": self._cap}))
+                else:
+                    self.armed = True
+                    out.append(LogEvent("armed", self.id,
+                                        {"credential": "clean_loop", "side": side,
+                                         "run": task.same_side_run,
+                                         "cap": (None if not self._debias_enabled
+                                                 else self._cap)}))
+        return out
+
+    # ------------------------------------------------------------------ tick
+    def tick(self, frame: Frame) -> List:
+        task = frame.task
+        if task is None:
+            return []
+        actions: List = []
+        if task.valid:
+            actions.extend(self._earn_credential(task))
+
+        at_well = bool(task.at_well)   # already implies task.valid
+        if at_well and self.state == "OUTSIDE":
+            self.state = "AT_WELL"
+            self._primed_this_visit = False
+            self.topups = 0
+            if self.prime_on_arrival and self.armed:
+                actions.append(self._fire(task.now, "prime"))
+                self._primed_this_visit = True
+                self.armed = False
+        elif not at_well and self.state == "AT_WELL" and task.valid:
+            # Exit the visit only on a CONFIDENT outside reading, so a brief
+            # track loss (task.valid False) neither drops the visit nor lets a
+            # re-prime happen when the lock returns.
+            self.state = "OUTSIDE"
+            self._primed_this_visit = False
+            self.topups = 0
+
+        self._at_well = at_well
+        self._last_tick_now = task.now
+        return actions
+
+    # ------------------------------------------------------------- lick edge
+    def on_lick(self, port: int, now: float) -> List:
+        if not self._lick.matches(port):
+            return []
+        if self.state != "AT_WELL" or not self._at_well:
+            return []
+        if self._last_tick_now is None or \
+                (now - self._last_tick_now) > CONJUNCTION_FRESH_S:
+            return []
+        if self._last_lick_now is not None and \
+                (now - self._last_lick_now) * 1000.0 < self.lick_debounce_ms:
+            return []
+        self._last_lick_now = now
+        if not self._primed_this_visit:
+            # Lick-gated prime: the first lick while credited fires the prime.
+            if (not self.prime_on_arrival) and self.armed:
+                self._primed_this_visit = True
+                self.armed = False
+                return [self._fire(now, "prime")]
+            return []
+        if self.topups >= self.max_topups:
+            return []
+        if not self._topup_ok(now):
+            return []
+        self.topups += 1
+        return [self._fire(now, "topup")]
+
+    # ---------------------------------------------------------------- status
+    def status(self) -> dict:
+        return {"id": self.id, "state": self.state, "armed": self.armed,
+                "credential": self.credential, "topups": self.topups,
+                "max_topups": self.max_topups, "fires": self.fires}
+
+
 TEMPLATES = {
     PrimeAndLickTopupRule.TEMPLATE: PrimeAndLickTopupRule,
+    WellRewardWithExcursionRule.TEMPLATE: WellRewardWithExcursionRule,
 }
 
 
@@ -423,7 +646,7 @@ class RulesEngine:
 
     # -------------------------------------------------------------- driving
     def _make_frame(self, track_result, landmarks, scale: Scale,
-                    now: float) -> Frame:
+                    now: float, task=None) -> Frame:
         centroid = None
         frame_size = (0, 0)
         confidence = 0.0
@@ -436,20 +659,29 @@ class RulesEngine:
             raw = getattr(track_result, "centroid", None)
             centroid = smoothed if smoothed is not None else raw
         return Frame(centroid, tuple(frame_size), confidence, state, now,
-                     landmarks or [], scale)
+                     landmarks or [], scale, task)
 
     def tick(self, track_result, landmarks, scale: Optional[Scale],
-             now: float) -> List:
-        """Evaluate all rules for one frame; return action intents."""
+             now: float, task=None) -> List:
+        """Evaluate all rules for one frame; return action intents.
+
+        ``scale`` may be None for zone/task-based rules (they need no cm scale);
+        the per-rule ``needs_scale`` flag decides whether a missing scale gates
+        that rule. ``task`` is the optional task-event context. See ADR-0026.
+        """
         if not self.enabled:
             return []
-        if scale is None or not scale.valid():
-            return []
-        frame = self._make_frame(track_result, landmarks, scale, now)
+        scale_ok = scale is not None and scale.valid()
+        frame = self._make_frame(track_result, landmarks, scale, now, task)
         out: List = []
         for rule in self.rules:
-            if getattr(rule, "enabled", True):
-                out.extend(rule.tick(frame))
+            if not getattr(rule, "enabled", True):
+                continue
+            # Rules that measure cm distances are gated by a valid scale; zone /
+            # loop rules (needs_scale False) run without one. See ADR-0026.
+            if getattr(rule, "needs_scale", False) and not scale_ok:
+                continue
+            out.extend(rule.tick(frame))
         return self._apply_global(out, now)
 
     def event(self, line: str, now: float) -> List:

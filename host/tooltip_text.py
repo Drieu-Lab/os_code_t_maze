@@ -149,8 +149,11 @@ TIPS: Dict[str, Entry] = {
     "tracker.cancel": "Abort the in-progress registration.",
     "tracker.enrich": "Keep refining the appearance model online while "
                       "tracking.",
-    "tracker.save_model": "Save the appearance model (.npz) for this animal.",
-    "tracker.load_model": "Load a saved appearance model (.npz).",
+    "tracker.save_model": "Save the appearance model (.npz) for this animal, "
+                          "including the tracker settings it was tuned with.",
+    "tracker.load_model": "Load a saved appearance model (.npz). Its stored "
+                          "settings are restored (except registration/enrichment "
+                          "knobs); re-grab the background if proc_max_w changed.",
     "tracker.clear_model": "Discard the current appearance model.",
     "tracker.define_region": "Define the maze ROI by clicking a captured still "
                              "frame.",
@@ -174,6 +177,9 @@ TIPS: Dict[str, Entry] = {
                     "or isn't gated to fire.",
     "rules.reload": "Reload rules.json from disk (pick up edits without "
                     "restarting the GUI).",
+    "rules.profile": "Reward-shaping phase (from rules.json profiles): Phase 1 "
+                     "(well + explore), Phase 2a (stem-gated choice), Phase 2b "
+                     "(clean loop + anti-bias). Switching disarms the engine.",
     "rules.log": "Rule events (prime/top-up/re-arm/suppressed) are written to a "
                  "rule_events CSV in the recordings' track_logs folder.",
     "rules.measure.a": "First landmark of the measurement segment.",

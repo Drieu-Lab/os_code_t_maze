@@ -47,8 +47,10 @@ not steal the track:
     converge rather than chase the latest frame. Guarded by confidence + an
     unambiguous-frame check (+ optional sample cap) to avoid learning an intruder.
 
-  - Persistence: RatModel save/load (.npz, sufficient statistics) and ROI
-    save/load (.json), so a model and maze outline can be reused across sessions.
+  - Persistence: RatModel save/load (.npz, sufficient statistics + the
+    acquisition-time TrackerParams, restored on load - see docs/decisions/0027)
+    and ROI save/load (.json), so a model, its tuning, and the maze outline can
+    be reused across sessions.
 
 Head/body orientation (heading) is intentionally NOT produced yet: a silhouette's
 axis is only known modulo 180 deg, and robust head-vs-tail disambiguation wants
@@ -73,7 +75,7 @@ import os
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, fields, replace
 from typing import List, Optional, Tuple
 
 try:
@@ -197,6 +199,34 @@ class TrackerParams:
     adapt_max_samples: int = 0    # cap on total form samples (0 = unlimited)
 
 
+# --- parameter groups persisted with a saved model (see docs/decisions/0027) ---
+# The acquisition-time TrackerParams are stored in the .npz and, on load, the
+# full tuned operating point is restored (no opt-out) EXCEPT the provenance-only
+# group. Two orthogonal reasons a knob matters, both served by restoring:
+#   * correctness - the SHAPING knobs change the *measured* blob (proc geometry +
+#     mask), so a model's stored statistics are only valid under the same values;
+#   * robust detection of *this* model - the appearance-scoring + tracking-
+#     dynamics knobs are the tuning that makes the model lock on and reject
+#     intruders (these are live per ADR-0017, but "live" governs WHEN a knob
+#     applies, not whether its tuned value should be persisted/restored).
+MODEL_SHAPING_FIELDS = (
+    "proc_max_w", "thresh", "blur", "morph", "min_area", "max_area",
+)
+# Saved for provenance but NOT re-applied on load: reg_* only matter while
+# building a *new* model, and adapt_* (keep-learning) is a live session choice.
+MODEL_PROVENANCE_ONLY_FIELDS = (
+    "reg_min_frames", "reg_dominance", "reg_logarea_spread_min",
+    "adapt_enrich", "adapt_min_conf", "adapt_max_samples",
+)
+# Everything else is restored on load (shaping + appearance-scoring +
+# tracking-dynamics), so a reloaded model comes back with the tuning it was
+# built under. A restored proc_max_w additionally invalidates the reference.
+MODEL_REAPPLY_FIELDS = tuple(
+    f.name for f in fields(TrackerParams)
+    if f.name not in MODEL_PROVENANCE_ONLY_FIELDS
+)
+
+
 def draw_overlay(img_bgr, scale: float, tracker, result) -> None:
     """Draw the tracking overlay on a (preview-scaled) BGR image, in place.
 
@@ -293,6 +323,10 @@ class RatModel:
         self.hist_bins = (HIST_H_BINS, HIST_S_BINS)
         self.animal = ""
         self.date = ""
+        # Acquisition-time tracker settings this model was built under, restored
+        # on load so the tuned operating point comes back with it (see
+        # docs/decisions/0027). None for models saved before this was added.
+        self.acq_params: Optional["TrackerParams"] = None
 
     # ----------------------------------------------------- accumulation
     def add_sample(self, hist_raw: "np.ndarray", form_x: "np.ndarray") -> None:
@@ -368,6 +402,12 @@ class RatModel:
     # ------------------------------------------------------- persistence
     def save(self, path: str) -> None:
         os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
+        # Persist the acquisition-time params as JSON (allow_pickle=False-safe,
+        # like animal/date); proc_max_w is also stored plainly for quick checks.
+        extra = {}
+        if self.acq_params is not None:
+            extra["acq_params_json"] = np.array(json.dumps(asdict(self.acq_params)))
+            extra["proc_max_w"] = np.int64(self.acq_params.proc_max_w)
         np.savez(
             path,
             version=np.int64(MODEL_VERSION),
@@ -379,6 +419,7 @@ class RatModel:
             hist_bins=np.array(self.hist_bins, np.int64),
             animal=np.array(self.animal),
             date=np.array(self.date),
+            **extra,
         )
 
     @staticmethod
@@ -397,6 +438,17 @@ class RatModel:
         m.hist_bins = tuple(int(x) for x in d["hist_bins"])
         m.animal = str(d["animal"]) if "animal" in d else ""
         m.date = str(d["date"]) if "date" in d else ""
+        # Restore the acquisition-time params (additive/optional key; older models
+        # simply lack it and load with acq_params=None). Only known dataclass
+        # fields are used, so extra/missing keys don't break forward/back compat.
+        if "acq_params_json" in d:
+            try:
+                raw = json.loads(str(d["acq_params_json"]))
+                valid = {f.name for f in fields(TrackerParams)}
+                m.acq_params = TrackerParams(
+                    **{k: v for k, v in raw.items() if k in valid})
+            except Exception:
+                m.acq_params = None
         m.recompute(params or TrackerParams())
         m.coverage_ok = bool(int(d["coverage_ok"])) if "coverage_ok" in d else m.coverage_ok
         return m
@@ -632,11 +684,23 @@ class RatTracker:
         model.save(path)
         return True
 
-    def load_model(self, path: str) -> bool:
+    def load_model(self, path: str, restore: bool = True) -> bool:
+        """Load a model and (by default) restore its acquisition-time settings.
+
+        The full tuned operating point (MODEL_REAPPLY_FIELDS) is re-applied so a
+        reloaded model is scored under the settings it was built with; the
+        provenance-only knobs (reg_*/adapt_*) are left as the current session's.
+        A restored proc_max_w invalidates the reference (re-grab background).
+        Older models without stored settings load unchanged (restore is a no-op).
+        See docs/decisions/0027.
+        """
         params = self.get_params()
         model = RatModel.load(path, params)
         with self._lock:
             self._model = model
+        if restore and model.acq_params is not None:
+            self.update_params(**{f: getattr(model.acq_params, f)
+                                  for f in MODEL_REAPPLY_FIELDS})
         return True
 
     # ------------------------------------------------------------- ROI I/O
@@ -826,6 +890,9 @@ class RatTracker:
                 built = self._reg if self._reg.n > 0 else None
                 self._reg = None
                 if built is not None:
+                    # Capture the settings this model was built under, so a later
+                    # save/load restores the tuned operating point (ADR-0027).
+                    built.acq_params = replace(params)
                     with self._lock:
                         self._model = built
                     model = built

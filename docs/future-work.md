@@ -64,7 +64,8 @@ criteria).
 | [FW-0004](#fw-0004-position-based-task-rule-engine-over-landmarks) | Position-based task-rule engine over landmarks | Tracker + GUI + protocol | Done ([ADR-0023](decisions/0023-position-based-rules-engine.md)) |
 | [FW-0005](#fw-0005-in-gui-rat-id-entry-firmware-animal-command--logger-file-roll) | In-GUI rat id entry (firmware `ANIMAL` command + logger file-roll) | Firmware + protocol + logger + GUI | Deferred |
 | [FW-0006](#fw-0006-shared-base-class-for-still-frame-editors) | Shared base class for still-frame editors | Tracker tab UI | Deferred |
-| [FW-0007](#fw-0007-maze-state-consumers---rule-shaping-primitives--behavior-stats) | Maze-state consumers - rule-shaping primitives + behavior stats | Rules engine + stats + GUI | Proposed |
+| [FW-0007](#fw-0007-maze-state-consumers---rule-shaping-primitives--behavior-stats) | Maze-state consumers - rule-shaping primitives + behavior stats | Rules engine + stats + GUI | Partly done ([ADR-0026](decisions/0026-reward-shaping-phases.md)) |
+| [FW-0008](#fw-0008-phase-3-transition---firmware-correction-trials--spatially-gated-cue) | Phase 3 transition - correction trials + spatially-gated cue | Firmware + protocol | Deferred |
 
 ## Entries
 
@@ -339,43 +340,90 @@ it keeps diverging?
 
 ### FW-0007: Maze-state consumers - rule-shaping primitives + behavior stats
 
-- **Status:** Proposed
+- **Status:** Partly done - the rule-shaping half landed in
+  [ADR-0026](decisions/0026-reward-shaping-phases.md) (`host/task_events.py` +
+  the `well_reward_with_excursion` template). The **behavior-statistics** half
+  (b) is still proposed.
 - **Date added:** 2026-07-06
 - **Author / Agent:** Agent (Cursor) on behalf of Celine
-- **Area / modules:** `host/rules_engine.py` (new condition primitives over
-  `RatState`), a new `host/` behavior-statistics module + tab, both consuming
-  `host/maze_state.py`'s `RatState`
-- **Related ADRs:** [ADR-0025](decisions/0025-maze-state-module.md) (the
-  discrete maze-state producer these consume),
+- **Area / modules:** ~~`host/rules_engine.py` (new condition primitives over
+  `RatState`)~~ done via `host/task_events.py`; a new `host/`
+  behavior-statistics module + tab, consuming `host/maze_state.py`'s `RatState`
+  (and reusing the SAME `task_events.py` vocabulary)
+- **Related ADRs:** [ADR-0026](decisions/0026-reward-shaping-phases.md) (the
+  task-event layer + reward-shaping phases - the rule half of this item),
+  [ADR-0025](decisions/0025-maze-state-module.md) (the discrete maze-state
+  producer these consume),
   [ADR-0023](decisions/0023-position-based-rules-engine.md) (rules engine)
 
 **Motivation / context.** ADR-0025 deliberately builds only the *producer* of
 the discrete `RatState` stream (zone + direction + loops + `visited_since`); it
 is a coupling interface for two deferred consumers that were explicitly out of
-scope: (a) **task-rule shaping** primitives (e.g. `InState`/`EnteredState`,
-"reward on a correct stem->choice traversal") layered onto the rules engine, and
-(b) a **behavior-statistics** module (per-session zone dwell times, traversal
-counts, choice/alternation rates, latencies) reading the state-timeline CSV or
-the live stream.
+scope: (a) **task-rule shaping** primitives and (b) a **behavior-statistics**
+module. Half (a) is now implemented: ADR-0026 added `task_events.py` (the neutral
+task-semantic vocabulary: `choice_entered`, `loop_closed`/`loop_clean`,
+`same_side_run`, ...) and the credential-gated `well_reward_with_excursion`
+reward rule. Crucially, `task_events.py` was designed as the shared definition so
+that half (b) - the stats module - consumes the *same* events, keeping the
+reward the animal earns and the behavior we report consistent.
 
-**Sketch of approach.** *Rules:* add `RatState`-based conditions to
-`rules_engine.py` alongside the existing `InZone`/`LickAt`, and a rule template
-that fires on a completed correct-side loop, gated exactly like the existing
-executor (Free Roam, confident track). *Stats:* a pure aggregator over the
-`RatState` stream + a read-only tab/CLI that summarizes a session; feed it the
-`*_mazestate.csv` the Maze state tab already writes.
+**Sketch of approach.** *Stats (remaining):* a pure aggregator over the
+`RatState` + `TaskEventFrame` stream + a read-only tab/CLI that summarizes a
+session (per-session zone dwell times, traversal counts, L/R choice and
+clean-loop rates, same-side runs, latencies); feed it the `*_mazestate.csv` the
+Maze state tab already writes, or run `task_events.py` over it offline.
 
-**Evaluation / acceptance.** Rules: headless tests over synthetic `RatState`
-sequences (fires once per qualifying traversal, respects gating). Stats: computed
-dwell/traversal/choice metrics match hand-worked synthetic sessions.
+**Evaluation / acceptance.** Stats: computed dwell/traversal/choice metrics match
+hand-worked synthetic sessions; the L/R and loop counts reconcile with the
+`rules_*.csv` rule-event log from the same session.
 
-**Effort / risk.** Medium. Main risk is choosing rule semantics that stay robust
-to the estimator's min-dwell latency; the beam-validation harness (ADR-0025)
-gives the latency budget to design against.
+**Effort / risk.** Low-medium (the vocabulary already exists in
+`task_events.py`). Main choice is live tab vs. offline CLI.
 
-**Open questions.** Do maze-state rules ever actuate reward, or only log? Live
-stats tab vs. an offline CLI over the CSV? Which metrics are primary for the
-grant's cue->action->reward analysis?
+**Open questions.** Live stats tab vs. an offline CLI over the CSV? Which metrics
+are primary for the grant's cue->action->reward analysis?
 
-**ADR needed?** Yes - rule semantics (especially any actuation) and the metric
-definitions are behavioral-design decisions worth recording.
+**ADR needed?** Maybe - the metric definitions are a (smaller) behavioral-design
+decision; the rule-semantics half is already recorded in ADR-0026.
+
+### FW-0008: Phase 3 transition - firmware correction trials + spatially-gated cue
+
+- **Status:** Deferred
+- **Date added:** 2026-07-06
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** `firmware/cue-guided-task/task_core.h` (correction-trial
+  sequencing), `firmware/cue-guided-task/cue-guided-task.ino`,
+  `firmware/PROTOCOL.md` (any new events / `PROTO_VERSION` bump)
+- **Related ADRs:** [ADR-0026](decisions/0026-reward-shaping-phases.md)
+  (reward-shaping phases 1/2a/2b this follows), [ADR-0009](decisions/0009-runtime-training-modes-and-logging.md)
+  (anti-bias run-length cap), [ADR-0008](decisions/0008-wavetable-tone-isr.md) (cue)
+
+**Motivation / context.** The host-side shaping phases (ADR-0026) end at Phase 2b
+(clean unidirectional loops with anti-bias). Phase 3 is the full cue-guided task,
+which stays in firmware for real-time cue timing and neural-recording TTLs. The
+bridge from 2b to 3 needs two behavioral pieces not yet built: **correction
+trials** (repeat the same cue/side after an error until the animal gets it,
+without letting a side-bias re-emerge) and confirming the cue is played only
+while the animal is within the spatially-stable window between the stem entry and
+exit beams (to drive hippocampal place x auditory-cue interactions - the grant's
+rationale).
+
+**Sketch of approach.** Extend the firmware sequence generator with an optional
+correction-trial mode (on error, re-present the same side, bounded so it does not
+defeat the anti-bias cap); keep it deterministic + host-testable like
+`generateSequence`. Verify/implement the spatial gate for cue onset from the
+stem entry/exit beam window.
+
+**Evaluation / acceptance.** Host unit tests over generated sequences (correction
+trials repeat the errored side, bounded run length, overall balance preserved);
+bench check that the cue only sounds within the stem window.
+
+**Effort / risk.** Medium; firmware + protocol change (Due reflash), so an ADR is
+warranted.
+
+**Open questions.** How many correction repeats before forcing a switch? Does
+2b's `uniform` debias carry into 3, or does 3 use a different balancing scheme
+(cf. FW-0001)?
+
+**ADR needed?** Yes - correction-trial semantics and any protocol change are
+behavioral-design decisions.
