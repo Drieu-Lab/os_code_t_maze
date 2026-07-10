@@ -26,12 +26,14 @@
       "rearm_refractory_ms": "prime_and_lick_topup: between-visit anti-camp refractory (ms)",
       "rearm_on_exit": "prime_and_lick_topup: re-arm once the animal leaves the zone",
       "credential": "well_reward_with_excursion: which excursion earns the next well payout - 'choice' (enter either choice arm), 'choice_via_stem' (enter a choice arm, outbound leg used the central stem), or 'clean_loop' (a completed clean lap: stem out + matching return arm)",
-      "prime_on_arrival": "well_reward_with_excursion: true = prime the moment the animal reaches the well while credited; false = the first lick at the well fires the prime (lick-gated)",
-      "debias": "well_reward_with_excursion (clean_loop only): anti-bias cap on the same-side run - {mode:'fixed', n:3} or {mode:'uniform', min:3, max:5, seed:optional}. A clean loop beyond the cap is logged but WITHHELD, nudging the animal to the other side. Omit for no cap."
+      "nonstem_reward_prob": "well_reward_with_excursion ('choice' credential only): probability 0..1 that a NON-stem excursion earns a credit (stem excursions always do). 1.0 = Phase 1 (any choice); 0.0 = exactly Phase 2a (stem-only). Lower it across sessions to fade Phase 1 into 2a without an extinction cliff (see ADR-0028); settable live in the Rules tab's Shaping control. Default 1.0.",
+      "seed": "well_reward_with_excursion (optional): RNG seed for the non-stem fade roll and the debias cap draw, for reproducibility",
+      "prime_on": "well_reward_with_excursion: when/where the prime fires - 'well_arrival' (on reaching the well while credited; default), 'well_lick' (first lick at the well fires the prime; lick-gated), or 'credential' (fire the instant the credential is earned, out at the choice zone, so the central-spout solenoid is the correct-choice signal; used by Phase 2a/2b - see ADR-0030). Legacy 'prime_on_arrival' (true/false) still accepted as an alias for well_arrival/well_lick.",
+      "debias": "well_reward_with_excursion (clean_loop or choice_via_stem): anti-bias cap on the same-side run - {mode:'fixed', n:3} or {mode:'uniform', min:3, max:5, seed:optional}. clean_loop caps consecutive same-side loops; choice_via_stem caps consecutive same-side stem-gated choice entries. A run beyond the cap is logged (debias_withhold) but WITHHELD, nudging the animal to the other side. Omit for no cap."
     },
     "templates": {
       "prime_and_lick_topup": "On entering the zone (confident track within radius_cm of landmark): dispense once (prime), then each subsequent lick tops up up to max_topups. Re-prime requires leaving the zone AND waiting rearm_refractory_ms.",
-      "well_reward_with_excursion": "Reward at the central well is credentialed by a behavioral excursion (see 'credential'). The well pays out only after the credit is earned; the prime consumes the credit, so each payout needs a fresh excursion. Licks top up as in prime_and_lick_topup. This is the reward-shaping curriculum: Phase 1 = 'choice', Phase 2a = 'choice_via_stem', Phase 2b = 'clean_loop' (+ debias). Requires zones.json."
+      "well_reward_with_excursion": "Reward at the central well (port 2) is credentialed by a behavioral excursion (see 'credential'). The prime consumes the credit, so each payout needs a fresh excursion. Licks top up as in prime_and_lick_topup. The reward-shaping curriculum: Phase 1 = 'choice' (prime_on well_arrival), Phase 2a = 'choice_via_stem', Phase 2b = 'choice_via_stem' + 'debias' (choice-side anti-bias); 2a/2b use prime_on 'credential' so the prime fires the moment the animal enters a choice arm (solenoid = correct-choice signal). Phase 1 -> 2a can be a gradual fade via 'nonstem_reward_prob' (1.0 -> 0.0). Requires zones.json."
     }
   },
   "version": 2,
@@ -51,7 +53,8 @@
           "template": "well_reward_with_excursion",
           "enabled": true,
           "credential": "choice",
-          "prime_on_arrival": true,
+          "nonstem_reward_prob": 1.0,
+          "prime_on": "well_arrival",
           "port": 2,
           "pulse_ms": 300,
           "max_topups": 3,
@@ -62,17 +65,17 @@
       ]
     },
     "phase2a": {
-      "label": "Phase 2a - stem-gated choice",
+      "label": "Phase 2a - stem-gated choice (prime at choice)",
       "rules": [
         {
           "id": "p2a_well_stem",
           "template": "well_reward_with_excursion",
           "enabled": true,
           "credential": "choice_via_stem",
-          "prime_on_arrival": true,
+          "prime_on": "credential",
           "port": 2,
           "pulse_ms": 300,
-          "max_topups": 3,
+          "max_topups": 2,
           "lick_debounce_ms": 150,
           "topup_cooldown_ms": 500,
           "min_confidence": 0.5
@@ -80,17 +83,17 @@
       ]
     },
     "phase2b": {
-      "label": "Phase 2b - clean loop + anti-bias",
+      "label": "Phase 2b - stem-gated choice + anti-bias (prime at choice)",
       "rules": [
         {
-          "id": "p2b_well_loop",
+          "id": "p2b_well_stem_bias",
           "template": "well_reward_with_excursion",
           "enabled": true,
-          "credential": "clean_loop",
-          "prime_on_arrival": true,
+          "credential": "choice_via_stem",
+          "prime_on": "credential",
           "port": 2,
           "pulse_ms": 300,
-          "max_topups": 3,
+          "max_topups": 0,
           "lick_debounce_ms": 150,
           "topup_cooldown_ms": 500,
           "min_confidence": 0.5,

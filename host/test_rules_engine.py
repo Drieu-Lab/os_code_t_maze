@@ -21,7 +21,7 @@ import types
 import unittest
 
 from rules_engine import (
-    FireReward, LogEvent, RulesEngine, Scale, resolve_landmark,
+    EngineDefaults, FireReward, LogEvent, RulesEngine, Scale, resolve_landmark,
 )
 
 # A single center-well landmark at the middle of a 1000x1000 frame.
@@ -283,6 +283,66 @@ class TestSplitTiming(unittest.TestCase):
         rule = eng.rules[0]
         self.assertEqual(rule.topup_cooldown_ms, 800)
         self.assertEqual(rule.rearm_refractory_ms, 800)
+
+
+class _StubRule:
+    """Minimal duck-typed rule to probe the engine's per-capability gating.
+
+    Records whether tick() ran so a test can assert the engine skipped it.
+    """
+
+    def __init__(self, needs_scale=False, needs_task=False):
+        self.id = "stub"
+        self.enabled = True
+        self.needs_scale = needs_scale
+        self.needs_task = needs_task
+        self.tick_calls = 0
+
+    def tick(self, frame):
+        self.tick_calls += 1
+        return [LogEvent("stub_tick", self.id, {})]
+
+    def on_lick(self, port, now):
+        return []
+
+
+class TestCapabilityGating(unittest.TestCase):
+    """The engine skips a rule whose declared capability is missing (ADR-0026):
+    a needs_scale rule requires a valid Scale, and a needs_task rule requires a
+    task-event context. A rule declaring neither always runs. Gating lives in the
+    engine, not (only) in each rule's own defensive guards."""
+
+    @staticmethod
+    def _engine(rule):
+        return RulesEngine([rule], EngineDefaults(), enabled=True)
+
+    def test_needs_task_rule_skipped_without_task(self):
+        rule = _StubRule(needs_task=True)
+        a = self._engine(rule).tick(tr(550, 500), CENTER_LANDMARKS, SCALE, 0.0,
+                                    task=None)
+        self.assertEqual(rule.tick_calls, 0)
+        self.assertEqual(a, [])
+
+    def test_needs_task_rule_runs_with_task(self):
+        rule = _StubRule(needs_task=True)
+        task = types.SimpleNamespace()   # any non-None context
+        a = self._engine(rule).tick(tr(550, 500), CENTER_LANDMARKS, SCALE, 0.0,
+                                    task=task)
+        self.assertEqual(rule.tick_calls, 1)
+        self.assertEqual(len(logs(a, "stub_tick")), 1)
+
+    def test_needs_scale_rule_skipped_without_scale(self):
+        rule = _StubRule(needs_scale=True)
+        a = self._engine(rule).tick(tr(550, 500), CENTER_LANDMARKS, None, 0.0,
+                                    task=types.SimpleNamespace())
+        self.assertEqual(rule.tick_calls, 0)
+        self.assertEqual(a, [])
+
+    def test_plain_rule_runs_without_scale_or_task(self):
+        rule = _StubRule()
+        a = self._engine(rule).tick(None, [], None, 0.0, task=None)
+        self.assertEqual(rule.tick_calls, 1)
+        self.assertEqual(len(logs(a, "stub_tick")), 1)
 
 
 class TestParsing(unittest.TestCase):

@@ -66,6 +66,7 @@ class TaskEventFrame:
     loop_clean: bool                    # that closed lap was clean (stem out + matching return)
     # ---- aggregates (across laps) ----
     same_side_run: int                  # consecutive same-side CLOSED loops (rewarded or not)
+    same_side_choice_run: int           # consecutive same-side STEM-GATED choice entries
     left_loops: int
     right_loops: int
     rat_state: RatState
@@ -88,6 +89,11 @@ class TaskEvents:
         self._same_side_run = 0
         self._left_loops = 0
         self._right_loops = 0
+        # Same-side run over STEM-GATED choice entries (the Phase 2b choice-side
+        # anti-bias reads this; see docs/decisions/0030). Tracked separately from
+        # the closed-loop run because 2b credits at choice entry, not loop close.
+        self._last_choice_side: Optional[str] = None
+        self._same_side_choice_run = 0
 
     def update(self, s: RatState) -> TaskEventFrame:
         at_well = bool(s.valid and s.zone == HUB and s.substate == IN_WELL)
@@ -98,6 +104,18 @@ class TaskEvents:
         # "This lap the outbound leg used the stem" == the stem was entered since
         # the animal last left the HUB (the canonical visited_since query).
         outbound_used_stem = bool(s.valid and s.visited_since(CENTRAL_STEM, HUB))
+
+        # Same-side run over STEM-GATED choice entries (Phase 2b anti-bias). Only a
+        # stem-gated entry counts (a non-stem entry is not a valid trial and does
+        # not reset the run); a switch to the other side resets to 1. This mirrors
+        # the closed-loop run below but keys off the choice-entry edge, which is
+        # when 2b credits. See docs/decisions/0030.
+        if choice_entered is not None and outbound_used_stem:
+            if choice_entered == self._last_choice_side:
+                self._same_side_choice_run += 1
+            else:
+                self._same_side_choice_run = 1
+            self._last_choice_side = choice_entered
 
         loop_closed: Optional[str] = None
         loop_clean = False
@@ -131,5 +149,6 @@ class TaskEvents:
             well_arrived=well_arrived, choice_entered=choice_entered,
             loop_closed=loop_closed, loop_clean=loop_clean,
             same_side_run=self._same_side_run,
+            same_side_choice_run=self._same_side_choice_run,
             left_loops=self._left_loops, right_loops=self._right_loops,
             rat_state=s)

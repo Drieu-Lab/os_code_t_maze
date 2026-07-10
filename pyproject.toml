@@ -1,0 +1,35 @@
+# Formatter / linter config for the host tools. This is ADVISORY, not a gate:
+# there is no CI and no pre-commit hook enforcing it (a deliberate choice for a
+# lab with coders of differing experience - see CONTRIBUTING.md). Run it by hand
+# before committing if you like:
+#
+#   pip install ruff        # once
+#   ruff format .           # auto-format
+#   ruff check .            # lint (add --fix to auto-fix the safe ones)
+#
+# The rule set is intentionally lenient so the two coding eras in the repo can
+# converge over time without a wall of errors on the older GUI scripts.
+
+[tool.ruff]
+# Match the prevailing line length in the host modules.
+line-length = 88
+target-version = "py313"
+# Firmware build artifacts and generated data are not Python we own.
+extend-exclude = ["host/data", "host/ratmodels", "host/track_logs"]
+
+[tool.ruff.lint]
+# A gentle core: pyflakes (F) catches real bugs (unused/undefined names),
+# pycodestyle errors (E) and warnings (W) catch obvious style slips, isort (I)
+# keeps imports tidy, pyupgrade (UP) nudges toward modern syntax, and flake8-bugbear
+# (B) flags easy-to-miss footguns. No opinionated docstring/typing rules yet -
+# that would bury the older files.
+select = ["F", "E", "W", "I", "UP", "B"]
+ignore = [
+    "E501",  # line too long - the formatter handles wrapping; don't fail on it.
+    "E741",  # ambiguous variable name (l/O/I) - common in short rig scripts.
+]
+
+[tool.ruff.format]
+# Defaults are fine (double quotes, spaces). Kept explicit so the intent is clear.
+quote-style = "double"
+indent-style = "space"

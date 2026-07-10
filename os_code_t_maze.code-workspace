@@ -9,5 +9,17 @@
       "path": "../os_code_t_maze_resources"
     }
   ],
-  "settings": {}
+  "settings": {
+    // Advisory only (see CONTRIBUTING.md / pyproject.toml): if the Ruff
+    // extension (charliermarsh.ruff) is installed it will format + organize
+    // imports on save using the repo's lenient config. Nothing is enforced;
+    // remove or ignore this if you prefer manual formatting.
+    "[python]": {
+      "editor.defaultFormatter": "charliermarsh.ruff",
+      "editor.formatOnSave": false,
+      "editor.codeActionsOnSave": {
+        "source.organizeImports": "never"
+      }
+    }
+  }
 }

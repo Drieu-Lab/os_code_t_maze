@@ -19,6 +19,9 @@ This project spans **two sibling folders**:
   - [`firmware/PROTOCOL.md`](firmware/PROTOCOL.md) — serial/TCP message protocol.
   - [`docs/decisions/`](docs/decisions/) — ADRs explaining *why* key choices
     were made (read the index in [`docs/decisions/README.md`](docs/decisions/README.md)).
+  - [`CONTRIBUTING.md`](CONTRIBUTING.md) — how code is written here (the
+    "pure core + thin shell" pattern, the run-from-`host/` rule, the new-coder
+    learning path), framed around minimizing comprehension debt.
   - `host/README.md`, `firmware/README.md` — component-level details.
 - **`../os_code_t_maze_resources/`** (sibling repo) — planning, hardware
  references, lab notes, and mockups. Its own
@@ -41,6 +44,24 @@ This project spans **two sibling folders**:
 To get both folders auto-loaded in one Cursor window, open
 [`os_code_t_maze.code-workspace`](os_code_t_maze.code-workspace) (a multi-root
 workspace) instead of opening this folder alone.
+
+## AI-assisted change rules — keep code understandable
+
+This repo grows fast, often via AI agents, in a lab with coders of differing
+experience. The compounding risk is **comprehension debt**: code volume that
+outruns what any human actually understands. Two rules keep that in check (the
+code-level conventions live in [`CONTRIBUTING.md`](CONTRIBUTING.md)):
+
+- **Human author of record.** Agent-generated code does not land until a named
+  human can explain what it does and why. That human — not the agent — is the
+  git author and owner of the change. If you are that agent, make the change
+  explainable: small diffs, intent in the commit message, an ADR for any
+  non-obvious decision. If a human cannot yet explain it, stop and explain it to
+  them rather than merging.
+- **Cap change size to human reviewability.** One purpose per commit/PR. If a
+  change is too big for a human to review in one sitting, split it — land the
+  pure core plus its tests separately from the GUI/firmware wiring that uses it.
+  Prefer several small, reviewable changes over one large milestone drop.
 
 ## Keep `PROGRAMS.md` up to date
 

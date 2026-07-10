@@ -43,3 +43,7 @@ commands to run each one (Anaconda env `drieu_t_maze`).
 
 See [`host/README.md`](host/README.md) for how to install dependencies and launch
 the rig. Open a `firmware/` sketch in the Arduino IDE to flash the Due.
+
+New to the camera-driven side of the rig? [`docs/how-tracking-and-rules-work.md`](docs/how-tracking-and-rules-work.md)
+is a plain-language walkthrough of the blob tracker, the maze-state estimator,
+the task-event layer, and the rules engine - no coding needed.

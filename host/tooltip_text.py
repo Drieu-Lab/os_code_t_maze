@@ -178,10 +178,62 @@ TIPS: Dict[str, Entry] = {
     "rules.reload": "Reload rules.json from disk (pick up edits without "
                     "restarting the GUI).",
     "rules.profile": "Reward-shaping phase (from rules.json profiles): Phase 1 "
-                     "(well + explore), Phase 2a (stem-gated choice), Phase 2b "
-                     "(clean loop + anti-bias). Switching disarms the engine.",
+                     "(well + explore), Phase 2a (stem-gated choice, primed at "
+                     "the choice), Phase 2b (stem-gated choice + anti-bias, no "
+                     "top-ups). Switching disarms the engine.",
+    "rules.nonstem": "Phase 1 -> 2a fade: probability that a NON-stem excursion "
+                     "earns the next well reward (stem excursions always do). "
+                     "1.0 = pure Phase 1; lower it across days toward 0.0 = "
+                     "Phase 2a. Applied live and logged.",
     "rules.log": "Rule events (prime/top-up/re-arm/suppressed) are written to a "
                  "rule_events CSV in the recordings' track_logs folder.",
+    "rules.editor.save": "Write the edited fields of the active phase's rule(s) "
+                         "back to rules.json (validated first; nothing is saved "
+                         "if a value is invalid). Saving disarms the engine - "
+                         "re-arm when ready.",
+    "rules.editor.debias": "Anti-bias cap on consecutive same-side runs "
+                           "(choice_via_stem / clean_loop only). none = no cap; "
+                           "fixed uses n; uniform redraws a cap in [min, max] on "
+                           "each side switch. Runs past the cap are withheld.",
+    "rules.editor.field.enabled": "Enable this rule. Unchecking disables it "
+                                  "without deleting it from rules.json.",
+    "rules.editor.field.port": "Reward port this rule fires (0 = left, 1 = "
+                               "right, 2 = center well).",
+    "rules.editor.field.pulse_ms": "Reward valve open time in milliseconds (sets "
+                                   "the dispensed volume per fire).",
+    "rules.editor.field.max_topups": "Maximum lick-triggered top-ups per visit, "
+                                     "after the initial prime.",
+    "rules.editor.field.lick_debounce_ms": "Ignore lick edges closer together "
+                                           "than this (ms). Anti-chatter only.",
+    "rules.editor.field.topup_cooldown_ms": "Minimum ms between fires WITHIN a "
+                                            "visit (prime->top-up, top-up->"
+                                            "top-up). Keep short.",
+    "rules.editor.field.rearm_refractory_ms": "Between-visit anti-camp refractory "
+                                              "(ms): time since the last fire "
+                                              "before the rule may prime again on "
+                                              "a fresh visit.",
+    "rules.editor.field.rearm_on_exit": "Re-arm the rule once the animal leaves "
+                                        "the zone (prime_and_lick_topup).",
+    "rules.editor.field.radius_cm": "Proximity radius in cm around the landmark "
+                                    "that counts as 'in the zone' "
+                                    "(prime_and_lick_topup).",
+    "rules.editor.field.min_confidence": "Only act while the track is confident "
+                                         "at or above this (0..1).",
+    "rules.editor.field.credential": "Which excursion earns the next well payout: "
+                                     "choice (Phase 1, either arm), "
+                                     "choice_via_stem (Phase 2a/2b, arm reached "
+                                     "via the stem), or clean_loop (a completed "
+                                     "clean lap).",
+    "rules.editor.field.prime_on": "When/where the prime fires: well_arrival (on "
+                                   "reaching the well), well_lick (first lick at "
+                                   "the well), or credential (the instant the "
+                                   "credential is earned, at the choice zone - "
+                                   "Phase 2a/2b).",
+    "rules.editor.field.nonstem_reward_prob": "choice credential only: "
+                                              "probability 0..1 that a NON-stem "
+                                              "excursion earns credit (stem "
+                                              "excursions always do). 1.0 = "
+                                              "Phase 1, 0.0 = Phase 2a.",
     "rules.measure.a": "First landmark of the measurement segment.",
     "rules.measure.b": "Second landmark of the measurement segment.",
     "rules.measure.cm": "The real-world distance between the two landmarks, in "
@@ -210,6 +262,52 @@ TIPS: Dict[str, Entry] = {
                     "along the stem, entered/exited edges, and completed loops.",
     "maze.log": "Start/stop a state-timeline CSV in the recordings' track_logs "
                 "folder (for offline analysis / the stats module).",
+
+    # ---- behavior_view.py: Phase 2a behavior readout ----
+    "behavior.start": "Start/Stop computing the live Phase 2a measures. Stop "
+                      "freezes the values and pauses the active-time clock (so a "
+                      "break doesn't dilute the per-minute rates); Start resumes.",
+    "behavior.reset": "Reset all behavior measures and the active-time clock to "
+                      "zero (also happens automatically on a training-mode "
+                      "switch).",
+    "behavior.window": "Size of the rolling window (most recent choice entries) "
+                       "used for the 'last N' figures shown beside the "
+                       "cumulative ones. Range 1-100 entries.",
+    "behavior.reload": "Reload the zone map (zones.json) and the px->cm scale "
+                       "(rig_scale.json) from disk - e.g. after redrawing zones "
+                       "or measuring the scale.",
+    "behavior.status": "Readout state: running, stopped, or waiting for tracking "
+                       "/ zones.",
+    "behavior.compliance": "Stem-compliance: fraction of choices that went out via "
+                           "the central stem (a valid Phase 2a trial), cumulative "
+                           "and over the last N. One choice is counted per outbound "
+                           "trip (the first choice-arm entry after leaving the hub), "
+                           "so an out-one-arm/back-the-other lap is one choice, not "
+                           "two. The primary 'is 2a working' number. Range 0-100% "
+                           "(-- until the first choice); rises toward 100% as stem "
+                           "use takes hold.",
+    "behavior.lr": "Left/right split of stem-gated (valid) choices, cumulative "
+                   "and over the last N. Phase 2a has no anti-bias cap, so this "
+                   "is informational. Each side 0-100% and the two sum to 100 "
+                   "(50/50 unbiased, 100/0 all-left, 0/100 all-right); -- until "
+                   "the first stem-gated trial.",
+    "behavior.nonstem": "Count of non-stem choices this session (an outbound trip "
+                        "that reached a choice arm without using the stem; credit "
+                        "denied). Counted once per trip, so an out-one-arm/back-the-"
+                        "other lap counts one. An integer >= 0.",
+    "behavior.sameside": "Consecutive same-side stem-gated choices: current run "
+                         "and session max, each with the side (L/R) it is on "
+                         "(e.g. 3L / max 4R). Each is an integer (0 before any "
+                         "stem-gated trial, otherwise >= 1). A large max flags a "
+                         "rat that will fight the Phase 2b anti-bias cap.",
+    "behavior.throughput": "Stem-gated trials this session (integer >= 0) and "
+                           "the rate per minute of active (running) time (>= 0, "
+                           "shown as -- until ~1 s of active time has elapsed).",
+    "behavior.distance": "Total distance the rat has run (from the smoothed "
+                         "centroid via the rig px->cm scale) and the rate per "
+                         "minute. Both >= 0 (rate -- until ~1 s of active time). "
+                         "Untracked stretches are not counted; shows -- (needs "
+                         "scale) without the Rules-tab scale.",
 
     # ---- tracker_view.py: tuning sliders (keyed by param name) ----
     "tracker.thresh": "Foreground threshold on the background difference (0-255).",

@@ -61,11 +61,10 @@ criteria).
 | [FW-0001](#fw-0001-6040-sameswitch-transition-bias-in-sequence-generation) | ~60/40 same/switch transition bias | Trial-sequence generation | Deferred |
 | [FW-0002](#fw-0002-head-vs-body-orientation-heading-from-the-tracker) | Head-vs-body orientation (heading) | Markerless tracker | Deferred |
 | [FW-0003](#fw-0003-multi-animal-association-and-irlow-saturation-tracking) | Multi-animal association + IR/low-saturation | Markerless tracker | Proposed |
-| [FW-0004](#fw-0004-position-based-task-rule-engine-over-landmarks) | Position-based task-rule engine over landmarks | Tracker + GUI + protocol | Done ([ADR-0023](decisions/0023-position-based-rules-engine.md)) |
 | [FW-0005](#fw-0005-in-gui-rat-id-entry-firmware-animal-command--logger-file-roll) | In-GUI rat id entry (firmware `ANIMAL` command + logger file-roll) | Firmware + protocol + logger + GUI | Deferred |
 | [FW-0006](#fw-0006-shared-base-class-for-still-frame-editors) | Shared base class for still-frame editors | Tracker tab UI | Deferred |
-| [FW-0007](#fw-0007-maze-state-consumers---rule-shaping-primitives--behavior-stats) | Maze-state consumers - rule-shaping primitives + behavior stats | Rules engine + stats + GUI | Partly done ([ADR-0026](decisions/0026-reward-shaping-phases.md)) |
 | [FW-0008](#fw-0008-phase-3-transition---firmware-correction-trials--spatially-gated-cue) | Phase 3 transition - correction trials + spatially-gated cue | Firmware + protocol | Deferred |
+| [FW-0009](#fw-0009-triggerdispenser-decomposition-of-the-well-reward-rule) | Trigger/Dispenser decomposition of the well-reward rule | Rules engine | Deferred |
 
 ## Entries
 
@@ -210,55 +209,6 @@ identity vs. shared models?
 **ADR needed?** Yes - multi-object association and the appearance-weighting change
 are non-obvious enough to warrant their own ADR (or an extension of ADR-0014).
 
-### FW-0004: Position-based task-rule engine over landmarks
-
-- **Status:** Done - implemented in [ADR-0023](decisions/0023-position-based-rules-engine.md)
-  (`host/rules_engine.py` pure core + `host/rules_view.py` "Rules" tab,
-  `host/rules.json`, `host/rig_scale.json`, `host/test_rules_engine.py`).
-- **Date added:** 2026-06-30
-- **Author / Agent:** Agent (Cursor) on behalf of Celine
-- **Area / modules:** `host/tracker.py` (consume `get_landmarks()` + the tracked
-  centroid), a new rule module in `host/` (or `tracker_view.py` controls), the
-  recording sidecar, possibly `firmware/PROTOCOL.md` (host -> firmware triggers)
-- **Related ADRs:** [ADR-0018](decisions/0018-landmark-annotations.md) (landmark
-  annotations this consumes), [ADR-0014](decisions/0014-markerless-position-tracking.md)
-  (tracker), [ADR-0007](decisions/0007-reward-at-central-port.md) (reward path)
-
-**Motivation / context.** ADR-0018 adds the *marking* of reward wells and
-body-sensor beams as image-space points; the point of marking them is to drive
-**task rules from the animal's position** - e.g. "rat is within R px of the left
-reward well", "rat entered the choice arm", dwell-time at a port, or arming/
-gating a reward based on trajectory. The fixed landmarks carry an `index` tying
-each to its firmware `L,i`/`S,i` event, so position-derived rules can be
-cross-checked against (or substitute for) the hardware beams/licks.
-
-**Sketch of approach.** A small, pure rule layer that takes the latest
-`TrackResult` centroid (full-frame px) + `get_landmarks()` (normalized -> px via
-frame size) and evaluates predicates: distance-to-landmark thresholds (the
-per-rule proximity radius lives here, *not* in the marker - see ADR-0018),
-enter/exit zone transitions with debounce/dwell, and simple sequencing (e.g.
-center -> choice arm -> reward). Emit rule events into the recording sidecar
-and/or the standalone track log; optionally let a rule fire a host->firmware
-command (e.g. an `R<port>` reward) with explicit safety gating. Keep evaluation
-UI-free and testable; expose enable/threshold controls in the Tracking tab.
-
-**Evaluation / acceptance.** Headless tests over synthetic trajectories: zone
-enter/exit fires once with debounce; distance thresholds match expectation under
-scaling; sequence rules only trip in order. On the rig, confirm position-derived
-"at well" agrees with the corresponding lick/beam events within tolerance.
-
-**Effort / risk.** Medium. Main risks: tuning thresholds/debounce to the tracker's
-noise, and (if rules trigger firmware) reward-safety gating - any auto-reward path
-needs the same care as ADR-0007/0010.
-
-**Open questions.** Do rules ever *actuate* (fire reward) or only *log*? Per-rule
-radius vs a shared default? Should rule events go in the video sidecar, the track
-log, or a dedicated events file? How do position rules coexist with the firmware's
-own beam/lick-driven task logic (authority/override)?
-
-**ADR needed?** Yes - rule semantics (and especially any position-triggered
-actuation) are a behavioral-design decision worth recording.
-
 ### FW-0005: In-GUI rat id entry (firmware `ANIMAL` command + logger file-roll)
 
 - **Status:** Deferred
@@ -338,54 +288,6 @@ it keeps diverging?
 
 **ADR needed?** No - mechanical UI refactor only if pursued.
 
-### FW-0007: Maze-state consumers - rule-shaping primitives + behavior stats
-
-- **Status:** Partly done - the rule-shaping half landed in
-  [ADR-0026](decisions/0026-reward-shaping-phases.md) (`host/task_events.py` +
-  the `well_reward_with_excursion` template). The **behavior-statistics** half
-  (b) is still proposed.
-- **Date added:** 2026-07-06
-- **Author / Agent:** Agent (Cursor) on behalf of Celine
-- **Area / modules:** ~~`host/rules_engine.py` (new condition primitives over
-  `RatState`)~~ done via `host/task_events.py`; a new `host/`
-  behavior-statistics module + tab, consuming `host/maze_state.py`'s `RatState`
-  (and reusing the SAME `task_events.py` vocabulary)
-- **Related ADRs:** [ADR-0026](decisions/0026-reward-shaping-phases.md) (the
-  task-event layer + reward-shaping phases - the rule half of this item),
-  [ADR-0025](decisions/0025-maze-state-module.md) (the discrete maze-state
-  producer these consume),
-  [ADR-0023](decisions/0023-position-based-rules-engine.md) (rules engine)
-
-**Motivation / context.** ADR-0025 deliberately builds only the *producer* of
-the discrete `RatState` stream (zone + direction + loops + `visited_since`); it
-is a coupling interface for two deferred consumers that were explicitly out of
-scope: (a) **task-rule shaping** primitives and (b) a **behavior-statistics**
-module. Half (a) is now implemented: ADR-0026 added `task_events.py` (the neutral
-task-semantic vocabulary: `choice_entered`, `loop_closed`/`loop_clean`,
-`same_side_run`, ...) and the credential-gated `well_reward_with_excursion`
-reward rule. Crucially, `task_events.py` was designed as the shared definition so
-that half (b) - the stats module - consumes the *same* events, keeping the
-reward the animal earns and the behavior we report consistent.
-
-**Sketch of approach.** *Stats (remaining):* a pure aggregator over the
-`RatState` + `TaskEventFrame` stream + a read-only tab/CLI that summarizes a
-session (per-session zone dwell times, traversal counts, L/R choice and
-clean-loop rates, same-side runs, latencies); feed it the `*_mazestate.csv` the
-Maze state tab already writes, or run `task_events.py` over it offline.
-
-**Evaluation / acceptance.** Stats: computed dwell/traversal/choice metrics match
-hand-worked synthetic sessions; the L/R and loop counts reconcile with the
-`rules_*.csv` rule-event log from the same session.
-
-**Effort / risk.** Low-medium (the vocabulary already exists in
-`task_events.py`). Main choice is live tab vs. offline CLI.
-
-**Open questions.** Live stats tab vs. an offline CLI over the CSV? Which metrics
-are primary for the grant's cue->action->reward analysis?
-
-**ADR needed?** Maybe - the metric definitions are a (smaller) behavioral-design
-decision; the rule-semantics half is already recorded in ADR-0026.
-
 ### FW-0008: Phase 3 transition - firmware correction trials + spatially-gated cue
 
 - **Status:** Deferred
@@ -399,7 +301,8 @@ decision; the rule-semantics half is already recorded in ADR-0026.
   (anti-bias run-length cap), [ADR-0008](decisions/0008-wavetable-tone-isr.md) (cue)
 
 **Motivation / context.** The host-side shaping phases (ADR-0026) end at Phase 2b
-(clean unidirectional loops with anti-bias). Phase 3 is the full cue-guided task,
+(stem-gated choice with choice-side anti-bias, primed at the choice; ADR-0030).
+Phase 3 is the full cue-guided task,
 which stays in firmware for real-time cue timing and neural-recording TTLs. The
 bridge from 2b to 3 needs two behavioral pieces not yet built: **correction
 trials** (repeat the same cue/side after an error until the animal gets it,
@@ -427,3 +330,58 @@ warranted.
 
 **ADR needed?** Yes - correction-trial semantics and any protocol change are
 behavioral-design decisions.
+
+### FW-0009: Trigger/Dispenser decomposition of the well-reward rule
+
+- **Status:** Deferred
+- **Date added:** 2026-07-08
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** `host/rules_engine.py` (`WellRewardWithExcursionRule`),
+  `host/test_well_reward.py`
+- **Related ADRs:** [ADR-0030](decisions/0030-prime-at-choice-entry.md) (the
+  in-place change that surfaced this), [ADR-0026](decisions/0026-reward-shaping-phases.md)
+  (the rule this refactors)
+
+**Motivation / context.** `WellRewardWithExcursionRule` now bundles three
+concerns that grew together: *when the credential is earned* (the excursion +
+`nonstem_reward_prob` fade + `debias` cap), *when the prime fires* (`prime_on`:
+well-arrival / well-lick / at-the-credential), and *how it dispenses* (port,
+pulse, top-up count + cooldown, freshness/anti-camp gating). ADR-0030 added the
+third `prime_on` mode in place rather than extracting an abstraction, because
+CONTRIBUTING #6 ("no abstraction until 2-3 real callers") was not yet met: the
+only other rule template, `prime_and_lick_topup`, is kept dormant. As more reward
+variants appear (e.g. the Phase-3 firmware bridge, FW-0008, or per-side spouts),
+the single method will get harder to follow.
+
+**Sketch of approach.** Split the rule into a small **Trigger** (decides *if/when*
+to arm and to prime, emitting `armed`/`credit_denied`/`debias_withhold` and a
+"prime now" signal) and a **Dispenser** (owns the port/pulse, the top-up counter +
+cooldown, the well-visit lifecycle, and the confidence/freshness/anti-camp gates).
+`prime_on` becomes which Trigger edge the Dispenser listens to. Credential logic
+(`_earn_credential`) is already a separate method, so it can move to the Trigger
+largely intact; the state machine in `tick`/`on_lick` moves to the Dispenser.
+
+**Evaluation / acceptance.** Pure refactor: the full `test_well_reward.py` +
+`test_task_events.py` suites pass unchanged; add focused tests for the
+Trigger/Dispenser seam. No behavior change for the shipped phase1/2a/2b profiles.
+
+**Effort / risk.** Medium. Risk is over-abstracting for a single live caller
+(exactly what was deferred here); revisit only when a second real consumer exists.
+
+**Open questions.** Does the dormant `prime_and_lick_topup` get retired or
+migrated onto the Dispenser? Do per-side spouts (dispense at the entered arm)
+arrive and justify the split on their own?
+
+**ADR needed?** Yes if the seam changes rule semantics or config; no if it is a
+pure internal refactor.
+
+## Completed
+
+Implemented items are removed from the active backlog above; their reasoning now
+lives in the linked ADRs. This table is kept only so the `FW-NNNN` ids still
+referenced from those ADRs resolve.
+
+| ID | Title | Implemented in |
+|----|-------|----------------|
+| FW-0004 | Position-based task-rule engine over landmarks | [ADR-0023](decisions/0023-position-based-rules-engine.md) |
+| FW-0007 | Maze-state consumers - rule-shaping + behavior stats | [ADR-0026](decisions/0026-reward-shaping-phases.md), [ADR-0032](decisions/0032-live-behavior-readout.md) |

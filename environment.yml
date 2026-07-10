@@ -1,0 +1,33 @@
+# Conda environment for the T-maze host tools.
+#
+#   conda env create -f environment.yml      # first time
+#   conda env update -f environment.yml       # after edits
+#   conda activate drieu_t_maze
+#
+# This file codifies the `drieu_t_maze` env referenced throughout the repo
+# (PROGRAMS.md, README.md, host/README.md, ADR-0004). The host tools are run
+# from the `host/` directory once this env is active.
+#
+# Version policy: the lower bounds below are floors known to work, not an exact
+# lock. To reproduce the rig exactly, regenerate a full lock ON THE RIG PC with
+#   conda env export --no-builds > environment.lock.yml
+# and commit that alongside this file. See CONTRIBUTING.md.
+name: drieu_t_maze
+channels:
+  - conda-forge
+dependencies:
+  - python=3.13
+  - pyserial>=3.5
+  - matplotlib>=3.8
+  - numpy>=2.1
+  - pillow>=11.0
+  # OpenCV: conda-forge ships it as `py-opencv` (imports as cv2). Install EITHER
+  # this or the pip `opencv-python` wheel, never both (duplicate cv2). See
+  # docs/decisions/0012 and host/requirements.txt.
+  - py-opencv>=4.10
+  # PyAV for multithreaded lossless FFV1 recording (see docs/decisions/0012).
+  - av>=12.0
+  # pypylon (Basler SDK) is not on conda-forge; install it with pip into the env.
+  - pip>=24.0
+  - pip:
+      - pypylon>=4.0

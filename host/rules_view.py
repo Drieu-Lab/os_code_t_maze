@@ -54,9 +54,15 @@ except Exception:  # pragma: no cover
     _draw_overlay = None  # type: ignore
 
 from rules_engine import (
-    EngineDefaults, FireReward, LogEvent, RulesEngine, Scale, load_rules_config,
-    resolve_landmark,
+    DEBIAS_CREDENTIALS, NONSTEM_CREDENTIALS, RULE_EDIT_FIELDS,
+    RULE_FIELD_CHOICES, EngineDefaults, FireReward, LogEvent, RulesEngine, Scale,
+    coerce_rule_field, load_rules_config, resolve_landmark, save_rules_config,
+    set_rule_debias, validate_profile_rules,
 )
+
+# The reward-shaping phases (1/2a/2b) all use this one template; the editor's
+# debias sub-form and conditional field enabling key off it. See ADR-0031.
+WELL_TEMPLATE = "well_reward_with_excursion"
 
 # Maze-state estimator + task-event layer (pure stdlib; safe to import). Zone /
 # loop rule templates need the task-event context these produce. See ADR-0026.
@@ -244,6 +250,220 @@ class RulesControlView:
         self._engine = RulesEngine.from_config(cfg)
         self._engine.enabled = False
         self._reset_state_pipeline()
+        self._sync_nonstem_widget()
+        self._rebuild_editor()
+
+    # ------------------------------------------------- non-stem reward fade
+    def _choice_rules(self) -> list:
+        """Active rules whose credit fades with the non-stem probability."""
+        if self._engine is None:
+            return []
+        return [r for r in self._engine.rules
+                if getattr(r, "credential", None) == "choice"
+                and hasattr(r, "nonstem_reward_prob")]
+
+    def _current_nonstem_prob(self) -> float:
+        rs = self._choice_rules()
+        return float(rs[0].nonstem_reward_prob) if rs else 1.0
+
+    def _sync_nonstem_widget(self) -> None:
+        """Reflect the active profile: enable only when a 'choice' rule is
+        active, and show its current p."""
+        spin = getattr(self, "_nonstem_spin", None)
+        if spin is None:
+            return
+        rs = self._choice_rules()
+        try:
+            if rs:
+                self._nonstem_var.set(round(float(rs[0].nonstem_reward_prob), 3))
+                spin.configure(state="normal")
+            else:
+                spin.configure(state="disabled")
+        except Exception:
+            pass
+
+    def _apply_nonstem_prob(self) -> None:
+        rs = self._choice_rules()
+        if not rs:
+            return
+        try:
+            p = max(0.0, min(1.0, float(self._nonstem_var.get())))
+        except (tk.TclError, ValueError):
+            messagebox.showinfo("Non-stem reward prob", "Enter a number 0.0-1.0.")
+            return
+        for r in rs:
+            r.nonstem_reward_prob = p
+            self._log_event(LogEvent("nonstem_prob_set", r.id, {"p": round(p, 3)}))
+        self._nonstem_var.set(round(p, 3))
+
+    # ------------------------------------------------- rules.json field editor
+    def _active_rule_dicts(self) -> list:
+        """The rule DICTS of the active profile (or the flat list).
+
+        These are the live objects inside ``self._config``; editing them in
+        place and calling ``save_rules_config`` writes the change back while
+        leaving the ``_schema`` block and every untouched key intact.
+        """
+        if self._profiles:
+            prof = self._profiles.get(self._active_profile, {})
+            return list(prof.get("rules", []))
+        return list(self._config.get("rules", []))
+
+    def _rebuild_editor(self) -> None:
+        """(Re)build the field editor for the active profile's rules."""
+        body = getattr(self, "_editor_body", None)
+        if body is None:      # called during __init__ before the UI is built
+            return
+        for child in body.winfo_children():
+            child.destroy()
+        self._editor_rows = []
+        rules = self._active_rule_dicts()
+        if not rules:
+            ttk.Label(body, text="(no editable rules in this phase)").pack(
+                side=tk.TOP, anchor="w", padx=4, pady=2)
+            return
+        for rule in rules:
+            self._build_rule_editor(body, rule)
+
+    def _build_rule_editor(self, parent: tk.Misc, rule: dict) -> None:
+        template = rule.get("template", "")
+        box = ttk.LabelFrame(parent, text=f"{rule.get('id', '?')}  [{template}]")
+        box.pack(side=tk.TOP, fill=tk.X, padx=2, pady=2)
+        row: dict = {"rule": rule, "template": template, "vars": {},
+                     "widgets": {}, "kinds": {}, "debias": None}
+        grid = ttk.Frame(box)
+        grid.pack(side=tk.TOP, fill=tk.X, padx=2, pady=2)
+        for r, (key, kind) in enumerate(RULE_EDIT_FIELDS.get(template, [])):
+            row["kinds"][key] = kind
+            ttk.Label(grid, text=key + ":").grid(
+                row=r, column=0, sticky="w", padx=(2, 4), pady=1)
+            if kind == "bool":
+                var: tk.Variable = tk.BooleanVar(value=bool(rule.get(key, True)))
+                w: tk.Widget = ttk.Checkbutton(grid, variable=var)
+            elif key in RULE_FIELD_CHOICES:
+                choices = RULE_FIELD_CHOICES[key]
+                var = tk.StringVar(value=str(rule.get(key, choices[0])))
+                w = ttk.Combobox(grid, width=16, state="readonly",
+                                 values=choices, textvariable=var)
+                if key == "credential":
+                    w.bind("<<ComboboxSelected>>",
+                           lambda _e, rw=row: self._sync_editor_enable(rw))
+            else:
+                default = rule.get(key, "")
+                var = tk.StringVar(value=("" if default == "" else str(default)))
+                w = ttk.Entry(grid, width=10, textvariable=var)
+            w.grid(row=r, column=1, sticky="w", padx=2, pady=1)
+            tip(w, f"rules.editor.field.{key}")
+            row["vars"][key] = var
+            row["widgets"][key] = w
+        if template == WELL_TEMPLATE:
+            self._build_debias_editor(box, rule, row)
+        self._editor_rows.append(row)
+        self._sync_editor_enable(row)
+
+    def _build_debias_editor(self, box: tk.Misc, rule: dict, row: dict) -> None:
+        """The optional anti-bias sub-form (well_reward only)."""
+        db = rule.get("debias") or {}
+        mode = str(db.get("mode")) if db else "none"
+        if mode not in ("none", "fixed", "uniform"):
+            mode = "none"
+        frame = ttk.Frame(box)
+        frame.pack(side=tk.TOP, fill=tk.X, padx=2, pady=(0, 2))
+        ttk.Label(frame, text="debias:").pack(side=tk.LEFT, padx=(2, 4))
+        mvar = tk.StringVar(value=mode)
+        mcmb = ttk.Combobox(frame, width=8, state="readonly",
+                            values=["none", "fixed", "uniform"], textvariable=mvar)
+        mcmb.pack(side=tk.LEFT, padx=2)
+        mcmb.bind("<<ComboboxSelected>>",
+                  lambda _e, rw=row: self._sync_editor_enable(rw))
+        widgets = {"mode": mcmb}
+        variables = {"mode": mvar}
+        for label, key, default in (("n", "n", 3), ("min", "min", 3),
+                                    ("max", "max", 5)):
+            ttk.Label(frame, text=f"{label}:").pack(side=tk.LEFT)
+            v = tk.StringVar(value=str(db.get(key, default)))
+            e = ttk.Entry(frame, width=4, textvariable=v)
+            e.pack(side=tk.LEFT, padx=2)
+            widgets[key] = e
+            variables[key] = v
+        tip(frame, "rules.editor.debias")
+        row["debias"] = {"vars": variables, "widgets": widgets}
+
+    def _sync_editor_enable(self, row: dict) -> None:
+        """Gray out well fields that don't apply to the selected credential."""
+        if row.get("template") != WELL_TEMPLATE:
+            return
+        cred_var = row["vars"].get("credential")
+        cred = cred_var.get() if cred_var is not None else ""
+        nonstem = row["widgets"].get("nonstem_reward_prob")
+        if nonstem is not None:
+            nonstem.configure(
+                state=("normal" if cred in NONSTEM_CREDENTIALS else "disabled"))
+        db = row.get("debias")
+        if db:
+            applies = cred in DEBIAS_CREDENTIALS
+            mode = db["vars"]["mode"].get()
+            db["widgets"]["mode"].configure(
+                state=("readonly" if applies else "disabled"))
+            for key in ("n", "min", "max"):
+                on = applies and ((key == "n" and mode == "fixed")
+                                  or (key in ("min", "max") and mode == "uniform"))
+                db["widgets"][key].configure(state=("normal" if on else "disabled"))
+
+    def _save_rules(self) -> None:
+        """Coerce the editor fields into rules.json, validate, and write."""
+        rows = getattr(self, "_editor_rows", [])
+        if not rows:
+            messagebox.showinfo("Save rules", "No editable rules in this phase.")
+            return
+        try:
+            for row in rows:
+                rule = row["rule"]
+                for key, var in row["vars"].items():
+                    kind = row["kinds"][key]
+                    raw = var.get()
+                    if kind in ("int", "float") and str(raw).strip() == "":
+                        continue      # leave a blank optional numeric unset
+                    rule[key] = coerce_rule_field(kind, raw)
+                db = row.get("debias")
+                if db is not None:
+                    set_rule_debias(
+                        rule, db["vars"]["mode"].get(),
+                        n=(db["vars"]["n"].get() or 3),
+                        lo=(db["vars"]["min"].get() or 3),
+                        hi=(db["vars"]["max"].get() or 5))
+        except (ValueError, TypeError) as e:
+            messagebox.showerror("Save rules", f"Invalid field value: {e}")
+            return
+        rules = self._active_rule_dicts()
+        if self._profiles:
+            defaults = (self._profiles.get(self._active_profile, {}).get("defaults")
+                        or self._config.get("defaults"))
+        else:
+            defaults = self._config.get("defaults")
+        try:
+            validate_profile_rules(rules, defaults)
+        except Exception as e:
+            messagebox.showerror(
+                "Save rules",
+                f"Edits are invalid, nothing was saved:\n{type(e).__name__}: {e}")
+            return
+        if self._active_profile:
+            # Persist the current phase selection alongside the field edits.
+            self._config["active_profile"] = self._active_profile
+        try:
+            save_rules_config(RULES_PATH, self._config)
+        except Exception as e:
+            messagebox.showerror("Save rules", f"{type(e).__name__}: {e}")
+            return
+        # Rebuild from the saved config and disarm (re-arm deliberately).
+        self._enable_var.set(False)
+        self._build_engine_for_active()
+        self._engine.enabled = False
+        messagebox.showinfo(
+            "Save rules",
+            f"Saved {len(rules)} rule(s) to rules.json "
+            f"(phase: {self._active_profile or 'flat'}). Re-arm when ready.")
 
     def _load_scale(self) -> None:
         if not os.path.exists(SCALE_PATH):
@@ -302,6 +522,35 @@ class RulesControlView:
             self._profile_cmb.pack(side=tk.LEFT, padx=2)
             self._profile_cmb.bind("<<ComboboxSelected>>", self._on_profile_change)
             tip(self._profile_cmb, "rules.profile")
+
+        # Non-stem reward probability (the P1 -> 2a fade; see ADR-0028). Set it
+        # per session, lowering it across days from 1.0 (Phase 1) to 0.0 (= 2a).
+        shaping = ttk.LabelFrame(controls, text="Shaping (Phase 1 -> 2a fade)")
+        shaping.pack(side=tk.TOP, fill=tk.X, **pad)
+        ttk.Label(shaping, text="Non-stem reward prob:").pack(side=tk.LEFT, padx=(4, 2))
+        self._nonstem_var = tk.DoubleVar(value=self._current_nonstem_prob())
+        self._nonstem_spin = ttk.Spinbox(
+            shaping, from_=0.0, to=1.0, increment=0.05, width=6,
+            textvariable=self._nonstem_var, command=self._apply_nonstem_prob)
+        self._nonstem_spin.pack(side=tk.LEFT, padx=2)
+        tip(self._nonstem_spin, "rules.nonstem")
+        apply_p = ttk.Button(shaping, text="Apply", command=self._apply_nonstem_prob)
+        apply_p.pack(side=tk.LEFT, padx=2)
+        tip(apply_p, "rules.nonstem")
+        self._sync_nonstem_widget()
+
+        # Per-rule field editor: tune the active phase's rule(s) and write the
+        # changes back to rules.json. See docs/decisions/0031.
+        editor = ttk.LabelFrame(controls, text="Rules editor (active phase)")
+        editor.pack(side=tk.TOP, fill=tk.X, **pad)
+        self._editor_body = ttk.Frame(editor)
+        self._editor_body.pack(side=tk.TOP, fill=tk.X)
+        save_rules_btn = ttk.Button(editor, text="Save to rules.json",
+                                    command=self._save_rules)
+        save_rules_btn.pack(side=tk.TOP, anchor="w", padx=4, pady=(2, 4))
+        tip(save_rules_btn, "rules.editor.save")
+        self._editor_rows: list = []
+        self._rebuild_editor()
 
         self._status_var = tk.StringVar(value="rules: idle")
         status_lbl = ttk.Label(controls, textvariable=self._status_var,

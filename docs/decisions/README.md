@@ -71,3 +71,8 @@ The chain of records is the audit trail.
 | [0025](0025-maze-state-module.md) | Discrete maze-state module (zones + direction + loops) over the tracker | Accepted | 2026-07-06 |
 | [0026](0026-reward-shaping-phases.md) | Host-side reward-shaping phases via a task-event layer and a credential-gated well rule | Accepted | 2026-07-06 |
 | [0027](0027-embed-acquisition-params-in-model.md) | Embed acquisition-time tracker settings in the saved model and restore them on load | Accepted | 2026-07-07 |
+| [0028](0028-probabilistic-phase-fade.md) | Fade Phase 1 into Phase 2a with a probabilistic non-stem reward, not a hard switch | Accepted | 2026-07-08 |
+| [0029](0029-comprehension-debt-guardrails.md) | Fight comprehension debt with advisory guardrails (CONTRIBUTING, env, tests, lint), not enforcement | Accepted | 2026-07-08 |
+| [0030](0030-prime-at-choice-entry.md) | Deliver the Phase 2a/2b prime at choice-zone entry; redefine 2b as stem-gated choice + choice-side anti-bias | Accepted | 2026-07-08 |
+| [0031](0031-gui-edit-rules-json.md) | Edit rule fields from the Rules tab and write back to the versioned rules.json | Accepted | 2026-07-09 |
+| [0032](0032-live-behavior-readout.md) | Live Phase 2a behavior readout (pure stats core over the task-event stream) in the Rig view tab | Accepted | 2026-07-09 |

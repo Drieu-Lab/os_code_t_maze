@@ -175,5 +175,38 @@ class TestSameSideRun(unittest.TestCase):
         self.assertEqual(f.same_side_run, 3)
 
 
+class TestSameSideChoiceRun(unittest.TestCase):
+    """The stem-gated choice-entry run used by the Phase 2b choice-side anti-bias
+    (see docs/decisions/0030). Counts consecutive same-side stem-gated entries;
+    a switch resets to 1; a non-stem (denied) entry does not reset it."""
+
+    def _left_stem_choice(self, h):
+        # HUB -> stem -> junction -> left choice, then back to HUB for the next.
+        return h.run([P_STEM, P_JUNCTION, P_LCHOICE, P_LRETURN, P_HUB])
+
+    def test_increments_on_same_side_and_resets_on_switch(self):
+        h = _Harness()
+        h.step(P_HUB)
+        f = h.run([P_STEM, P_JUNCTION, P_LCHOICE])
+        self.assertEqual(f.choice_entered, LEFT)
+        self.assertEqual(f.same_side_choice_run, 1)
+        f = h.run([P_LRETURN, P_HUB, P_STEM, P_JUNCTION, P_LCHOICE])
+        self.assertEqual(f.same_side_choice_run, 2)
+        f = h.run([P_LRETURN, P_HUB, P_STEM, P_JUNCTION, P_RCHOICE])
+        self.assertEqual(f.choice_entered, RIGHT)
+        self.assertEqual(f.same_side_choice_run, 1)
+
+    def test_nonstem_entry_does_not_count_or_reset(self):
+        h = _Harness()
+        h.step(P_HUB)
+        f = h.run([P_STEM, P_JUNCTION, P_LCHOICE])       # stem-gated -> run 1
+        self.assertEqual(f.same_side_choice_run, 1)
+        # A non-stem entry (up the return arm) is not a valid trial: run unchanged.
+        f = h.run([P_LRETURN, P_HUB, P_LRETURN, P_LCHOICE])
+        self.assertEqual(f.choice_entered, LEFT)
+        self.assertFalse(f.outbound_used_stem)
+        self.assertEqual(f.same_side_choice_run, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

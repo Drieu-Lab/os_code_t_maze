@@ -1,5 +1,14 @@
-pyserial
-matplotlib
+# Python dependencies for the host tools. Install inside the `drieu_t_maze`
+# conda env (see ../environment.yml, which is the preferred way to create it):
+#
+#   pip install -r requirements.txt
+#
+# Versions below are lower bounds known to work, not an exact lock. For a
+# byte-for-byte reproduction of the rig PC, run `pip freeze` (or
+# `conda env export`) ON THE RIG and commit that lock. See ../CONTRIBUTING.md.
+
+pyserial>=3.5
+matplotlib>=3.8
 
 # Camera module (experiment_control.py, beside the schematic). pypylon is the
 # Basler SDK and is not on conda - install it with pip (`pip install pypylon`).
@@ -8,8 +17,8 @@ matplotlib
 # duplicate cv2. av (PyAV) is used for multithreaded lossless FFV1 recording
 # (preview works without it); conda-forge also has it (`conda install -c
 # conda-forge av`). See docs/decisions/0012.
-pypylon
-numpy
-pillow
-opencv-python
-av
+pypylon>=4.0
+numpy>=2.1
+pillow>=11.0
+opencv-python>=4.10
+av>=12.0

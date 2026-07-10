@@ -1,4 +1,15 @@
-# docs - architecture diagrams
+# docs
+
+## Guides
+
+- [`how-tracking-and-rules-work.md`](how-tracking-and-rules-work.md) - a
+  plain-language, no-coding walkthrough of the camera pipeline: the blob
+  tracker, the maze-state estimator, the task-event layer, and the rules
+  engine, and how they chain together.
+- [`maze_state_validation.md`](maze_state_validation.md) - the beam-vs-vision
+  agreement / latency validation harness for the maze-state estimator.
+
+## Architecture diagrams
 
 A Graphviz view of how the rig's programs interact at runtime (the closest
 thing this repo has to `rqt_graph`, since it isn't a ROS system).

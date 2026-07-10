@@ -1,0 +1,29 @@
+---
+description: Coding + doc-upkeep conventions (canonical sources: CONTRIBUTING.md, AGENTS.md)
+globs: host/**/*.py,firmware/**/*.ino,firmware/**/*.h,docs/**/*.md,*.bat
+alwaysApply: false
+---
+
+# Conventions — quick nudges
+
+Canonical sources, kept deliberately un-duplicated here:
+[CONTRIBUTING.md](../../CONTRIBUTING.md) (how code is written here) and
+[AGENTS.md](../../AGENTS.md) (maintenance contract). Reminders:
+
+## Writing code (`host/**/*.py`)
+- **Pure core + thin shell:** logic in stdlib-only, headless-testable cores
+  (`protocol.py`, `maze_state.py`, `task_events.py`, `rules_engine.py`);
+  Tk/OpenCV/serial in the `*_view.py` shells. Don't grow a GUI file with logic.
+- **Run from `host/`** — sibling imports, not a package. Parse firmware lines via
+  `protocol.py`, reach the broker via `rig_io.py`, guard optional deps via `gui_deps.py`.
+- No magic numbers (named constant or `# see docs/decisions/NNNN`); comments
+  explain why, not what; no new abstraction until 2–3 real callers.
+- `maze_gui.py` and `tools/test_sensors_licks.py` are legacy — don't copy them.
+- Any pure-core change ships a `test_*.py`; run `run_tests.bat` (or
+  `python -m unittest discover -p "test_*.py"`) from `host/`.
+
+## Keeping docs in sync (same change)
+- New/changed runnable → update [PROGRAMS.md](../../PROGRAMS.md) (one line, exact command).
+- Non-obvious decision → add an ADR (next free number; immutable — supersede,
+  never rewrite) and reference it from code + commit.
+- Deferred idea → add an `FW-NNNN` entry to [docs/future-work.md](../../docs/future-work.md).

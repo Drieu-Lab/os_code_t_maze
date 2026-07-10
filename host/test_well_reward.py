@@ -8,11 +8,14 @@ centroid trajectories, plus synthetic lick lines. Run from host/:
 
     python -m unittest test_well_reward
 
-Covers (see docs/decisions/0026): Phase 1 (choice credit; no reward without an
-excursion; credit consumed by the prime; lick top-ups + cap); Phase 2a
-(stem-gated choice credit; a return-arm approach is denied); Phase 2b (clean-loop
-credit; stem-reversal loop denied; fixed debias cap withholds an over-biased
-run); and lick-gated priming (prime_on_arrival False).
+Covers (see docs/decisions/0026, 0030): Phase 1 (choice credit; no reward without
+an excursion; credit consumed by the prime; lick top-ups + cap); Phase 2a
+(stem-gated choice credit; a return-arm approach is denied); the legacy clean-loop
+credit (stem-reversal loop denied; fixed debias cap withholds an over-biased run);
+lick-gated priming (prime_on_arrival False); prime-at-choice-entry timing
+(prime_on "credential": prime fires at the choice arm not the well, top-ups still
+happen at the well and are capped); and Phase 2b (stem-gated choice + choice-side
+anti-bias, zero top-ups, side-switch re-rewards).
 """
 
 from __future__ import annotations
@@ -25,7 +28,9 @@ from maze_state import (
     RIGHT_RETURN, MazeStateEstimator, MazeStateParams, Zone, ZoneMap,
 )
 from task_events import TaskEvents
-from rules_engine import FireReward, LogEvent, RulesEngine
+from rules_engine import (
+    EngineDefaults, FireReward, LogEvent, RulesEngine, build_rule,
+)
 
 FRAME_W, FRAME_H = 1000, 1000
 
@@ -206,6 +211,144 @@ class TestLickGatedPrime(unittest.TestCase):
         self.assertEqual(len(fires(p)), 1)
         self.assertEqual(fires(p)[0].reason, "prime")
         self.assertEqual(len(fires(h.lick())), 1)   # subsequent lick tops up
+
+
+class TestNonStemFade(unittest.TestCase):
+    """The probabilistic P1->2a fade on the 'choice' credential (ADR-0028)."""
+
+    def test_p1_default_credits_nonstem(self):
+        # Default nonstem_reward_prob = 1.0 => a non-stem (return-arm) approach
+        # still credits, i.e. plain Phase 1.
+        h = Harness({"credential": "choice"})
+        h.step(P_HUB)
+        a = h.run([P_LRETURN, P_LCHOICE])       # reached choice arm without the stem
+        self.assertEqual(len(logs(a, "armed")), 1)
+        self.assertEqual(logs(a, "armed")[0].detail.get("route"), "nonstem")
+
+    def test_p0_denies_nonstem_but_stem_still_credits(self):
+        # nonstem_reward_prob = 0.0 is exactly Phase 2a.
+        h = Harness({"credential": "choice", "nonstem_reward_prob": 0.0})
+        h.step(P_HUB)
+        a = h.run([P_LRETURN, P_LCHOICE])       # non-stem -> denied
+        self.assertEqual(len(logs(a, "credit_denied")), 1)
+        self.assertEqual(logs(a, "credit_denied")[0].detail.get("reason"),
+                         "nonstem_faded")
+        self.assertEqual(len(logs(a, "armed")), 0)
+
+        h2 = Harness({"credential": "choice", "nonstem_reward_prob": 0.0})
+        h2.step(P_HUB)
+        a2 = h2.run([P_STEM, P_JUNCTION, P_LCHOICE])   # stem route -> credits
+        self.assertEqual(len(logs(a2, "armed")), 1)
+        self.assertEqual(logs(a2, "armed")[0].detail.get("route"), "stem")
+
+    def test_intermediate_probability_matches_rate(self):
+        # Drive many independent non-stem choice events through the credential
+        # logic directly (resetting the latch each time to simulate the credit
+        # being consumed at the well) and check the arm rate ~ p. Seeded => stable.
+        rule = build_rule(
+            {"id": "f", "template": "well_reward_with_excursion",
+             "credential": "choice", "nonstem_reward_prob": 0.5, "seed": 1234},
+            EngineDefaults())
+        armed = 0
+        n = 600
+        for _ in range(n):
+            rule.armed = False
+            task = types.SimpleNamespace(choice_entered="left",
+                                         outbound_used_stem=False)
+            rule._earn_credential(task)
+            if rule.armed:
+                armed += 1
+        self.assertAlmostEqual(armed / n, 0.5, delta=0.06)
+
+    def test_stem_always_credits_regardless_of_p(self):
+        rule = build_rule(
+            {"id": "f", "template": "well_reward_with_excursion",
+             "credential": "choice", "nonstem_reward_prob": 0.0, "seed": 1},
+            EngineDefaults())
+        for _ in range(50):
+            rule.armed = False
+            task = types.SimpleNamespace(choice_entered="right",
+                                         outbound_used_stem=True)
+            rule._earn_credential(task)
+            self.assertTrue(rule.armed)
+
+
+class TestPrimeOnCredential(unittest.TestCase):
+    """Phase 2a with prime_on='credential': the prime fires the instant a
+    stem-gated choice is entered (out at the choice zone), at the central spout,
+    and licks top up later at the well. See docs/decisions/0030."""
+
+    def test_prime_fires_at_choice_entry_not_at_well(self):
+        h = Harness({"credential": "choice_via_stem", "prime_on": "credential",
+                     "max_topups": 2})
+        h.step(P_HUB)
+        a = h.run([P_STEM, P_JUNCTION, P_LCHOICE])   # stem-gated choice entry
+        self.assertEqual(len(fires(a)), 1)
+        self.assertEqual(fires(a)[0].reason, "prime")
+        self.assertEqual(fires(a)[0].port, 2)        # central spout
+        b = h.run([P_LRETURN, P_HUB])                # reach the well
+        self.assertEqual(len(fires(b)), 0)           # no second prime on arrival
+
+    def test_topups_at_well_after_credential_prime_and_cap(self):
+        h = Harness({"credential": "choice_via_stem", "prime_on": "credential",
+                     "max_topups": 2})
+        h.step(P_HUB)
+        h.run([P_STEM, P_JUNCTION, P_LCHOICE])       # prime at choice
+        h.run([P_LRETURN, P_HUB])                    # travel to the well
+        self.assertEqual(len(fires(h.lick())), 1)    # top-up 1
+        self.assertEqual(len(fires(h.lick())), 1)    # top-up 2
+        self.assertEqual(len(fires(h.lick())), 0)    # capped at 2
+
+    def test_nonstem_entry_denied_no_prime(self):
+        h = Harness({"credential": "choice_via_stem", "prime_on": "credential"})
+        h.step(P_HUB)
+        a = h.run([P_LRETURN, P_LCHOICE])            # choice arm without the stem
+        self.assertEqual(len(logs(a, "credit_denied")), 1)
+        self.assertEqual(len(fires(a)), 0)
+
+
+class TestPhase2bChoiceBias(unittest.TestCase):
+    """Phase 2b = stem-gated choice + choice-side anti-bias, prime at choice,
+    zero top-ups. See docs/decisions/0030."""
+
+    def _left_trial(self, h):
+        return h.run([P_STEM, P_JUNCTION, P_LCHOICE, P_LRETURN, P_HUB])
+
+    def test_zero_topups(self):
+        h = Harness({"credential": "choice_via_stem", "prime_on": "credential",
+                     "max_topups": 0})
+        h.step(P_HUB)
+        a = h.run([P_STEM, P_JUNCTION, P_LCHOICE])   # prime at choice
+        self.assertEqual(len(fires(a)), 1)
+        h.run([P_LRETURN, P_HUB])
+        self.assertEqual(len(fires(h.lick())), 0)    # no top-ups in 2b
+
+    def test_choice_side_debias_withholds_over_biased_run(self):
+        h = Harness({"credential": "choice_via_stem", "prime_on": "credential",
+                     "max_topups": 0, "debias": {"mode": "fixed", "n": 2}})
+        h.step(P_HUB)
+        a1 = h.run([P_STEM, P_JUNCTION, P_LCHOICE])  # left run 1 <= 2 -> prime
+        self.assertEqual(len(fires(a1)), 1)
+        h.run([P_LRETURN, P_HUB])
+        a2 = h.run([P_STEM, P_JUNCTION, P_LCHOICE])  # left run 2 <= 2 -> prime
+        self.assertEqual(len(fires(a2)), 1)
+        h.run([P_LRETURN, P_HUB])
+        a3 = h.run([P_STEM, P_JUNCTION, P_LCHOICE])  # left run 3 > 2 -> withheld
+        self.assertEqual(len(logs(a3, "debias_withhold")), 1)
+        self.assertEqual(len(fires(a3)), 0)
+
+    def test_side_switch_resets_run_and_rewards(self):
+        h = Harness({"credential": "choice_via_stem", "prime_on": "credential",
+                     "max_topups": 0, "debias": {"mode": "fixed", "n": 1}})
+        h.step(P_HUB)
+        a1 = h.run([P_STEM, P_JUNCTION, P_LCHOICE])  # left run 1 <= 1 -> prime
+        self.assertEqual(len(fires(a1)), 1)
+        h.run([P_LRETURN, P_HUB])
+        a2 = h.run([P_STEM, P_JUNCTION, P_LCHOICE])  # left run 2 > 1 -> withheld
+        self.assertEqual(len(fires(a2)), 0)
+        h.run([P_LRETURN, P_HUB])
+        a3 = h.run([P_STEM, P_JUNCTION, P_RCHOICE])  # switch: right run 1 -> prime
+        self.assertEqual(len(fires(a3)), 1)
 
 
 if __name__ == "__main__":

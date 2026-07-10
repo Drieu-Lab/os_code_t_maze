@@ -76,6 +76,14 @@ try:
 except Exception as e:  # pragma: no cover
     MazeStateControlView = None  # type: ignore
     _TRACKER_ERR = _TRACKER_ERR or f"{type(e).__name__}: {e}"
+# Live Phase 2a behavior readout: a read-only tracker consumer that fills the
+# empty bottom-right of the Rig view tab. Optional; guarded like the tabs above.
+# See docs/decisions/0032.
+try:
+    from behavior_view import BehaviorView
+except Exception as e:  # pragma: no cover
+    BehaviorView = None  # type: ignore
+    _TRACKER_ERR = _TRACKER_ERR or f"{type(e).__name__}: {e}"
 
 # ================= CONFIG =================
 BROKER_HOST = "127.0.0.1"
@@ -365,6 +373,8 @@ def main() -> int:
     # mode) - these belong with Rig view (you watch the valve markers here) and
     # keeping them off the Tracking tab lets that tab use its full height.
     rig_controls_parent = root  # fallback; reassigned to the Rig view bottom strip
+    rig_controls_left = root     # left column: the existing rig/firmware controls
+    rig_controls_right = None    # right column: the live behavior readout (or None)
     for title, factories in tabs:
         tab = ttk.Frame(notebook)
         notebook.add(tab, text=title)
@@ -376,9 +386,17 @@ def main() -> int:
             quit_btn.pack(side=tk.RIGHT)
             tip(quit_btn, "quit.rig")
             # Pack the bottom strip BEFORE the body so it reserves its space and
-            # the body (schematic + camera) fills whatever remains.
+            # the body (schematic + camera) fills whatever remains. The strip is
+            # split into a LEFT column (the existing rig/firmware controls, which
+            # are left-aligned and leave the right half empty) and a RIGHT column
+            # that fills that dead space with the live behavior readout.
             rig_controls_parent = ttk.Frame(tab)
             rig_controls_parent.pack(side=tk.BOTTOM, fill=tk.X)
+            rig_controls_left = ttk.Frame(rig_controls_parent)
+            rig_controls_left.pack(side=tk.LEFT, fill=tk.Y, anchor="n")
+            rig_controls_right = ttk.Frame(rig_controls_parent)
+            rig_controls_right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True,
+                                    padx=(8, 4), pady=4)
             body = ttk.Frame(tab)
             body.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         else:
@@ -435,10 +453,20 @@ def main() -> int:
         root.destroy()
         return 1
 
-    build_mode_controls(rig_controls_parent, client, mode_var)
-    build_solenoid_panel(rig_controls_parent, client)
-    build_reward_panel(rig_controls_parent, reward_tally)
-    build_lick_panel(rig_controls_parent, lick_tally)
+    build_mode_controls(rig_controls_left, client, mode_var)
+    build_solenoid_panel(rig_controls_left, client)
+    build_reward_panel(rig_controls_left, reward_tally)
+    build_lick_panel(rig_controls_left, lick_tally)
+
+    # Live Phase 2a behavior readout in the freed bottom-right column. It is a
+    # read-only consumer of the shared tracker + camera; registered as a module
+    # so it gets each serial line (to reset on a MODE switch) and close().
+    if (tracker is not None and BehaviorView is not None
+            and rig_controls_right is not None):
+        behavior = BehaviorView(rig_controls_right, tracker=tracker,
+                                camera=camera_ref.get("cam"))
+        behavior.widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        modules.append(behavior)
 
     root.protocol("WM_DELETE_WINDOW", on_close)
 

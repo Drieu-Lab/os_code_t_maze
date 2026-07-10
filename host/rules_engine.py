@@ -409,17 +409,21 @@ class WellRewardWithExcursionRule:
     new code:
       - "choice"          (Phase 1): entering EITHER choice arm credits. Teaches
                           well = reward and encourages whole-maze exploration.
-      - "choice_via_stem" (Phase 2a): entering a choice arm credits ONLY if the
-                          outbound leg used the central stem. Shapes
-                          unidirectional stem travel.
-      - "clean_loop"      (Phase 2b): a completed clean loop (stem out + matching
-                          return arm) credits, subject to an optional anti-bias
-                          debias cap on the same-side run length.
+      - "choice_via_stem" (Phase 2a/2b): entering a choice arm credits ONLY if
+                          the outbound leg used the central stem. Shapes
+                          unidirectional stem travel. With a ``debias`` cap it is
+                          Phase 2b (adds choice-side anti-bias).
+      - "clean_loop"      : a completed clean loop (stem out + matching return
+                          arm) credits, subject to an optional anti-bias debias
+                          cap on the same-side loop run length.
 
-    ``prime_on_arrival`` (default True): prime fires the moment the animal
-    arrives at the well while credited. If False, the prime is lick-gated (the
-    first lick at the well while credited fires the prime), which can sharpen the
-    well-lick association in later phases.
+    ``prime_on`` selects prime timing: "well_arrival" (default) primes the moment
+    the animal reaches the well while credited; "well_lick" is lick-gated (the
+    first lick at the well while credited fires the prime); "credential" fires the
+    prime the instant the credential arms, out at the choice zone, so the
+    central-spout solenoid becomes the correct-choice signal (Phase 2a/2b),
+    matching the full cue-guided task. The legacy boolean ``prime_on_arrival`` is
+    still accepted (True->"well_arrival", False->"well_lick"). See ADR-0030.
 
     Debias (``clean_loop`` only): ``debias`` = {"mode":"fixed","n":3} caps the
     same-side run at a fixed N; {"mode":"uniform","min":3,"max":5,"seed":...}
@@ -452,21 +456,50 @@ class WellRewardWithExcursionRule:
         self.topup_cooldown_ms = int(params.get(
             "topup_cooldown_ms",
             legacy if legacy is not None else defaults.topup_cooldown_ms))
-        self.prime_on_arrival = bool(params.get("prime_on_arrival", True))
+        # Where/when the prime fires (see docs/decisions/0030):
+        #   "well_arrival" - on reaching the well while armed (default; Phase 1),
+        #   "well_lick"    - first lick at the well while armed (lick-gated),
+        #   "credential"   - the instant the credential arms, out at the choice
+        #                    zone, so the central-spout solenoid becomes the
+        #                    correct-choice signal (Phase 2a/2b).
+        # Back-compat: the older boolean prime_on_arrival maps True->well_arrival,
+        # False->well_lick.
+        prime_on = params.get("prime_on")
+        if prime_on is None:
+            prime_on = ("well_arrival"
+                        if bool(params.get("prime_on_arrival", True))
+                        else "well_lick")
+        self.prime_on = str(prime_on)
+        if self.prime_on not in ("well_arrival", "well_lick", "credential"):
+            raise ValueError(
+                f"unknown prime_on {self.prime_on!r}; "
+                "known: well_arrival, well_lick, credential")
         self.credential = str(params.get("credential", "choice"))
         if self.credential not in self._CREDENTIALS:
             raise ValueError(
                 f"unknown credential {self.credential!r}; "
                 f"known: {list(self._CREDENTIALS)}")
 
-        # Anti-bias debias (clean_loop only).
+        # Probabilistic fade (choice credential only): a NON-stem excursion earns
+        # a credit only with probability nonstem_reward_prob, while a stem
+        # excursion always credits. p = 1.0 is Phase 1 (any choice credits); p =
+        # 0.0 is exactly Phase 2a (stem-only). Fading p 1->0 across sessions
+        # morphs P1 into 2a without an extinction cliff. See docs/decisions/0028.
+        self.nonstem_reward_prob = float(params.get("nonstem_reward_prob", 1.0))
+
+        # Anti-bias debias: caps consecutive same-side runs. For clean_loop it
+        # caps closed loops (same_side_run); for choice_via_stem it caps stem-
+        # gated choice entries (same_side_choice_run). See docs/decisions/0030.
         db = params.get("debias") or {}
-        self._debias_enabled = bool(db) and self.credential == "clean_loop"
+        self._debias_enabled = bool(db) and self.credential in (
+            "clean_loop", "choice_via_stem")
         self._debias_mode = str(db.get("mode", "fixed"))
         self._debias_n = int(db.get("n", 3))
         self._debias_min = int(db.get("min", 3))
         self._debias_max = int(db.get("max", 5))
-        self._rng = random.Random(db.get("seed"))
+        # One seeded RNG for both the fade roll and the debias cap draw, so a
+        # session is reproducible from ``seed`` (falls back to the debias seed).
+        self._rng = random.Random(params.get("seed", db.get("seed")))
         self._cap = self._draw_cap()
 
         self._lick = LickAt(self.port)
@@ -477,6 +510,9 @@ class WellRewardWithExcursionRule:
         self.topups = 0
         self.fires = 0
         self._primed_this_visit = False
+        # A prime fired at credential time (prime_on == "credential") that is
+        # awaiting the well visit to open its lick-top-up window.
+        self._credit_primed = False
         self._at_well = False
         self._last_tick_now: Optional[float] = None
         self._last_fire_now: Optional[float] = None
@@ -505,22 +541,56 @@ class WellRewardWithExcursionRule:
         out: List = []
         if self.credential == "choice":
             if task.choice_entered is not None and not self.armed:
-                self.armed = True
-                out.append(LogEvent("armed", self.id,
-                                    {"credential": "choice",
-                                     "side": task.choice_entered}))
+                if task.outbound_used_stem or self.nonstem_reward_prob >= 1.0:
+                    self.armed = True
+                    out.append(LogEvent("armed", self.id,
+                                        {"credential": "choice",
+                                         "side": task.choice_entered,
+                                         "route": ("stem" if task.outbound_used_stem
+                                                   else "nonstem")}))
+                else:
+                    # Non-stem excursion: credit only with the (fading) probability.
+                    p = max(0.0, min(1.0, self.nonstem_reward_prob))
+                    roll = self._rng.random()
+                    if roll < p:
+                        self.armed = True
+                        out.append(LogEvent("armed", self.id,
+                                            {"credential": "choice",
+                                             "side": task.choice_entered,
+                                             "route": "nonstem",
+                                             "p": round(p, 3),
+                                             "roll": round(roll, 3)}))
+                    else:
+                        out.append(LogEvent("credit_denied", self.id,
+                                            {"reason": "nonstem_faded",
+                                             "side": task.choice_entered,
+                                             "p": round(p, 3),
+                                             "roll": round(roll, 3)}))
         elif self.credential == "choice_via_stem":
             if task.choice_entered is not None:
+                side = task.choice_entered
                 if task.outbound_used_stem:
-                    if not self.armed:
+                    # Optional choice-side anti-bias (Phase 2b): redraw the cap on
+                    # a side switch, then withhold a stem-gated choice that runs
+                    # the same side past the cap. See docs/decisions/0030.
+                    if self._debias_enabled and task.same_side_choice_run == 1:
+                        self._cap = self._draw_cap()
+                    if self._debias_enabled and task.same_side_choice_run > self._cap:
+                        out.append(LogEvent("debias_withhold", self.id,
+                                            {"side": side,
+                                             "run": task.same_side_choice_run,
+                                             "cap": self._cap}))
+                    elif not self.armed:
                         self.armed = True
                         out.append(LogEvent("armed", self.id,
                                             {"credential": "choice_via_stem",
-                                             "side": task.choice_entered}))
+                                             "side": side,
+                                             "run": task.same_side_choice_run,
+                                             "cap": (None if not self._debias_enabled
+                                                     else self._cap)}))
                 else:
                     out.append(LogEvent("credit_denied", self.id,
-                                        {"reason": "no_stem",
-                                         "side": task.choice_entered}))
+                                        {"reason": "no_stem", "side": side}))
         elif self.credential == "clean_loop":
             if task.loop_closed is not None:
                 side = task.loop_closed
@@ -550,16 +620,29 @@ class WellRewardWithExcursionRule:
         actions: List = []
         if task.valid:
             actions.extend(self._earn_credential(task))
+            # Prime the instant the credential arms (Phase 2a/2b): fire out at
+            # the choice zone so the central spout signals the correct choice.
+            # See docs/decisions/0030.
+            if self.prime_on == "credential" and self.armed:
+                actions.append(self._fire(task.now, "prime"))
+                self.armed = False
+                self._credit_primed = True
 
         at_well = bool(task.at_well)   # already implies task.valid
         if at_well and self.state == "OUTSIDE":
             self.state = "AT_WELL"
-            self._primed_this_visit = False
             self.topups = 0
-            if self.prime_on_arrival and self.armed:
-                actions.append(self._fire(task.now, "prime"))
-                self._primed_this_visit = True
-                self.armed = False
+            if self.prime_on == "credential":
+                # The prime already fired at the choice; carry it into the visit
+                # so licks here can top up.
+                self._primed_this_visit = self._credit_primed
+                self._credit_primed = False
+            else:
+                self._primed_this_visit = False
+                if self.prime_on == "well_arrival" and self.armed:
+                    actions.append(self._fire(task.now, "prime"))
+                    self._primed_this_visit = True
+                    self.armed = False
         elif not at_well and self.state == "AT_WELL" and task.valid:
             # Exit the visit only on a CONFIDENT outside reading, so a brief
             # track loss (task.valid False) neither drops the visit nor lets a
@@ -586,8 +669,8 @@ class WellRewardWithExcursionRule:
             return []
         self._last_lick_now = now
         if not self._primed_this_visit:
-            # Lick-gated prime: the first lick while credited fires the prime.
-            if (not self.prime_on_arrival) and self.armed:
+            # Lick-gated prime (well_lick): the first lick while credited fires it.
+            if self.prime_on == "well_lick" and self.armed:
                 self._primed_this_visit = True
                 self.armed = False
                 return [self._fire(now, "prime")]
@@ -602,8 +685,10 @@ class WellRewardWithExcursionRule:
     # ---------------------------------------------------------------- status
     def status(self) -> dict:
         return {"id": self.id, "state": self.state, "armed": self.armed,
-                "credential": self.credential, "topups": self.topups,
-                "max_topups": self.max_topups, "fires": self.fires}
+                "credential": self.credential, "prime_on": self.prime_on,
+                "topups": self.topups, "max_topups": self.max_topups,
+                "fires": self.fires,
+                "nonstem_reward_prob": self.nonstem_reward_prob}
 
 
 TEMPLATES = {
@@ -672,14 +757,18 @@ class RulesEngine:
         if not self.enabled:
             return []
         scale_ok = scale is not None and scale.valid()
+        task_ok = task is not None
         frame = self._make_frame(track_result, landmarks, scale, now, task)
         out: List = []
         for rule in self.rules:
             if not getattr(rule, "enabled", True):
                 continue
-            # Rules that measure cm distances are gated by a valid scale; zone /
-            # loop rules (needs_scale False) run without one. See ADR-0026.
+            # Skip any rule whose capability is missing (ADR-0026): rules that
+            # measure cm distances need a valid scale; zone/loop rules need the
+            # task-event context. Rules declaring neither run unconditionally.
             if getattr(rule, "needs_scale", False) and not scale_ok:
+                continue
+            if getattr(rule, "needs_task", False) and not task_ok:
                 continue
             out.extend(rule.tick(frame))
         return self._apply_global(out, now)
@@ -741,3 +830,112 @@ def load_rules_config(path: str) -> dict:
     """Load and return the rules.json config dict."""
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
+
+
+# ============================ GUI editor support =============================
+# The Rules tab (rules_view.py) exposes a per-rule field editor that writes back
+# to rules.json. The editable-field spec, value coercion, whole-profile
+# validation, and the write itself live here (pure core) so they are
+# unit-testable and the Tk shell stays thin. Only a curated subset of each
+# template's params is editable from the GUI; any key NOT in the spec (a rule's
+# landmark, a well rule's legacy min_confidence, the _schema block, ...) is
+# preserved untouched because the GUI mutates the loaded dict in place before
+# saving. See docs/decisions/0031.
+
+# Editable fields per template, as (key, kind) with kind in
+# {"int","float","bool","str"}. Enumerated string fields also list their allowed
+# values in RULE_FIELD_CHOICES so the GUI renders a dropdown.
+RULE_EDIT_FIELDS: Dict[str, List[Tuple[str, str]]] = {
+    PrimeAndLickTopupRule.TEMPLATE: [
+        ("enabled", "bool"),
+        ("port", "int"),
+        ("pulse_ms", "int"),
+        ("max_topups", "int"),
+        ("lick_debounce_ms", "int"),
+        ("topup_cooldown_ms", "int"),
+        ("rearm_refractory_ms", "int"),
+        ("rearm_on_exit", "bool"),
+        ("radius_cm", "float"),
+        ("min_confidence", "float"),
+    ],
+    WellRewardWithExcursionRule.TEMPLATE: [
+        ("enabled", "bool"),
+        ("port", "int"),
+        ("pulse_ms", "int"),
+        ("max_topups", "int"),
+        ("lick_debounce_ms", "int"),
+        ("topup_cooldown_ms", "int"),
+        ("credential", "str"),
+        ("prime_on", "str"),
+        ("nonstem_reward_prob", "float"),
+    ],
+}
+
+RULE_FIELD_CHOICES: Dict[str, List[str]] = {
+    "credential": list(WellRewardWithExcursionRule._CREDENTIALS),
+    "prime_on": ["well_arrival", "well_lick", "credential"],
+}
+
+# Credentials for which the conditionally-meaningful well fields apply; the GUI
+# grays them out otherwise (the engine already ignores them). nonstem_reward_prob
+# only fades the "choice" credential (ADR-0028); debias only caps the stem-gated
+# / loop credentials (ADR-0030).
+NONSTEM_CREDENTIALS = ("choice",)
+DEBIAS_CREDENTIALS = ("choice_via_stem", "clean_loop")
+
+
+def coerce_rule_field(kind: str, raw):
+    """Convert a GUI-entered value to the typed value for a rule param.
+
+    Raises ValueError/TypeError on malformed input so a caller can reject the
+    edit before it is written to disk.
+    """
+    if kind == "bool":
+        return bool(raw)
+    if kind == "int":
+        return int(raw)
+    if kind == "float":
+        return float(raw)
+    return str(raw)
+
+
+def set_rule_debias(rule: dict, mode: Optional[str],
+                    n: int = 3, lo: int = 3, hi: int = 5) -> None:
+    """Set or clear the ``debias`` sub-config on a well_reward rule dict.
+
+    ``mode`` of None or "none" removes the key entirely (no cap); "fixed" writes
+    ``{mode, n}``; "uniform" writes ``{mode, min, max}``.
+    """
+    if not mode or mode == "none":
+        rule.pop("debias", None)
+        return
+    if mode == "fixed":
+        rule["debias"] = {"mode": "fixed", "n": int(n)}
+    elif mode == "uniform":
+        rule["debias"] = {"mode": "uniform", "min": int(lo), "max": int(hi)}
+    else:
+        raise ValueError(f"unknown debias mode {mode!r}")
+
+
+def validate_profile_rules(rules: List[dict], defaults: Optional[dict]) -> None:
+    """Raise if any rule dict is invalid (unknown template/credential/prime_on).
+
+    Mirrors how the engine is built for a profile, so a clean return means the
+    rules will load. The Rules tab calls this to guard a save.
+    """
+    d = EngineDefaults.from_dict(defaults)
+    for rp in rules:
+        build_rule(rp, d)
+
+
+def save_rules_config(path: str, config: dict) -> None:
+    """Write a rules config dict back to disk (round-trips load_rules_config).
+
+    Pretty-prints with indent=2 and preserves every key in ``config`` (the
+    ``_schema`` docs block, defaults, and any params the editor left untouched),
+    since callers mutate only edited fields in place before saving. See
+    docs/decisions/0031.
+    """
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(config, f, indent=2, ensure_ascii=False)
+        f.write("\n")
