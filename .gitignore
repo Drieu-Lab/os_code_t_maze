@@ -37,6 +37,11 @@ host/rig_scale.json
 test_task_core
 test_task_core.exe
 
+# Obsidian per-machine config for the capture-inbox vault (docs/notes/). The
+# Markdown notes are versioned; Obsidian's local workspace/app config is not.
+# see docs/decisions/0033
+docs/notes/.obsidian/
+
 # OS cruft
 .DS_Store
 Thumbs.db

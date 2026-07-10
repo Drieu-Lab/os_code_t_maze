@@ -22,6 +22,9 @@ This project spans **two sibling folders**:
   - [`CONTRIBUTING.md`](CONTRIBUTING.md) — how code is written here (the
     "pure core + thin shell" pattern, the run-from-`host/` rule, the new-coder
     learning path), framed around minimizing comprehension debt.
+  - [`docs/notes/`](docs/notes/) — the human-owned **capture inbox** (raw bug /
+    idea jottings). Read it for context and triage it (see "Triage the capture
+    inbox" below); don't treat it as authoritative.
   - `host/README.md`, `firmware/README.md` — component-level details.
 - **`../os_code_t_maze_resources/`** (sibling repo) — planning, hardware
  references, lab notes, and mockups. Its own
@@ -118,3 +121,23 @@ row). Capture enough context to reconstruct it: motivation, affected modules,
 related ADRs, a sketch of the approach, and how to evaluate it. When an item is
 implemented, record the reasoning in a new ADR and remove (or mark `Done`) its
 backlog entry.
+
+## Triage the capture inbox
+
+[`docs/notes/`](docs/notes/) is a **human-owned, low-friction capture inbox**
+(`Bugs.md`, `Ideas.md`) — raw, possibly noisy jottings, distinct from the
+curated `future-work.md` backlog (see ADR-0033). It is the human's space; do not
+require it to be tidy.
+
+You **may** read it for context and help it flow *out* (this is the only list
+agents actively prune):
+
+- A raw idea that is really a concrete deferred code change → promote it into
+  [`docs/future-work.md`](docs/future-work.md) as a full `FW-NNNN` entry, then
+  remove it from `docs/notes/Ideas.md`.
+- A captured bug you fix in the current change → reference the fix in the commit,
+  then remove it from `docs/notes/Bugs.md`.
+- Leave anything you can't confidently triage where it is.
+
+Don't invent entries here on the human's behalf; capture agent-deferred work in
+`future-work.md` instead.

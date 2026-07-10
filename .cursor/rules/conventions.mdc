@@ -27,3 +27,6 @@ Canonical sources, kept deliberately un-duplicated here:
 - Non-obvious decision → add an ADR (next free number; immutable — supersede,
   never rewrite) and reference it from code + commit.
 - Deferred idea → add an `FW-NNNN` entry to [docs/future-work.md](../../docs/future-work.md).
+- `docs/notes/` is the human's raw bug/idea inbox — you may read it and triage
+  items out (promote real ones to `future-work.md`, remove fixed bugs), but don't
+  require it to be tidy. See AGENTS.md "Triage the capture inbox".

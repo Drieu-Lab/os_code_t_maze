@@ -9,6 +9,13 @@
 - [`maze_state_validation.md`](maze_state_validation.md) - the beam-vs-vision
   agreement / latency validation harness for the maze-state estimator.
 
+## Notes
+
+- [`notes/`](notes/) - the human-owned **capture inbox** for code bugs and ideas
+  (`Bugs.md`, `Ideas.md`); openable as an Obsidian vault. Raw jottings that get
+  triaged into [`future-work.md`](future-work.md) / ADRs (see ADR-0033). Distinct
+  from the curated backlog in [`future-work.md`](future-work.md).
+
 ## Architecture diagrams
 
 A Graphviz view of how the rig's programs interact at runtime (the closest
