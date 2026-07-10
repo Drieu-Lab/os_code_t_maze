@@ -77,3 +77,5 @@ The chain of records is the audit trail.
 | [0031](0031-gui-edit-rules-json.md) | Edit rule fields from the Rules tab and write back to the versioned rules.json | Accepted | 2026-07-09 |
 | [0032](0032-live-behavior-readout.md) | Live Phase 2a behavior readout (pure stats core over the task-event stream) in the Rig view tab | Accepted | 2026-07-09 |
 | [0033](0033-human-capture-inbox.md) | Human-owned bug/idea capture inbox (`docs/notes/`), separate from the agent-curated backlog | Accepted | 2026-07-10 |
+| [0034](0034-parallel-blocker-tracking.md) | Track orange-taped blockers in parallel and subtract their footprint so they can't steal the rat's track | Accepted | 2026-07-10 |
+| [0035](0035-once-per-excursion-well-credit.md) | Credit the well reward at most once per outbound excursion (per-excursion choice latch) | Accepted | 2026-07-10 |

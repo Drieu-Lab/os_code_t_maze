@@ -50,6 +50,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 import protocol  # shared serial-line parser (pure stdlib; see docs/decisions/0024)
+from maze_state import HUB  # zone vocabulary constant (pure stdlib; see docs/decisions/0035)
 
 # Tracker state string that means "confirmed lock" (kept local so this core does
 # not import tracker.py / opencv). Must match tracker.STATE_TRACKING.
@@ -444,6 +445,10 @@ class WellRewardWithExcursionRule:
     needs_scale = False   # zone/loop based; no cm scale required
     needs_task = True     # requires the task-event context (zone map + estimator)
     _CREDENTIALS = ("choice", "choice_via_stem", "clean_loop")
+    # Credentials that EARN at choice-arm entry (as opposed to loop close). Only
+    # these are gated by the once-per-excursion choice latch; clean_loop earns at
+    # the HUB when the lap closes and needs no latch. See docs/decisions/0035.
+    _CHOICE_CREDENTIALS = ("choice", "choice_via_stem")
 
     def __init__(self, params: dict, defaults: EngineDefaults):
         self.id = str(params.get("id", "well_reward_with_excursion"))
@@ -513,6 +518,14 @@ class WellRewardWithExcursionRule:
         # A prime fired at credential time (prime_on == "credential") that is
         # awaiting the well visit to open its lick-top-up window.
         self._credit_primed = False
+        # Once-per-excursion latch for the choice-family credentials: True while
+        # the current hub->...->hub trip has not yet earned. Re-armed whenever the
+        # rat is at the HUB and consumed on the FIRST choice-arm entry of the trip,
+        # so a figure-8 that crosses into the OTHER choice arm on the way back is
+        # one excursion, not two (the double-reward bug). Starts True so a first
+        # choice counts even without a prior HUB tick. Mirrors the counting unit in
+        # behavior_stats.py. See docs/decisions/0035.
+        self._excursion_open = True
         self._at_well = False
         self._last_tick_now: Optional[float] = None
         self._last_fire_now: Optional[float] = None
@@ -619,7 +632,19 @@ class WellRewardWithExcursionRule:
             return []
         actions: List = []
         if task.valid:
-            actions.extend(self._earn_credential(task))
+            # Once-per-excursion choice latch (see docs/decisions/0035): re-arm at
+            # the HUB, then let only the FIRST choice-arm entry of the trip earn.
+            # This stops a figure-8 that re-enters the OTHER choice arm on the way
+            # back (still outbound_used_stem, no HUB since) from re-crediting.
+            if task.rat_state.zone == HUB:
+                self._excursion_open = True
+            earn = True
+            if (task.choice_entered is not None
+                    and self.credential in self._CHOICE_CREDENTIALS):
+                earn = self._excursion_open
+                self._excursion_open = False
+            if earn:
+                actions.extend(self._earn_credential(task))
             # Prime the instant the credential arms (Phase 2a/2b): fire out at
             # the choice zone so the central spout signals the correct choice.
             # See docs/decisions/0030.

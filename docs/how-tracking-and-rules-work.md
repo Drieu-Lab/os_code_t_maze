@@ -107,6 +107,32 @@ observations to its color/size/shape range), so it copes with lighting or pose
 it didn't see during registration - without ever forgetting the original
 registration or drifting onto an intruder.
 
+### Physical blockers (the orange-taped obstacle)
+
+Sometimes you drop a physical blocker into the maze to close off a path. It was
+not in the "empty maze" photo, so plain background-subtraction sees it as a new
+blob - and because a blocker is dark like the rat, the track can jump to it or
+"stick" when the rat gets close. The fix (ADR-0034):
+
+1. **Put orange tape on the blocker's edges.** Orange is a colour the rat never
+   has, so it is a reliable "this is the blocker" marker no matter where the
+   blocker sits.
+2. **Register the blocker from a few still snapshots.** On the "Tracking" tab,
+   place the blocker, take your hand out of view, and click **Capture sample**;
+   repeat at a few positions/orientations, then **Finish**. The tracker learns
+   the tape's actual colour *under your room lighting* (you'll see the learned
+   hue range in the status), so there is nothing to hand-tune. Save/Load keeps
+   it for next time.
+3. **During tracking it is followed in parallel and erased from the rat's view.**
+   Each frame the software finds the orange tape, fills in the blocker's outline,
+   and subtracts that patch before it looks for the rat. Because the tape is only
+   ever on the blocker, this works even when the rat is touching the blocker (the
+   rat is not erased), and it follows the blocker if you move it. The blocker is
+   drawn as an orange square marked `BLOCKER` on the preview.
+
+Caveat: while your hand is in the frame moving the blocker, tracking can be
+briefly noisy - fine between trials, so reposition then.
+
 ### What it tells the next step
 
 Every frame the tracker emits a small record (`TrackResult`) with the rat's
@@ -453,6 +479,7 @@ still no code, but naming the techniques so you know what you're tuning.
 | Smoothing / gap-filling | **Constant-velocity Kalman filter** | Glide instead of jitter, and coast briefly in a straight line when the rat is lost. |
 | Lock management | A small **state machine** (`ACQUIRING → TRACKING → COASTING → LOST`) with a per-frame confidence | Know when to trust the track and when to say "I'm not sure." |
 | Online learning (optional) | **Sufficient-statistics accumulation** (not exponential drift) | Grow the fingerprint's range to new poses/lighting without forgetting or chasing an intruder. |
+| Blocker handling (optional) | **Learned orange-tape HSV gate** locates the obstacle; its **convex-hull footprint** is subtracted from the mask before the rat is chosen (ADR-0034) | Track an orange-taped blocker in parallel and erase it so it can't steal the rat's track, even on contact. |
 
 ### Maze-state estimator (`maze_state.py`)
 

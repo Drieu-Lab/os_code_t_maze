@@ -351,5 +351,26 @@ class TestPhase2bChoiceBias(unittest.TestCase):
         self.assertEqual(len(fires(a3)), 1)
 
 
+class TestExcursionDoubleReward(unittest.TestCase):
+    """A single outbound excursion earns at most once, even when the animal
+    turns back and enters the OTHER choice arm on the way home (the figure-8
+    double-reward bug #260710_DoubleReward). See docs/decisions/0035."""
+
+    def test_opposite_arm_on_way_back_does_not_reprime(self):
+        h = Harness({"credential": "choice_via_stem", "prime_on": "credential"})
+        h.step(P_HUB)
+        a = h.run([P_STEM, P_JUNCTION, P_LCHOICE])   # stem-gated left choice -> prime
+        self.assertEqual(len(fires(a)), 1)
+        # Turn back and enter the OTHER choice arm without returning to the hub:
+        # one excursion, so it must NOT re-credit or re-prime.
+        b = h.run([P_JUNCTION, P_RCHOICE])
+        self.assertEqual(len(fires(b)), 0)
+        self.assertEqual(len(logs(b, "armed")), 0)
+        # A genuine next excursion (after returning to the hub) earns again.
+        h.run([P_RRETURN, P_HUB])                    # close the trip at the hub
+        c = h.run([P_STEM, P_JUNCTION, P_LCHOICE])   # new outbound -> prime again
+        self.assertEqual(len(fires(c)), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

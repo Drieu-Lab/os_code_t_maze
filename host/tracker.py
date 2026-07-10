@@ -198,6 +198,19 @@ class TrackerParams:
     adapt_min_conf: float = 0.85  # only enrich from confident frames
     adapt_max_samples: int = 0    # cap on total form samples (0 = unlimited)
 
+    # --- blocker (parallel-tracked physical obstacle; see docs/decisions/0034) ---
+    # The blocker is identified by its ORANGE tape (a position-invariant cue), not
+    # its silhouette, which changes with placement. The HSV orange range below is
+    # only a SEED / fallback + the S,V floor that isolates tape pixels from the
+    # blocker's black surfaces during registration; the operating range is LEARNED
+    # from the tape and stored on the blocker RatModel (orange_lo/hi).
+    blocker_h_lo: int = 5          # OpenCV hue is 0-180 (orange ~ 5-25)
+    blocker_h_hi: int = 25
+    blocker_s_min: int = 90        # saturation floor (also isolates tape vs black)
+    blocker_v_min: int = 90        # value/brightness floor
+    blocker_orange_min_px: int = 40  # min in-range px to call a blob the blocker
+    blocker_footprint_dilate: int = 5  # px the stored footprint grows before subtraction
+
 
 # --- parameter groups persisted with a saved model (see docs/decisions/0027) ---
 # The acquisition-time TrackerParams are stored in the .npz and, on load, the
@@ -261,6 +274,14 @@ def draw_overlay(img_bgr, scale: float, tracker, result) -> None:
                      (int(path[i][0] * scale), int(path[i][1] * scale)),
                      (0, 200, 255), 2)
         if result is not None:
+            # Blocker centroid marker in orange (full-frame px -> preview via scale).
+            if result.blocker_centroid is not None:
+                bx = int(result.blocker_centroid[0] * scale)
+                by = int(result.blocker_centroid[1] * scale)
+                cv2.drawMarker(img_bgr, (bx, by), (0, 140, 255),
+                               markerType=cv2.MARKER_SQUARE, markerSize=14, thickness=2)
+                cv2.putText(img_bgr, "BLOCKER", (bx + 8, by - 8),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 140, 255), 1, cv2.LINE_AA)
             for c in result.candidates:
                 cv2.circle(img_bgr, (int(c[0] * scale), int(c[1] * scale)), 4,
                            (120, 120, 120), 1)
@@ -327,6 +348,16 @@ class RatModel:
         # on load so the tuned operating point comes back with it (see
         # docs/decisions/0027). None for models saved before this was added.
         self.acq_params: Optional["TrackerParams"] = None
+        # Learned ORANGE range for a blocker model (see docs/decisions/0034):
+        # 1-D histograms of the tape pixels' H/S/V accumulated during
+        # registration, from which robust bounds (orange_lo/hi as (H,S,V)) are
+        # derived in recompute(). Empty/None for a rat model.
+        self.tape_h = np.zeros(180, np.float64)
+        self.tape_s = np.zeros(256, np.float64)
+        self.tape_v = np.zeros(256, np.float64)
+        self.tape_n = 0
+        self.orange_lo: Optional[Tuple[int, int, int]] = None
+        self.orange_hi: Optional[Tuple[int, int, int]] = None
 
     # ----------------------------------------------------- accumulation
     def add_sample(self, hist_raw: "np.ndarray", form_x: "np.ndarray") -> None:
@@ -335,7 +366,46 @@ class RatModel:
         self.sum_xx += np.outer(form_x, form_x)
         self.n += 1
 
+    def add_orange_pixels(self, hsv_pixels: "np.ndarray") -> None:
+        """Accumulate an (N, 3) array of HSV tape pixels into the 1-D H/S/V
+        histograms (used to LEARN the orange range in recompute())."""
+        if hsv_pixels is None or len(hsv_pixels) == 0:
+            return
+        p = hsv_pixels.reshape(-1, 3)
+        self.tape_h += np.bincount(p[:, 0].astype(np.intp), minlength=180)[:180]
+        self.tape_s += np.bincount(p[:, 1].astype(np.intp), minlength=256)[:256]
+        self.tape_v += np.bincount(p[:, 2].astype(np.intp), minlength=256)[:256]
+        self.tape_n += int(len(p))
+
+    @staticmethod
+    def _hist_percentile(hist: "np.ndarray", q: float) -> int:
+        """Value at percentile q (0..1) of a 1-D count histogram."""
+        total = float(hist.sum())
+        if total <= 0:
+            return 0
+        cdf = np.cumsum(hist) / total
+        return int(np.searchsorted(cdf, q))
+
+    def _recompute_orange(self) -> None:
+        """Derive robust orange bounds (H,S,V) from the accumulated tape pixels.
+
+        Hue uses a tight central band [p2, p98]; saturation/value use low-
+        percentile floors (the tape is the colourful, bright subset). Leaves
+        orange_lo/hi unchanged when no tape pixels were collected (rat model)."""
+        if self.tape_n <= 0:
+            return
+        h_lo = self._hist_percentile(self.tape_h, 0.02)
+        h_hi = self._hist_percentile(self.tape_h, 0.98)
+        s_lo = self._hist_percentile(self.tape_s, 0.05)
+        v_lo = self._hist_percentile(self.tape_v, 0.05)
+        # Small hue margin for robustness; clamp to valid ranges.
+        h_lo = max(0, h_lo - 3)
+        h_hi = min(179, max(h_hi + 3, h_lo + 1))
+        self.orange_lo = (int(h_lo), int(max(0, s_lo)), int(max(0, v_lo)))
+        self.orange_hi = (int(h_hi), 255, 255)
+
     def recompute(self, params: "TrackerParams") -> None:
+        self._recompute_orange()
         s = float(self.hist_counts.sum())
         self.hist = ((self.hist_counts / s) if s > 0 else self.hist_counts).astype(np.float32)
         if self.n < 1:
@@ -408,6 +478,13 @@ class RatModel:
         if self.acq_params is not None:
             extra["acq_params_json"] = np.array(json.dumps(asdict(self.acq_params)))
             extra["proc_max_w"] = np.int64(self.acq_params.proc_max_w)
+        # Blocker models carry a learned orange range + its tape histograms
+        # (additive keys; rat models simply have tape_n == 0). See ADR-0034.
+        if self.tape_n > 0:
+            extra["tape_h"] = self.tape_h.astype(np.float64)
+            extra["tape_s"] = self.tape_s.astype(np.float64)
+            extra["tape_v"] = self.tape_v.astype(np.float64)
+            extra["tape_n"] = np.int64(self.tape_n)
         np.savez(
             path,
             version=np.int64(MODEL_VERSION),
@@ -438,6 +515,13 @@ class RatModel:
         m.hist_bins = tuple(int(x) for x in d["hist_bins"])
         m.animal = str(d["animal"]) if "animal" in d else ""
         m.date = str(d["date"]) if "date" in d else ""
+        # Restore the learned orange tape histograms (blocker models); recompute()
+        # below re-derives orange_lo/hi from them. Absent for rat/old models.
+        if "tape_n" in d:
+            m.tape_h = np.asarray(d["tape_h"], np.float64)
+            m.tape_s = np.asarray(d["tape_s"], np.float64)
+            m.tape_v = np.asarray(d["tape_v"], np.float64)
+            m.tape_n = int(d["tape_n"])
         # Restore the acquisition-time params (additive/optional key; older models
         # simply lack it and load with acq_params=None). Only known dataclass
         # fields are used, so extra/missing keys don't break forward/back compat.
@@ -475,6 +559,9 @@ class TrackResult:
     has_model: bool = False
     model_samples: int = 0
     model_coverage: bool = False
+    # Parallel-tracked blocker (see docs/decisions/0034).
+    blocker_detected: bool = False
+    blocker_centroid: Optional[Tuple[float, float]] = None  # full px
 
 
 # Shared column set for per-frame track rows (video sidecar + standalone log).
@@ -482,6 +569,7 @@ TRACK_COLUMNS = (
     "track_state", "track_detected", "track_cx", "track_cy",
     "track_smooth_cx", "track_smooth_cy", "track_area",
     "track_elongation", "track_solidity", "track_confidence",
+    "blocker_detected", "blocker_cx", "blocker_cy",
 )
 _TRACK_BLANKS = ("",) * len(TRACK_COLUMNS)
 
@@ -496,9 +584,11 @@ def track_row(result: Optional[TrackResult]) -> tuple:
 
     cx, cy = fmt(result.centroid)
     sx, sy = fmt(result.smoothed)
+    bcx, bcy = fmt(result.blocker_centroid)
     return (result.state, int(result.detected), cx, cy, sx, sy,
             int(result.area), f"{result.elongation:.3f}",
-            f"{result.solidity:.3f}", f"{result.confidence:.3f}")
+            f"{result.solidity:.3f}", f"{result.confidence:.3f}",
+            int(result.blocker_detected), bcx, bcy)
 
 
 class RatTracker:
@@ -537,6 +627,18 @@ class RatTracker:
         self._reg_cancel_pending = False
         self._reg: Optional[RatModel] = None         # active accumulator inside process()
 
+        # Blocker: parallel appearance-tracked obstacle (see docs/decisions/0034).
+        # Registration is on-demand still captures (blocker as the dominant blob);
+        # tracking claims the blocker by its LEARNED orange range and subtracts its
+        # pixel footprint from the mask so a rat touching it keeps its own track.
+        self._blocker_model: Optional[RatModel] = None
+        self._blocker_reg: Optional[RatModel] = None
+        self._blocker_sample_pending = False
+        self._blocker_finalize_pending = False
+        self._blocker_cancel_pending = False
+        self._blocker_footprint: Optional["np.ndarray"] = None   # proc-res mask
+        self._blocker_last: Optional[Tuple[float, float]] = None  # proc-res centroid
+
         # Tracking state machine (touched only inside process()).
         self._kalman = self._make_kalman()
         self._kalman_primed = False
@@ -564,6 +666,8 @@ class RatTracker:
             if new.proc_max_w != self._params.proc_max_w:
                 self._reference = None          # reference is proc-resolution
                 self._roi_cache = None
+                self._blocker_footprint = None  # footprint is proc-resolution too
+                self._blocker_last = None
                 self._reset_pending = True
             self._params = new
 
@@ -580,6 +684,8 @@ class RatTracker:
         with self._lock:
             self._reference = None
             self._reference_full = None
+            self._blocker_footprint = None
+            self._blocker_last = None
 
     def has_reference(self) -> bool:
         with self._lock:
@@ -703,6 +809,77 @@ class RatTracker:
                                   for f in MODEL_REAPPLY_FIELDS})
         return True
 
+    # --------------------------------------------------------- blocker API
+    # A blocker is registered from on-demand still captures (the operator places
+    # the obstacle, withdraws their hand, then captures a sample); the dominant
+    # foreground blob is sampled and its orange tape pixels learned. See ADR-0034.
+    def capture_blocker_sample(self) -> None:
+        """Request that the next processed frame contribute one blocker sample."""
+        with self._lock:
+            self._blocker_sample_pending = True
+
+    def finalize_blocker_model(self) -> None:
+        with self._lock:
+            self._blocker_finalize_pending = True
+
+    def cancel_blocker_registration(self) -> None:
+        with self._lock:
+            self._blocker_cancel_pending = True
+
+    def is_registering_blocker(self) -> bool:
+        with self._lock:
+            return self._blocker_reg is not None
+
+    def blocker_registration_status(self) -> Tuple[bool, int]:
+        """(registering, accepted_samples)."""
+        with self._lock:
+            if self._blocker_reg is not None:
+                return True, self._blocker_reg.n
+            return False, 0
+
+    def has_blocker_model(self) -> bool:
+        with self._lock:
+            return self._blocker_model is not None
+
+    def get_blocker_model(self) -> Optional[RatModel]:
+        with self._lock:
+            return self._blocker_model
+
+    def clear_blocker_model(self) -> None:
+        with self._lock:
+            self._blocker_model = None
+            self._blocker_footprint = None
+            self._blocker_last = None
+
+    def get_blocker_orange_range(self):
+        """Learned (lo, hi) HSV orange bounds of the blocker model, or None."""
+        with self._lock:
+            m = self._blocker_model
+        if m is None or m.orange_lo is None:
+            return None
+        return (m.orange_lo, m.orange_hi)
+
+    def save_blocker_model(self, path: str) -> bool:
+        with self._lock:
+            model = self._blocker_model
+        if model is None:
+            return False
+        model.save(path)
+        return True
+
+    def load_blocker_model(self, path: str) -> bool:
+        """Load a blocker model (its learned orange range + appearance).
+
+        Unlike the rat model, the blocker's acquisition params are provenance-only
+        and NOT re-applied, so loading a blocker never disturbs the rat model's
+        restored operating point. See ADR-0034."""
+        model = RatModel.load(path, self.get_params())
+        with self._lock:
+            self._blocker_model = model
+            self._blocker_footprint = None
+            self._blocker_last = None
+        return True
+
     # ------------------------------------------------------------- ROI I/O
     def save_roi(self, path: str) -> bool:
         with self._lock:
@@ -799,6 +976,13 @@ class RatTracker:
             self._reg_start_pending = False
             self._reg_finalize_pending = False
             self._reg_cancel_pending = False
+            blocker_model = self._blocker_model
+            blk_sample = self._blocker_sample_pending
+            blk_finalize = self._blocker_finalize_pending
+            blk_cancel = self._blocker_cancel_pending
+            self._blocker_sample_pending = False
+            self._blocker_finalize_pending = False
+            self._blocker_cancel_pending = False
             if self._reset_pending:
                 self._reset_pending = False
                 self._kalman = self._make_kalman()
@@ -870,9 +1054,31 @@ class RatTracker:
 
         detections = self._detections(mask, params)
 
-        # HSV is needed only when scoring/registering with appearance.
-        need_hsv = (self._reg is not None) or (model is not None)
+        # HSV is needed when scoring/registering the rat OR the blocker.
+        need_hsv = ((self._reg is not None) or (model is not None) or blk_sample
+                    or (self._blocker_reg is not None) or (blocker_model is not None))
         hsv = cv2.cvtColor(proc, cv2.COLOR_BGR2HSV) if need_hsv else None
+
+        # ------------------------------------ blocker registration (still captures)
+        # Independent of rat tracking: each capture samples the dominant blob's
+        # appearance + learns its tape colour (see docs/decisions/0034).
+        if blk_cancel:
+            self._blocker_reg = None
+        if blk_sample:
+            if self._blocker_reg is None:
+                self._blocker_reg = RatModel()
+                self._blocker_reg.animal = animal
+            self._accumulate_blocker_sample(
+                self._blocker_reg, detections, hsv, pw, ph, params)
+        if blk_finalize and self._blocker_reg is not None:
+            self._blocker_reg.recompute(params)
+            built = self._blocker_reg if self._blocker_reg.n > 0 else None
+            self._blocker_reg = None
+            if built is not None:
+                built.acq_params = replace(params)
+                with self._lock:
+                    self._blocker_model = built
+                blocker_model = built
 
         # ------------------------------------------------ registration branch
         if self._reg is not None:
@@ -912,6 +1118,25 @@ class RatTracker:
                     chosen_contour=(sample.contour if sample is not None else None),
                     reg_accepted=self._reg_accepted_safe(),
                     reg_target=params.reg_min_frames, **model_fields()), params)
+
+        # ------------------------------------------- blocker footprint subtract
+        # Locate the blocker from its orange tape and subtract its pixel footprint
+        # from the rat's view, so a rat touching it (a merged contour) is split at
+        # the blocker's pixels and does not steal the track. The footprint follows
+        # a moved blocker (refreshed whenever enough tape is visible) and falls
+        # back to the last known footprint when the tape is occluded. ADR-0034.
+        if blocker_model is not None:
+            orange_range = ((blocker_model.orange_lo, blocker_model.orange_hi)
+                            if blocker_model.orange_lo is not None else None)
+            fp, bc = self._blocker_footprint_from_orange(
+                hsv, mask, orange_range, params, pw, ph)
+            if fp is not None:
+                self._blocker_footprint = fp
+                self._blocker_last = bc
+            fp = self._blocker_footprint
+            if fp is not None and fp.shape == mask.shape:
+                detections = self._detections(
+                    cv2.bitwise_and(mask, cv2.bitwise_not(fp)), params)
 
         # ------------------------------------------------------ tracking branch
         predicted = None
@@ -989,6 +1214,11 @@ class RatTracker:
                 confidence=self._confidence,
                 candidates=[to_full(d.centroid) for d in rejected],
                 frame_size=(full_w, full_h), mask=mask, **model_fields())
+
+        # Attach blocker readout (last known tape position, in full-frame px).
+        if blocker_model is not None and self._blocker_last is not None:
+            result.blocker_detected = True
+            result.blocker_centroid = to_full(self._blocker_last)
 
         return self._finish(result, params)
 
@@ -1082,6 +1312,69 @@ class RatTracker:
                 return
             model.add_sample(hist_raw, form_x)
             model.recompute(params)
+
+    # ------------------------------------------------------- blocker helpers
+    def _orange_mask(self, hsv, orange_range, params: TrackerParams):
+        """Binary mask of orange (tape) pixels. Uses the model's LEARNED range
+        when given, else the TrackerParams seed. See docs/decisions/0034."""
+        if hsv is None:
+            return None
+        if orange_range is not None and orange_range[0] is not None:
+            lo, hi = orange_range
+        else:
+            lo = (params.blocker_h_lo, params.blocker_s_min, params.blocker_v_min)
+            hi = (params.blocker_h_hi, 255, 255)
+        return cv2.inRange(hsv, np.array(lo, np.uint8), np.array(hi, np.uint8))
+
+    def _accumulate_blocker_sample(self, reg: RatModel, detections: List[Detection],
+                                   hsv, pw: int, ph: int, params: TrackerParams) -> bool:
+        """Add one blocker sample from a still capture: the dominant foreground
+        blob's appearance + its colourful (tape) pixels. See docs/decisions/0034."""
+        blob = self._pick_registration_blob(detections, pw, ph, params)
+        if blob is None or hsv is None:
+            return False
+        hist_raw = self._blob_histogram(hsv, blob.contour, normalize=False)
+        if hist_raw is None:
+            return False
+        reg.add_sample(hist_raw,
+                       compute_form_vector(blob.area, blob.elongation, blob.solidity))
+        # Learn the tape colour: the colourful subset inside the blob (S,V above
+        # the seed floors isolates the orange tape from the blocker's black body).
+        m = np.zeros(hsv.shape[:2], np.uint8)
+        cv2.drawContours(m, [blob.contour], -1, 255, thickness=cv2.FILLED)
+        inside = hsv[m > 0]
+        if inside.size:
+            floor = ((inside[:, 1] >= params.blocker_s_min)
+                     & (inside[:, 2] >= params.blocker_v_min))
+            reg.add_orange_pixels(inside[floor])
+        return True
+
+    def _blocker_footprint_from_orange(self, hsv, mask, orange_range,
+                                       params: TrackerParams, pw: int, ph: int):
+        """Locate the blocker from its ORANGE tape and return (footprint, centroid)
+        in proc-res, or (None, None) if too little tape is visible.
+
+        The tape is only ever on the blocker (never on the black rat), so filling
+        the convex hull of the in-range orange pixels covers the whole blocker
+        (interior included) even when a rat is touching it - which is what lets the
+        footprint split a merged rat+blocker blob without erasing the rat, and
+        follow the blocker as it is moved. See docs/decisions/0034."""
+        om = self._orange_mask(hsv, orange_range, params)
+        if om is None:
+            return None, None
+        om = cv2.bitwise_and(om, mask)  # tape is foreground; ignore stray orange
+        if int(cv2.countNonZero(om)) < params.blocker_orange_min_px:
+            return None, None
+        ys, xs = np.where(om > 0)
+        pts = np.column_stack([xs, ys]).astype(np.int32)
+        hull = cv2.convexHull(pts)
+        fp = np.zeros((ph, pw), np.uint8)
+        cv2.fillConvexPoly(fp, hull, 255)
+        dsz = int(params.blocker_footprint_dilate)
+        if dsz >= 1:
+            k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * dsz + 1, 2 * dsz + 1))
+            fp = cv2.dilate(fp, k)
+        return fp, (float(xs.mean()), float(ys.mean()))
 
     def _associate(self, detections: List[Detection], predicted,
                    model: Optional[RatModel], hsv, params: TrackerParams

@@ -249,6 +249,31 @@ class TrackerControlView:
         clear_model_btn.pack(side=tk.LEFT, padx=2)
         tip(clear_model_btn, "tracker.clear_model")
 
+        # Blocker (orange-taped obstacle): on-demand still captures across
+        # placements; tracked in parallel and subtracted from the rat. ADR-0034.
+        blk = ttk.LabelFrame(controls, text="Blocker (orange tape)")
+        blk.pack(side=tk.TOP, fill=tk.X, **pad)
+        cap_btn = ttk.Button(blk, text="Capture sample", command=self._capture_blocker)
+        cap_btn.pack(side=tk.LEFT, padx=4, pady=4)
+        tip(cap_btn, "tracker.blocker_capture")
+        finish_btn = ttk.Button(blk, text="Finish", command=self._finish_blocker)
+        finish_btn.pack(side=tk.LEFT, padx=2)
+        tip(finish_btn, "tracker.blocker_finish")
+        cancelb_btn = ttk.Button(blk, text="Cancel", command=self._cancel_blocker)
+        cancelb_btn.pack(side=tk.LEFT, padx=2)
+        tip(cancelb_btn, "tracker.blocker_cancel")
+        clearb_btn = ttk.Button(blk, text="Clear", command=self._clear_blocker)
+        clearb_btn.pack(side=tk.LEFT, padx=2)
+        tip(clearb_btn, "tracker.blocker_clear")
+        saveb_btn = ttk.Button(blk, text="Save...", command=self._save_blocker)
+        saveb_btn.pack(side=tk.LEFT, padx=2)
+        tip(saveb_btn, "tracker.blocker_save")
+        loadb_btn = ttk.Button(blk, text="Load...", command=self._load_blocker)
+        loadb_btn.pack(side=tk.LEFT, padx=2)
+        tip(loadb_btn, "tracker.blocker_load")
+        self._blocker_status = tk.StringVar(value="blocker: none")
+        ttk.Label(blk, textvariable=self._blocker_status).pack(side=tk.LEFT, padx=6)
+
         region = ttk.Frame(controls)
         region.pack(side=tk.TOP, fill=tk.X, **pad)
         define_region_btn = ttk.Button(region, text="Define region...",
@@ -530,6 +555,66 @@ class TrackerControlView:
         self._tracker.clear_model()
         self._model_status.set("model: none")
 
+    # ----------------------------------------------------------- blocker I/O
+    def _capture_blocker(self) -> None:
+        if not self._tracker.has_reference():
+            messagebox.showinfo(
+                "Blocker", "Grab a background of the EMPTY rig first, then place "
+                "the blocker, withdraw your hand, and capture.")
+            return
+        if not self.tracking_running():
+            messagebox.showinfo(
+                "Blocker", "Enable tracking (with the camera running) so the "
+                "tracker sees the frame to sample.")
+            return
+        self._tracker.capture_blocker_sample()
+
+    def _finish_blocker(self) -> None:
+        registering, n = self._tracker.blocker_registration_status()
+        if not registering or n <= 0:
+            messagebox.showinfo(
+                "Blocker", "Capture at least one sample (at a few placements) first.")
+            return
+        self._tracker.finalize_blocker_model()
+
+    def _cancel_blocker(self) -> None:
+        self._tracker.cancel_blocker_registration()
+
+    def _clear_blocker(self) -> None:
+        self._tracker.clear_blocker_model()
+        self._blocker_status.set("blocker: none")
+
+    def _save_blocker(self) -> None:
+        if not self._tracker.has_blocker_model():
+            messagebox.showinfo("Save blocker",
+                                "No blocker model yet - capture samples and Finish first.")
+            return
+        os.makedirs(MODEL_DIR, exist_ok=True)
+        animal = self._animal or "animal"
+        default = f"{animal}_blockermodel.npz"
+        path = filedialog.asksaveasfilename(
+            title="Save blocker model", initialdir=MODEL_DIR,
+            initialfile=default, defaultextension=".npz",
+            filetypes=[("Blocker model", "*.npz"), ("All files", "*.*")])
+        if not path:
+            return
+        try:
+            self._tracker.save_blocker_model(path)
+            self._blocker_status.set(f"blocker: saved {os.path.basename(path)}")
+        except Exception as e:
+            messagebox.showerror("Save blocker", f"{type(e).__name__}: {e}")
+
+    def _load_blocker(self) -> None:
+        path = filedialog.askopenfilename(
+            title="Load blocker model", initialdir=MODEL_DIR,
+            filetypes=[("Blocker model", "*.npz"), ("All files", "*.*")])
+        if not path:
+            return
+        try:
+            self._tracker.load_blocker_model(path)
+        except Exception as e:
+            messagebox.showerror("Load blocker", f"{type(e).__name__}: {e}")
+
     # ------------------------------------------------------------- ROI I/O
     def _save_roi(self) -> None:
         if self._tracker.save_roi(ROI_PATH):
@@ -716,6 +801,19 @@ class TrackerControlView:
             self._model_status.set(f"model: set  n={m.n}  {cov}")
         else:
             self._model_status.set("model: none")
+
+        b_reg, b_n = tr.blocker_registration_status()
+        if b_reg:
+            self._blocker_status.set(f"blocker: REGISTERING  samples={b_n}")
+        elif tr.has_blocker_model():
+            rng = tr.get_blocker_orange_range()
+            if rng is not None:
+                lo, hi = rng
+                self._blocker_status.set(f"blocker: set  orange H {lo[0]}-{hi[0]}")
+            else:
+                self._blocker_status.set("blocker: set")
+        else:
+            self._blocker_status.set("blocker: none")
 
         if not self.tracking_running():
             self._readout.set("state: (tracking disabled)")
