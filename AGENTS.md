@@ -65,7 +65,11 @@ code-level conventions live in [`CONTRIBUTING.md`](CONTRIBUTING.md)):
 - **Cap change size to human reviewability.** One purpose per commit/PR. If a
   change is too big for a human to review in one sitting, split it — land the
   pure core plus its tests separately from the GUI/firmware wiring that uses it.
-  Prefer several small, reviewable changes over one large milestone drop.
+  Prefer several small, reviewable changes over one large milestone drop. When the
+  work reaches a coherent, self-contained checkpoint (it builds and its tests
+  pass), pause and **offer to commit** — propose a commit message, and if the work
+  spans multiple purposes, propose how to split it — rather than letting one large
+  diff accumulate. Only commit when the human agrees; never commit automatically.
 
 ## Keep `PROGRAMS.md` up to date
 
