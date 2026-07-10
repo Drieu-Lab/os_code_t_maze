@@ -21,7 +21,8 @@ This project spans **two sibling folders**:
     were made (read the index in [`docs/decisions/README.md`](docs/decisions/README.md)).
   - [`CONTRIBUTING.md`](CONTRIBUTING.md) — how code is written here (the
     "pure core + thin shell" pattern, the run-from-`host/` rule, the new-coder
-    learning path), framed around minimizing comprehension debt.
+    learning path), framed around minimizing comprehension debt. **Read it before
+    writing or changing host code.**
   - [`docs/notes/`](docs/notes/) — the human-owned **capture inbox** (raw bug /
     idea jottings). Read it for context and triage it (see "Triage the capture
     inbox" below); don't treat it as authoritative.

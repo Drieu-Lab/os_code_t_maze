@@ -1,0 +1,19 @@
+---
+description: When touching firmware, honor the serial protocol contract in firmware/PROTOCOL.md
+globs: firmware/**/*.ino,firmware/**/*.h
+alwaysApply: false
+---
+
+# Firmware serial protocol
+
+Firmware and host share one line contract — `<ms>,<TYPE>,<payload...>` — documented
+in [firmware/PROTOCOL.md](../../firmware/PROTOCOL.md). Read it before changing
+serial output, message types, commands, or framing.
+
+- Any change to line format / message types / commands / framing → update
+  [firmware/PROTOCOL.md](../../firmware/PROTOCOL.md) in the same change, and bump
+  `PROTO_VERSION` when the contract itself changes.
+- The host parses these lines through `host/protocol.py` (see docs/decisions/0024)
+  — keep the two in sync so host tools don't break.
+- Pin map and tunables live in `firmware/common/rig_config.h` (the host reads it
+  too, see docs/decisions/0021) — not scattered magic constants.
