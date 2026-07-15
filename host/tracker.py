@@ -187,9 +187,25 @@ class TrackerParams:
     form_tol: float = 1.0          # size+shape Gaussian softness (>1 = more tolerant)
     hist_min: float = 0.0          # hard colour-correlation gate (0 = off)
 
+    # --- clustering (fragmented rat = a cluster of blobs; see docs/decisions/0037) ---
+    # The rat's mask is often several disconnected blobs (pose + lighting). When
+    # cluster_gap > 0, blobs whose bounding boxes are within cluster_gap (proc px)
+    # are merged into ONE candidate before association/registration. cluster_hist_min
+    # is a lenient colour-MEMBERSHIP gate (only active once a model exists): a
+    # fragment may join only if this fraction of its pixels are colours the model has
+    # observed (its histogram support) - NOT a per-fragment distribution match.
+    cluster_gap: float = 0.0       # 0 = off (single-blob behaviour, backward compat)
+    cluster_hist_min: float = 0.0  # 0 = spatial-only merge even with a model present
+
     # --- registration window ---
     reg_min_frames: int = 30          # min accepted samples for a "covered" model
     reg_dominance: float = 0.5        # 2nd blob must be < this * largest to sample
+    # Registration-only: the COLOUR support is learned from the dominant gap-cluster
+    # plus every other in-ROI cluster within reg_proximity_mult * cluster_gap of it
+    # (same bbox-gap metric), so detached-but-nearby parts (tail/head) enter the
+    # support and are not rejected at tracking time. The size/shape Gaussian is still
+    # learned from the dominant gap-cluster only (see docs/decisions/0037).
+    reg_proximity_mult: float = 3.0
     reg_logarea_spread_min: float = 0.10  # std(log area) needed for coverage_ok
     area_gate_k: float = 3.0          # hard size band = exp(muA +/- k*sigmaA)
 
@@ -224,11 +240,15 @@ class TrackerParams:
 #     applies, not whether its tuned value should be persisted/restored).
 MODEL_SHAPING_FIELDS = (
     "proc_max_w", "thresh", "blur", "morph", "min_area", "max_area",
+    # cluster_gap changes the measured blob (fragments get merged), so a model's
+    # stored form/colour stats are only valid under the same gap (see ADR-0037).
+    "cluster_gap",
 )
 # Saved for provenance but NOT re-applied on load: reg_* only matter while
 # building a *new* model, and adapt_* (keep-learning) is a live session choice.
 MODEL_PROVENANCE_ONLY_FIELDS = (
-    "reg_min_frames", "reg_dominance", "reg_logarea_spread_min",
+    "reg_min_frames", "reg_dominance", "reg_proximity_mult",
+    "reg_logarea_spread_min",
     "adapt_enrich", "adapt_min_conf", "adapt_max_samples",
 )
 # Everything else is restored on load (shaping + appearance-scoring +
@@ -308,7 +328,14 @@ def compute_form_vector(area: float, elongation: float, solidity: float):
 
 @dataclass
 class Detection:
-    """One foreground blob (in proc-frame coordinates)."""
+    """One foreground blob (in proc-frame coordinates).
+
+    A *clustered* detection (see _cluster_detections / ADR-0037) aggregates several
+    fragments: `contour` is then the union convex hull, and `members` holds each
+    fragment's own contour so the colour histogram is taken over the true rat pixels
+    (the union of member interiors) rather than the hull's interior gaps. For a plain
+    single blob `members` is None (treated as `[contour]`).
+    """
     centroid: Tuple[float, float]
     area: float
     bbox: Tuple[int, int, int, int]
@@ -316,6 +343,7 @@ class Detection:
     solidity: float = 1.0
     contour: Optional["np.ndarray"] = None
     hist: Optional["np.ndarray"] = None   # lazily filled normalized H-S hist
+    members: Optional[List["np.ndarray"]] = None  # fragment contours (clustered)
 
 
 class RatModel:
@@ -447,6 +475,22 @@ class RatModel:
         v = float(cv2.compareHist(hist_norm.astype(np.float32),
                                   self.hist.astype(np.float32), cv2.HISTCMP_CORREL))
         return max(0.0, min(1.0, v))
+
+    def in_support_fraction(self, hist_counts: "np.ndarray") -> float:
+        """Fraction of a fragment's pixels whose H-S bin the model has *ever*
+        observed (pooled `hist_counts > 0`). This is a lenient colour-MEMBERSHIP
+        test used to decide whether a fragment may join the rat's cluster (see
+        docs/decisions/0037): a differently-coloured intruder scores ~0, while any
+        body part (tail/head/torso) whose colours are a subset of the rat's palette
+        scores high - unlike hist_score, it does not require a distribution match, so
+        it never rejects a legitimate part. Returns 0.0 with no model/support."""
+        if self.hist_counts is None or hist_counts is None:
+            return 0.0
+        total = float(hist_counts.sum())
+        if total <= 0:
+            return 0.0
+        support = self.hist_counts > 0
+        return float(hist_counts[support].sum()) / total
 
     def form_score(self, form_x: "np.ndarray", tol: float = 1.0) -> float:
         if self.inv_cov is None or self.mu is None:
@@ -1059,6 +1103,14 @@ class RatTracker:
                     or (self._blocker_reg is not None) or (blocker_model is not None))
         hsv = cv2.cvtColor(proc, cv2.COLOR_BGR2HSV) if need_hsv else None
 
+        # Reassemble a fragmented rat: merge nearby (colour-consistent) blobs into a
+        # single candidate before registration + association (see docs/decisions/0037).
+        # While ANY registration is active the colour gate is off (no committed
+        # support to test against yet), so a stale model can't bias a fresh build.
+        gate_model = None if (self._reg is not None or blk_sample
+                              or self._blocker_reg is not None) else model
+        detections = self._cluster_detections(detections, gate_model, hsv, params, pw, ph)
+
         # ------------------------------------ blocker registration (still captures)
         # Independent of rat tracking: each capture samples the dominant blob's
         # appearance + learns its tape colour (see docs/decisions/0034).
@@ -1082,13 +1134,19 @@ class RatTracker:
 
         # ------------------------------------------------ registration branch
         if self._reg is not None:
-            sample = self._pick_registration_blob(detections, pw, ph, params)
-            if sample is not None and hsv is not None:
-                hist_raw = self._blob_histogram(hsv, sample.contour, normalize=False)
+            # Decoupled sampling (ADR-0037): FORM from the dominant gap-cluster;
+            # COLOUR support from the broader proximity union, so detached-but-nearby
+            # parts (tail/head) enter the palette and aren't rejected while tracking.
+            picked = self._pick_registration_sample(detections, pw, ph, params)
+            sample = picked[0] if picked is not None else None
+            if picked is not None and hsv is not None:
+                dominant, colour_contours = picked
+                hist_raw = self._blob_histogram(hsv, colour_contours, normalize=False)
                 if hist_raw is not None:
                     self._reg.add_sample(
                         hist_raw,
-                        compute_form_vector(sample.area, sample.elongation, sample.solidity))
+                        compute_form_vector(dominant.area, dominant.elongation,
+                                            dominant.solidity))
             self._state = STATE_REGISTERING
 
             if finalize_now:
@@ -1128,15 +1186,18 @@ class RatTracker:
         if blocker_model is not None:
             orange_range = ((blocker_model.orange_lo, blocker_model.orange_hi)
                             if blocker_model.orange_lo is not None else None)
+            # The footprint lives ONLY while the tape is visible this frame; a
+            # blocker removed from view (or a fully occluded tape) stops masking at
+            # once - no stale footprint - so the rat is tracked normally there
+            # again and the overlay marker clears. See docs/decisions/0035.
             fp, bc = self._blocker_footprint_from_orange(
                 hsv, mask, orange_range, params, pw, ph)
-            if fp is not None:
-                self._blocker_footprint = fp
-                self._blocker_last = bc
-            fp = self._blocker_footprint
+            self._blocker_footprint = fp   # None when no tape this frame
+            self._blocker_last = bc        # None when no tape this frame
             if fp is not None and fp.shape == mask.shape:
-                detections = self._detections(
-                    cv2.bitwise_and(mask, cv2.bitwise_not(fp)), params)
+                detections = self._cluster_detections(
+                    self._detections(cv2.bitwise_and(mask, cv2.bitwise_not(fp)), params),
+                    gate_model, hsv, params, pw, ph)
 
         # ------------------------------------------------------ tracking branch
         predicted = None
@@ -1247,6 +1308,108 @@ class RatTracker:
         return out
 
     @staticmethod
+    def _bbox_gap(a: Tuple[int, int, int, int], b: Tuple[int, int, int, int]) -> float:
+        """Nearest-edge distance between two axis-aligned bounding boxes (0 if they
+        overlap/touch), in the same px units as the bboxes."""
+        ax, ay, aw, ah = a
+        bx, by, bw, bh = b
+        dx = max(0, max(ax, bx) - min(ax + aw, bx + bw))
+        dy = max(0, max(ay, by) - min(ay + ah, by + bh))
+        return math.hypot(dx, dy)
+
+    def _cluster_detections(self, dets: List[Detection], model: Optional[RatModel],
+                            hsv, params: TrackerParams, pw: int, ph: int
+                            ) -> List[Detection]:
+        """Merge a fragmented rat's nearby blobs into one candidate (ADR-0037).
+
+        With `cluster_gap <= 0` or a single detection, returns `dets` unchanged
+        (single-blob behaviour, backward compatible). Otherwise blobs whose bounding
+        boxes are within `cluster_gap` (proc px) merge into one aggregated
+        `Detection`. When a model + `cluster_hist_min` + hsv are all present, a
+        fragment may join only if its colour is one the model has observed
+        (`in_support_fraction >= cluster_hist_min`) - a lenient membership test that
+        keeps a differently-coloured intruder out without rejecting real body parts.
+        """
+        n = len(dets)
+        if params.cluster_gap <= 0 or n <= 1:
+            return dets
+        gap = float(params.cluster_gap)
+
+        gate_on = (model is not None and params.cluster_hist_min > 0.0
+                   and hsv is not None)
+        gate_pass = [True] * n
+        if gate_on:
+            for i, d in enumerate(dets):
+                hc = self._blob_histogram(hsv, self._fill_contours(d), normalize=False)
+                frac = model.in_support_fraction(hc) if hc is not None else 0.0
+                gate_pass[i] = frac >= params.cluster_hist_min
+
+        parent = list(range(n))
+
+        def find(a: int) -> int:
+            while parent[a] != a:
+                parent[a] = parent[parent[a]]
+                a = parent[a]
+            return a
+
+        for i in range(n):
+            if not gate_pass[i]:
+                continue
+            for j in range(i + 1, n):
+                if not gate_pass[j]:
+                    continue
+                if self._bbox_gap(dets[i].bbox, dets[j].bbox) <= gap:
+                    parent[find(j)] = find(i)
+
+        groups: dict = {}
+        for i in range(n):
+            groups.setdefault(find(i), []).append(dets[i])
+
+        out: List[Detection] = []
+        for members in groups.values():
+            if len(members) == 1:
+                out.append(members[0])
+                continue
+            merged = self._merge_cluster(members, pw, ph)
+            if merged is None:
+                out.extend(members)
+            elif params.max_area > 0 and merged.area > params.max_area:
+                out.extend(members)  # merged blob too big -> keep fragments unmerged
+            else:
+                out.append(merged)
+        return out
+
+    def _merge_cluster(self, members: List[Detection], pw: int, ph: int
+                       ) -> Optional[Detection]:
+        """Build one aggregated Detection from >1 fragments: area = sum of member
+        areas; centroid + elongation from the filled union; solidity = union area /
+        convex-hull area; contour = union hull; members kept for the colour hist."""
+        contours = [d.contour for d in members if d.contour is not None]
+        if not contours:
+            return None
+        m = np.zeros((ph, pw), np.uint8)
+        cv2.drawContours(m, contours, -1, 255, thickness=cv2.FILLED)
+        area = float(sum(d.area for d in members))
+        mom = cv2.moments(m, binaryImage=True)
+        if mom["m00"] > 0:
+            cx = mom["m10"] / mom["m00"]
+            cy = mom["m01"] / mom["m00"]
+            elong = self._elongation_from_moments(mom)
+        else:
+            tot = area if area > 0 else 1.0
+            cx = sum(d.centroid[0] * d.area for d in members) / tot
+            cy = sum(d.centroid[1] * d.area for d in members) / tot
+            elong = 1.0
+        pts = np.vstack([c.reshape(-1, 2) for c in contours]).astype(np.int32)
+        hull = cv2.convexHull(pts)
+        union_px = float(cv2.countNonZero(m))
+        hull_area = float(cv2.contourArea(hull))
+        solidity = float(min(1.0, union_px / hull_area)) if hull_area > 0 else 1.0
+        bbox = cv2.boundingRect(pts)
+        return Detection((cx, cy), area, bbox, elongation=elong, solidity=solidity,
+                         contour=hull, members=contours)
+
+    @staticmethod
     def _elongation_from_moments(m) -> float:
         """Major/minor axis ratio from the contour's 2nd central moments
         (rotation invariant; 1.0 = circular, larger = more elongated)."""
@@ -1287,12 +1450,49 @@ class RatTracker:
             return None  # touching border -> probably partially out of view
         return largest
 
-    def _blob_histogram(self, hsv, contour, normalize: bool = True):
-        """H-S histogram of the pixels inside a contour (raw counts or normalized)."""
-        if hsv is None or contour is None:
+    def _pick_registration_sample(self, dets: List[Detection], pw: int, ph: int,
+                                  params: TrackerParams):
+        """Decoupled rat-registration sampler (ADR-0037): returns
+        `(dominant_cluster, colour_contours)` or None.
+
+        The dominant gap-cluster provides the FORM sample (its area/shape match how
+        `cluster_gap` assembles the rat at tracking time). `colour_contours` unions
+        the dominant cluster's members with those of every other in-ROI cluster
+        within `reg_proximity_mult * cluster_gap` of it, so the learned colour
+        support includes detached-but-nearby parts (tail/head) and is not
+        body-biased. Skips the frame on border-touch, or when a *far* comparably-
+        large cluster suggests a second object / intrusion rather than a body part.
+        """
+        if not dets:
+            return None
+        ordered = sorted(dets, key=lambda d: d.area, reverse=True)
+        dominant = ordered[0]
+        x, y, w, h = dominant.bbox
+        if x <= 1 or y <= 1 or (x + w) >= (pw - 1) or (y + h) >= (ph - 1):
+            return None  # partial animal at the frame edge
+        radius = max(0.0, params.reg_proximity_mult) * max(0.0, params.cluster_gap)
+        colour_contours = list(self._fill_contours(dominant))
+        for d in ordered[1:]:
+            if radius > 0 and self._bbox_gap(dominant.bbox, d.bbox) <= radius:
+                colour_contours.extend(self._fill_contours(d))  # nearby body part
+            elif d.area > params.reg_dominance * dominant.area:
+                return None  # far + comparably large -> ambiguous, skip the frame
+        return dominant, colour_contours
+
+    def _blob_histogram(self, hsv, contours, normalize: bool = True):
+        """H-S histogram of the pixels inside a contour (raw counts or normalized).
+
+        `contours` may be a single contour or a list of them (a clustered
+        detection's `members`); all are filled into one mask so the histogram covers
+        the union of the fragments' interiors (see ADR-0037)."""
+        if hsv is None or contours is None:
+            return None
+        cs = list(contours) if isinstance(contours, (list, tuple)) else [contours]
+        cs = [c for c in cs if c is not None]
+        if not cs:
             return None
         m = np.zeros(hsv.shape[:2], np.uint8)
-        cv2.drawContours(m, [contour], -1, 255, thickness=cv2.FILLED)
+        cv2.drawContours(m, cs, -1, 255, thickness=cv2.FILLED)
         hist = cv2.calcHist([hsv], [0, 1], m, [HIST_H_BINS, HIST_S_BINS], HIST_RANGES)
         if normalize:
             s = float(hist.sum())
@@ -1300,10 +1500,18 @@ class RatTracker:
                 hist = hist / s
         return hist
 
+    @staticmethod
+    def _fill_contours(det: Detection) -> List["np.ndarray"]:
+        """The contours to fill for a detection's colour histogram: its member
+        fragments when clustered, else just its own contour."""
+        if det.members:
+            return det.members
+        return [det.contour] if det.contour is not None else []
+
     def _enrich_model(self, model: RatModel, hsv, chosen: Detection,
                       params: TrackerParams) -> None:
         """Accumulate a confident observation into the model's statistics."""
-        hist_raw = self._blob_histogram(hsv, chosen.contour, normalize=False)
+        hist_raw = self._blob_histogram(hsv, self._fill_contours(chosen), normalize=False)
         if hist_raw is None:
             return
         form_x = compute_form_vector(chosen.area, chosen.elongation, chosen.solidity)
@@ -1333,7 +1541,8 @@ class RatTracker:
         blob = self._pick_registration_blob(detections, pw, ph, params)
         if blob is None or hsv is None:
             return False
-        hist_raw = self._blob_histogram(hsv, blob.contour, normalize=False)
+        fill = self._fill_contours(blob)   # member fragments when clustered
+        hist_raw = self._blob_histogram(hsv, fill, normalize=False)
         if hist_raw is None:
             return False
         reg.add_sample(hist_raw,
@@ -1341,7 +1550,7 @@ class RatTracker:
         # Learn the tape colour: the colourful subset inside the blob (S,V above
         # the seed floors isolates the orange tape from the blocker's black body).
         m = np.zeros(hsv.shape[:2], np.uint8)
-        cv2.drawContours(m, [blob.contour], -1, 255, thickness=cv2.FILLED)
+        cv2.drawContours(m, fill, -1, 255, thickness=cv2.FILLED)
         inside = hsv[m > 0]
         if inside.size:
             floor = ((inside[:, 1] >= params.blocker_s_min)
@@ -1443,7 +1652,7 @@ class RatTracker:
             else:
                 s_dist = 0.0
             if d.hist is None:
-                d.hist = self._blob_histogram(hsv, d.contour, normalize=True)
+                d.hist = self._blob_histogram(hsv, self._fill_contours(d), normalize=True)
             s_hist = model.hist_score(d.hist)
             if hist_min > 0.0 and s_hist < hist_min:
                 continue  # hard colour gate: reject clearly wrong-coloured blobs

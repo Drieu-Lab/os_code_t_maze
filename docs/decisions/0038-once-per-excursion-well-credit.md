@@ -1,4 +1,4 @@
-# ADR 0035: Credit the well reward at most once per outbound excursion (per-excursion choice latch)
+# ADR 0038: Credit the well reward at most once per outbound excursion (per-excursion choice latch)
 
 - **Status:** Accepted
 - **Date:** 2026-07-10

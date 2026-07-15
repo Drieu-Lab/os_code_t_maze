@@ -65,6 +65,8 @@ criteria).
 | [FW-0006](#fw-0006-shared-base-class-for-still-frame-editors) | Shared base class for still-frame editors | Tracker tab UI | Deferred |
 | [FW-0008](#fw-0008-phase-3-transition---firmware-correction-trials--spatially-gated-cue) | Phase 3 transition - correction trials + spatially-gated cue | Firmware + protocol | Deferred |
 | [FW-0009](#fw-0009-triggerdispenser-decomposition-of-the-well-reward-rule) | Trigger/Dispenser decomposition of the well-reward rule | Rules engine | Deferred |
+| [FW-0010](#fw-0010-deeplabcut-live-pose-estimation-for-body-part-tracking) | DeepLabCut-Live pose estimation for body-part tracking | Markerless tracker | Proposed |
+| [FW-0011](#fw-0011-richer-colour-model-for-clustered-fragments-multimodalper-part) | Richer colour model for clustered fragments (multimodal/per-part) | Markerless tracker | Proposed |
 
 ## Entries
 
@@ -126,7 +128,9 @@ the per-block balance guarantee from ADR-era behavior.
 - **Area / modules:** `host/tracker.py` (`Detection`/`RatModel` already compute the
   body axis via 2nd-moment elongation; add a heading output + disambiguation),
   `host/blob_tracker_prototype.py` (overlay + CSV), later the GUI overlay/sidecar
-- **Related ADRs:** ADR-0014 (markerless tracking, planned in Phase 4)
+- **Related ADRs:** ADR-0014 (markerless tracking, planned in Phase 4), ADR-0037
+  (blob clustering - provides the aggregated union axis and the learned lighter-tail
+  colour this can use for disambiguation)
 
 **Motivation / context.** The cue-guided task is about reward-directed *choices*
 and the grant studies navigation/reactivation, so the animal's **head direction**
@@ -137,16 +141,21 @@ the shape model. Note the *left/right choice* itself is better read from
 enrichment, not a prerequisite for scoring choices.
 
 **Sketch of approach.** Emit `body_axis_deg` (0-180, from the moment
-eigenvector). Resolve the 180 deg head/tail ambiguity using the **Kalman
-velocity** (assume forward motion: pick the axis end aligned with travel),
-emitting `heading_deg` (0-360) plus a `heading_valid` flag that is false when the
-blob is near-round (eccentricity below a threshold -> axis ill-defined) or the
-speed is below a threshold (direction unreliable). Smooth heading **circularly**
-(EMA on sin/cos, after resolving body-axis flips), separate from the position
-Kalman. Optionally add a morphology tie-break (head end bulkier than the tapering
-tail) once real video is available. Heading is an OUTPUT only - never a model
-feature (it is orientation-dependent by construction). Document that it is in
-image space (post rot180 + undistort), not maze/world coordinates.
+eigenvector; take it from the **clustered union** once ADR-0037 lands, so the axis
+spans the reassembled animal rather than one fragment). Resolve the 180 deg
+head/tail ambiguity using the **Kalman velocity** (assume forward motion: pick the
+axis end aligned with travel), emitting `heading_deg` (0-360) plus a
+`heading_valid` flag that is false when the blob is near-round (eccentricity below
+a threshold -> axis ill-defined) or the speed is below a threshold (direction
+unreliable). A stronger, **motion-independent** disambiguation is now available:
+the end of the axis nearer the **lighter tail-coloured pixels** is the tail, the
+other the head - reusing the tail colour the blocker/rat clustering already learns
+(ADR-0037), which also fixes head/tail during slow turns / grooming when velocity
+is unreliable. Smooth heading **circularly** (EMA on sin/cos, after resolving
+body-axis flips), separate from the position Kalman. Heading is an OUTPUT only -
+never a model feature (it is orientation-dependent by construction). Document that
+it is in image space (post rot180 + undistort), not maze/world coordinates. (This
+is the near-term, cheap, high-value precursor to full pose estimation, FW-0010.)
 
 **Evaluation / acceptance.** Validate against **recorded real-rat video** (the
 trigger for deferring this): check `body_axis_deg` is rotation-stable on straight
@@ -160,8 +169,9 @@ are head/tail disambiguation and validity gating, which is exactly why it waits 
 real video. Low hardware risk (output only).
 
 **Open questions.** Eccentricity/speed thresholds for `heading_valid`? Is
-velocity-only disambiguation enough, or is a morphology tie-break needed for slow
-turns? Should heading later be mapped from image space into maze coordinates?
+velocity-only disambiguation enough, or should the tail-colour cue (ADR-0037) be
+the primary head/tail resolver, with velocity as a fallback? Should heading later
+be mapped from image space into maze coordinates?
 
 **ADR needed?** Fold into ADR-0014 (tracking architecture) when implemented, or a
 small follow-up ADR if the disambiguation strategy is non-obvious.
@@ -374,6 +384,111 @@ arrive and justify the split on their own?
 
 **ADR needed?** Yes if the seam changes rule semantics or config; no if it is a
 pure internal refactor.
+
+### FW-0010: DeepLabCut-Live pose estimation for body-part tracking
+
+- **Status:** Proposed
+- **Date added:** 2026-07-15
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** a new host module (e.g. `host/pose_dlc.py`) beside
+  `host/tracker.py`; the position/rules feed (`rules_engine` consumes a
+  `centroid_px` + `scale`, so a chosen keypoint can slot in); recording sidecar
+  columns; the GUI overlay; new dependencies (`deeplabcut-live` **or** SLEAP, plus
+  a trained model and likely a GPU)
+- **Related ADRs:** [ADR-0014](decisions/0014-markerless-position-tracking.md)
+  (single-blob markerless tracker this would sit beside/above),
+  ADR-0037 (blob clustering - the classical predecessor + its tail-colour output),
+  [ADR-0015](decisions/0015-undistort-at-source.md) (undistort applies before
+  inference), FW-0002 (heading - subsumed once real pose keypoints exist)
+
+**Motivation / context.** The stated end goal is **DeepLabCut-Live** running on the
+rig: real-time per-body-part keypoints (nose, ears, body centre, tailbase, tail)
+as behavioural and neural covariates - head direction, nose-at-port precision, and
+pose during choices - supporting the grant's navigation / reactivation aims. The
+classical pipeline (ADR-0014 + the ADR-0037 clustering) gives a robust centroid and
+an aggregate body axis, but its blobs are background-subtraction / threshold
+artifacts, **not stable anatomy**, so per-part *identity* from blobs is fragile
+(blob count fluctuates; a part splits/merges frame to frame; a black rat is
+low-texture so appearance barely separates parts). A learned pose estimator
+sidesteps all of that by predicting keypoints directly.
+
+**Sketch of approach.** Run DLC-Live (or SLEAP) inference per frame after
+undistort-at-source (ADR-0015); output keypoints + per-keypoint confidence. Feed a
+chosen keypoint (e.g. nose or body centre) into the existing position/ROI + rules
+pipeline in place of the blob centroid, keeping the classical tracker as a fallback
+for low-confidence frames / when no GPU is present. Add per-keypoint sidecar columns
+and overlay. Budget inference latency against the closed-loop reward-timing
+requirement (the reason cue/reward timing stays in firmware - see ADR-0001/0023).
+
+**Evaluation / acceptance.** Keypoint accuracy vs hand-labelled frames; end-to-end
+per-frame latency within the closed-loop budget; head-direction sanity on straight
+runs; graceful, automatic fallback to the classical tracker when confidence is low
+or the GPU is unavailable; identity stability across occlusions/crossings.
+
+**Effort / risk.** High. A heavy ML dependency + trained model + GPU, and a
+departure from the repo's classical-CV, low-comprehension-debt ethos - a
+significant architectural decision, not just a feature. Main risks: real-time
+latency for closed-loop actuation, model generalization across lighting/animals,
+labeling/training workflow, and long-term maintenance.
+
+**Open questions.** DLC-Live vs SLEAP? Which keypoint drives the rules (nose vs
+body centre)? Is there a GPU on the rig PC, and what is the latency budget? Does
+pose *replace* or *augment* the classical tracker (fallback)? A hand-built
+constellation / pictorial-structures part model on the existing blobs was
+considered and rejected as too fragile given unstable blob-to-part mapping - a
+learned estimator is preferred; is that still the call?
+
+**ADR needed?** Yes - a major architecture + external-dependency decision (likely
+several: dependency/runtime, which keypoint feeds rules, fallback strategy).
+
+### FW-0011: Richer colour model for clustered fragments (multimodal/per-part)
+
+- **Status:** Proposed
+- **Date added:** 2026-07-15
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** `host/tracker.py` (`RatModel` colour representation +
+  `hist_score` / `in_support_fraction`; the clustering merge gate in
+  `_cluster_detections`)
+- **Related ADRs:** [ADR-0037](decisions/0037-cluster-fragmented-rat-blobs.md)
+  (blob clustering - the pooled-histogram + membership design this would enrich),
+  [ADR-0014](decisions/0014-markerless-position-tracking.md) (the appearance model),
+  FW-0010 (learned pose estimation - the intended longer-term answer)
+
+**Motivation / context.** ADR-0037 models the rat's colour as a **single pooled**
+H-S histogram and gates fragment merges with a lenient "fraction of pixels in an
+observed bin" membership test (`in_support_fraction`). A rat's parts are visibly
+multi-modal in colour (black/white torso vs. a lighter tail vs. a head), so one
+pooled histogram blurs those modes together: the membership gate can be too
+permissive (any bin the rat ever showed passes, so a same-coloured intruder
+fragment could sneak in) or, if tightened, too strict. A representation that knows
+the rat has *several* colour modes could gate merges and score candidates more
+precisely - and is a stepping stone toward per-part identity.
+
+**Sketch of approach.** Replace/augment the pooled histogram with a **multimodal**
+colour model - e.g. a small **GMM in H-S space**, or a handful of per-mode
+histograms clustered from registration samples - and gate a fragment by its best
+mode rather than the union support. Optionally attach a coarse **spatial prior**
+per mode (tail tends to be peripheral/elongated) once ADR-0037's `members` are
+being labelled. Keep it behind the existing knobs (fall back to the pooled
+histogram when the model is thin). Note this is explicitly the "richer colour
+model" alternative that ADR-0037 considered and deferred.
+
+**Evaluation / acceptance.** On recorded real-rat clips: the merge gate keeps the
+tail while rejecting a same-ish-coloured intruder fragment better than the pooled
+membership test; no regression in single-blob tracking; registration stays
+bootstrappable (no prior needed). Compare false-merge / false-split rates against
+the ADR-0037 baseline on hand-labelled frames.
+
+**Effort / risk.** Medium. Risk of over-engineering the classical model when the
+stated end goal is a learned pose estimator (FW-0010); pursue only if the pooled
+histogram proves insufficient in practice and pose estimation is not yet available.
+
+**Open questions.** GMM vs. discrete per-mode histograms? How many modes, and set
+by whom (auto vs. a knob)? Is this worth doing at all given FW-0010, or only as a
+low-cost interim? Does it need the per-part labels the user can provide?
+
+**ADR needed?** Yes - it changes the appearance model's representation and the
+merge/scoring semantics.
 
 ## Completed
 

@@ -1,10 +1,10 @@
 # ADR 0034: Track orange-taped blockers in parallel and subtract their footprint
 
-- **Status:** Accepted
+- **Status:** Accepted (footprint-persistence sub-decision superseded by ADR-0035)
 - **Date:** 2026-07-10
 - **Author / Agent:** Agent (Cursor) on behalf of Celine
 - **Affects:** `host/tracker.py` (RatModel, TrackerParams, RatTracker.process + blocker API), `host/tracker_view.py` (Blocker controls), `host/test_tracker_blocker.py`, `docs/how-tracking-and-rules-work.md`
-- **Supersedes / Superseded by:** —
+- **Supersedes / Superseded by:** Footprint-persistence choice superseded by ADR-0035 (footprint is now per-frame)
 
 ## Context
 

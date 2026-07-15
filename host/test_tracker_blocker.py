@@ -139,6 +139,29 @@ class TestBlockerTracking(unittest.TestCase):
         self.assertGreater(cx, blocker_center_x + 10)
         self.assertAlmostEqual(cx, rat_center_x, delta=25)
 
+    def test_footprint_clears_when_blocker_leaves(self):
+        """Once the blocker (and its tape) leaves view, the footprint stops
+        masking, so a rat at the former blocker spot is tracked again."""
+        trk = self._tracker()
+        self._register_blocker(trk)
+        bx, by, bs = 40, 40, 70
+        # Blocker present -> footprint active, nothing tracked as the rat.
+        f0 = _bg()
+        _draw_blocker(f0, bx, by, bs)
+        res0 = trk.process(f0)
+        self.assertTrue(res0.blocker_detected)
+        self.assertFalse(res0.detected)
+        # Blocker gone; a rat now sits at the blocker's former location.
+        f1 = _bg()
+        rat_x, rat_y = bx + 15, by + 15
+        _draw_rat(f1, rat_x, rat_y, 40)
+        res1 = trk.process(f1)
+        self.assertFalse(res1.blocker_detected, "stale footprint should be cleared")
+        self.assertTrue(res1.detected, "rat at the former blocker spot must track")
+        cx, cy = res1.centroid
+        self.assertAlmostEqual(cx, rat_x + 20, delta=15)
+        self.assertAlmostEqual(cy, rat_y + 20, delta=15)
+
     def test_no_blocker_model_unchanged(self):
         """Without a blocker model the largest blob is tracked as the rat."""
         trk = self._tracker()

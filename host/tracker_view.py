@@ -94,6 +94,7 @@ _SLIDERS = (
     ("Min area", "min_area", 0, 8000, False, 1.0),
     ("Blur", "blur", 1, 31, False, 1.0),
     ("Gate (px)", "gate_radius", 0, 500, False, 1.0),
+    ("Cluster gap (px)", "cluster_gap", 0, 100, False, 1.0),  # 0 = off (ADR-0037)
     ("Accept", "accept_score", 0, 100, False, 0.01),   # slider 0..100 -> 0..1
     ("Coast (frames)", "coast_max_frames", 1, 200, False, 1.0),
 )
@@ -105,6 +106,7 @@ _TOL_SLIDERS = (
     ("Appearance bias", "appearance_bias", 0.0, 1.0, True, 1.0),  # appearance vs distance
     ("Shape tol", "form_tol", 0.2, 5.0, True, 1.0),            # Gaussian softness
     ("Color gate", "hist_min", 0.0, 1.0, True, 1.0),           # min hue/sat correlation (0=off)
+    ("Cluster color gate", "cluster_hist_min", 0.0, 1.0, True, 1.0),  # merge membership (ADR-0037)
 )
 
 

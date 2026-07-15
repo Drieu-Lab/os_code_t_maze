@@ -16,8 +16,6 @@ date column is needed. Don't rename a handle after you've referenced it elsewher
 - #260710_LickTunerFreeze Lick tuner trace freezes for ~1 s when the Rules tab arms [host/lick_tuner.py?]
 -->
 
-- #260710_SessionTimer The behavioral stats needs a session timer (start time, stop time, duration)
-
 ## Fixed (pending cleanup)
 
 <!-- Move here once fixed; note the commit/ADR, then delete on the next pass. -->

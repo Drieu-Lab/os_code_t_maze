@@ -130,6 +130,13 @@ blob - and because a blocker is dark like the rat, the track can jump to it or
    rat is not erased), and it follows the blocker if you move it. The blocker is
    drawn as an orange square marked `BLOCKER` on the preview.
 
+The erasing only happens **while the tape is actually visible that frame**
+(ADR-0035). Take the blocker out of view (or fully hide its tape) and the patch
+and the `BLOCKER` marker clear immediately, so that spot tracks normally again -
+there is no lingering "ghost" blocker. The one cost: if the rat *completely*
+covers the tape while the blocker is still there, the blocker briefly reappears
+and can tug the track until the tape shows again.
+
 Caveat: while your hand is in the frame moving the blocker, tracking can be
 briefly noisy - fine between trials, so reposition then.
 
@@ -474,6 +481,7 @@ still no code, but naming the techniques so you know what you're tuning.
 | Noise cleanup | **Gaussian blur** before thresholding, then **morphological open + close** | Smooth speckle and fill small holes so the rat is one solid blob. |
 | Region limiting | **Point-in-polygon ROI mask** | Ignore everything outside the maze outline you drew. |
 | Blob extraction | **Contour finding** + area filtering; shape from **image moments** (elongation) and **convex-hull solidity** | Turn white clumps into candidates with a size and a shape. |
+| Fragment clustering (optional) | **Spatial merge** of nearby blobs (bounding-box gap ≤ `cluster_gap`) into one candidate, gated by a lenient **colour-membership** test (ADR-0037) | Reassemble a rat that broke into pieces (torso + head + long tail) into one whole-animal candidate, without letting a wrong-coloured speck (e.g. a blocker) join. |
 | Appearance model | **Pooled Hue-Saturation histogram** for colour + a **3-D Gaussian** over `[log area, log elongation, solidity]` for size/shape | A statistical fingerprint of *this* rat that can be extended without storing raw frames. |
 | Choosing the right blob | **Weighted score** = distance-to-prediction + colour-histogram correlation + shape **Mahalanobis** term; a hard size band gates first | Pick the candidate that is close, the right colour, and the right size/shape; reject intruders. |
 | Smoothing / gap-filling | **Constant-velocity Kalman filter** | Glide instead of jitter, and coast briefly in a straight line when the rat is lost. |
@@ -521,10 +529,11 @@ defaults.
 
 | Label | Parameter | Range | What it does | Turn it UP if... |
 | --- | --- | --- | --- | --- |
-| Threshold | `thresh` | 0-255 (**30**) | How different from the empty maze a pixel must be to count as "foreground." | The background is noisy / rat blob is fragmented → lower it; false specks appear → raise it. |
+| Threshold | `thresh` | 0-255 (**30**) | How different from the empty maze a pixel must be to count as "foreground." | The background is noisy / rat blob is fragmented → lower it (or use **Cluster gap** to reassemble the pieces); false specks appear → raise it. |
 | Min area | `min_area` | 0-8000 px² (**150**) | Smallest blob accepted as the rat. | Small non-rat specks get tracked → raise it; the rat blob is being rejected → lower it. |
 | Blur | `blur` | 1-31, odd (**5**) | Smoothing kernel applied before thresholding. | The mask is grainy → raise it (loses fine detail). |
 | Gate (px) | `gate_radius` | 0-500 px (**120**) | Biggest frame-to-frame jump allowed before a candidate is rejected. | The rat moves fast and the track drops → raise it; a far intruder steals the track → lower it. |
+| Cluster gap (px) | `cluster_gap` | 0-100 px (**0 = off**) | Merge separate blobs whose bounding boxes are within this distance into one rat candidate (reassembles a fragmented rat). | The rat keeps splitting into pieces tracked separately → raise it; distinct nearby objects get glued onto the rat → lower it. |
 | Accept | `accept_score` | 0-1 (**0.50**) | Minimum match score (with a model) to accept a blob as the rat. | Intruders get accepted → raise it; the real rat is rejected too often → lower it. |
 | Coast (frames) | `coast_max_frames` | 1-200 (**30**) | How long to keep guessing position after losing the blob before declaring `LOST`. | The rat briefly disappears under a cable → raise it; a stale lock lingers → lower it. |
 
@@ -539,6 +548,7 @@ live, so you can tune them while watching the track.
 | Appearance bias | `appearance_bias` | 0-1 (**0.55**) | Balance between "looks like the rat" (appearance) and "is where the rat should be" (distance). Higher = trust appearance more. |
 | Shape tol | `form_tol` | 0.2-5 (**1.0**) | Softness of the size/shape match. Higher = more tolerant of posture changes. |
 | Color gate | `hist_min` | 0-1 (**0.0 = off**) | Hard minimum colour-correlation. Above 0, blobs whose colour is clearly wrong are rejected outright. |
+| Cluster color gate | `cluster_hist_min` | 0-1 (**0.0 = off**) | When **Cluster gap** merges fragments, the fraction of a blob's pixels that must be colours the model has already seen for it to join the cluster. Above 0, wrong-coloured specks are kept out of the rat. |
 
 ### Tracking tab - other controls
 

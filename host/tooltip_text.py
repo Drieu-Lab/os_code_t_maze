@@ -278,6 +278,12 @@ TIPS: Dict[str, Entry] = {
                        "or measuring the scale.",
     "behavior.status": "Readout state: running, stopped, or waiting for tracking "
                        "/ zones.",
+    "behavior.session": "Session clock: start time, stop time, and duration, driven "
+                        "by this panel's Start/Stop button. Duration is wall-clock "
+                        "span from the first Start (it INCLUDES paused stretches), "
+                        "so it differs from the active-time that denominates the "
+                        "per-minute rates. Resets with the Reset button and on a "
+                        "training-mode switch.",
     "behavior.compliance": "Stem-compliance: fraction of choices that went out via "
                            "the central stem (a valid Phase 2a trial), cumulative "
                            "and over the last N. One choice is counted per outbound "
@@ -315,6 +321,9 @@ TIPS: Dict[str, Entry] = {
     "tracker.blur": "Blur kernel applied before thresholding (noise smoothing).",
     "tracker.gate_radius": "Max jump (px) allowed between frames before the track "
                            "is rejected.",
+    "tracker.cluster_gap": "Merge separate blobs (px between their bounding boxes) "
+                           "into one rat candidate - reassembles a fragmented rat. "
+                           "0 = off (one blob = one candidate).",
     "tracker.accept_score": "Minimum match score to accept a detection as the "
                             "rat.",
     "tracker.coast_max_frames": "How many frames to coast on the prediction after "
@@ -326,6 +335,9 @@ TIPS: Dict[str, Entry] = {
     "tracker.form_tol": "Shape-match softness (Gaussian tolerance).",
     "tracker.hist_min": "Minimum hue/saturation correlation to pass the colour "
                         "gate (0 = off).",
+    "tracker.cluster_hist_min": "When merging fragments, the fraction of a blob's "
+                                "pixels that must be colours the model has seen for "
+                                "it to join the cluster (0 = spatial-only merge).",
 }
 
 

@@ -32,7 +32,9 @@ _CUSTOM = replace(
     gate_radius=99.0, use_kalman=False,
     w_dist=0.3, w_hist=0.4, w_form=0.25, accept_score=0.62, confirm_frames=5,
     coast_max_frames=44, appearance_bias=0.7, form_tol=2.0, hist_min=0.1,
-    reg_min_frames=50, reg_dominance=0.4, reg_logarea_spread_min=0.2,
+    cluster_gap=25.0, cluster_hist_min=0.35,
+    reg_min_frames=50, reg_dominance=0.4, reg_proximity_mult=4.5,
+    reg_logarea_spread_min=0.2,
     area_gate_k=4.2, adapt_enrich=True, adapt_min_conf=0.9, adapt_max_samples=100,
 )
 

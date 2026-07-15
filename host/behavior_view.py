@@ -35,6 +35,7 @@ from behavior_stats import BehaviorStats
 from maze_state import (
     MazeStateEstimator, MazeStateParams, ZoneMap, ZONES_PATH, load_zone_map,
 )
+from session_timer import SessionTimer
 from task_events import TaskEvents
 
 try:
@@ -68,10 +69,12 @@ class BehaviorView:
         self._estimator = MazeStateEstimator(ZoneMap(), MazeStateParams())
         self._events = TaskEvents()
         self._stats = BehaviorStats()
+        self._timer = SessionTimer()
         self._scale = Scale() if Scale is not None else None
 
         self._vars = {k: tk.StringVar(value="-") for k in (
-            "status", "compliance", "lr", "nonstem", "run", "throughput", "distance")}
+            "status", "session", "compliance", "lr", "nonstem", "run",
+            "throughput", "distance")}
         self._window = tk.IntVar(value=self._stats.snapshot().window_n)
 
         self._build_ui()
@@ -91,6 +94,7 @@ class BehaviorView:
         if protocol.mode_name(line) is not None:
             self._stats.reset()
             self._stats.mark_gap()
+            self._timer.reset()
             self._refresh()
 
     def close(self) -> None:
@@ -122,6 +126,11 @@ class BehaviorView:
         status_lbl.pack(side=tk.TOP, anchor="w", **pad)
         tip(status_lbl, "behavior.status")
 
+        session_lbl = ttk.Label(self.frame, textvariable=self._vars["session"],
+                                anchor="w", font=("TkDefaultFont", 10))
+        session_lbl.pack(side=tk.TOP, anchor="w", **pad)
+        tip(session_lbl, "behavior.session")
+
         # Measures - one bold value line each. The var key doubles as the tooltip
         # key suffix, except the same-side run (var "run" -> tip "sameside").
         _TIP_KEY = {"run": "sameside"}
@@ -134,14 +143,19 @@ class BehaviorView:
     # ------------------------------------------------------------- controls
     def _toggle_run(self) -> None:
         self._running = not self._running
+        now = time.time()
         if self._running:
             self._stats.mark_gap()   # fresh continuity when (re)starting
+            self._timer.start(now)   # wall-clock session span (see docs/decisions/0036)
+        else:
+            self._timer.stop(now)
         self._run_btn.configure(text="Stop" if self._running else "Start")
         self._refresh()
 
     def _reset(self) -> None:
         self._stats.reset()
         self._stats.mark_gap()
+        self._timer.reset()
         self._refresh()
 
     def _sync_window(self) -> None:
@@ -220,6 +234,7 @@ class BehaviorView:
         snap = self._stats.snapshot()
         n = snap.window_n
         self._vars["status"].set(self._status_text())
+        self._vars["session"].set(self._session_text(self._timer.snapshot(time.time())))
         self._vars["compliance"].set(
             f"Stem-gated: {_pct(snap.compliance_cum)}  "
             f"(last {n}: {_pct(snap.compliance_win)})   "
@@ -243,6 +258,16 @@ class BehaviorView:
         return (f"Distance: {snap.distance_cm / 100.0:.1f} m   "
                 f"{_rate(snap.distance_m_per_min)} m/min")
 
+    @staticmethod
+    def _session_text(snap) -> str:
+        if snap.start_ts is None:
+            return "Session: not started"
+        start = _clock(snap.start_ts)
+        dur = _duration(snap.elapsed_s)
+        if snap.running:
+            return f"Session: started {start}   -   {dur}"
+        return f"Session: {start} - {_clock(snap.stop_ts)}   ({dur})"
+
 
 def _pct(x: Optional[float]) -> str:
     return "--" if x is None else f"{x * 100:.0f}%"
@@ -258,3 +283,16 @@ def _rate(x: Optional[float]) -> str:
 
 def _side(side: Optional[str]) -> str:
     return {"left": "L", "right": "R"}.get(side, "")
+
+
+def _clock(ts: Optional[float]) -> str:
+    return "--" if ts is None else time.strftime("%H:%M:%S", time.localtime(ts))
+
+
+def _duration(seconds: Optional[float]) -> str:
+    if seconds is None:
+        return "--"
+    total = int(max(0.0, seconds))
+    h, rem = divmod(total, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}:{m:02d}:{s:02d}"

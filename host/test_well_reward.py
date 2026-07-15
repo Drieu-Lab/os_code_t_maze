@@ -354,7 +354,7 @@ class TestPhase2bChoiceBias(unittest.TestCase):
 class TestExcursionDoubleReward(unittest.TestCase):
     """A single outbound excursion earns at most once, even when the animal
     turns back and enters the OTHER choice arm on the way home (the figure-8
-    double-reward bug #260710_DoubleReward). See docs/decisions/0035."""
+    double-reward bug #260710_DoubleReward). See docs/decisions/0038."""
 
     def test_opposite_arm_on_way_back_does_not_reprime(self):
         h = Harness({"credential": "choice_via_stem", "prime_on": "credential"})
