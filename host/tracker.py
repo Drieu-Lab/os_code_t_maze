@@ -226,6 +226,11 @@ class TrackerParams:
     blocker_v_min: int = 90        # value/brightness floor
     blocker_orange_min_px: int = 40  # min in-range px to call a blob the blocker
     blocker_footprint_dilate: int = 5  # px the stored footprint grows before subtraction
+    # A candidate whose filled area is at least this fraction inside the blocker
+    # footprint is dropped (it IS the blocker) before clustering, rather than
+    # pixel-subtracting + re-detecting the whole frame. Overlap (not centroid)
+    # so a separate rat blob grazing the dilated halo is kept. See ADR-0039.
+    blocker_overlap_drop: float = 0.6
 
 
 # --- parameter groups persisted with a saved model (see docs/decisions/0027) ---
@@ -1103,12 +1108,39 @@ class RatTracker:
                     or (self._blocker_reg is not None) or (blocker_model is not None))
         hsv = cv2.cvtColor(proc, cv2.COLOR_BGR2HSV) if need_hsv else None
 
+        registering = (self._reg is not None or blk_sample
+                       or self._blocker_reg is not None)
+
+        # Blocker (see docs/decisions/0034, 0035, 0039): locate its orange-tape
+        # footprint every frame (for the overlay readout and to move with it), and
+        # - during tracking - DROP its own blob(s) from the candidate list before
+        # clustering, so the blocker is neither tracked as the rat nor merged into
+        # a rat cluster. This whole-detection removal (a containment test) replaces
+        # the former per-frame pixel-subtract + re-detect + re-cluster: it keeps
+        # process() to ONE detect + ONE cluster pass whenever the tape is merely
+        # visible, which is the dominant per-frame load in #260720. The drop is
+        # skipped while any registration is active (so a re-registered blocker /
+        # rat sample still sees every blob). Trade-off (ADR-0039): a rat FUSED with
+        # the blocker into a single contour is not split - that blob is dropped
+        # rather than stealing the track - so the rat briefly coasts during direct
+        # contact.
+        if blocker_model is not None:
+            orange_range = ((blocker_model.orange_lo, blocker_model.orange_hi)
+                            if blocker_model.orange_lo is not None else None)
+            fp, bc = self._blocker_footprint_from_orange(
+                hsv, mask, orange_range, params, pw, ph)
+            self._blocker_footprint = fp   # None when no tape this frame
+            self._blocker_last = bc        # None when no tape this frame
+            if fp is not None and fp.shape == mask.shape and not registering:
+                detections = [d for d in detections
+                              if self._footprint_overlap(d, fp)
+                              < params.blocker_overlap_drop]
+
         # Reassemble a fragmented rat: merge nearby (colour-consistent) blobs into a
         # single candidate before registration + association (see docs/decisions/0037).
         # While ANY registration is active the colour gate is off (no committed
         # support to test against yet), so a stale model can't bias a fresh build.
-        gate_model = None if (self._reg is not None or blk_sample
-                              or self._blocker_reg is not None) else model
+        gate_model = None if registering else model
         detections = self._cluster_detections(detections, gate_model, hsv, params, pw, ph)
 
         # ------------------------------------ blocker registration (still captures)
@@ -1176,28 +1208,6 @@ class RatTracker:
                     chosen_contour=(sample.contour if sample is not None else None),
                     reg_accepted=self._reg_accepted_safe(),
                     reg_target=params.reg_min_frames, **model_fields()), params)
-
-        # ------------------------------------------- blocker footprint subtract
-        # Locate the blocker from its orange tape and subtract its pixel footprint
-        # from the rat's view, so a rat touching it (a merged contour) is split at
-        # the blocker's pixels and does not steal the track. The footprint follows
-        # a moved blocker (refreshed whenever enough tape is visible) and falls
-        # back to the last known footprint when the tape is occluded. ADR-0034.
-        if blocker_model is not None:
-            orange_range = ((blocker_model.orange_lo, blocker_model.orange_hi)
-                            if blocker_model.orange_lo is not None else None)
-            # The footprint lives ONLY while the tape is visible this frame; a
-            # blocker removed from view (or a fully occluded tape) stops masking at
-            # once - no stale footprint - so the rat is tracked normally there
-            # again and the overlay marker clears. See docs/decisions/0035.
-            fp, bc = self._blocker_footprint_from_orange(
-                hsv, mask, orange_range, params, pw, ph)
-            self._blocker_footprint = fp   # None when no tape this frame
-            self._blocker_last = bc        # None when no tape this frame
-            if fp is not None and fp.shape == mask.shape:
-                detections = self._cluster_detections(
-                    self._detections(cv2.bitwise_and(mask, cv2.bitwise_not(fp)), params),
-                    gate_model, hsv, params, pw, ph)
 
         # ------------------------------------------------------ tracking branch
         predicted = None
@@ -1507,6 +1517,22 @@ class RatTracker:
         if det.members:
             return det.members
         return [det.contour] if det.contour is not None else []
+
+    def _footprint_overlap(self, det: Detection, fp) -> float:
+        """Fraction (0..1) of a detection's filled area that lies inside the
+        blocker footprint mask `fp`. Used to drop the blocker's own blob(s)
+        before clustering (see ADR-0039). Overlap - not a centroid test - so a
+        separate rat blob merely grazing the dilated footprint halo is kept."""
+        contours = self._fill_contours(det)
+        if not contours:
+            return 0.0
+        m = np.zeros(fp.shape, np.uint8)
+        cv2.drawContours(m, contours, -1, 255, thickness=cv2.FILLED)
+        total = int(cv2.countNonZero(m))
+        if total <= 0:
+            return 0.0
+        inter = int(cv2.countNonZero(cv2.bitwise_and(m, fp)))
+        return inter / float(total)
 
     def _enrich_model(self, model: RatModel, hsv, chosen: Detection,
                       params: TrackerParams) -> None:

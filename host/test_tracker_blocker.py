@@ -100,7 +100,7 @@ class TestBlockerTracking(unittest.TestCase):
         self.assertEqual(loaded.orange_hi, model.orange_hi)
 
     def test_blocker_excluded_from_rat(self):
-        """A lone blocker is claimed + subtracted; nothing is tracked as the rat."""
+        """A lone blocker is claimed + dropped; nothing is tracked as the rat."""
         trk = self._tracker()
         self._register_blocker(trk)
         f = _bg()
@@ -114,9 +114,10 @@ class TestBlockerTracking(unittest.TestCase):
         # The blocker is not mistaken for the rat.
         self.assertFalse(res.detected)
 
-    def test_rat_survives_merge_with_blocker(self):
-        """Rat touching the blocker (merged contour): the tracked point stays on
-        the rat, because the orange-derived footprint removes only the blocker."""
+    def test_rat_tracked_near_but_separate_blocker(self):
+        """Rat close to (but not fused with) the blocker: the blocker's own blob
+        is dropped, the rat's separate blob is kept, and the tracked point is on
+        the rat - not pulled onto the blocker (ADR-0039 containment-drop)."""
         trk = self._tracker()
         self._register_blocker(trk)
         bx, by, bs = 60, 60, 70
@@ -124,20 +125,43 @@ class TestBlockerTracking(unittest.TestCase):
         f0 = _bg()
         _draw_blocker(f0, bx, by, bs)
         trk.process(f0)
-        # Now a rat pressed against the blocker's right edge (contours merge).
+        # Rat with a clear gap from the blocker's right edge (contours stay
+        # separate; the rat blob does not overlap the dilated footprint halo).
         f1 = _bg()
         _draw_blocker(f1, bx, by, bs)
-        rat_x = bx + bs - 4          # overlap so morphology merges them
+        rat_x = bx + bs + 15         # 15 px gap -> distinct contour
         rat_y = by + 15
         _draw_rat(f1, rat_x, rat_y, 40)
         res = trk.process(f1)
-        self.assertTrue(res.detected, "rat should still be tracked next to blocker")
+        self.assertTrue(res.detected, "separate rat next to blocker must track")
+        self.assertTrue(res.blocker_detected)
         cx, _cy = res.centroid
         rat_center_x = rat_x + 20
         blocker_center_x = bx + bs // 2
-        # The tracked x is on the rat's side, not pulled onto the blocker.
         self.assertGreater(cx, blocker_center_x + 10)
         self.assertAlmostEqual(cx, rat_center_x, delta=25)
+
+    def test_fused_rat_blocker_not_stolen(self):
+        """Documented ADR-0039 trade-off: when the rat is FUSED with the blocker
+        into one contour, whole-detection dropping cannot split it - the fused
+        blob is dropped (its area is mostly inside the footprint), so the tracker
+        does NOT lock onto the blocker. The rat coasts through direct contact
+        instead of the track being stolen onto the blocker."""
+        trk = self._tracker()
+        self._register_blocker(trk)
+        bx, by, bs = 60, 60, 70
+        f0 = _bg()
+        _draw_blocker(f0, bx, by, bs)
+        trk.process(f0)
+        # Rat pressed against the blocker's right edge so the contours merge.
+        f1 = _bg()
+        _draw_blocker(f1, bx, by, bs)
+        _draw_rat(f1, bx + bs - 4, by + 15, 40)
+        res = trk.process(f1)
+        self.assertTrue(res.blocker_detected)
+        # The fused blob is dropped rather than tracked as (or stealing) the rat.
+        self.assertFalse(res.detected,
+                         "fused rat+blocker blob must not be locked as the rat")
 
     def test_footprint_clears_when_blocker_leaves(self):
         """Once the blocker (and its tape) leaves view, the footprint stops

@@ -123,19 +123,24 @@ blob - and because a blocker is dark like the rat, the track can jump to it or
    the tape's actual colour *under your room lighting* (you'll see the learned
    hue range in the status), so there is nothing to hand-tune. Save/Load keeps
    it for next time.
-3. **During tracking it is followed in parallel and erased from the rat's view.**
-   Each frame the software finds the orange tape, fills in the blocker's outline,
-   and subtracts that patch before it looks for the rat. Because the tape is only
-   ever on the blocker, this works even when the rat is touching the blocker (the
-   rat is not erased), and it follows the blocker if you move it. The blocker is
-   drawn as an orange square marked `BLOCKER` on the preview.
+3. **During tracking it is followed in parallel and excluded from the rat search.**
+   Each frame the software finds the orange tape and fills in the blocker's outline
+   (its "footprint"); any blob sitting mostly inside that footprint *is* the
+   blocker, so it is dropped from the candidates before the rat is chosen, and the
+   footprint follows the blocker if you move it. The blocker is drawn as an orange
+   square marked `BLOCKER` on the preview. This is one cheap pass (ADR-0039): the
+   earlier design re-analysed the whole frame a *second* time on every frame the
+   tape was visible, which loaded the CPU and could starve tracking of frames (bug
+   #260720).
 
-The erasing only happens **while the tape is actually visible that frame**
-(ADR-0035). Take the blocker out of view (or fully hide its tape) and the patch
+The exclusion only happens **while the tape is actually visible that frame**
+(ADR-0035). Take the blocker out of view (or fully hide its tape) and the footprint
 and the `BLOCKER` marker clear immediately, so that spot tracks normally again -
-there is no lingering "ghost" blocker. The one cost: if the rat *completely*
-covers the tape while the blocker is still there, the blocker briefly reappears
-and can tug the track until the tape shows again.
+there is no lingering "ghost" blocker. The one cost (ADR-0039): if the rat presses
+*right up against* the blocker so their outlines merge into a single blob, that
+blob is dropped rather than split, so the rat briefly coasts through the contact
+instead of the track being stolen onto the blocker - it re-locks as soon as they
+separate.
 
 Caveat: while your hand is in the frame moving the blocker, tracking can be
 briefly noisy - fine between trials, so reposition then.
@@ -487,7 +492,7 @@ still no code, but naming the techniques so you know what you're tuning.
 | Smoothing / gap-filling | **Constant-velocity Kalman filter** | Glide instead of jitter, and coast briefly in a straight line when the rat is lost. |
 | Lock management | A small **state machine** (`ACQUIRING → TRACKING → COASTING → LOST`) with a per-frame confidence | Know when to trust the track and when to say "I'm not sure." |
 | Online learning (optional) | **Sufficient-statistics accumulation** (not exponential drift) | Grow the fingerprint's range to new poses/lighting without forgetting or chasing an intruder. |
-| Blocker handling (optional) | **Learned orange-tape HSV gate** locates the obstacle; its **convex-hull footprint** is subtracted from the mask before the rat is chosen (ADR-0034) | Track an orange-taped blocker in parallel and erase it so it can't steal the rat's track, even on contact. |
+| Blocker handling (optional) | **Learned orange-tape HSV gate** locates the obstacle; blobs mostly inside its **convex-hull footprint** are dropped from the candidates before the rat is chosen (ADR-0034; single-pass containment-drop, ADR-0039) | Track an orange-taped blocker in parallel and exclude it so it can't steal the rat's track; a rat pressed against it briefly coasts rather than being stolen. |
 
 ### Maze-state estimator (`maze_state.py`)
 
