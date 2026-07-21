@@ -81,6 +81,11 @@ PREVIEW_MAX_W = 480           # downscale preview to keep the GUI light
 RETRIEVE_TIMEOUT_MS = 1000    # how long RetrieveResult waits before we re-check stop
 QUEUE_SECONDS = 2.0           # bounded queue holds ~this many seconds of frames
 
+# Smoothing factor for the displayed tracker.process() time (exponential moving
+# average). Small alpha => stable readout that still tracks sustained load; the
+# separate peak-hold catches transient spikes. Diagnostic only (see #260720).
+TRACK_MS_EMA_ALPHA = 0.1
+
 # Lens-distortion correction (see docs/decisions/0015). The calibration is
 # computed offline in MATLAB cameraCalibrator and exported to an OpenCV-
 # convention JSON (rig-hardware/camera/export_calibration_to_json.m -> .json,
@@ -121,6 +126,16 @@ class _Counters:
     src_drops: int = 0     # frames the camera produced but we never received (BlockID gaps)
     incomplete: int = 0    # grabs that arrived corrupt/partial
     queue_drops: int = 0   # frames dropped because the encode queue was full
+    track_ms_avg: float = 0.0   # EMA of tracker.process() wall time, ms (0 = no samples)
+    track_ms_peak: float = 0.0  # peak-hold tracker.process() time, ms
+
+    def note_track_ms(self, ms: float) -> None:
+        """Fold one process() timing into the EMA + peak-hold (caller holds lock)."""
+        self.track_ms_avg = (ms if self.track_ms_avg == 0.0
+                             else (1.0 - TRACK_MS_EMA_ALPHA) * self.track_ms_avg
+                                   + TRACK_MS_EMA_ALPHA * ms)
+        if ms > self.track_ms_peak:
+            self.track_ms_peak = ms
 
 
 @dataclass
@@ -607,12 +622,15 @@ class CameraView:
         _draw_track_overlay_shared(disp, scale, self._tracker, result)
 
     def _update_status(self) -> None:
+        track_on = self._tracker is not None and self._track_on.is_set()
         with self._counters_lock:
             c = self._counters
             line = (f"frames: {c.grabbed}   saved: {c.saved}   "
                     f"src-drop: {c.src_drops}   incomplete: {c.incomplete}   "
                     f"q-drop: {c.queue_drops}   queue: {self._queue.qsize()}/"
                     f"{self._queue.maxsize}")
+            if track_on:
+                line += f"   track: {c.track_ms_avg:.1f}/{c.track_ms_peak:.1f} ms"
         rec = "  [RECORDING]" if self._recording.is_set() else ""
         self._status_var.set(self._conn_status + "   |   " + line + rec)
 
@@ -800,10 +818,18 @@ class CameraView:
                     # preview and record. Never let a tracker hiccup kill grab.
                     track_result = None
                     if self._tracker is not None and self._track_on.is_set():
+                        t0 = time.perf_counter()
                         try:
                             track_result = self._tracker.process(frame)
                         except Exception:
                             track_result = None
+                        # Diagnostic: how long tracking held the grab thread this
+                        # frame. A rising value here (esp. when the blocker enters
+                        # view or recording starts) is the direct measure of the
+                        # per-frame load that drops source frames (see #260720).
+                        with self._counters_lock:
+                            self._counters.note_track_ms(
+                                (time.perf_counter() - t0) * 1000.0)
 
                     with self._latest_lock:
                         self._latest_frame = frame

@@ -67,6 +67,10 @@ criteria).
 | [FW-0009](#fw-0009-triggerdispenser-decomposition-of-the-well-reward-rule) | Trigger/Dispenser decomposition of the well-reward rule | Rules engine | Deferred |
 | [FW-0010](#fw-0010-deeplabcut-live-pose-estimation-for-body-part-tracking) | DeepLabCut-Live pose estimation for body-part tracking | Markerless tracker | Proposed |
 | [FW-0011](#fw-0011-richer-colour-model-for-clustered-fragments-multimodalper-part) | Richer colour model for clustered fragments (multimodal/per-part) | Markerless tracker | Proposed |
+| [FW-0012](#fw-0012-run-tracking-off-the-camera-grab-thread) | Run tracking off the camera grab thread | Camera + tracker | Proposed |
+| [FW-0013](#fw-0013-free-cpu-cores-during-recording-nvenc-or-encode-thread-cap) | Free CPU cores during recording (NVENC or encode-thread cap) | Camera recording | Proposed |
+| [FW-0014](#fw-0014-zone-entry-latency-floor-for-a-vision-triggered-cue-path) | Zone-entry latency floor for a vision-triggered cue path | Maze state + rules | Proposed |
+| [FW-0015](#fw-0015-scoped-ratblocker-de-merge-restore-splitting-only-if-needed) | Scoped rat/blocker de-merge (restore splitting only if needed) | Markerless tracker | Proposed |
 
 ## Entries
 
@@ -489,6 +493,165 @@ low-cost interim? Does it need the per-part labels the user can provide?
 
 **ADR needed?** Yes - it changes the appearance model's representation and the
 merge/scoring semantics.
+
+### FW-0012: Run tracking off the camera grab thread
+
+- **Status:** Proposed
+- **Date added:** 2026-07-21
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** `host/camera_view.py` (`_grab_loop`, a new tracking worker +
+  latest-frame handoff), `host/tracker.py` (already thread-safe via its lock)
+- **Related ADRs:** [ADR-0011](decisions/0011-camera-tab-freerun-ffv1.md)
+  (grab/encode thread split), [ADR-0014](decisions/0014-markerless-position-tracking.md),
+  [ADR-0039](decisions/0039-blocker-containment-drop.md) (the load-reduction change
+  that surfaced this)
+
+**Motivation / context.** Tracking runs **inline on the grab thread**
+(`tracker.process()` between `RetrieveResult` calls), so a slow frame delays the
+next retrieve and the camera buffer overflows - dropping frames at the source
+(`src_drops`) and, indirectly, breaking association / decaying confidence. This is
+the structural root of `#260720_TrackingDelays`; ADR-0039 cut the per-frame cost
+but did not remove the coupling.
+
+**Sketch of approach.** Make the grab thread only grab + update the latest-frame
+slot (+ enqueue for recording). Run `tracker.process()` on a separate worker that
+consumes the **most recent** frame (dropping stale ones), so tracking runs at a
+steady, possibly lower rate without ever back-pressuring capture. Preserve
+frame-alignment metadata (block id / timestamp) so the recording sidecar can still
+tie a track result to its frame. `RatTracker` is already lock-guarded for exactly
+this cross-thread use.
+
+**Evaluation / acceptance.** With a deliberately heavy `process()` (blocker +
+clustering + recording), `src_drops` stays ~0 while tracking degrades gracefully
+in rate rather than reliability; recorded video keeps full frame rate; the
+`track_ms` readout still reflects real cost.
+
+**Effort / risk.** Medium. Risks: frame/track alignment for the sidecar, added
+concurrency (another thread + latest-frame handoff), and choosing the stale-frame
+drop policy.
+
+**Open questions.** One worker or a small pool? Track every Nth frame or newest-
+available? How to keep the recording sidecar's per-frame track column meaningful
+when tracking skips frames?
+
+**ADR needed?** Yes - it changes the acquisition/tracking threading model
+(extends ADR-0011).
+
+### FW-0013: Free CPU cores during recording (NVENC or encode-thread cap)
+
+- **Status:** Proposed
+- **Date added:** 2026-07-21
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** `host/camera_view.py` (`_VideoWriter` codec setup,
+  `thread_count`)
+- **Related ADRs:** [ADR-0011](decisions/0011-camera-tab-freerun-ffv1.md),
+  [ADR-0012](decisions/0012-pyav-multithreaded-ffv1.md),
+  [ADR-0013](decisions/0013-selectable-lossless-lossy-recording.md)
+
+**Motivation / context.** The encoder is configured `thread_count = 0` (all
+cores). It runs on its own thread (decoupled from grab by a bounded queue,
+ADR-0011), but competes for the same cores the grab thread needs to finish
+`process()` in time - a contributor to `#260720` when recording is on. The rig PC
+has an NVIDIA RTX 4060 Ti whose **NVENC** block is separate silicon from both the
+CPU and CUDA cores; PyAV in the `drieu_t_maze` env exposes `h264_nvenc` /
+`hevc_nvenc` / `av1_nvenc`.
+
+**Sketch of approach.** Either (a) switch H.264 recording from `libx264` to
+`h264_nvenc` (GPU encode, frees CPU cores; add `nv12`/`yuv420p` pixel format + a
+CQ/bitrate option), and/or (b) cap `thread_count` to leave cores for tracking.
+Use the `track_ms` readout (added for #260720) to pick the operating point.
+Keep FFV1 (lossless) on CPU; NVENC is for the compressed path.
+
+**Evaluation / acceptance.** With recording on, `track_ms` and `src_drops` drop
+toward their recording-off values; recorded file quality/size stays acceptable for
+a behavioural record; no encode `queue_drops` regression.
+
+**Effort / risk.** Low-medium. NVENC quality-per-bit is slightly below libx264 at
+matched size; verify visual sufficiency. Adds a GPU-driver dependency for the
+compressed path.
+
+**Open questions.** Default to NVENC when available and fall back to libx264? Which
+rate-control (CQ vs bitrate)? Expose as a GUI toggle or auto-detect?
+
+**ADR needed?** Yes - it changes the recording codec/quality trade-off
+(extends ADR-0013).
+
+### FW-0014: Zone-entry latency floor for a vision-triggered cue path
+
+- **Status:** Proposed
+- **Date added:** 2026-07-21
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** `host/maze_state.py` (`min_dwell_ticks`, commit logic),
+  `host/maze_state_view.py` / `host/rules_view.py` (poll intervals), any future
+  host->firmware cue command
+- **Related ADRs:** [ADR-0025](decisions/0025-maze-state-module.md) (min-dwell
+  hysteresis), [ADR-0023](decisions/0023-position-based-rules-engine.md)
+- **Related FW:** [FW-0008](#fw-0008-phase-3-transition---firmware-correction-trials--spatially-gated-cue)
+  (spatially-gated cue - would consume this)
+
+**Motivation / context.** Part of `#260720` is that zone **entry** registers late
+and variably ("rat is well into the zone before entry commits"). This is largely
+architectural, not CPU: entry is evaluated only on the Tk poll (100-150 ms) and a
+new zone must persist `min_dwell_ticks = 3` consecutive polls before it commits -
+a ~300-450 ms floor even at zero load. The *variability* comes from confidence
+loss (returns `UNKNOWN` until re-lock) and dwell-counter resets on boundary
+jitter. A future position-triggered auditory cue (none today; cues are firmware
+beam-triggered) would inherit this floor, hurting the spatial consistency of cue
+onset.
+
+**Sketch of approach.** For a cue-critical zone edge, evaluate entry on the
+grab/tracking thread (not the Tk poll) and/or expose a lower `min_dwell_ticks` +
+faster poll for that path, trading more false/earlier edges for lower latency.
+Consider a separate low-latency "entry" signal distinct from the debounced
+display/logging state.
+
+**Evaluation / acceptance.** Measured entry-commit latency (vs a beam-break ground
+truth, cf. `maze_state_validate.py`) meets the cue's spatial-consistency budget
+with acceptable false-edge rate.
+
+**Effort / risk.** Medium. Tension between latency and false edges; couples to
+FW-0008 (where the cue actually lives) and FW-0012 (thread model).
+
+**Open questions.** What onset-jitter budget does the science require? Firmware
+beam gate (FW-0008) vs a host vision gate - or both? Per-zone dwell settings?
+
+**ADR needed?** Yes - it changes maze-state commit timing semantics
+(extends ADR-0025).
+
+### FW-0015: Scoped rat/blocker de-merge (restore splitting only if needed)
+
+- **Status:** Proposed
+- **Date added:** 2026-07-21
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** `host/tracker.py` (`RatTracker.process` blocker branch,
+  `_footprint_overlap`), `host/test_tracker_blocker.py`
+- **Related ADRs:** [ADR-0039](decisions/0039-blocker-containment-drop.md) (the
+  containment-drop that accepted this trade-off), ADR-0034, ADR-0035
+
+**Motivation / context.** ADR-0039 replaced per-frame pixel-subtraction with
+dropping whole detections inside the blocker footprint, to cut per-frame load. The
+accepted trade-off: a rat **fused** with the blocker into one contour is dropped
+(brief COAST during contact) rather than split. If the blocker sits at a
+decision-relevant spot and the rat contacts it often, that brief loss may matter.
+
+**Sketch of approach.** Detect only the *fused* case cheaply - a single detection
+whose bbox overlaps the footprint **and** has substantial area outside it - and do
+pixel-subtraction + local re-detect **just for that one blob**, not a whole-frame
+second pass. Everything else keeps the ADR-0039 single-pass drop.
+
+**Evaluation / acceptance.** During scripted contact the rat stays tracked on its
+own side (no steal onto the blocker) while `track_ms` stays near the ADR-0039
+baseline for non-contact frames; existing blocker tests plus a restored contact
+test pass.
+
+**Effort / risk.** Low-medium. Gated on evidence from the `track_ms` /
+reliability data that the contact case actually hurts an experiment.
+
+**Open questions.** What outside-area fraction defines "fused"? Is local
+re-detection cheap enough to be worth it vs just accepting the coast?
+
+**ADR needed?** Yes if it changes the ADR-0039 behaviour (supersede the relevant
+part); no if it is a guarded, evidence-driven addition.
 
 ## Completed
 
