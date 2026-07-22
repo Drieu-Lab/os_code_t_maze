@@ -3,12 +3,20 @@ rules_view.py - "Rules" tab for experiment_control.py.
 
 The thin GUI/host layer over the pure rules engine (rules_engine.py). It is the
 SINGLE actuation authority: it loads rules.json + the cm<->px scale calibration
-(rig_scale.json), DRAINS the shared maze-state pipeline (maze_pipeline; ADR-0041)
-folding each RatState through its own TaskEvents + engine, feeds lick lines to the
-engine, and EXECUTES the returned action intents (send a reward command, write a
-rule-event row). The engine itself never sends or logs. Actuation still fires on
-the Tk thread here (moving it onto the worker callback is Phase 2b). See
+(rig_scale.json), and EXECUTES the engine's action intents (send a reward command,
+write a rule-event row). The engine itself never sends or logs. See
 docs/decisions/0023.
+
+Actuation runs on a dedicated worker thread (ADR-0043), NOT the Tk poll. The
+shared pipeline's FAST view (maze_pipeline, ADR-0042) pushes each frame's low-dwell
+RatState inline on the tracking worker; a fast callback enqueues it onto this tab's
+own actuation queue. Lick edges from ``apply`` (Tk) are routed onto the SAME queue,
+so a single actuation thread drains frames + licks in arrival order and is the only
+caller of ``engine.tick`` / ``engine.event`` / ``TaskEvents.update`` - the engine
+stays single-threaded with no lock on the hot path. This removes the ~100 ms Tk
+poll from the beam->reward path (the low-latency-position goal; extends ADR-0040/
+0041). The Tk poll now only publishes an atomic gate snapshot (armed/mode/scale/
+task-ready + landmarks + log dir) that the thread reads, and renders status.
 
 Module contract (like the other tabs):
     widget() -> a Tk widget to place in its tab
@@ -41,8 +49,11 @@ from __future__ import annotations
 import csv
 import json
 import os
+import queue
+import threading
 import time
 import tkinter as tk
+from dataclasses import dataclass, field, replace
 from tkinter import messagebox, ttk
 from typing import Optional
 
@@ -92,12 +103,34 @@ RULES_PATH = os.path.join(_HERE, "rules.json")       # versioned example config
 SCALE_PATH = os.path.join(_HERE, "rig_scale.json")   # per-rig scale (gitignored)
 RULE_LOG_SUBDIR = "track_logs"                        # shared with track logs
 
-POLL_INTERVAL_MS = 100        # engine tick + status refresh
+POLL_INTERVAL_MS = 100        # gate-snapshot publish + status refresh (Tk)
 PREVIEW_INTERVAL_MS = 66      # ~15 fps live preview (only while the tab is visible)
 PREVIEW_MAX_W = 640
 
+# The actuation queue merges fast-view frame pushes (worker) with routed lick edges
+# (Tk). Sized to several seconds of frames at 30-60 fps; the actuation work per item
+# is tiny so it never backs up in practice. Overflow drops the newest item (counted)
+# rather than growing unbounded or blocking the tracking worker.
+ACT_QUEUE_MAX = 512
+
 # Free Roam is the only firmware mode we actuate in (see module docstring).
 FREEROAM_TOKENS = ("FREEROAM", "FREE")
+
+
+@dataclass(frozen=True)
+class _GateSnapshot:
+    """Atomic, immutable view of the Tk-owned gate state for the actuation thread.
+
+    Published once per Tk poll (``_publish_gate_snapshot``) and read (whole) by the
+    actuation thread, so the thread never touches Tk state or the live engine's
+    config. ``gate_open`` folds in arm/mode/tracking/scale/task readiness; the
+    thread guards every tick/event on it. ``landmarks`` + ``scale`` feed
+    ``engine.tick``; ``needs_task`` decides whether to fold the shared RatState.
+    """
+    gate_open: bool = False
+    needs_task: bool = False
+    scale: Optional[Scale] = None
+    landmarks: tuple = field(default_factory=tuple)
 
 
 class RulesControlView:
@@ -108,11 +141,11 @@ class RulesControlView:
         self._parent = parent
         self._tracker = tracker
         self._camera = camera
-        # Shared maze-state pipeline (ADR-0041): the one estimator on the tracking
-        # worker. This tab drains its RatState stream and folds each state through
-        # its OWN TaskEvents + engine (per-consumer, still on the Tk thread).
+        # Shared maze-state pipeline (ADR-0041/0042). This tab consumes the pipeline's
+        # FAST view (low-dwell) via a worker-side push callback, and folds each state
+        # through its OWN TaskEvents + engine on a dedicated actuation thread (below).
         self._pipeline = pipeline
-        self._sub = pipeline.register() if pipeline is not None else None
+        self._use_worker_actuation = pipeline is not None
         self._send = send                # callable(str) -> None (RigClient.send)
         self.frame = ttk.Frame(parent)
         self._photo_preview = None
@@ -127,11 +160,27 @@ class RulesControlView:
         self._active_profile: str = ""
         self._defaults = None            # engine defaults from the loaded config
         self._task_events = None
-        self._gate_was_open = False      # gate rising-edge detector (resets state)
+        self._gate_was_open = False      # gate rising-edge detector (actuation thread)
         self._log_file = None
         self._log_writer = None
         self._log_idx = 0
+        self._log_lock = threading.Lock()   # log is written by Tk + actuation thread
+        # Plain mirror of the log-status text: the actuation thread sets this (it
+        # must NOT touch the Tk StringVar); the Tk poll copies it into _log_status.
+        self._log_status_text = "log: off"
         self._closed = False
+
+        # --- actuation thread (ADR-0043) -----------------------------------
+        # Merged queue of ("frame", bundle) fast pushes + ("lick", line, now) edges.
+        # The gate snapshot is the Tk->thread hand-off; the reset flag lets Tk ask
+        # the thread (sole owner of task_events) to clear it on a config change.
+        self._act_queue: "queue.Queue" = queue.Queue(maxsize=ACT_QUEUE_MAX)
+        self._act_stop = threading.Event()
+        self._act_thread: Optional[threading.Thread] = None
+        self._act_drops = 0                 # items dropped on a full queue (lag)
+        self._gate_snapshot = _GateSnapshot()
+        self._log_dir_str = self._log_dir()  # refreshed each Tk poll for the thread
+        self._task_reset_pending = False
 
         missing = self._missing_dependency()
         if tracker is None or missing:
@@ -148,33 +197,64 @@ class RulesControlView:
         self._build_ui()
         self._refresh_landmark_options()
         self._render_measurements()
+        self._start_actuation()
         self._schedule_poll()
         self._schedule_preview()
+
+    def _start_actuation(self) -> None:
+        """Start the dedicated actuation thread and subscribe to the pipeline's
+        fast view (ADR-0042/0043). Without a pipeline we degrade to the legacy Tk
+        poll path (proximity-only rules); nothing to start."""
+        if not self._use_worker_actuation:
+            return
+        self._pipeline.subscribe_fast(self._on_fast_state)
+        self._act_thread = threading.Thread(
+            target=self._actuation_loop, name="rules-actuation", daemon=True)
+        self._act_thread.start()
 
     # ------------------------------------------------------------ module API
     def widget(self) -> tk.Widget:
         return self.frame
 
     def apply(self, line: str) -> None:
-        """Track firmware mode and feed lick edges to the engine."""
+        """Track firmware mode (Tk) and ROUTE lick edges to the actuation thread.
+
+        The engine must stay single-threaded, so a lick edge is never fed to the
+        engine here - it is enqueued (with its arrival timestamp) onto the same
+        queue the fast-view frames use, and the actuation thread calls
+        ``engine.event`` in arrival order (ADR-0043)."""
         mode = protocol.mode_name(line)
         if mode is not None:
             self._mode = mode.upper()
             return
         if self._engine is None:
             return
-        # Feed lick lines; only acts when the gate is open (set on the engine).
-        if protocol.lick_edge(line) is not None:
+        if protocol.lick_edge(line) is None:
+            return
+        if self._use_worker_actuation:
+            self._enqueue_act(("lick", line, time.monotonic()))
+        else:
+            # No pipeline: legacy in-line handling on the Tk thread.
             self._engine.enabled = self._gate_open()
             if self._engine.enabled:
-                actions = self._engine.event(line, time.monotonic())
-                self._execute(actions)
+                self._execute(self._engine.event(line, time.monotonic()))
 
     def close(self) -> None:
         self._closed = True
+        # Stop the actuation thread BEFORE closing the log it writes to.
+        self._act_stop.set()
+        if self._use_worker_actuation and self._pipeline is not None:
+            try:
+                self._pipeline.unsubscribe_fast(self._on_fast_state)
+            except Exception:
+                pass
+        try:
+            self._act_queue.put_nowait(None)   # wake the loop so it can exit
+        except queue.Full:
+            pass
+        if self._act_thread is not None and self._act_thread.is_alive():
+            self._act_thread.join(timeout=2.0)
         self._stop_log()
-        if self._sub is not None:
-            self._sub.close()
 
     # ---------------------------------------------------------- dependencies
     @staticmethod
@@ -203,12 +283,27 @@ class RulesControlView:
     def _reset_state_pipeline(self) -> None:
         """Reset only THIS tab's task-event history so an arming session starts
         fresh. The shared estimator is global and is never reset by a consumer
-        (its RatState.history is global physical position; ADR-0041)."""
+        (its RatState.history is global physical position; ADR-0041).
+
+        Owned by the ACTUATION thread (ADR-0043): the thread calls this on the
+        gate rising edge and when Tk requests a reset. Tk must NOT call it while
+        the thread runs - use ``_request_task_reset`` instead."""
         try:
             if self._task_events is not None:
                 self._task_events.reset()
         except Exception:
             pass
+
+    def _request_task_reset(self) -> None:
+        """Tk-side request to clear task-event history (e.g. on a config change).
+
+        While the actuation thread runs it owns ``task_events``, so we only set a
+        flag it picks up before the next fold; before the thread starts (during
+        __init__) we reset directly."""
+        if self._act_thread is not None and self._act_thread.is_alive():
+            self._task_reset_pending = True
+        else:
+            self._reset_state_pipeline()
 
     def _load_rules(self) -> None:
         """Load rules.json. Supports either a flat top-level ``rules`` list or a
@@ -252,7 +347,7 @@ class RulesControlView:
                "enabled": False, "defaults": defaults.__dict__, "rules": rules}
         self._engine = RulesEngine.from_config(cfg)
         self._engine.enabled = False
-        self._reset_state_pipeline()
+        self._request_task_reset()
         self._sync_nonstem_widget()
         self._rebuild_editor()
 
@@ -298,6 +393,24 @@ class RulesControlView:
             r.nonstem_reward_prob = p
             self._log_event(LogEvent("nonstem_prob_set", r.id, {"p": round(p, 3)}))
         self._nonstem_var.set(round(p, 3))
+
+    def _apply_fast_dwell(self) -> None:
+        """Set the pipeline's FAST-view min_dwell (in camera frames) from the
+        spinbox (ADR-0042). Leaves the debounced display view untouched."""
+        if self._pipeline is None:
+            return
+        try:
+            n = max(1, int(self._fast_dwell_var.get()))
+        except (tk.TclError, ValueError):
+            messagebox.showinfo("Fast min dwell", "Enter a whole number of frames.")
+            return
+        try:
+            self._pipeline.set_fast_params(
+                replace(self._pipeline.fast_params, min_dwell_ticks=n))
+        except Exception as e:
+            messagebox.showerror("Fast min dwell", f"{type(e).__name__}: {e}")
+            return
+        self._fast_dwell_var.set(n)
 
     # ------------------------------------------------- rules.json field editor
     def _active_rule_dicts(self) -> list:
@@ -542,6 +655,30 @@ class RulesControlView:
         tip(apply_p, "rules.nonstem")
         self._sync_nonstem_widget()
 
+        # Fast-view actuation dwell (ADR-0042): how many CAMERA FRAMES a zone must
+        # be held before the actuation (fast) view commits it. Lower = snappier
+        # reward but more jitter-sensitive; independent of the debounced display
+        # view the Maze state / Behavior tabs use. Only meaningful with a pipeline.
+        if self._use_worker_actuation:
+            fastf = ttk.LabelFrame(controls, text="Actuation latency (fast view)")
+            fastf.pack(side=tk.TOP, fill=tk.X, **pad)
+            ttk.Label(fastf, text="Fast min dwell (frames):").pack(
+                side=tk.LEFT, padx=(4, 2))
+            try:
+                fd = int(self._pipeline.fast_params.min_dwell_ticks)
+            except Exception:
+                fd = 1
+            self._fast_dwell_var = tk.IntVar(value=fd)
+            fast_spin = ttk.Spinbox(
+                fastf, from_=1, to=30, increment=1, width=6,
+                textvariable=self._fast_dwell_var, command=self._apply_fast_dwell)
+            fast_spin.pack(side=tk.LEFT, padx=2)
+            tip(fast_spin, "rules.fast_min_dwell")
+            fast_apply = ttk.Button(fastf, text="Apply",
+                                    command=self._apply_fast_dwell)
+            fast_apply.pack(side=tk.LEFT, padx=2)
+            tip(fast_apply, "rules.fast_min_dwell")
+
         # Per-rule field editor: tune the active phase's rule(s) and write the
         # changes back to rules.json. See docs/decisions/0031.
         editor = ttk.LabelFrame(controls, text="Rules editor (active phase)")
@@ -735,6 +872,83 @@ class RulesControlView:
             elif isinstance(a, LogEvent):
                 self._log_event(a)
 
+    # ------------------------------------------------- actuation thread (2b)
+    def _on_fast_state(self, bundle) -> None:
+        """Pipeline fast-view callback - runs INLINE on the tracking worker.
+
+        Must be cheap + non-blocking: just enqueue the bundle for the actuation
+        thread. Never call the engine or Tk from here (ADR-0042/0043)."""
+        self._enqueue_act(("frame", bundle))
+
+    def _enqueue_act(self, item) -> None:
+        """Put an item on the actuation queue, dropping (and counting) on overflow
+        rather than blocking the caller (the tracking worker or Tk)."""
+        try:
+            self._act_queue.put_nowait(item)
+        except queue.Full:
+            self._act_drops += 1
+
+    def _actuation_loop(self) -> None:
+        """The single actuation thread: drain frames + licks in arrival order and
+        be the sole caller of engine.tick/event + TaskEvents.update (ADR-0043)."""
+        while not self._act_stop.is_set():
+            try:
+                item = self._act_queue.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            if item is None:                 # close() sentinel
+                continue
+            try:
+                self._process_act_item(item)
+            except Exception:
+                pass
+
+    def _process_act_item(self, item) -> None:
+        snap = self._gate_snapshot           # atomic read of the immutable snapshot
+        engine = self._engine
+        if engine is None:
+            return
+        kind = item[0]
+        if kind == "frame":
+            bundle = item[1]
+            # Pending Tk-requested reset (config change) + gate rising edge both
+            # clear this consumer's task history before folding the next frame.
+            if self._task_reset_pending:
+                self._task_reset_pending = False
+                self._reset_state_pipeline()
+            if snap.gate_open and not self._gate_was_open:
+                self._reset_state_pipeline()
+            self._gate_was_open = snap.gate_open
+            engine.enabled = snap.gate_open
+            if not snap.gate_open:
+                return
+            task = None
+            if snap.needs_task and self._task_events is not None:
+                task = self._task_events.update(bundle.state)
+            actions = engine.tick(bundle.track_result, list(snap.landmarks),
+                                  snap.scale, bundle.mono_ts, task=task)
+            self._execute(actions)
+        elif kind == "lick":
+            _, line, now = item
+            engine.enabled = snap.gate_open
+            if not snap.gate_open:
+                return
+            self._execute(engine.event(line, now))
+
+    def _publish_gate_snapshot(self) -> None:
+        """Tk poll: snapshot the gate + inputs the actuation thread needs, so the
+        thread never reads Tk state or the live engine config (ADR-0043)."""
+        try:
+            landmarks = self._tracker.get_landmarks()
+        except Exception:
+            landmarks = []
+        self._log_dir_str = self._log_dir()
+        self._gate_snapshot = _GateSnapshot(
+            gate_open=self._gate_open(),
+            needs_task=self._needs_task(),
+            scale=self._scale,
+            landmarks=tuple(landmarks or ()))
+
     # ----------------------------------------------------- rule-event log
     def _log_dir(self) -> str:
         base = _RECORDINGS_DIR
@@ -746,10 +960,14 @@ class RulesControlView:
         return os.path.join(base, RULE_LOG_SUBDIR)
 
     def _ensure_log(self) -> None:
+        """Open the rule-event log lazily. Called under ``_log_lock`` from either
+        the actuation thread (on the first fire) or Tk (nonstem-prob edit)."""
         if self._log_writer is not None:
             return
         try:
-            log_dir = self._log_dir()
+            # Use the dir snapshotted on the Tk poll (camera.get_output_dir is a
+            # Tk-side read); the actuation thread must not touch it directly.
+            log_dir = self._log_dir_str or self._log_dir()
             os.makedirs(log_dir, exist_ok=True)
             path = os.path.join(
                 log_dir, f"rules_{time.strftime('%Y%m%d_%H%M%S')}.csv")
@@ -759,35 +977,39 @@ class RulesControlView:
                 ["idx", "host_unix_s", "firmware_mode", "event", "rule_id",
                  "port", "pulse_ms", "detail"])
             self._log_idx = 0
-            self._log_status.set(f"log: {os.path.basename(path)}")
+            self._log_status_text = f"log: {os.path.basename(path)}"
         except Exception as e:
             self._log_file = self._log_writer = None
-            self._log_status.set(f"log: error ({type(e).__name__})")
+            self._log_status_text = f"log: error ({type(e).__name__})"
 
     def _log_event(self, ev: LogEvent) -> None:
-        self._ensure_log()
-        if self._log_writer is None:
-            return
-        detail = dict(ev.detail or {})
-        port = detail.pop("port", "")
-        pulse = detail.pop("pulse_ms", "")
-        try:
-            self._log_writer.writerow([
-                self._log_idx, f"{time.time():.6f}", self._mode, ev.name,
-                ev.rule_id, port, pulse,
-                json.dumps(detail) if detail else ""])
-            self._log_file.flush()
-            self._log_idx += 1
-        except Exception:
-            pass
-
-    def _stop_log(self) -> None:
-        if self._log_file is not None:
+        # Under the lock: callable from both the actuation thread (fires) and Tk
+        # (nonstem-prob edits), so writes never interleave.
+        with self._log_lock:
+            self._ensure_log()
+            if self._log_writer is None:
+                return
+            detail = dict(ev.detail or {})
+            port = detail.pop("port", "")
+            pulse = detail.pop("pulse_ms", "")
             try:
-                self._log_file.close()
+                self._log_writer.writerow([
+                    self._log_idx, f"{time.time():.6f}", self._mode, ev.name,
+                    ev.rule_id, port, pulse,
+                    json.dumps(detail) if detail else ""])
+                self._log_file.flush()
+                self._log_idx += 1
             except Exception:
                 pass
-        self._log_file = self._log_writer = None
+
+    def _stop_log(self) -> None:
+        with self._log_lock:
+            if self._log_file is not None:
+                try:
+                    self._log_file.close()
+                except Exception:
+                    pass
+            self._log_file = self._log_writer = None
 
     # --------------------------------------------------- scale calibration
     def _frame_size(self):
@@ -952,41 +1174,27 @@ class RulesControlView:
     def _poll(self) -> None:
         if self._engine is None:
             return
-        gate = self._gate_open()
-        self._engine.enabled = gate
-        # On the gate's rising edge, drop any stale zone/loop history so an
-        # arming session starts from a clean maze state.
-        if gate and not self._gate_was_open:
-            self._reset_state_pipeline()
-        self._gate_was_open = gate
-        if gate:
-            try:
-                landmarks = self._tracker.get_landmarks()
-                bundles = self._sub.drain() if self._sub is not None else []
-                if bundles:
-                    # Fold EVERY shared RatState since last poll: the choice/loop
-                    # edges are one-frame flags, so folding only the latest would
-                    # drop a trial (and its reward) that landed between polls. The
-                    # engine ticks per bundle (frame rate) but still on the Tk
-                    # thread, batched here - actuation moves to the worker in 2b.
-                    for b in bundles:
-                        task = None
-                        if self._needs_task() and self._task_events is not None:
-                            task = self._task_events.update(b.state)
-                        actions = self._engine.tick(
-                            b.track_result, landmarks, self._scale, b.mono_ts,
-                            task=task)
-                        self._execute(actions)
-                elif not self._needs_task():
-                    # Proximity-only rules have no edges to miss, so a single tick
-                    # on the freshest result each poll suffices (and works even
-                    # with no pipeline, e.g. legacy landmark-radius rules).
+        # Hand the actuation thread a fresh, atomic gate snapshot; mirror the
+        # thread-set log status into the Tk label. Actuation itself runs on the
+        # worker thread now (ADR-0043) - not here.
+        self._publish_gate_snapshot()
+        self._log_status.set(self._log_status_text)
+        if not self._use_worker_actuation:
+            # Legacy fallback (no pipeline): proximity-only rules tick on the Tk
+            # poll off the freshest tracker result; task rules need the pipeline.
+            gate = self._gate_open()
+            self._engine.enabled = gate
+            if gate and not self._gate_was_open:
+                self._reset_state_pipeline()
+            self._gate_was_open = gate
+            if gate and not self._needs_task():
+                try:
                     res = self._tracker.snapshot_result()
-                    actions = self._engine.tick(res, landmarks, self._scale,
-                                                time.monotonic(), task=None)
-                    self._execute(actions)
-            except Exception:
-                pass
+                    self._execute(self._engine.tick(
+                        res, self._tracker.get_landmarks(), self._scale,
+                        time.monotonic(), task=None))
+                except Exception:
+                    pass
         # Status line: per-rule state + gate reason.
         parts = []
         for st in self._engine.status():

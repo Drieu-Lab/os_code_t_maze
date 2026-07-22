@@ -545,9 +545,23 @@ rate-control (CQ vs bitrate)? Expose as a GUI toggle or auto-detect?
 - **Related FW:** [FW-0008](#fw-0008-phase-3-transition---firmware-correction-trials--spatially-gated-cue)
   (spatially-gated cue - would consume this)
 - **Related ADRs (progress):** [ADR-0040](decisions/0040-tracking-off-grab-thread.md)
-  (tracking off the grab thread) and
+  (tracking off the grab thread),
   [ADR-0041](decisions/0041-shared-maze-state-pipeline.md) (one shared estimator
-  ticking at the camera frame rate)
+  ticking at the camera frame rate),
+  [ADR-0042](decisions/0042-fast-actuation-maze-state-view.md) (fast low-latency
+  view + worker push seam) and
+  [ADR-0043](decisions/0043-rules-actuation-thread.md) (actuation off the Tk poll)
+
+**Update (2026-07-22, later).** The **distinct fast/low-latency view** and the
+**move off the Tk poll** called for below are now done: ADR-0042 added a second
+low-`min_dwell` estimator (default 1 frame) with a worker push seam
+(`subscribe_fast`), and ADR-0043 moved reward actuation onto a dedicated thread
+fed by those pushes + routed lick edges, so rules react within ~1-2 frames instead
+of a Tk poll. What still remains for THIS item is the beam+vision **fusion** for
+observability (committed-entry = beam ENTRY confirmed by vision forward progress),
+confidence-dropout **fail-open**, and an actual host->firmware cue command - none
+of which exist yet. The fast push -> actuation-thread seam is what that cue path
+will attach to.
 
 **Update (2026-07-22).** The *poll-rate* half of the floor below is gone: ADR-0041
 moved the one estimator onto the frame-rate tracking worker, so `min_dwell_ticks`

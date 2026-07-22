@@ -187,6 +187,11 @@ TIPS: Dict[str, Entry] = {
                      "Phase 2a. Applied live and logged.",
     "rules.log": "Rule events (prime/top-up/re-arm/suppressed) are written to a "
                  "rule_events CSV in the recordings' track_logs folder.",
+    "rules.fast_min_dwell": "Camera frames a zone must be held before the "
+                            "ACTUATION (fast) view commits it and rules may fire. "
+                            "Lower = snappier reward, more jitter-sensitive; "
+                            "independent of the debounced display view used by the "
+                            "Maze state / Behavior tabs. Applied live.",
     "rules.editor.save": "Write the edited fields of the active phase's rule(s) "
                          "back to rules.json (validated first; nothing is saved "
                          "if a value is invalid). Saving disarms the engine - "
