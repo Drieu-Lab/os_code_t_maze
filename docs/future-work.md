@@ -544,6 +544,19 @@ rate-control (CQ vs bitrate)? Expose as a GUI toggle or auto-detect?
   hysteresis), [ADR-0023](decisions/0023-position-based-rules-engine.md)
 - **Related FW:** [FW-0008](#fw-0008-phase-3-transition---firmware-correction-trials--spatially-gated-cue)
   (spatially-gated cue - would consume this)
+- **Related ADRs (progress):** [ADR-0040](decisions/0040-tracking-off-grab-thread.md)
+  (tracking off the grab thread) and
+  [ADR-0041](decisions/0041-shared-maze-state-pipeline.md) (one shared estimator
+  ticking at the camera frame rate)
+
+**Update (2026-07-22).** The *poll-rate* half of the floor below is gone: ADR-0041
+moved the one estimator onto the frame-rate tracking worker, so `min_dwell_ticks`
+now counts camera frames (~50-100 ms) instead of ~3 Tk polls (~300-450 ms). What
+remains for this item is the beam+vision *fusion* for observability, a distinct
+**fast/low-latency view** (lower `min_dwell`, evaluated on the worker) separate
+from the debounced display/logging state, and confidence-dropout fail-open - i.e.
+Phase 2b builds on this seam. The motivation below is kept for context but its
+"evaluated only on the Tk poll" premise is now historical.
 
 **Motivation / context.** Part of `#260720` is that zone **entry** registers late
 and variably ("rat is well into the zone before entry commits"). This is largely

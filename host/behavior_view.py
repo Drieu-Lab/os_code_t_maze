@@ -2,12 +2,13 @@
 behavior_view.py - live "Phase 2a behavior" readout panel for experiment_control.py.
 
 The thin Tk shell around the pure behavior-stats core (behavior_stats.BehaviorStats).
-Like the Maze state / Rules tabs, it runs a UI-free consumer of the shared tracker
-on the Tk poll loop (single-threaded, no locks): each tick it reduces the tracker's
-latest result to a discrete RatState (maze_state.MazeStateEstimator), turns that
-into task-semantic events (task_events.TaskEvents), and folds those - plus the
-smoothed centroid - into the Phase 2a training measures, shown both cumulatively
-and over a rolling window.
+Like the Maze state / Rules tabs, it is a UI-free consumer of the shared maze-state
+pipeline (maze_pipeline; ADR-0041): each poll it DRAINS every RatState the shared
+worker produced since last poll, turns each into task-semantic events
+(task_events.TaskEvents), and folds those - plus the smoothed centroid - into the
+Phase 2a training measures, shown both cumulatively and over a rolling window.
+Draining (not sampling the latest) is required because the choice/loop events are
+one-frame edges that would otherwise be missed between polls.
 
 It lives in the empty bottom-right of the Rig view tab (beside the solenoid /
 reward / lick controls) so the experimenter can watch shaping progress while
@@ -32,9 +33,6 @@ from preview import safe_after
 from tooltips import tip
 
 from behavior_stats import BehaviorStats
-from maze_state import (
-    MazeStateEstimator, MazeStateParams, ZoneMap, ZONES_PATH, load_zone_map,
-)
 from session_timer import SessionTimer
 from task_events import TaskEvents
 
@@ -53,20 +51,25 @@ POLL_INTERVAL_MS = 150   # readout / estimator refresh (~ the Maze state tab rat
 class BehaviorView:
     """Tk module: live Phase 2a training-readout panel (widget/apply/close)."""
 
-    def __init__(self, parent: tk.Misc, tracker=None, camera=None):
+    def __init__(self, parent: tk.Misc, tracker=None, camera=None, pipeline=None):
         self._tracker = tracker
         self._camera = camera
+        # Shared maze-state pipeline (ADR-0041): consume its RatState stream
+        # instead of running a private estimator. Draining every bundle keeps the
+        # one-frame choice/loop edges (folded into TaskEvents/BehaviorStats).
+        self._pipeline = pipeline
+        self._sub = None
         self.frame = ttk.LabelFrame(parent, text="Phase 2a behavior  -  live readout")
         self._closed = False
         self._running = False
 
-        if tracker is None:
+        if tracker is None or pipeline is None:
             ttk.Label(self.frame, padding=16, anchor="center", justify="center",
                       text="Behavior readout unavailable - the tracker core is "
                            "unavailable.").pack(fill=tk.BOTH, expand=True)
             return
 
-        self._estimator = MazeStateEstimator(ZoneMap(), MazeStateParams())
+        self._sub = pipeline.register()
         self._events = TaskEvents()
         self._stats = BehaviorStats()
         self._timer = SessionTimer()
@@ -99,6 +102,8 @@ class BehaviorView:
 
     def close(self) -> None:
         self._closed = True
+        if self._sub is not None:
+            self._sub.close()
 
     # ------------------------------------------------------------------- UI
     def _build_ui(self) -> None:
@@ -166,12 +171,12 @@ class BehaviorView:
         self._refresh()
 
     def _reload(self) -> None:
-        """(Re)load the zone map and the px<->cm scale from disk."""
-        if os.path.exists(ZONES_PATH):
-            try:
-                self._estimator.set_zone_map(load_zone_map(ZONES_PATH))
-            except Exception:
-                pass
+        """(Re)load the px<->cm scale from disk.
+
+        The zone map is now owned by the shared pipeline (edited in the Maze state
+        tab), so only the distance scale is reloaded here; zone changes take
+        effect immediately via the shared estimator.
+        """
         if load_scale is not None and os.path.exists(SCALE_PATH):
             try:
                 self._scale = load_scale(SCALE_PATH)
@@ -191,7 +196,7 @@ class BehaviorView:
 
     def _has_zones(self) -> bool:
         try:
-            return self._estimator.zone_map.valid()
+            return self._pipeline.zones_valid()
         except Exception:
             return False
 
@@ -205,16 +210,24 @@ class BehaviorView:
 
     def _poll(self) -> None:
         if self._running and self._tracking_running() and self._has_zones():
-            result = self._tracker.snapshot_result()
-            s = self._estimator.update(result, time.time())
-            te = self._events.update(s)
-            pos = None
-            if result is not None:
-                pos = result.smoothed if result.smoothed is not None else result.centroid
-            self._stats.update(te, pos_px=pos, scale=self._scale)
+            # Drain EVERY RatState the shared worker produced since last poll and
+            # fold each in order: the choice/loop edges are one-frame flags, so
+            # sampling only the latest would drop trials landing between polls.
+            bundles = self._sub.drain() if self._sub is not None else []
+            for b in bundles:
+                te = self._events.update(b.state)
+                pos = None
+                r = b.track_result
+                if r is not None:
+                    smoothed = getattr(r, "smoothed", None)
+                    pos = smoothed if smoothed is not None \
+                        else getattr(r, "centroid", None)
+                self._stats.update(te, pos_px=pos, scale=self._scale)
         elif self._running:
             # Running but not measuring (tracking off / no zones): break
             # continuity so the idle stretch is not counted as active time.
+            if self._sub is not None:
+                self._sub.drain()   # discard stale bundles so we don't fold a backlog
             self._stats.mark_gap()
         self._refresh()
 

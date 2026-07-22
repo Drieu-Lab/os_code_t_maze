@@ -1,13 +1,15 @@
 """
 maze_state_view.py - "Maze state" tab for experiment_control.py.
 
-The Tk shell around the pure maze-state core (maze_state.MazeStateEstimator). The
-estimator is UI-free and runs here on the Tk poll loop (single-threaded, no
-locks), exactly like the Rules tab drives rules_engine.py: this tab polls the
-shared tracker's latest result, reduces it to a discrete RatState, shows a live
-zone / substate / direction / loop readout, and can log a state-timeline CSV. It
-also hosts a still-frame, multi-region polygon ZONE EDITOR (mirroring the ROI /
-landmark editors in tracker_view.py) that writes zones.json.
+The Tk shell around the shared maze-state pipeline (maze_pipeline, which drives
+ONE pure maze_state.MazeStateEstimator on the camera tracking worker at frame
+rate; see ADR-0041). This tab is the OWNER/editor of that pipeline: its zone-map
+edits and param sliders reconfigure the single estimator every tab consumes. For
+display it shows a live zone / substate / direction / loop readout from the
+pipeline's freshest snapshot, and for the state-timeline CSV it drains the full
+RatState stream (every frame, so no transition is missed). It also hosts a
+still-frame, multi-region polygon ZONE EDITOR (mirroring the ROI / landmark
+editors in tracker_view.py) that writes zones.json.
 
 Why a separate tab (not folded into Tracking): the estimator is a *consumer* of
 the tracker (like the rules engine, ADR-0023), not a tracking tuner; giving it
@@ -24,6 +26,7 @@ import csv
 import os
 import time
 import tkinter as tk
+from dataclasses import replace
 from tkinter import filedialog, messagebox, ttk
 from typing import Optional
 
@@ -33,7 +36,7 @@ from tooltips import tip
 
 import protocol
 from maze_state import (
-    EDITABLE_ZONES, ZONES_PATH, MazeStateEstimator, MazeStateParams, Zone,
+    EDITABLE_ZONES, ZONES_PATH, MazeStateParams, Zone,
     ZoneMap, load_zone_map, save_zone_map, state_row, state_timeline_header,
 )
 
@@ -107,10 +110,15 @@ def _editor_targets():
 class MazeStateControlView:
     """Tk module: zone editor + live discrete-maze-state readout + state log."""
 
-    def __init__(self, parent: tk.Misc, tracker=None, camera=None):
+    def __init__(self, parent: tk.Misc, tracker=None, camera=None, pipeline=None):
         self._parent = parent
         self._tracker = tracker
         self._camera = camera
+        # Shared maze-state pipeline (ADR-0041): this tab OWNS its zone map +
+        # params (editing them here reconfigures the one estimator all tabs
+        # consume) and drains its RatState stream for the state-timeline log.
+        self._pipeline = pipeline
+        self._sub = None
         self.frame = ttk.Frame(parent)
         self._animal = ""
         self._photo_preview = None
@@ -120,22 +128,17 @@ class MazeStateControlView:
         self._last_state = None
 
         missing = missing_dependency("numpy", "opencv-python", "pillow")
-        if tracker is None or missing:
+        if tracker is None or pipeline is None or missing:
             why = ("the tracker core is unavailable"
-                   if tracker is None else f"missing dependency:\n{missing}")
+                   if tracker is None or pipeline is None
+                   else f"missing dependency:\n{missing}")
             ttk.Label(self.frame, padding=24, anchor="center", justify="center",
                       text=f"Maze state tab unavailable - {why}.").pack(
                 fill=tk.BOTH, expand=True)
             return
 
-        self._estimator = MazeStateEstimator(ZoneMap(), MazeStateParams())
+        self._sub = pipeline.register()
         self._build_ui()
-        # Reuse a previously drawn zone map, if any.
-        if os.path.exists(ZONES_PATH):
-            try:
-                self._estimator.set_zone_map(load_zone_map(ZONES_PATH))
-            except Exception:
-                pass
         self._sync_params()
         self._set_zone_status()
         self._schedule_poll()
@@ -154,6 +157,8 @@ class MazeStateControlView:
     def close(self) -> None:
         self._closed = True
         self._stop_log()
+        if self._sub is not None:
+            self._sub.close()
 
     # ------------------------------------------------------------------- UI
     def _build_ui(self) -> None:
@@ -186,8 +191,8 @@ class MazeStateControlView:
         # Params (min confidence + min dwell). Tuning knobs for the estimator.
         params = ttk.LabelFrame(controls, text="State estimation")
         params.pack(side=tk.TOP, fill=tk.X, **pad)
-        self._min_conf = tk.DoubleVar(value=self._estimator.params.min_confidence)
-        self._min_dwell = tk.IntVar(value=self._estimator.params.min_dwell_ticks)
+        self._min_conf = tk.DoubleVar(value=self._pipeline.params.min_confidence)
+        self._min_dwell = tk.IntVar(value=self._pipeline.params.min_dwell_ticks)
         crow = ttk.Frame(params)
         crow.pack(side=tk.TOP, fill=tk.X, pady=1)
         ttk.Label(crow, text="Min confidence", width=14, anchor="w").pack(side=tk.LEFT)
@@ -197,7 +202,7 @@ class MazeStateControlView:
         tip(cscale, "maze.min_confidence")
         drow = ttk.Frame(params)
         drow.pack(side=tk.TOP, fill=tk.X, pady=1)
-        ttk.Label(drow, text="Min dwell (ticks)", width=14, anchor="w").pack(side=tk.LEFT)
+        ttk.Label(drow, text="Min dwell (frames)", width=14, anchor="w").pack(side=tk.LEFT)
         dspin = ttk.Spinbox(drow, from_=1, to=30, width=5, textvariable=self._min_dwell,
                             command=self._sync_params)
         dspin.pack(side=tk.LEFT, padx=4)
@@ -224,7 +229,7 @@ class MazeStateControlView:
     # --------------------------------------------------------------- params
     def _sync_params(self) -> None:
         try:
-            self._estimator.set_params(MazeStateParams(
+            self._pipeline.set_params(MazeStateParams(
                 min_confidence=float(self._min_conf.get()),
                 min_dwell_ticks=max(1, int(self._min_dwell.get())),
             ))
@@ -233,7 +238,7 @@ class MazeStateControlView:
 
     # ----------------------------------------------------------- zone I/O
     def _set_zone_status(self) -> None:
-        zm = self._estimator.zone_map
+        zm = self._pipeline.zone_map
         n = len(zm.zones)
         extras = []
         if zm.well is not None:
@@ -258,11 +263,11 @@ class MazeStateControlView:
             landmarks = self._tracker.get_landmarks()
         except Exception:
             landmarks = []
-        _ZoneEditor(self.frame, frame, self._estimator.zone_map,
+        _ZoneEditor(self.frame, frame, self._pipeline.zone_map,
                     on_commit=self._on_zones_committed, landmarks=landmarks)
 
     def _on_zones_committed(self, zone_map: ZoneMap) -> None:
-        self._estimator.set_zone_map(zone_map)
+        self._pipeline.set_zone_map(zone_map)
         try:
             save_zone_map(zone_map, ZONES_PATH)
         except Exception as e:
@@ -270,7 +275,7 @@ class MazeStateControlView:
         self._set_zone_status()
 
     def _save_zones(self) -> None:
-        zm = self._estimator.zone_map
+        zm = self._pipeline.zone_map
         if not zm.valid():
             messagebox.showinfo("Save zones", "No zones to save - define them first.")
             return
@@ -287,7 +292,7 @@ class MazeStateControlView:
         if not path:
             return
         try:
-            self._estimator.set_zone_map(load_zone_map(path))
+            self._pipeline.set_zone_map(load_zone_map(path))
             self._set_zone_status()
         except Exception as e:
             messagebox.showerror("Load zones", f"{type(e).__name__}: {e}")
@@ -350,39 +355,55 @@ class MazeStateControlView:
             safe_after(self.frame, POLL_INTERVAL_MS, self._schedule_poll)
 
     def _poll(self) -> None:
-        """Run the estimator on the tracker's latest result; update readout/log."""
+        """Render the freshest shared state; drain the stream for the state log.
+
+        The shared estimator (maze_pipeline) runs on the camera worker at frame
+        rate, so display uses the latest snapshot while the state-timeline log
+        drains EVERY RatState since last poll (frame-rate rows, no missed edges).
+        """
         if not self._tracking_running():
+            if self._sub is not None:
+                self._sub.drain()   # discard so a later log doesn't dump a backlog
             self._readout.set("state: (tracking disabled)")
             self._last_state = None
             return
-        result = self._tracker.snapshot_result()
-        s = self._estimator.update(result, time.time())
+
+        bundles = self._sub.drain() if self._sub is not None else []
+        snap = self._pipeline.snapshot()
+        s = snap.state if snap is not None else None
         self._last_state = s
-        parts = [f"zone: {s.zone}"]
-        if s.substate:
-            parts.append(f"({s.substate})")
-        if not s.valid:
-            parts.append("[invalid]")
-        line1 = "  ".join(parts)
-        bits = []
-        if s.direction:
-            bits.append(s.direction)
-        if s.stem_progress is not None:
-            bits.append(f"t={s.stem_progress:.2f}")
-        bits.append(f"conf={s.confidence:.2f}")
-        line2 = "  ".join(bits)
-        line3 = ""
-        if s.entered or s.exited:
-            line3 = f"entered={s.entered or '-'}  exited={s.exited or '-'}"
-        if s.loop_completed:
-            line3 += f"   LOOP {s.loop_side}"
-        self._readout.set("\n".join(x for x in (line1, line2, line3) if x))
+        if s is None:
+            self._readout.set("state: -  (waiting for frames)")
+        else:
+            parts = [f"zone: {s.zone}"]
+            if s.substate:
+                parts.append(f"({s.substate})")
+            if not s.valid:
+                parts.append("[invalid]")
+            line1 = "  ".join(parts)
+            bits = []
+            if s.direction:
+                bits.append(s.direction)
+            if s.stem_progress is not None:
+                bits.append(f"t={s.stem_progress:.2f}")
+            bits.append(f"conf={s.confidence:.2f}")
+            line2 = "  ".join(bits)
+            line3 = ""
+            if s.entered or s.exited:
+                line3 = f"entered={s.entered or '-'}  exited={s.exited or '-'}"
+            if s.loop_completed:
+                line3 += f"   LOOP {s.loop_side}"
+            self._readout.set("\n".join(x for x in (line1, line2, line3) if x))
 
         if self._log_writer is not None:
-            try:
-                self._log_writer.writerow(state_row(s))
-            except Exception:
-                pass
+            for b in bundles:
+                try:
+                    # Log wall-clock time (the shared state's `now` is monotonic,
+                    # the engine clock); the bundle carries the wall stamp.
+                    self._log_writer.writerow(state_row(replace(b.state,
+                                                                now=b.wall_ts)))
+                except Exception:
+                    pass
 
     def _schedule_preview(self) -> None:
         if self._closed:
@@ -420,7 +441,7 @@ class MazeStateControlView:
             return
         try:
             dh, dw = disp.shape[:2]
-            zm = self._estimator.zone_map
+            zm = self._pipeline.zone_map
             cur = self._last_state.zone if self._last_state is not None else None
             for z in zm.zones:
                 if len(z.polygon) < 3:

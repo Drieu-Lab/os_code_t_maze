@@ -256,8 +256,10 @@ TIPS: Dict[str, Entry] = {
     "maze.load_zones": "Load a zone map from disk.",
     "maze.min_confidence": "Track confidence below which the maze state is "
                            "UNKNOWN (no transitions emitted).",
-    "maze.min_dwell": "Ticks a new zone must persist before it commits "
-                      "(hysteresis against border jitter).",
+    "maze.min_dwell": "Camera frames a new zone must persist before it commits "
+                      "(hysteresis against border jitter). The shared estimator "
+                      "now ticks at the camera frame rate, so this counts frames, "
+                      "not GUI polls (ADR-0041).",
     "maze.readout": "Live discrete maze state: current zone/substate, direction "
                     "along the stem, entered/exited edges, and completed loops.",
     "maze.log": "Start/stop a state-timeline CSV in the recordings' track_logs "

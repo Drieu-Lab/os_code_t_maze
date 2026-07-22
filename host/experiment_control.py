@@ -84,6 +84,21 @@ try:
 except Exception as e:  # pragma: no cover
     BehaviorView = None  # type: ignore
     _TRACKER_ERR = _TRACKER_ERR or f"{type(e).__name__}: {e}"
+# One shared maze-state pipeline (pure stdlib): a single estimator driven on the
+# camera tracking worker that fans a RatState stream out to the three tabs above,
+# replacing their per-tab estimators. Optional; guarded like the tabs above.
+# See docs/decisions/0041.
+try:
+    from maze_pipeline import MazeStatePipeline
+    from maze_state import (
+        MazeStateParams, ZoneMap, ZONES_PATH, load_zone_map,
+    )
+except Exception as e:  # pragma: no cover
+    MazeStatePipeline = None  # type: ignore
+    MazeStateParams = ZoneMap = None  # type: ignore
+    ZONES_PATH = ""  # type: ignore
+    load_zone_map = None  # type: ignore
+    _TRACKER_ERR = _TRACKER_ERR or f"{type(e).__name__}: {e}"
 
 # ================= CONFIG =================
 BROKER_HOST = "127.0.0.1"
@@ -295,9 +310,27 @@ def main() -> int:
             tracker = None
     camera_ref = {}
 
+    # One shared maze-state pipeline (a single estimator on the camera tracking
+    # worker), consumed by the Maze state / Rules / Behavior tabs instead of a
+    # per-tab estimator (ADR-0041). Seed it with a previously drawn zone map so
+    # state is available immediately; the Maze state tab owns editing it.
+    pipeline = None
+    if tracker is not None and MazeStatePipeline is not None:
+        zone_map = ZoneMap()
+        if load_zone_map is not None and ZONES_PATH and os.path.exists(ZONES_PATH):
+            try:
+                zone_map = load_zone_map(ZONES_PATH)
+            except Exception:
+                zone_map = ZoneMap()
+        pipeline = MazeStatePipeline(zone_map, MazeStateParams())
+
     def make_camera(parent):
         cam = CameraView(parent, tracker=tracker)
         camera_ref["cam"] = cam
+        # Drive the shared pipeline from the camera's off-thread track worker so
+        # estimation runs once, at frame rate, off the Tk poll (ADR-0040/0041).
+        if pipeline is not None:
+            cam.subscribe_track(pipeline.on_track)
         return cam
 
     modules = []
@@ -356,7 +389,7 @@ def main() -> int:
         tabs.append(("Rules", [
             lambda parent: RulesControlView(
                 parent, tracker=tracker, camera=camera_ref.get("cam"),
-                send=lambda cmd: client.send(cmd))]))
+                pipeline=pipeline, send=lambda cmd: client.send(cmd))]))
     # Maze state tab: reduces the tracker centroid to a discrete per-tick maze
     # state (zone + direction + loops) and hosts the zone editor. Read-only
     # consumer of the shared tracker; needs the camera for still-frame editing +
@@ -364,7 +397,8 @@ def main() -> int:
     if tracker is not None and MazeStateControlView is not None:
         tabs.append(("Maze state", [
             lambda parent: MazeStateControlView(
-                parent, tracker=tracker, camera=camera_ref.get("cam"))]))
+                parent, tracker=tracker, camera=camera_ref.get("cam"),
+                pipeline=pipeline)]))
 
     # Build modules into tabs. Modules grouped in one tab are packed
     # left-to-right (schematic on the left, camera on the right). The Rig view
@@ -464,7 +498,7 @@ def main() -> int:
     if (tracker is not None and BehaviorView is not None
             and rig_controls_right is not None):
         behavior = BehaviorView(rig_controls_right, tracker=tracker,
-                                camera=camera_ref.get("cam"))
+                                camera=camera_ref.get("cam"), pipeline=pipeline)
         behavior.widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         modules.append(behavior)
 

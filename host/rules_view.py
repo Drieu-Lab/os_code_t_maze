@@ -3,9 +3,12 @@ rules_view.py - "Rules" tab for experiment_control.py.
 
 The thin GUI/host layer over the pure rules engine (rules_engine.py). It is the
 SINGLE actuation authority: it loads rules.json + the cm<->px scale calibration
-(rig_scale.json), polls the shared tracker, feeds lick lines to the engine, and
-EXECUTES the returned action intents (send a reward command, write a rule-event
-row). The engine itself never sends or logs. See docs/decisions/0023.
+(rig_scale.json), DRAINS the shared maze-state pipeline (maze_pipeline; ADR-0041)
+folding each RatState through its own TaskEvents + engine, feeds lick lines to the
+engine, and EXECUTES the returned action intents (send a reward command, write a
+rule-event row). The engine itself never sends or logs. Actuation still fires on
+the Tk thread here (moving it onto the worker callback is Phase 2b). See
+docs/decisions/0023.
 
 Module contract (like the other tabs):
     widget() -> a Tk widget to place in its tab
@@ -64,17 +67,14 @@ from rules_engine import (
 # debias sub-form and conditional field enabling key off it. See ADR-0031.
 WELL_TEMPLATE = "well_reward_with_excursion"
 
-# Maze-state estimator + task-event layer (pure stdlib; safe to import). Zone /
-# loop rule templates need the task-event context these produce. See ADR-0026.
+# Task-event layer (pure stdlib; safe to import). Zone / loop rule templates need
+# the task-event context it produces from the shared pipeline's RatState stream.
+# The maze-state estimator itself is no longer built here - it is the one shared
+# estimator on the tracking worker (maze_pipeline; ADR-0041). See ADR-0026.
 try:
-    from maze_state import (
-        MazeStateEstimator, MazeStateParams, ZoneMap, load_zone_map,
-    )
     from task_events import TaskEvents
     _MAZE_STATE_IMPORT_ERROR = None
 except Exception as e:  # pragma: no cover
-    MazeStateEstimator = MazeStateParams = ZoneMap = None  # type: ignore
-    load_zone_map = None  # type: ignore
     TaskEvents = None  # type: ignore
     _MAZE_STATE_IMPORT_ERROR = f"{type(e).__name__}: {e}"
 
@@ -90,7 +90,6 @@ except Exception:  # pragma: no cover
 _HERE = os.path.dirname(os.path.abspath(__file__))
 RULES_PATH = os.path.join(_HERE, "rules.json")       # versioned example config
 SCALE_PATH = os.path.join(_HERE, "rig_scale.json")   # per-rig scale (gitignored)
-ZONES_PATH = os.path.join(_HERE, "zones.json")       # per-rig zone map (gitignored)
 RULE_LOG_SUBDIR = "track_logs"                        # shared with track logs
 
 POLL_INTERVAL_MS = 100        # engine tick + status refresh
@@ -104,10 +103,16 @@ FREEROAM_TOKENS = ("FREEROAM", "FREE")
 class RulesControlView:
     """Tk module: the Rules tab - controls + executor for the rules engine."""
 
-    def __init__(self, parent: tk.Misc, tracker=None, camera=None, send=None):
+    def __init__(self, parent: tk.Misc, tracker=None, camera=None, pipeline=None,
+                 send=None):
         self._parent = parent
         self._tracker = tracker
         self._camera = camera
+        # Shared maze-state pipeline (ADR-0041): the one estimator on the tracking
+        # worker. This tab drains its RatState stream and folds each state through
+        # its OWN TaskEvents + engine (per-consumer, still on the Tk thread).
+        self._pipeline = pipeline
+        self._sub = pipeline.register() if pipeline is not None else None
         self._send = send                # callable(str) -> None (RigClient.send)
         self.frame = ttk.Frame(parent)
         self._photo_preview = None
@@ -121,8 +126,6 @@ class RulesControlView:
         self._profiles: dict = {}        # name -> profile dict
         self._active_profile: str = ""
         self._defaults = None            # engine defaults from the loaded config
-        self._zone_map = ZoneMap() if ZoneMap is not None else None
-        self._estimator = None
         self._task_events = None
         self._gate_was_open = False      # gate rising-edge detector (resets state)
         self._log_file = None
@@ -170,6 +173,8 @@ class RulesControlView:
     def close(self) -> None:
         self._closed = True
         self._stop_log()
+        if self._sub is not None:
+            self._sub.close()
 
     # ---------------------------------------------------------- dependencies
     @staticmethod
@@ -178,30 +183,28 @@ class RulesControlView:
 
     # -------------------------------------------------------------- loading
     def _load_zone_map(self) -> None:
-        """Load the per-rig zone map + build the maze-state / task-event pipeline."""
+        """Build this tab's per-consumer task-event layer over the shared pipeline.
+
+        The zone map + estimator are now shared (owned by the Maze state tab via
+        maze_pipeline; ADR-0041); this tab only needs its own TaskEvents to fold
+        the shared RatState stream into reward-rule credentials.
+        """
         self._zone_map_error = None
-        if ZoneMap is None or load_zone_map is None:
-            self._zone_map = None
+        if TaskEvents is None or self._pipeline is None:
+            self._task_events = None
             self._zone_map_error = _MAZE_STATE_IMPORT_ERROR or "maze_state unavailable"
             return
         try:
-            self._zone_map = load_zone_map(ZONES_PATH) if os.path.exists(ZONES_PATH) \
-                else ZoneMap()
-        except Exception as e:
-            self._zone_map = ZoneMap()
-            self._zone_map_error = f"{type(e).__name__}: {e}"
-        try:
-            self._estimator = MazeStateEstimator(self._zone_map, MazeStateParams())
             self._task_events = TaskEvents()
         except Exception as e:
-            self._estimator = self._task_events = None
+            self._task_events = None
             self._zone_map_error = f"{type(e).__name__}: {e}"
 
     def _reset_state_pipeline(self) -> None:
-        """Drop stale zone/loop history so each arming session starts fresh."""
+        """Reset only THIS tab's task-event history so an arming session starts
+        fresh. The shared estimator is global and is never reset by a consumer
+        (its RatState.history is global physical position; ADR-0041)."""
         try:
-            if self._estimator is not None:
-                self._estimator.reset()
             if self._task_events is not None:
                 self._task_events.reset()
         except Exception:
@@ -690,8 +693,8 @@ class RulesControlView:
         return any(getattr(r, "needs_task", False) for r in self._engine.rules)
 
     def _task_ready(self) -> bool:
-        return bool(self._estimator is not None and self._task_events is not None
-                    and self._zone_map is not None and self._zone_map.valid())
+        return bool(self._pipeline is not None and self._task_events is not None
+                    and self._pipeline.zones_valid())
 
     def _gate_open(self) -> bool:
         """All conditions that must hold before the engine may actuate."""
@@ -958,16 +961,30 @@ class RulesControlView:
         self._gate_was_open = gate
         if gate:
             try:
-                now = time.monotonic()
-                res = self._tracker.snapshot_result()
                 landmarks = self._tracker.get_landmarks()
-                task = None
-                if self._needs_task() and self._estimator is not None:
-                    rat_state = self._estimator.update(res, now)
-                    task = self._task_events.update(rat_state)
-                actions = self._engine.tick(res, landmarks, self._scale, now,
-                                            task=task)
-                self._execute(actions)
+                bundles = self._sub.drain() if self._sub is not None else []
+                if bundles:
+                    # Fold EVERY shared RatState since last poll: the choice/loop
+                    # edges are one-frame flags, so folding only the latest would
+                    # drop a trial (and its reward) that landed between polls. The
+                    # engine ticks per bundle (frame rate) but still on the Tk
+                    # thread, batched here - actuation moves to the worker in 2b.
+                    for b in bundles:
+                        task = None
+                        if self._needs_task() and self._task_events is not None:
+                            task = self._task_events.update(b.state)
+                        actions = self._engine.tick(
+                            b.track_result, landmarks, self._scale, b.mono_ts,
+                            task=task)
+                        self._execute(actions)
+                elif not self._needs_task():
+                    # Proximity-only rules have no edges to miss, so a single tick
+                    # on the freshest result each poll suffices (and works even
+                    # with no pipeline, e.g. legacy landmark-radius rules).
+                    res = self._tracker.snapshot_result()
+                    actions = self._engine.tick(res, landmarks, self._scale,
+                                                time.monotonic(), task=None)
+                    self._execute(actions)
             except Exception:
                 pass
         # Status line: per-rule state + gate reason.
@@ -1014,7 +1031,7 @@ class RulesControlView:
 
     def _draw_zone_polys(self, img, scale: float, frame_size) -> None:
         """Outline the maze zones + well on the preview (task/loop phases)."""
-        zm = self._zone_map
+        zm = self._pipeline.zone_map if self._pipeline is not None else None
         if zm is None or not zm.valid():
             return
         w, h = frame_size

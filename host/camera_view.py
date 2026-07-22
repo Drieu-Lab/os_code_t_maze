@@ -386,6 +386,18 @@ class CameraView:
             frame = self._latest_frame
         return None if frame is None else frame.copy()
 
+    def subscribe_track(self, cb) -> None:
+        """Register a callback invoked on the track worker for each published
+        result, as ``cb(track_result, block_id, mono_ts)``.
+
+        This is the low-latency seam the shared maze-state pipeline consumes
+        (maze_pipeline.MazeStatePipeline.on_track) so estimation runs once, at the
+        camera frame rate, off the Tk poll. Callbacks run on the worker thread and
+        are isolated (a raising subscriber can't kill the worker). See ADR-0041,
+        extends ADR-0040.
+        """
+        self._track_pub.subscribe(cb)
+
     def enable_tracking(self, on: bool) -> None:
         """Enable/disable running the tracker on each grabbed frame."""
         if self._tracker is None:
