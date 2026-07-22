@@ -67,7 +67,6 @@ criteria).
 | [FW-0009](#fw-0009-triggerdispenser-decomposition-of-the-well-reward-rule) | Trigger/Dispenser decomposition of the well-reward rule | Rules engine | Deferred |
 | [FW-0010](#fw-0010-deeplabcut-live-pose-estimation-for-body-part-tracking) | DeepLabCut-Live pose estimation for body-part tracking | Markerless tracker | Proposed |
 | [FW-0011](#fw-0011-richer-colour-model-for-clustered-fragments-multimodalper-part) | Richer colour model for clustered fragments (multimodal/per-part) | Markerless tracker | Proposed |
-| [FW-0012](#fw-0012-run-tracking-off-the-camera-grab-thread) | Run tracking off the camera grab thread | Camera + tracker | Proposed |
 | [FW-0013](#fw-0013-free-cpu-cores-during-recording-nvenc-or-encode-thread-cap) | Free CPU cores during recording (NVENC or encode-thread cap) | Camera recording | Proposed |
 | [FW-0014](#fw-0014-zone-entry-latency-floor-for-a-vision-triggered-cue-path) | Zone-entry latency floor for a vision-triggered cue path | Maze state + rules | Proposed |
 | [FW-0015](#fw-0015-scoped-ratblocker-de-merge-restore-splitting-only-if-needed) | Scoped rat/blocker de-merge (restore splitting only if needed) | Markerless tracker | Proposed |
@@ -494,49 +493,6 @@ low-cost interim? Does it need the per-part labels the user can provide?
 **ADR needed?** Yes - it changes the appearance model's representation and the
 merge/scoring semantics.
 
-### FW-0012: Run tracking off the camera grab thread
-
-- **Status:** Proposed
-- **Date added:** 2026-07-21
-- **Author / Agent:** Agent (Cursor) on behalf of Celine
-- **Area / modules:** `host/camera_view.py` (`_grab_loop`, a new tracking worker +
-  latest-frame handoff), `host/tracker.py` (already thread-safe via its lock)
-- **Related ADRs:** [ADR-0011](decisions/0011-camera-tab-freerun-ffv1.md)
-  (grab/encode thread split), [ADR-0014](decisions/0014-markerless-position-tracking.md),
-  [ADR-0039](decisions/0039-blocker-containment-drop.md) (the load-reduction change
-  that surfaced this)
-
-**Motivation / context.** Tracking runs **inline on the grab thread**
-(`tracker.process()` between `RetrieveResult` calls), so a slow frame delays the
-next retrieve and the camera buffer overflows - dropping frames at the source
-(`src_drops`) and, indirectly, breaking association / decaying confidence. This is
-the structural root of `#260720_TrackingDelays`; ADR-0039 cut the per-frame cost
-but did not remove the coupling.
-
-**Sketch of approach.** Make the grab thread only grab + update the latest-frame
-slot (+ enqueue for recording). Run `tracker.process()` on a separate worker that
-consumes the **most recent** frame (dropping stale ones), so tracking runs at a
-steady, possibly lower rate without ever back-pressuring capture. Preserve
-frame-alignment metadata (block id / timestamp) so the recording sidecar can still
-tie a track result to its frame. `RatTracker` is already lock-guarded for exactly
-this cross-thread use.
-
-**Evaluation / acceptance.** With a deliberately heavy `process()` (blocker +
-clustering + recording), `src_drops` stays ~0 while tracking degrades gracefully
-in rate rather than reliability; recorded video keeps full frame rate; the
-`track_ms` readout still reflects real cost.
-
-**Effort / risk.** Medium. Risks: frame/track alignment for the sidecar, added
-concurrency (another thread + latest-frame handoff), and choosing the stale-frame
-drop policy.
-
-**Open questions.** One worker or a small pool? Track every Nth frame or newest-
-available? How to keep the recording sidecar's per-frame track column meaningful
-when tracking skips frames?
-
-**ADR needed?** Yes - it changes the acquisition/tracking threading model
-(extends ADR-0011).
-
 ### FW-0013: Free CPU cores during recording (NVENC or encode-thread cap)
 
 - **Status:** Proposed
@@ -599,21 +555,49 @@ jitter. A future position-triggered auditory cue (none today; cues are firmware
 beam-triggered) would inherit this floor, hurting the spatial consistency of cue
 onset.
 
-**Sketch of approach.** For a cue-critical zone edge, evaluate entry on the
-grab/tracking thread (not the Tk poll) and/or expose a lower `min_dwell_ticks` +
-faster poll for that path, trading more false/earlier edges for lower latency.
-Consider a separate low-latency "entry" signal distinct from the debounced
-display/logging state.
+**Why beams alone are insufficient (the deeper reason for a vision cue path).** A
+beam break is an *event*, not a *state*: a beam-only maze-state machine is **not
+real-time observable**. Example (Celine, 2026-07-22): the rat breaks the central-
+stem ENTRY beam, but can then either continue toward the EXIT beam *or* turn back
+to the reward well - and beam-only, that branch is unobservable until a *future*
+break (the EXIT sensor) resolves it. Many such break sequences are ambiguous, so
+"which state is the rat in now" is only decidable in the context of a future
+break. Beam-only therefore forces a hard trade: fire the cue early on the ENTRY
+break (false cues when the rat reverses) or wait for a downstream break to be
+certain (too late for an entry-timed cue). The firmware has exactly this gap today
+- `task_core.h` plays the tone the whole time it is in `CueRunning` (between ENTRY
+and EXIT), so a rat that breaks ENTRY then turns back keeps the tone until it
+eventually trips EXIT. Vision's real role here is **observability**: it supplies
+the continuous trajectory *between* beams so commitment-vs-reversal is answerable
+*now*, not retrospectively.
+
+**Sketch of approach.** Treat it as sensor fusion, not vision-vs-beam: **beams are
+precise spatial/temporal fiducials** ("crossed this line, at this instant") and
+**vision is the connective tissue that makes state observable between them**.
+Define cue onset as *committed entry* = the beam ENTRY event **confirmed** by
+vision showing sustained forward progress (the estimator already computes
+`direction` up_stem/down_stem and `stem_progress` 0..1 - reuse them), evaluated on
+the grab/tracking thread so it resolves within a few frames (tens of ms) rather
+than waiting for the EXIT beam. Vision should **fail open** (defer to the beam when
+tracking is unconfident) so a confidence dropout degrades gracefully instead of
+dropping cues. Also expose a lower `min_dwell_ticks` + faster evaluation for this
+path, distinct from the debounced display/logging state.
 
 **Evaluation / acceptance.** Measured entry-commit latency (vs a beam-break ground
 truth, cf. `maze_state_validate.py`) meets the cue's spatial-consistency budget
-with acceptable false-edge rate.
+with acceptable false-edge rate; scripted turn-back sequences (ENTRY break then
+reverse) do **not** fire/sustain the cue; a confidence dropout falls back to beam
+behaviour rather than missing the cue.
 
-**Effort / risk.** Medium. Tension between latency and false edges; couples to
-FW-0008 (where the cue actually lives) and FW-0012 (thread model).
+**Effort / risk.** Medium-high. It is a fused host+firmware state estimator, not a
+knob; couples tightly to FW-0008 (where the cue actually lives) and FW-0012 (the
+thread model that makes the vision signal low-latency).
 
-**Open questions.** What onset-jitter budget does the science require? Firmware
-beam gate (FW-0008) vs a host vision gate - or both? Per-zone dwell settings?
+**Open questions.** Exact scientific definition of the cue-onset (and cue-*offset*)
+event in commitment terms - does a mid-cue reversal abort the tone? What
+`stem_progress`/`direction` threshold and frame-count define "committed"? Does the
+fusion live in firmware (host sends a vision "committed" flag) or does the host own
+the decision and command the tone? Per-zone settings?
 
 **ADR needed?** Yes - it changes maze-state commit timing semantics
 (extends ADR-0025).
@@ -663,3 +647,4 @@ referenced from those ADRs resolve.
 |----|-------|----------------|
 | FW-0004 | Position-based task-rule engine over landmarks | [ADR-0023](decisions/0023-position-based-rules-engine.md) |
 | FW-0007 | Maze-state consumers - rule-shaping + behavior stats | [ADR-0026](decisions/0026-reward-shaping-phases.md), [ADR-0032](decisions/0032-live-behavior-readout.md) |
+| FW-0012 | Run tracking off the camera grab thread | [ADR-0040](decisions/0040-tracking-off-grab-thread.md) |

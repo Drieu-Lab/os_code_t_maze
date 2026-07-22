@@ -51,6 +51,7 @@ import protocol  # noqa: E402  (shared serial-line parser; see docs/decisions/00
 from preview import render_bgr_to_label, safe_after  # noqa: E402
 from tooltips import tip  # noqa: E402
 from tracker import TRACK_COLUMNS, track_row  # noqa: E402
+from track_worker import LatestFrameSlot, TrackPublisher  # noqa: E402
 
 # Shared tracking-overlay drawing (also used by the Tracking tab so previews
 # match). Guarded: tracking deps may be absent without breaking the camera tab.
@@ -105,6 +106,13 @@ UNDISTORT_ALPHA = 0.0
 # now even though Step 0 doesn't analyze them, so early recordings stay usable).
 SIDECAR_COLUMNS = ("frame_idx", "host_unix_s", "rig_ms", "cam_block_id", "cam_timestamp")
 
+# Extra sidecar column written after TRACK_COLUMNS. Tracking now runs on its own
+# worker off the grab thread (see docs/decisions/0040), so a recorded frame carries
+# the LATEST-available track result rather than one computed from that exact frame;
+# this records the BlockID of the frame the track result WAS computed on, making
+# the (usually small) staleness explicit and measurable for offline alignment.
+TRACK_SRC_COLUMN = ("track_src_block_id",)
+
 # How many FFV1 slices to split each frame into for multithreaded encoding. More
 # slices => more parallelism across cores (at a tiny size cost). See ADR-0012.
 FFV1_SLICES = 24
@@ -126,6 +134,7 @@ class _Counters:
     src_drops: int = 0     # frames the camera produced but we never received (BlockID gaps)
     incomplete: int = 0    # grabs that arrived corrupt/partial
     queue_drops: int = 0   # frames dropped because the encode queue was full
+    track_skips: int = 0   # frames handed to the tracker but dropped unprocessed (worker behind)
     track_ms_avg: float = 0.0   # EMA of tracker.process() wall time, ms (0 = no samples)
     track_ms_peak: float = 0.0  # peak-hold tracker.process() time, ms
 
@@ -233,11 +242,15 @@ class CameraView:
         # Optional markerless tracker (shared RatTracker injected by
         # experiment_control.py). Tracking is OFF by default - flipped on from the
         # Tracking tab - so this tab behaves exactly as before unless requested.
-        # process() runs on the grab thread; the result drives the preview overlay
-        # and the per-frame sidecar track columns. See ADR-0014.
+        # process() runs on a SEPARATE worker thread (not the grab thread) so it can
+        # never delay the next RetrieveResult / drop source frames (see ADR-0040,
+        # extends ADR-0014). The grab thread hands the newest frame to _track_slot
+        # (drop-oldest); the worker publishes results via _track_pub, which feeds the
+        # preview overlay, the per-frame sidecar track columns, and the Tk pollers.
         self._tracker = tracker
         self._track_on = threading.Event()
-        self._latest_track = None              # most recent TrackResult (overlay)
+        self._track_slot = LatestFrameSlot()   # newest-frame handoff to the worker
+        self._track_pub = TrackPublisher()     # freshest (result, block_id, mono_ts)
         self._counters_lock = threading.Lock()
         self._counters = _Counters()
         self._cam_fps = DEFAULT_FPS
@@ -283,6 +296,7 @@ class CameraView:
                 "and restart experiment_control.py.")
             self._grab_thread = None
             self._encode_thread = None
+            self._track_thread = None
             return
 
         self._build_ui()
@@ -293,13 +307,21 @@ class CameraView:
             self._load_calibration(CALIBRATION_PATH, announce_failure=False)
 
         # Start workers. The grab thread opens the camera and streams for preview
-        # immediately; recording only gates the queue + writer.
+        # immediately; recording only gates the queue + writer. The track worker
+        # (only when a tracker is present) drains the newest-frame slot off the grab
+        # thread so a slow process() can't stall acquisition (ADR-0040).
         self._encode_thread = threading.Thread(
             target=self._encode_loop, name="CameraView-encode", daemon=True)
         self._grab_thread = threading.Thread(
             target=self._grab_loop, name="CameraView-grab", daemon=True)
+        self._track_thread = (
+            threading.Thread(target=self._track_loop, name="CameraView-track",
+                             daemon=True)
+            if self._tracker is not None else None)
         self._encode_thread.start()
         self._grab_thread.start()
+        if self._track_thread is not None:
+            self._track_thread.start()
 
         self._schedule_preview()
 
@@ -348,7 +370,8 @@ class CameraView:
         """Stop threads and release the camera + any open recording."""
         self._stop.set()
         self._recording.clear()
-        for t in (self._grab_thread, self._encode_thread):
+        self._track_slot.stop()   # unblock the track worker's take()
+        for t in (self._grab_thread, self._encode_thread, self._track_thread):
             if t is not None and t.is_alive():
                 t.join(timeout=3.0)
 
@@ -371,8 +394,9 @@ class CameraView:
             self._track_on.set()
         else:
             self._track_on.clear()
-            with self._latest_lock:
-                self._latest_track = None
+            # Drop any pending frame + stale result so the overlay/sidecar clear.
+            self._track_slot.clear()
+            self._track_pub.clear()
 
     def tracking_enabled(self) -> bool:
         return self._tracker is not None and self._track_on.is_set()
@@ -617,8 +641,8 @@ class CameraView:
         """Draw the (shared) tracking overlay on the preview."""
         if _draw_track_overlay_shared is None:
             return
-        with self._latest_lock:
-            result = self._latest_track
+        snap = self._track_pub.snapshot()
+        result = snap[0] if snap is not None else None
         _draw_track_overlay_shared(disp, scale, self._tracker, result)
 
     def _update_status(self) -> None:
@@ -630,7 +654,8 @@ class CameraView:
                     f"q-drop: {c.queue_drops}   queue: {self._queue.qsize()}/"
                     f"{self._queue.maxsize}")
             if track_on:
-                line += f"   track: {c.track_ms_avg:.1f}/{c.track_ms_peak:.1f} ms"
+                line += (f"   track: {c.track_ms_avg:.1f}/{c.track_ms_peak:.1f} ms"
+                         f"   track-skip: {c.track_skips}")
         rec = "  [RECORDING]" if self._recording.is_set() else ""
         self._status_var.set(self._conn_status + "   |   " + line + rec)
 
@@ -813,35 +838,38 @@ class CameraView:
                     arr = self._maybe_undistort(arr)          # lens correction (ADR-0015)
                     frame = self._orient(arr)
 
-                    # Markerless tracking (optional, default off). Runs on this
-                    # grab thread so the result is frame-aligned with what we
-                    # preview and record. Never let a tracker hiccup kill grab.
-                    track_result = None
+                    # Markerless tracking (optional, default off) runs on a SEPARATE
+                    # worker (ADR-0040): hand it the NEWEST frame + alignment metadata
+                    # and move on. If the worker is behind, this overwrites the pending
+                    # frame (a counted track-skip) so a slow process() degrades tracking
+                    # RATE, not capture - it can never stall the next RetrieveResult or
+                    # drop source frames (the root cause in #260720). frame is a fresh
+                    # array each iteration and process() never mutates it in place, so
+                    # sharing the reference across threads read-only is safe.
                     if self._tracker is not None and self._track_on.is_set():
-                        t0 = time.perf_counter()
-                        try:
-                            track_result = self._tracker.process(frame)
-                        except Exception:
-                            track_result = None
-                        # Diagnostic: how long tracking held the grab thread this
-                        # frame. A rising value here (esp. when the blocker enters
-                        # view or recording starts) is the direct measure of the
-                        # per-frame load that drops source frames (see #260720).
-                        with self._counters_lock:
-                            self._counters.note_track_ms(
-                                (time.perf_counter() - t0) * 1000.0)
+                        skipped = self._track_slot.put(
+                            frame, block_id, cam_ts, time.monotonic())
+                        if skipped:
+                            with self._counters_lock:
+                                self._counters.track_skips += 1
 
                     with self._latest_lock:
                         self._latest_frame = frame
-                        self._latest_track = track_result
                     with self._counters_lock:
                         self._counters.grabbed += 1
 
                     if self._recording.is_set():
+                        # The frame-aligned track result was computed on the worker;
+                        # attach the LATEST-available one plus the BlockID it came from
+                        # (track_src_block_id) so its staleness is explicit (ADR-0040).
+                        snap = self._track_pub.snapshot()
+                        track = track_row(snap[0] if snap is not None else None)
+                        track_src = ("" if snap is None or snap[1] is None
+                                     else snap[1])
                         meta = (time.time(), self._latest_rig_ms,
                                 "" if block_id is None else block_id,
                                 "" if cam_ts is None else cam_ts,
-                                track_row(track_result))
+                                track, track_src)
                         self._enqueue(frame, meta)
                 finally:
                     grab.Release()
@@ -849,6 +877,32 @@ class CameraView:
             self._safe_stop_grabbing(camera)
             self._safe_close_camera(camera)
             self._post(self._set_record_enabled, False)
+
+    def _track_loop(self) -> None:
+        """Run the tracker off the grab thread on the newest available frame.
+
+        Blocks on the drop-oldest _track_slot, so it processes the freshest frame
+        the grab thread produced (skipping any it fell behind on) and publishes the
+        result via _track_pub. Timing is measured here (note_track_ms) so the
+        `track: <avg>/<peak> ms` readout still reflects real process() cost. See
+        docs/decisions/0040.
+        """
+        while not self._stop.is_set():
+            item = self._track_slot.take(timeout=0.2)
+            if item is None:
+                continue
+            frame, block_id, _cam_ts, mono_ts = item
+            tracker = self._tracker
+            if tracker is None:
+                continue
+            t0 = time.perf_counter()
+            try:
+                result = tracker.process(frame)   # never let a hiccup kill the worker
+            except Exception:
+                result = None
+            with self._counters_lock:
+                self._counters.note_track_ms((time.perf_counter() - t0) * 1000.0)
+            self._track_pub.publish(result, block_id, mono_ts)
 
     def _enqueue(self, frame, meta) -> None:
         try:
@@ -914,7 +968,7 @@ class CameraView:
             for k, v in params.header.items():
                 csv_file.write(f"# {k}: {v}\n")
             csv_writer = csv.writer(csv_file)
-            csv_writer.writerow(SIDECAR_COLUMNS + TRACK_COLUMNS)
+            csv_writer.writerow(SIDECAR_COLUMNS + TRACK_COLUMNS + TRACK_SRC_COLUMN)
             self._post(self._set_conn_status,
                        f"Recording -> {os.path.basename(params.video_path)}")
             return writer, csv_file, csv_writer
@@ -925,9 +979,10 @@ class CameraView:
     def _write_frame(self, writer, csv_writer, idx, frame, meta) -> bool:
         try:
             writer.write(frame)
-            host_unix_s, rig_ms, block_id, cam_ts, track = meta
+            host_unix_s, rig_ms, block_id, cam_ts, track, track_src = meta
             csv_writer.writerow(
-                [idx, f"{host_unix_s:.6f}", rig_ms, block_id, cam_ts] + list(track))
+                [idx, f"{host_unix_s:.6f}", rig_ms, block_id, cam_ts]
+                + list(track) + [track_src])
             with self._counters_lock:
                 self._counters.saved = idx + 1
             return True

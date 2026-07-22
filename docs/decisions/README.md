@@ -83,3 +83,4 @@ The chain of records is the audit trail.
 | [0037](0037-cluster-fragmented-rat-blobs.md) | Track the rat as a cluster of nearby blobs (spatial + colour-membership merge) with decoupled registration | Accepted | 2026-07-15 |
 | [0038](0038-once-per-excursion-well-credit.md) | Credit the well reward at most once per outbound excursion (per-excursion choice latch) | Accepted | 2026-07-10 |
 | [0039](0039-blocker-containment-drop.md) | Exclude the blocker by dropping its blob in one pass (containment test), not pixel-subtracting + re-detecting, to cut per-frame tracking load | Accepted | 2026-07-21 |
+| [0040](0040-tracking-off-grab-thread.md) | Run rat tracking on its own worker off the camera grab thread (newest-frame handoff + publisher), so tracking cost can't drop source frames | Accepted | 2026-07-22 |
