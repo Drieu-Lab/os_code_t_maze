@@ -6,6 +6,8 @@ duck-typed track results (SimpleNamespace, exactly like maze_state_validate.py),
 verifying it drives ONE estimator, fans a full RatState stream out to every
 subscriber without dropping one-frame edges, and stays thread-safe under a
 concurrent on_track vs set_zone_map / set_params / reset. See docs/decisions/0041.
+Also exercises the FAST view + push seam (subscribe_fast / set_fast_params) that
+the Rules actuation thread consumes for low-latency reward (ADR-0042).
 
 Run from host/:
     python -m unittest test_maze_pipeline
@@ -171,6 +173,91 @@ class TestThreadSafety(unittest.TestCase):
             t.join(timeout=2.0)
         self.assertFalse(t.is_alive())
         self.assertEqual(errors, [])
+
+
+class TestFastView(unittest.TestCase):
+    """The fast (low-dwell) push seam the Rules actuation thread consumes."""
+
+    def test_default_fast_dwell_is_one(self):
+        pipe = MazeStatePipeline(make_zone_map(),
+                                 MazeStateParams(min_dwell_ticks=4))
+        # Debounced keeps the requested dwell; fast defaults to 1 frame.
+        self.assertEqual(pipe.params.min_dwell_ticks, 4)
+        self.assertEqual(pipe.fast_params.min_dwell_ticks, 1)
+
+    def test_subscribe_fast_receives_every_frame(self):
+        pipe = MazeStatePipeline(make_zone_map(), MazeStateParams())
+        got = []
+        pipe.subscribe_fast(lambda b: got.append(b.block_id))
+        for i in range(5):
+            pipe.on_track(_tr(500, 900), block_id=i, mono_ts=float(i))
+        self.assertEqual(got, [0, 1, 2, 3, 4])
+
+    def test_fast_bundle_carries_fast_state(self):
+        pipe = MazeStatePipeline(make_zone_map(), MazeStateParams())
+        got = []
+        pipe.subscribe_fast(got.append)
+        pipe.on_track(_tr(500, 900), block_id=7, mono_ts=3.5)
+        self.assertEqual(got[-1].block_id, 7)
+        self.assertEqual(got[-1].mono_ts, 3.5)
+        self.assertEqual(got[-1].state.zone, HUB)
+
+    def test_fast_commits_zone_before_debounced(self):
+        """The whole point: with fast min_dwell=1 vs debounced=4, entering a new
+        zone is reflected on the fast push ~3 frames before snapshot()."""
+        pipe = MazeStatePipeline(make_zone_map(),
+                                 MazeStateParams(min_dwell_ticks=4))
+        fast = []
+        pipe.subscribe_fast(fast.append)
+        t = 0.0
+        for _ in range(4):                 # commit HUB in both views
+            pipe.on_track(_tr(500, 900), block_id=int(t), mono_ts=t)
+            t += 1.0
+        self.assertEqual(pipe.snapshot().state.zone, HUB)
+        self.assertEqual(fast[-1].state.zone, HUB)
+        # One frame in the LEFT choice arm: fast commits it now; debounced holds.
+        pipe.on_track(_tr(200, 350), block_id=int(t), mono_ts=t)
+        self.assertEqual(fast[-1].state.zone, LEFT_CHOICE)   # fast view: committed
+        self.assertEqual(pipe.snapshot().state.zone, HUB)    # debounced: still HUB
+
+    def test_set_fast_params_tunes_only_fast(self):
+        pipe = MazeStatePipeline(make_zone_map(),
+                                 MazeStateParams(min_dwell_ticks=4))
+        pipe.set_fast_params(MazeStateParams(min_dwell_ticks=3))
+        self.assertEqual(pipe.fast_params.min_dwell_ticks, 3)
+        self.assertEqual(pipe.params.min_dwell_ticks, 4)     # debounced untouched
+
+    def test_set_zone_map_reconfigures_both_views(self):
+        pipe = MazeStatePipeline(make_zone_map(), MazeStateParams())
+        fast = []
+        pipe.subscribe_fast(fast.append)
+        pipe.on_track(_tr(500, 900), block_id=1, mono_ts=1.0)
+        pipe.set_zone_map(make_zone_map())   # must not break the fast estimator
+        pipe.on_track(_tr(500, 900), block_id=2, mono_ts=2.0)
+        self.assertEqual(fast[-1].state.zone, HUB)
+
+    def test_unsubscribe_fast_stops_delivery(self):
+        pipe = MazeStatePipeline(make_zone_map(), MazeStateParams())
+        got = []
+        cb = got.append
+        pipe.subscribe_fast(cb)
+        pipe.on_track(_tr(500, 900), block_id=0, mono_ts=0.0)
+        pipe.unsubscribe_fast(cb)
+        pipe.on_track(_tr(500, 900), block_id=1, mono_ts=1.0)
+        self.assertEqual([b.block_id for b in got], [0])
+
+    def test_fast_callback_exception_is_isolated(self):
+        """A raising fast subscriber must not stop other fast subscribers, the
+        debounced fan-out, or the snapshot (it runs inline on the worker)."""
+        pipe = MazeStatePipeline(make_zone_map(), MazeStateParams())
+        good = []
+        sub = pipe.register()
+        pipe.subscribe_fast(lambda _b: (_ for _ in ()).throw(RuntimeError("boom")))
+        pipe.subscribe_fast(good.append)
+        pipe.on_track(_tr(500, 900), block_id=5, mono_ts=5.0)
+        self.assertEqual([b.block_id for b in good], [5])
+        self.assertEqual([b.block_id for b in sub.drain()], [5])
+        self.assertEqual(pipe.snapshot().block_id, 5)
 
 
 if __name__ == "__main__":

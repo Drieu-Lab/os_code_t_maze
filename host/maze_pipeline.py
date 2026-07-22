@@ -35,6 +35,18 @@ Design (headless, stdlib-only - no Tk/OpenCV/numpy, like maze_state.py):
     consumer's own downstream ``TaskEvents`` / stats, never this shared estimator
     (``RatState.history`` is global physical position).
 
+Two views, one physical position (ADR-0042). The pipeline runs TWO estimators
+over the same track stream under the same lock: the DEBOUNCED estimator above
+(display + behavior + the state log, tolerant ``min_dwell``) and a FAST estimator
+(low ``min_dwell``, default 1 frame) for actuation. The debounced view fans out
+via ``snapshot()`` / ``register()`` as above; the fast view is a hot, push-only
+seam - ``subscribe_fast(cb)`` invokes ``cb(fast_bundle)`` ON THE WORKER for every
+frame, so a low-latency consumer (the Rules actuation thread) reacts to a zone
+commit in ~1 frame instead of ~3 without waiting for a Tk poll. Both estimators
+share the one zone map (``set_zone_map`` reconfigures both); ``set_fast_params``
+tunes only the fast one. Fast subscribers must be cheap and non-blocking (they
+run inline on the worker) - the Rules consumer just enqueues to its own thread.
+
 Clock. The bundle timestamps the state with ``mono_ts`` (the worker's
 ``time.monotonic()``), the same clock the rules engine ticks on, so a consumer
 can pass ``bundle.mono_ts`` straight to ``engine.tick``. ``wall_ts`` is kept
@@ -46,8 +58,8 @@ from __future__ import annotations
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass
-from typing import Deque, List, Optional
+from dataclasses import dataclass, replace
+from typing import Any, Callable, Deque, List, Optional
 
 from maze_state import MazeStateEstimator, MazeStateParams, RatState, ZoneMap
 
@@ -117,12 +129,20 @@ class MazeStatePipeline:
 
     def __init__(self, zone_map: Optional[ZoneMap] = None,
                  params: Optional[MazeStateParams] = None,
+                 fast_params: Optional[MazeStateParams] = None,
                  queue_max: int = DEFAULT_QUEUE_MAX) -> None:
         self._lock = threading.Lock()
-        self._estimator = MazeStateEstimator(zone_map or ZoneMap(),
-                                             params or MazeStateParams())
+        zm = zone_map or ZoneMap()
+        base_params = params or MazeStateParams()
+        # Debounced view (display / behavior / state log).
+        self._estimator = MazeStateEstimator(zm, base_params)
+        # Fast view (actuation): same zone map, low min_dwell (ADR-0042). A
+        # separate params object so tuning one estimator never touches the other.
+        self._fast_estimator = MazeStateEstimator(
+            zm, fast_params or replace(base_params, min_dwell_ticks=1))
         self._latest: Optional[TrackBundle] = None
         self._subscribers: List[Subscriber] = []
+        self._fast_subscribers: List[Callable[[TrackBundle], Any]] = []
         self._queue_max = max(1, int(queue_max))
 
     # ------------------------------------------------------ worker (producer)
@@ -140,24 +160,45 @@ class MazeStatePipeline:
             bundle = TrackBundle(track_result, block_id, mono_ts, wall_ts, state)
             self._latest = bundle
             subscribers = list(self._subscribers)
+            # Fast view: fold the SAME result through the low-dwell estimator and
+            # package its own bundle for the hot actuation seam (ADR-0042).
+            fast_state = self._fast_estimator.update(track_result, mono_ts)
+            fast_bundle = TrackBundle(track_result, block_id, mono_ts, wall_ts,
+                                      fast_state)
+            fast_cbs = list(self._fast_subscribers)
         for sub in subscribers:
             sub._append(bundle)
+        # Fast callbacks run inline on the worker (must be cheap + non-blocking);
+        # isolate each so one bad consumer can't stall tracking.
+        for cb in fast_cbs:
+            try:
+                cb(fast_bundle)
+            except Exception:
+                pass
 
     # ------------------------------------------------------- Tk editing seam
     def set_zone_map(self, zone_map: ZoneMap) -> None:
         """Swap the zone map (resets the estimator) and clear the snapshot."""
         with self._lock:
             self._estimator.set_zone_map(zone_map)
+            self._fast_estimator.set_zone_map(zone_map)  # both views, one map
             self._latest = None
 
     def set_params(self, params: MazeStateParams) -> None:
         with self._lock:
             self._estimator.set_params(params)
 
+    def set_fast_params(self, params: MazeStateParams) -> None:
+        """Tune only the FAST (actuation) estimator - e.g. its ``min_dwell_ticks``
+        (ADR-0042). Leaves the debounced display/behavior view untouched."""
+        with self._lock:
+            self._fast_estimator.set_params(params)
+
     def reset(self) -> None:
-        """Drop the shared estimator's internal state (rarely needed globally)."""
+        """Drop both estimators' internal state (rarely needed globally)."""
         with self._lock:
             self._estimator.reset()
+            self._fast_estimator.reset()
             self._latest = None
 
     # --------------------------------------------------------- reads / config
@@ -177,6 +218,12 @@ class MazeStatePipeline:
         with self._lock:
             return self._estimator.params
 
+    @property
+    def fast_params(self) -> MazeStateParams:
+        """The current (immutable) FAST-view params (for the Rules tab control)."""
+        with self._lock:
+            return self._fast_estimator.params
+
     def zones_valid(self) -> bool:
         """True once the shared zone map has a usable polygon (>= 3 verts)."""
         with self._lock:
@@ -194,3 +241,17 @@ class MazeStatePipeline:
         with self._lock:
             if sub in self._subscribers:
                 self._subscribers.remove(sub)
+
+    # ---------------------------------------------------- fast (push) seam
+    def subscribe_fast(self, cb: Callable[[TrackBundle], Any]) -> None:
+        """Register a fast-view callback invoked as ``cb(fast_bundle)`` ON THE
+        WORKER for every frame (ADR-0042). The callback must be cheap and
+        non-blocking (the Rules consumer just enqueues to its own thread)."""
+        with self._lock:
+            self._fast_subscribers.append(cb)
+
+    def unsubscribe_fast(self, cb: Callable[[TrackBundle], Any]) -> None:
+        """Remove a fast-view callback (idempotent)."""
+        with self._lock:
+            if cb in self._fast_subscribers:
+                self._fast_subscribers.remove(cb)
