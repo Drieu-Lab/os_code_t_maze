@@ -121,6 +121,7 @@ class _Phase3Snapshot:
     reward_incorrect: bool = False
     animal: str = ""
     session_id: str = ""
+    session_out_dir: str = ""
 
 
 class Phase3ControlView:
@@ -151,6 +152,9 @@ class Phase3ControlView:
         # Shared session id when armed via the Session controller (docs/decisions/
         # 0048); "" on a manual arm. Set on the Tk thread, snapshotted to the thread.
         self._session_id = ""
+        # Session output dir (the session's task/ folder; docs/decisions/0049); ""
+        # -> the default host/data/ location for a manual arm.
+        self._session_out_dir = ""
         self._active_cue: Optional[str] = None
         self._prev_zone: Optional[str] = None
         # The center-well lick channel (reward-collection lick), from the shared
@@ -232,18 +236,20 @@ class Phase3ControlView:
             self._send_cmd("CUE,BEAM")
 
     # ----------------------------------------------- Session controller seams
-    def arm(self, session_id: str = "") -> None:
+    def arm(self, session_id: str = "", out_dir: str = "") -> None:
         """Arm Phase 3 as part of a coordinated session (see docs/decisions/0048).
 
         Records the shared ``session_id`` (threaded into the data-file name +
-        header so it correlates with the video + manifest) and flips the Arm
-        checkbox. The task still starts only once the gate opens (Free Roam +
-        tracking + a valid zone map), exactly as a manual arm. No-op if the tab
-        is unavailable (no pipeline/task_events).
+        header so it correlates with the video + manifest) and, optionally, the
+        session's ``out_dir`` (its ``task/`` folder, docs/decisions/0049) that the
+        data file is written into; then flips the Arm checkbox. The task still
+        starts only once the gate opens (Free Roam + tracking + a valid zone map),
+        exactly as a manual arm. No-op if the tab is unavailable (no pipeline).
         """
         if not hasattr(self, "_enable_var"):
             return
         self._session_id = session_id or ""
+        self._session_out_dir = out_dir or ""
         self._enable_var.set(True)
 
     def disarm(self) -> None:
@@ -252,6 +258,7 @@ class Phase3ControlView:
             return
         self._enable_var.set(False)
         self._session_id = ""
+        self._session_out_dir = ""
 
     def current_log_path(self) -> Optional[str]:
         """Path of the in-progress session data file, or None until the gate
@@ -318,7 +325,10 @@ class Phase3ControlView:
         self._log = Phase3Log(self._seq, animal=animal, session_start_iso=_now_iso(),
                               reward_incorrect=snap.reward_incorrect,
                               session_id=snap.session_id)
-        self._log_path = os.path.join(DATA_DIR, f"{base}.csv")
+        # Write into the session's task/ folder when armed via a session, else the
+        # default host/data/ tree (docs/decisions/0049). _write_log makes the dir.
+        out_dir = snap.session_out_dir or DATA_DIR
+        self._log_path = os.path.join(out_dir, f"{base}.csv")
         self._write_log()
         self._send_cmd("CUE,VISION")         # host owns the DAC; suppress auto-tone
 
@@ -606,4 +616,5 @@ class Phase3ControlView:
             seed=self._current_seed(),
             reward_incorrect=bool(self._reward_incorrect_var.get()),
             animal=self._animal_var.get().strip(),
-            session_id=self._session_id)
+            session_id=self._session_id,
+            session_out_dir=self._session_out_dir)

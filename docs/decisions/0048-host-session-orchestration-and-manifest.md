@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-07-23
 - **Author / Agent:** Agent (Cursor) on behalf of Celine
-- **Affects:** `host/session_log.py` (new pure core), `host/session_controller.py` (new "Session" tab), `host/camera_view.py` (recording seams), `host/phase3_controller.py` + `host/phase3_log.py` (arm/disarm seams + `session_id` in the header), `host/experiment_control.py` (tab wiring)
+- **Affects:** `host/session_log.py` (new pure core), `host/session_controller.py` (new "Session" panel), `host/camera_view.py` (recording seams), `host/phase3_controller.py` + `host/phase3_log.py` (arm/disarm seams + `session_id` in the header), `host/experiment_control.py` (bottom-strip wiring)
 - **Supersedes / Superseded by:** —
 
 ## Context
@@ -43,9 +43,11 @@ can only reach that log by looping through the firmware (which re-emits it).
 
 ## Decision
 
-Add a **host-only** session orchestrator — a thin "Session" tab — that owns
-coordination and correlation but no task logic, plus a shared `session_id` and a
-JSON **manifest** that is the correlation index. No firmware change, no reflash.
+Add a **host-only** session orchestrator — a thin "Session" panel in the Rig
+view tab's bottom strip (right column, under the live behavior readout) — that
+owns coordination and correlation but no task logic, plus a shared `session_id`
+and a JSON **manifest** that is the correlation index. No firmware change, no
+reflash.
 
 - **`session_id = <animal>_<stamp>`**, minted once at Start and passed to the
   writers the host owns (camera + Phase 3) so their filenames and headers share

@@ -6,8 +6,11 @@ modules in a tabbed notebook. The first module is a live maze illustration
 (rig_view.RigView). The rig/firmware controls live at the bottom of the Rig view
 tab: a "Solenoid test" bar fires R<port><sol>,<ms> commands (the pulse width is
 configurable, default DEFAULT_PULSE_MS) so you can map each solenoid by watching
-which physical valve clicks and which marker flashes in Rig view, and a "Training
-mode" bar switches the firmware between Free Roam and the Full task. Both the
+which physical valve clicks and which marker flashes in Rig view, a "Training
+mode" bar switches the firmware between Free Roam and the Full task, and a
+"Session" panel (bottom-right, under the behavior readout) starts/stops recording
+everything (camera + Phase 3) under one shared session id + manifest (ADR-0048).
+Both the
 tmaze_test and cue-guided-task sketches ack with SOL lines and honor the
 per-pulse duration, so the buttons work under either (cue-guided-task fires
 non-blocking and in any mode). Future modules (reward control, trial
@@ -40,7 +43,7 @@ from tkinter import messagebox, ttk
 import protocol
 from rig_io import RigClient
 from rig_view import RigView
-from camera_view import CameraView
+from camera_view import CameraView, DEFAULT_OUTPUT_DIR
 from reward_volume import (reward_volume_ul, format_volume,
                            DEFAULT_REWARD_PULSE_MS)
 from rig_config import load_rig_config, RigConfig
@@ -446,20 +449,20 @@ def main() -> int:
     # See docs/decisions/0046.
     if tracker is not None and Phase3ControlView is not None:
         tabs.append(("Phase 3", [make_phase3]))
-    # Session tab: one-click start/stop of the recorders + a shared manifest. Built
-    # LAST so camera_ref/phase3_ref are populated when its factory runs (ADR-0048).
-    if SessionControlView is not None:
-        tabs.append(("Session", [
-            lambda parent: SessionControlView(
-                parent, camera=camera_ref.get("cam"),
-                phase3=phase3_ref.get("p3"), send=lambda cmd: client.send(cmd))]))
+    # NOTE: the Session control is NOT a tab - it lives in the Rig view bottom
+    # strip's RIGHT column, under the live behavior readout (filling the dead
+    # space there so it doesn't lengthen the left column / the window). It is
+    # built after the tab loop (so camera_ref/phase3_ref are populated) and after
+    # the broker client exists; see the bottom-strip wiring below (ADR-0048).
 
     # Build modules into tabs. Modules grouped in one tab are packed
     # left-to-right (schematic on the left, camera on the right). The Rig view
     # tab gets a small toolbar on top carrying the "Quit rig" button, and a
     # bottom strip that hosts the rig/firmware controls (Solenoid test, Training
-    # mode) - these belong with Rig view (you watch the valve markers here) and
-    # keeping them off the Tracking tab lets that tab use its full height.
+    # mode in the left column; the Session start/stop panel under the behavior
+    # readout in the right) - these belong with Rig view (you watch the valve
+    # markers here) and keeping them off the Tracking tab lets that tab use its
+    # full height.
     rig_controls_parent = root  # fallback; reassigned to the Rig view bottom strip
     rig_controls_left = root     # left column: the existing rig/firmware controls
     rig_controls_right = None    # right column: the live behavior readout (or None)
@@ -555,6 +558,26 @@ def main() -> int:
                                 camera=camera_ref.get("cam"), pipeline=pipeline)
         behavior.widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         modules.append(behavior)
+
+    # Session start/stop panel: pinned to the BOTTOM of the right column, filling
+    # the dead space under the behavior readout (keeps it off the left column so
+    # the strip - and the window - stays short). Built here (not as a tab) so
+    # camera_ref/phase3_ref + the broker client exist; registered as a module so
+    # it gets each serial line (animal-id prefill) + close(). ADR-0048. Falls back
+    # to the left column only if the right one somehow wasn't created.
+    if SessionControlView is not None:
+        session_parent = (rig_controls_right if rig_controls_right is not None
+                          else rig_controls_left)
+        # Each session gets its own folder tree under <recordings>/phase3_recordings
+        # (ADR-0049). Use the camera's fixed default recordings folder as the base
+        # (not the live Output: box), so sessions always land in one place.
+        recordings_root = os.path.join(DEFAULT_OUTPUT_DIR, "phase3_recordings")
+        session = SessionControlView(
+            session_parent, camera=camera_ref.get("cam"),
+            phase3=phase3_ref.get("p3"), send=lambda cmd: client.send(cmd),
+            recordings_root=recordings_root)
+        session.widget().pack(side=tk.BOTTOM, fill=tk.X, padx=4, pady=4)
+        modules.append(session)
 
     root.protocol("WM_DELETE_WINDOW", on_close)
 

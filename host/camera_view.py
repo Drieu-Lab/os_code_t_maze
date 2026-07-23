@@ -732,15 +732,19 @@ class CameraView:
             pass
         self._set_format_locked(False)
 
-    def start_recording(self, session_id: Optional[str] = None) -> bool:
+    def start_recording(self, session_id: Optional[str] = None,
+                        out_dir: Optional[str] = None) -> bool:
         """Begin a recording; return True iff it started.
 
         Public seam used by the Session controller (one-click session start; see
         docs/decisions/0048) as well as the Record button. When ``session_id`` is
         given it names the file (so the video + Phase 3 file share the session
         stamp) and is stamped into the sidecar header for correlation; otherwise
-        the file is named ``<animal>_<stamp>`` as before. Needs the camera UI +
-        PyAV; a no-op (returns False) if recording isn't available or already on.
+        the file is named ``<animal>_<stamp>`` as before. ``out_dir`` redirects the
+        output into the session's folder (docs/decisions/0049); when omitted the
+        file goes to the Output: box / the default recordings folder as before.
+        Needs the camera UI + PyAV; a no-op (returns False) if recording isn't
+        available or already on.
         """
         if not self._can_record or not hasattr(self, "_record_btn"):
             return False
@@ -754,7 +758,7 @@ class CameraView:
             return False
 
         h, w = frame.shape[:2]
-        out_dir = self._outdir_var.get().strip() or DEFAULT_OUTPUT_DIR
+        out_dir = out_dir or self._outdir_var.get().strip() or DEFAULT_OUTPUT_DIR
         try:
             os.makedirs(out_dir, exist_ok=True)
         except OSError as e:
