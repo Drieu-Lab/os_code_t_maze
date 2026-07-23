@@ -87,3 +87,5 @@ The chain of records is the audit trail.
 | [0041](0041-shared-maze-state-pipeline.md) | One shared maze-state pipeline on the tracking worker (frame-rate estimator + drained fan-out) replacing the three per-tab estimators | Accepted | 2026-07-22 |
 | [0042](0042-fast-actuation-maze-state-view.md) | A second "fast" (low-dwell) maze-state view + worker push seam for actuation, alongside the debounced display view | Accepted | 2026-07-22 |
 | [0043](0043-rules-actuation-thread.md) | Move reward actuation onto a dedicated thread fed by fast-view pushes + routed lick edges (single-threaded engine, atomic gate snapshot) | Accepted | 2026-07-22 |
+| [0044](0044-host-driven-cue-command.md) | Host-driven positional audio cue command (CUE_ON/CUE_OFF + CUE,VISION\|BEAM source flag), PROTO_VERSION 5 | Accepted | 2026-07-22 |
+| [0045](0045-vision-cue-zone-gate.md) | Host vision cue as a zone-membership gate (fast view + CueGate, fail-open choice / fail-safe return) with a redrawn return zone + offline onset measurement | Accepted | 2026-07-22 |

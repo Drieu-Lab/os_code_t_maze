@@ -253,6 +253,26 @@ TIPS: Dict[str, Entry] = {
                            "segments (high CV suggests the single scale is "
                            "inaccurate across the frame - consider a homography).",
 
+    # ---- cue_controller.py: Cue tab (vision-triggered spatially-gated cue) ----
+    "cue.arm": "Arm the HOST-driven vision cue (OFF by default). While armed the "
+               "host owns the DAC: it sends CUE,VISION so the firmware suppresses "
+               "its own beam-driven tone, then drives CUE_ON/CUE_OFF from the "
+               "rat's tracked zone. Only actuates while the firmware is in Full "
+               "task, tracking is running, and a zone map exists; disarming "
+               "restores firmware autonomy (CUE,BEAM).",
+    "cue.choice": "Play the CHOICE tone while the rat is in the central-stem zone "
+                  "(the window between the entry and exit beams). Fails OPEN: a "
+                  "confidence dropout never cuts a playing tone.",
+    "cue.up_stem": "Only start the choice tone while the rat is heading UP the "
+                   "stem (toward the junction), not on the way back down.",
+    "cue.return": "Play a tone on every return-arm run (the firmware picks hi/lo). "
+                  "Fails SAFE: if the track is not confident the instant the rat "
+                  "enters the return zone, that return's cue is skipped for the "
+                  "whole visit (a missed cue beats a mis-placed one).",
+    "cue.min_confidence": "Extra track-confidence floor for a cue onset, on top of "
+                          "the estimator's own validity threshold (0..1; 0 defers "
+                          "entirely to the estimator).",
+
     # ---- maze_state_view.py: Maze state tab ----
     "maze.define_zones": "Draw the maze zones (central reward HUB, stem, "
                          "junction, choice/return arms), the well region (inside "

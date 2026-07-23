@@ -68,8 +68,10 @@ criteria).
 | [FW-0010](#fw-0010-deeplabcut-live-pose-estimation-for-body-part-tracking) | DeepLabCut-Live pose estimation for body-part tracking | Markerless tracker | Proposed |
 | [FW-0011](#fw-0011-richer-colour-model-for-clustered-fragments-multimodalper-part) | Richer colour model for clustered fragments (multimodal/per-part) | Markerless tracker | Proposed |
 | [FW-0013](#fw-0013-free-cpu-cores-during-recording-nvenc-or-encode-thread-cap) | Free CPU cores during recording (NVENC or encode-thread cap) | Camera recording | Proposed |
-| [FW-0014](#fw-0014-zone-entry-latency-floor-for-a-vision-triggered-cue-path) | Zone-entry latency floor for a vision-triggered cue path | Maze state + rules | Proposed |
+| [FW-0014](#fw-0014-zone-entry-latency-floor-for-a-vision-triggered-cue-path) | Zone-entry latency floor for a vision-triggered cue path | Maze state + rules | Partially done |
 | [FW-0015](#fw-0015-scoped-ratblocker-de-merge-restore-splitting-only-if-needed) | Scoped rat/blocker de-merge (restore splitting only if needed) | Markerless tracker | Proposed |
+| [FW-0016](#fw-0016-migrate-trial-sequence--cue-identity-from-firmware-to-host) | Migrate trial-sequence / cue-identity from firmware to host | Firmware + protocol + host | Proposed |
+| [FW-0017](#fw-0017-end-to-end-cue-onset-latency-from-the-firmware-cue-echo) | End-to-end cue-onset latency from the firmware CUE echo | Validation harness | Proposed |
 
 ## Entries
 
@@ -313,6 +315,14 @@ it keeps diverging?
   (reward-shaping phases 1/2a/2b this follows), [ADR-0009](decisions/0009-runtime-training-modes-and-logging.md)
   (anti-bias run-length cap), [ADR-0008](decisions/0008-wavetable-tone-isr.md) (cue)
 
+**Update (2026-07-22).** The **spatially-gated cue** half of this item is now
+addressed by the host vision cue (ADR-0044 + ADR-0045): the tone is a function of
+the rat's tracked position (the central-stem / return zones), so it is played only
+within the spatially-stable window rather than for the whole beam-bounded
+`CueRunning` interval. What REMAINS for FW-0008 is the **correction-trial**
+sequencing below (and, if desired, folding the cue into the firmware trial FSM
+rather than the host-driven path).
+
 **Motivation / context.** The host-side shaping phases (ADR-0026) end at Phase 2b
 (stem-gated choice with choice-side anti-bias, primed at the choice; ADR-0030).
 Phase 3 is the full cue-guided task,
@@ -534,7 +544,7 @@ rate-control (CQ vs bitrate)? Expose as a GUI toggle or auto-detect?
 
 ### FW-0014: Zone-entry latency floor for a vision-triggered cue path
 
-- **Status:** Proposed
+- **Status:** Partially done
 - **Date added:** 2026-07-21
 - **Author / Agent:** Agent (Cursor) on behalf of Celine
 - **Area / modules:** `host/maze_state.py` (`min_dwell_ticks`, commit logic),
@@ -552,16 +562,27 @@ rate-control (CQ vs bitrate)? Expose as a GUI toggle or auto-detect?
   view + worker push seam) and
   [ADR-0043](decisions/0043-rules-actuation-thread.md) (actuation off the Tk poll)
 
-**Update (2026-07-22, later).** The **distinct fast/low-latency view** and the
+**Update (2026-07-22, latest).** The **host vision cue path itself now exists**
+(ADR-0044 + ADR-0045): a host->firmware cue command (`CUE_ON/CUE_OFF` +
+`CUE,VISION|BEAM`, PROTO_VERSION 5) and a pure `CueGate` (`host/cue_gate.py`) that
+gates the tone on the fast-view zone (CHOICE = central stem up-stem, RETURN =
+redrawn return zone), with **fail-open** on the choice cue and fail-safe on the
+return, driven by the `cue_controller.py` Cue tab off the actuation-thread seam.
+Onset is measured offline via `maze_state_validate.py --cue`. What REMAINS for
+this item is only the beam+vision **fusion** for observability (committed-entry =
+beam ENTRY *confirmed* by vision forward progress) - the current cue is
+Celine's deliberate **vision-only** first cut ("ON/OFF just based on vision for
+now ... eventually a fusion signal using both vision and beams"). Fusion would
+add the beam fiducial back as a precise onset time while vision resolves
+commitment-vs-reversal.
+
+**Update (2026-07-22, earlier).** The **distinct fast/low-latency view** and the
 **move off the Tk poll** called for below are now done: ADR-0042 added a second
 low-`min_dwell` estimator (default 1 frame) with a worker push seam
 (`subscribe_fast`), and ADR-0043 moved reward actuation onto a dedicated thread
 fed by those pushes + routed lick edges, so rules react within ~1-2 frames instead
-of a Tk poll. What still remains for THIS item is the beam+vision **fusion** for
-observability (committed-entry = beam ENTRY confirmed by vision forward progress),
-confidence-dropout **fail-open**, and an actual host->firmware cue command - none
-of which exist yet. The fast push -> actuation-thread seam is what that cue path
-will attach to.
+of a Tk poll. The fast push -> actuation-thread seam is what the cue path attached
+to.
 
 **Update (2026-07-22).** The *poll-rate* half of the floor below is gone: ADR-0041
 moved the one estimator onto the frame-rate tracking worker, so `min_dwell_ticks`
@@ -663,6 +684,97 @@ re-detection cheap enough to be worth it vs just accepting the coast?
 
 **ADR needed?** Yes if it changes the ADR-0039 behaviour (supersede the relevant
 part); no if it is a guarded, evidence-driven addition.
+
+### FW-0016: Migrate trial-sequence / cue-identity from firmware to host
+
+- **Status:** Proposed
+- **Date added:** 2026-07-22
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** `firmware/cue-guided-task/task_core.h` (`generateSequence`,
+  `cueFor`, `correctArm`), `firmware/cue-guided-task/cue-guided-task.ino`,
+  `firmware/PROTOCOL.md` (events / any bump), a new host module (e.g.
+  `host/trial_sequence.py`) + tests, `host/cue_controller.py` (resolve identity)
+- **Related ADRs:** [ADR-0044](decisions/0044-host-driven-cue-command.md) (the
+  semantic `CUE_ON,<kind>` command chosen to stay valid across this migration),
+  [ADR-0045](decisions/0045-vision-cue-zone-gate.md) (the host cue gate that would
+  consume host-side identity), FW-0001 (transition-bias generator this would host)
+
+**Motivation / context.** Today the firmware owns the trial sequence and the tone
+identity: `generateSequence` builds the L/R schedule, `correctArm` is latched on
+the `B_ENTRY` beam, and `cueFor()` maps it to a frequency. ADR-0044 kept the wire
+command SEMANTIC (`CUE_ON,CHOICE`, not `TONE_ON,<hz>`) precisely so identity can
+move to the host later without another protocol bump. Two forces push that way:
+(a) ADR-0044 notes a latent race - the host decides the choice-cue ONSET from
+vision while the firmware still resolves WHICH tone from the ENTRY beam; hosting
+the sequence removes the split-brain; (b) richer sequence logic (FW-0001's
+60/40 transition bias, correction trials in FW-0008) is easier to write and test
+in Python than on the Due.
+
+**Sketch of approach.** Add a pure host `trial_sequence` core (deterministic from
+a seed, host-testable like `generateSequence`) that owns the L/R schedule and the
+per-trial correct arm + tone identity. The host advances trials on the events it
+already sees (beams / zone entries / reward) and resolves `CUE_ON,CHOICE` to a
+specific tone; the firmware keeps synthesizing tones + TTLs. Decide the source of
+truth for trial advancement (host vs firmware) and how they stay in sync.
+
+**Evaluation / acceptance.** Host unit tests over long sequences (balance,
+transition ratio, anti-bias cap, correction-trial rules); a bench check that
+host-resolved identity matches the firmware's `cueFor` for the same schedule
+during a transition period; no missed/duplicated trials across a mode switch.
+
+**Effort / risk.** Medium-high. Splitting authority for trial state between host
+and firmware is the main risk (drift/desync); needs a clear ownership decision and
+probably a firmware "report current trial" line for reconciliation.
+
+**Open questions.** Does the host or firmware remain the trial-advance authority?
+How is the seed shared so both sides agree? Is this a hard cutover or a
+dual-run reconciliation period? Does it subsume FW-0001's generator?
+
+**ADR needed?** Yes - it moves a core behavioral-timing responsibility across the
+host/firmware boundary.
+
+### FW-0017: End-to-end cue-onset latency from the firmware CUE echo
+
+- **Status:** Proposed
+- **Date added:** 2026-07-22
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** `host/maze_state_validate.py` (a `load_cue_events` parser +
+  a firmware-echo alignment pass), `host/protocol.py` (`cue_info`, already added)
+- **Related ADRs:** [ADR-0045](decisions/0045-vision-cue-zone-gate.md) (the offline
+  CueGate-replay latency this complements), [ADR-0044](decisions/0044-host-driven-cue-command.md)
+  (the `<ms>,CUE,ON,...` echo this would parse)
+
+**Motivation / context.** `maze_state_validate.py --cue` already measures the
+**vision-decision** component of cue-onset spread (offline CueGate replay vs the
+beams). It does NOT measure the **command/serial/firmware** component - the extra
+latency from the host's `CUE_ON` send to the true acoustic onset. The firmware
+emits `<ms>,CUE,ON,<kind>,<freq>` on every real (re)start (ADR-0044), and the
+session log carries it with a wall-clock stamp, so the realized end-to-end onset
+can be aligned to the beam ground truth offline - closing the budget breakdown the
+mission asked for (decision -> tone).
+
+**Sketch of approach.** Add `load_cue_events(session_csv)` (reuse `cue_info`) to
+pull firmware `CUE,ON` echoes with their wall-clock time, then align them to the
+cue-relevant beams like `cue_report` does. Handle the return-side ambiguity: the
+`RETURN` echo carries no L/R side, so match a `RETURN` onset to the NEAREST of the
+two return beams within the window (or infer side from the concurrent track).
+Report realized-onset-vs-beam alongside the offline CueGate prediction so the
+command-path delta is explicit.
+
+**Evaluation / acceptance.** On a recorded session with the cue armed: the
+realized `CUE,ON` onsets align to their beams within the window, and the
+(realized - predicted) delta quantifies the command/serial/firmware latency;
+consistent with a bench loopback measurement of `CUE_ON` -> `TONE_ON` TTL.
+
+**Effort / risk.** Low. Pure offline harness addition; main subtlety is the
+return-side disambiguation.
+
+**Open questions.** Match `RETURN` echoes to the nearest return beam, or require a
+track to disambiguate side? Should the harness ingest the TTL log directly if one
+is exported, for a firmware-internal latency number?
+
+**ADR needed?** No - it extends an existing measurement tool without changing
+behavior.
 
 ## Completed
 

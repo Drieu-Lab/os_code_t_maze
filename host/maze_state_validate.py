@@ -26,9 +26,18 @@ the central reward HUB has no body beam (arrival there is sensed by the lick
 port, not a crossing beam), so HUB entries are vision-only and are excluded from
 the candidate-false-transition count.
 
+Cue-onset mode (--cue): additionally replays the host-driven vision cue offline
+(the FAST-view estimator feeding the pure CueGate, cue_gate.py) and aligns each
+CUE_ON onset to its ground-truth beam (ENTRY for the choice cue, L/R RETURN for
+the return cue). The signed latency is the vision-decision component of the cue's
+spatial-onset spread; use it to confirm the tight onset budget before finalizing
+(ADR-0045). The command/serial/firmware component is measured separately on the
+rig (the firmware's "<ms>,CUE,ON,..." echo, ADR-0044).
+
 Run from host/:
     python maze_state_validate.py --selftest
     python maze_state_validate.py --beams data/RAT_...csv --track recordings/track_logs/RAT_..._track.csv --frame-size 1280 1024
+    python maze_state_validate.py --cue --beams data/RAT_...csv --track ..._track.csv --frame-size 1280 1024
 """
 
 from __future__ import annotations
@@ -42,6 +51,7 @@ from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
 import protocol
+from cue_gate import CueGate, CueParams
 from maze_state import (
     HUB, CENTRAL_STEM, JUNCTION, LEFT_CHOICE, RIGHT_CHOICE, LEFT_RETURN,
     RIGHT_RETURN, ZONES_PATH, MazeStateEstimator, MazeStateParams, ZoneMap,
@@ -161,6 +171,52 @@ def vision_transitions(rows: List[Tuple[float, object]], zone_map: ZoneMap,
     return out
 
 
+# The zones whose ENTRY the host-driven vision cue keys off (choice = central
+# stem, return = either return arm); the matching beams are their ground truth.
+CUE_ONSET_ZONES = (CENTRAL_STEM, LEFT_RETURN, RIGHT_RETURN)
+
+
+def cue_onset_events(rows: List[Tuple[float, object]], zone_map: ZoneMap,
+                     params: Optional[MazeStateParams] = None,
+                     cue_params: Optional[CueParams] = None
+                     ) -> List[Tuple[float, str]]:
+    """(unix_seconds, zone) for every CueGate ONSET over the track.
+
+    Replays the exact host actuation path offline: the FAST-view estimator
+    (low ``min_dwell``) feeding the pure CueGate (cue_gate.py). The onset zone is
+    the RatState zone at the tick CUE_ON would fire (CENTRAL_STEM for the choice
+    cue, LEFT/RIGHT_RETURN for the return cue), so onsets align against the same
+    beams as the zone-entry check. Aligning these to the beam crossings measures
+    the vision-decision component of the cue's spatial-onset spread (ADR-0045);
+    the direction gate on the choice cue makes this later than the raw zone commit.
+    """
+    est = MazeStateEstimator(zone_map, params or MazeStateParams())
+    gate = CueGate(cue_params or CueParams())
+    out: List[Tuple[float, str]] = []
+    for t, result in rows:
+        s = est.update(result, t)
+        d = gate.step(s.zone, s.direction, s.confidence, s.valid)
+        if d.started is not None:
+            out.append((t, s.zone))
+    return out
+
+
+def cue_report(rows: List[Tuple[float, object]],
+               beam_events: List[Tuple[float, int]], zone_map: ZoneMap,
+               params: Optional[MazeStateParams] = None,
+               cue_params: Optional[CueParams] = None,
+               window_s: float = DEFAULT_WINDOW_S) -> dict:
+    """Align CueGate onsets to their ground-truth beams (ENTRY / L,R RETURN).
+
+    Reuses ``align`` with the beam list filtered to the cue-relevant crossings, so
+    each report latency is (cue onset - beam) and ``unmatched_vision`` counts
+    spurious/early cue onsets not explained by a beam crossing.
+    """
+    onsets = cue_onset_events(rows, zone_map, params, cue_params)
+    cue_beams = [e for e in beam_events if BEAM_TO_ZONE[e[1]] in CUE_ONSET_ZONES]
+    return align(cue_beams, onsets, window_s)
+
+
 # ================================ alignment ==================================
 def align(beam_events: List[Tuple[float, int]],
           transitions: List[Tuple[float, str]],
@@ -251,25 +307,28 @@ def selftest() -> int:
     w, h = 1000, 1000
 
     # A scripted left lap: dwell in each zone a few ticks so the min-dwell
-    # hysteresis commits, sampled at 20 Hz (0.05 s). (zone-center px, n_ticks,
-    # beam index at entry or None for the beamless HUB).
+    # hysteresis commits, sampled at 20 Hz (0.05 s). Each segment is a sequence of
+    # centroid px + the beam index tripped at its start (None for the beamless
+    # HUB). The stem is a genuine upward SWEEP (y decreasing) so the estimator
+    # assigns up_stem - the choice cue's direction gate needs real motion.
+    stem_sweep = [(500, cy) for cy in (760, 720, 680, 640, 600, 560)]
     segments = [
-        ((500, 900), 6, None),  # HUB (start, in well) - no beam
-        ((500, 650), 6, 0),     # CENTRAL_STEM  <- ENTRY
-        ((500, 420), 6, 1),     # JUNCTION      <- EXIT
-        ((200, 350), 6, 2),     # LEFT_CHOICE   <- LCHOICE
-        ((100, 650), 6, 4),     # LEFT_RETURN   <- LRETURN
-        ((500, 900), 8, None),  # HUB again (closes the lap) - no beam
+        ([(500, 900)] * 6, None),   # HUB (start, in well) - no beam
+        (stem_sweep, 0),            # CENTRAL_STEM (up-stem) <- ENTRY
+        ([(500, 420)] * 6, 1),      # JUNCTION      <- EXIT
+        ([(200, 350)] * 6, 2),      # LEFT_CHOICE   <- LCHOICE
+        ([(100, 650)] * 6, 4),      # LEFT_RETURN   <- LRETURN
+        ([(500, 900)] * 8, None),   # HUB again (closes the lap) - no beam
     ]
     rows: List[Tuple[float, object]] = []
     beam_events: List[Tuple[float, int]] = []
     t = 1000.0
-    for (cx, cy), n, beam in segments:
+    for points, beam in segments:
         if beam is not None:
             # A real beam trips slightly before the centroid is deep in the
             # zone; nudge it 60 ms before the segment start.
             beam_events.append((t - 0.06, beam))
-        for _ in range(n):
+        for (cx, cy) in points:
             rows.append((t, types.SimpleNamespace(
                 state="TRACKING", confidence=0.9, frame_size=(w, h),
                 centroid=(cx, cy), smoothed=(cx, cy))))
@@ -282,7 +341,20 @@ def selftest() -> int:
     print("[selftest] synthetic left-lap figure-8 traversal")
     print(format_report(report))
 
-    ok = report["match_rate"] >= 0.8 and report["unmatched_vision"] == 0
+    # Cue-onset pass over the same lap: the choice cue (CENTRAL_STEM, up-stem) and
+    # the left return cue (LEFT_RETURN) should each fire once and match their beam.
+    fast = MazeStateParams(min_dwell_ticks=1)
+    creport = cue_report(rows, beam_events, zm, params=fast,
+                         window_s=DEFAULT_WINDOW_S)
+    print("\n[selftest] cue onsets (fast estimator + CueGate)")
+    print(format_report(creport))
+    cue_beams = creport["per_beam"]
+    cue_ok = (cue_beams[0]["matched"] == 1        # choice cue matched the ENTRY beam
+              and cue_beams[4]["matched"] == 1    # return cue matched the LRETURN beam
+              and creport["unmatched_vision"] == 0)
+
+    ok = (report["match_rate"] >= 0.8 and report["unmatched_vision"] == 0
+          and cue_ok)
     print(f"\n[selftest] {'PASS' if ok else 'FAIL'}")
     return 0 if ok else 1
 
@@ -301,6 +373,11 @@ def main(argv: Optional[List[str]] = None) -> int:
                     help=f"match window in ms (default {DEFAULT_WINDOW_S * 1000:.0f})")
     ap.add_argument("--min-dwell", type=int, default=3,
                     help="min-dwell ticks for the estimator (default 3)")
+    ap.add_argument("--cue", action="store_true",
+                    help="also replay the vision cue (CueGate) and report "
+                         "cue-onset latency vs the ENTRY / L,R RETURN beams")
+    ap.add_argument("--cue-min-dwell", type=int, default=1,
+                    help="min-dwell ticks for the cue's FAST estimator (default 1)")
     ap.add_argument("--selftest", action="store_true",
                     help="run the built-in synthetic check and exit")
     args = ap.parse_args(argv)
@@ -324,12 +401,20 @@ def main(argv: Optional[List[str]] = None) -> int:
               "column + coords).", file=sys.stderr)
         return 2
     params = MazeStateParams(min_dwell_ticks=max(1, args.min_dwell))
+    window_s = args.window_ms / 1000.0
     trans = vision_transitions(rows, zone_map, params)
-    report = align(beam_events, trans, window_s=args.window_ms / 1000.0)
+    report = align(beam_events, trans, window_s=window_s)
     print(f"beams: {len(beam_events)} rising edges from {args.beams}")
     print(f"track: {len(rows)} rows from {args.track} (frame {frame_size[0]}x{frame_size[1]})")
     print("")
     print(format_report(report))
+    if args.cue:
+        fast = MazeStateParams(min_dwell_ticks=max(1, args.cue_min_dwell))
+        creport = cue_report(rows, beam_events, zone_map, params=fast,
+                             window_s=window_s)
+        print("\ncue onsets (fast estimator + CueGate, min_dwell "
+              f"{fast.min_dwell_ticks}):")
+        print(format_report(creport))
     return 0
 
 
