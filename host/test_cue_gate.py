@@ -83,12 +83,14 @@ class TestChoiceCue(unittest.TestCase):
 
 class TestReturnCue(unittest.TestCase):
     def test_fires_on_entry_and_off_on_leaving(self):
-        for zone in (LEFT_RETURN, RIGHT_RETURN):
+        for zone, side in ((LEFT_RETURN, "left"), (RIGHT_RETURN, "right")):
             g = CueGate()
             self.assertIsNone(_valid(g, JUNCTION).desired)
             d = _valid(g, zone)
             self.assertEqual(d.desired, RETURN)
             self.assertEqual(d.started, RETURN)
+            # the physical arm is reported on the RETURN onset (ADR-0047)
+            self.assertEqual(d.return_arm, side)
             # stays on inside the zone
             self.assertEqual(_valid(g, zone).desired, RETURN)
             # leaving to the hub cuts it

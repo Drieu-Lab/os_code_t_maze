@@ -37,13 +37,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from maze_state import (CENTRAL_STEM, LEFT_RETURN, RIGHT_RETURN, UP_STEM)
+from maze_state import (CENTRAL_STEM, LEFT, LEFT_RETURN, RIGHT, RIGHT_RETURN,
+                        UP_STEM)
 
 # Cue kinds (match the CUE_ON,<kind> firmware command; see firmware/PROTOCOL.md).
 CHOICE = "CHOICE"
 RETURN = "RETURN"
 
 _RETURN_ZONES = frozenset({LEFT_RETURN, RIGHT_RETURN})
+# Physical return arm ("left"/"right") of each return zone, reported on a RETURN
+# onset so the host can pick that arm's planned cue (see docs/decisions/0047).
+_SIDE_OF_RETURN = {LEFT_RETURN: LEFT, RIGHT_RETURN: RIGHT}
 
 
 @dataclass(frozen=True)
@@ -71,11 +75,15 @@ class CueDecision:
     ``started`` / ``stopped`` are the edges this tick (for logging); the raw
     ``desired`` is authoritative. ``skipped_return`` flags a return visit dropped
     by the fail-safe (unconfident at entry) - surfaced for status/telemetry.
+    ``return_arm`` is the physical arm ("left"/"right") on a RETURN onset (only
+    set when ``started == RETURN``), so the host can look up that arm's planned
+    return cue (see docs/decisions/0047).
     """
     desired: Optional[str] = None
     started: Optional[str] = None
     stopped: bool = False
     skipped_return: bool = False
+    return_arm: Optional[str] = None
 
 
 class CueGate:
@@ -127,6 +135,7 @@ class CueGate:
         started: Optional[str] = None
         stopped = False
         skipped_return = False
+        return_arm: Optional[str] = None
 
         # --- OFF first: positional - leaving the window (positively observed on
         # this valid frame) cuts the tone. ---
@@ -151,6 +160,7 @@ class CueGate:
                     if confident:
                         self._active = RETURN
                         started = RETURN
+                        return_arm = _SIDE_OF_RETURN.get(zone)
                     else:
                         skipped_return = True
                     self._return_visit_decided = True
@@ -162,4 +172,5 @@ class CueGate:
 
         self._prev_in_return = in_return
         return CueDecision(desired=self._active, started=started,
-                           stopped=stopped, skipped_return=skipped_return)
+                           stopped=stopped, skipped_return=skipped_return,
+                           return_arm=return_arm)
