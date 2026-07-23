@@ -12,7 +12,7 @@ dist/
 .vscode/
 .idea/
 
-# Recorded session data (rig_logger.py output)
+# Recorded session data (rig_logger.py raw log + phase3_controller.py session CSV)
 host/data/
 
 # Camera recordings + sidecars (experiment_control.py / camera_view.py output)
