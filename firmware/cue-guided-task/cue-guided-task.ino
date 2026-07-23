@@ -152,6 +152,41 @@ void handleManualSolenoid(const char* b) {
   }
 }
 
+// ---------------- Host-driven positional cue (protocol v5) ----------------
+// The HOST owns the ON/OFF decision from the rat's tracked position; the firmware
+// just makes the sound and (via startTone/stopToneAsync) fires the TONE_ON/OFF
+// TTLs. Identity stays in firmware: CHOICE uses the current trial's correctArm;
+// RETURN is a random hi/lo from the session PRNG. Handled shell-side (like
+// R<port>), session-independent. The CUE line reflects the ACTUAL acoustic state
+// (emitted only on a real start/stop, never a no-op). see docs/decisions/0044
+void handleCueOn(const char* kind) {
+  uint16_t freq;
+  const char* type;
+  if (!strcmp(kind, "CHOICE")) {
+    freq = cueFor(session.trial.correctArm, cfg);   // -1 arm (no trial) -> low-tone fallback
+    type = "CHOICE";
+  } else if (!strcmp(kind, "RETURN")) {
+    session.rng = lcg(session.rng);                 // advance the threaded PRNG
+    bool high = ((session.rng >> 16) & 1u);
+    freq = high ? cfg.highToneHz : cfg.lowToneHz;
+    type = "RETURN";
+  } else {
+    return;                                          // unknown cue kind: ignore
+  }
+  if (tonePlaying) return;                           // already sounding: don't relog / retrigger
+  startToneAsync((float)freq);                       // also raises the TONE_ON TTL
+  unsigned long t = millis() - session.startMs;
+  CONSOLE.print(t); CONSOLE.print(",CUE,ON,");
+  CONSOLE.print(type); CONSOLE.print(','); CONSOLE.println(freq);
+}
+
+void handleCueOff() {
+  if (!tonePlaying) return;                          // nothing playing: don't pulse a spurious TTL
+  stopToneAsync();                                   // also raises the TONE_OFF TTL
+  unsigned long t = millis() - session.startMs;
+  CONSOLE.print(t); CONSOLE.println(",CUE,OFF");
+}
+
 // ---------------- Serial command channel ----------------
 Command parseCommand(const char* b) {
   if (!strcmp(b, "ABORT") || !strcmp(b, "STOP")) return Command{Command::Abort, 0};
@@ -177,6 +212,14 @@ Command drainSerial() {
         // other lines parse into a core Command.
         if (cmdBuf[0] == 'R' && cmdBuf[1] >= '0' && cmdBuf[1] <= '2') {
           handleManualSolenoid(cmdBuf);
+        } else if (!strncmp(cmdBuf, "CUE_ON,", 7)) {
+          handleCueOn(cmdBuf + 7);                 // host-driven cue on (v5)
+        } else if (!strcmp(cmdBuf, "CUE_OFF")) {
+          handleCueOff();                          // host-driven cue off (v5)
+        } else if (!strcmp(cmdBuf, "CUE,VISION")) {
+          cfg.cueSourceVision = true;              // host drives the cue; suppress beam auto-tone
+        } else if (!strcmp(cmdBuf, "CUE,BEAM")) {
+          cfg.cueSourceVision = false;             // firmware beam-driven auto-tone (v4 behavior)
         } else {
           Command k = parseCommand(cmdBuf);
           if (k.kind != Command::None) last = k;
@@ -292,6 +335,7 @@ TaskConfig makeConfig() {
   c.rewardPulseMs      = REWARD_PULSE_MS;   // logged on REWARD,CENTER for host volume calc
   c.highToneHz         = TONE_HIGH_HZ;
   c.lowToneHz          = TONE_LOW_HZ;
+  c.cueSourceVision    = DEFAULT_CUE_SOURCE_VISION;  // host-driven cue off by default. see docs/decisions/0044
   return c;
 }
 
@@ -395,6 +439,9 @@ void loop() {
   // Mode switch is a shell concern (it re-seeds, regenerates the sequence, and
   // re-dumps the handshake), so it is handled here rather than in the pure core.
   if (in.cmd.kind == Command::SetMode) {
+    // A mode switch starts a fresh session; silence any tone the host (or a v4
+    // beam cue) left playing so a new session never begins mid-tone. see docs/decisions/0044
+    if (tonePlaying) stopToneAsync();
     if (in.cmd.arg == (int8_t)Mode::FullTask) startFullTask();
     else                                      startFreeRoam();
   } else if (session.active) {

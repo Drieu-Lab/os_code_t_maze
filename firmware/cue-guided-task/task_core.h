@@ -91,6 +91,10 @@ struct TaskConfig {
                               * pulse to a calibrated dispensed volume. see docs/decisions/0019 */
   uint16_t highToneHz;
   uint16_t lowToneHz;
+  bool     cueSourceVision;  /* true: HOST drives the cue tone (CUE_ON/CUE_OFF) and the
+                              * firmware suppresses its Phase::CueRunning auto-tone, so only
+                              * one thing drives the DAC. false: v4 beam-driven auto-tone.
+                              * see docs/decisions/0044 */
 };
 
 /* ------------------------------- Effects -------------------------------- */
@@ -271,10 +275,14 @@ inline Session step(const Session& s, const Inputs& in, const TaskConfig& cfg,
       break;
 
     case Phase::CueRunning:
+      /* Cue tone: BEAM source (v4) plays it while between ENTRY and EXIT and
+       * stops it at EXIT. VISION source leaves the DAC entirely to the host
+       * (CUE_ON/CUE_OFF); the FSM only advances the phase on the EXIT beam so
+       * scoring/reward/TTLs are untouched. see docs/decisions/0044 */
       if (in.beam[B_EXIT]) {
-        if (in.tonePlaying) emit(fx, stopTone());
+        if (!cfg.cueSourceVision && in.tonePlaying) emit(fx, stopTone());
         n.trial.phase = Phase::AwaitChoice;
-      } else if (!in.tonePlaying) {
+      } else if (!cfg.cueSourceVision && !in.tonePlaying) {
         emit(fx, startTone(cueFor(s.trial.correctArm, cfg)));
       }
       break;

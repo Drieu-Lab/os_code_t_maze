@@ -11,8 +11,8 @@ from __future__ import annotations
 import unittest
 
 import protocol
-from protocol import (animal_id, lick_edge, mode_name, parse, reward_info,
-                      sensor_edge, sol_pulse)
+from protocol import (animal_id, cue_info, lick_edge, mode_name, parse,
+                      reward_info, sensor_edge, sol_pulse)
 
 
 class TestParse(unittest.TestCase):
@@ -34,7 +34,7 @@ class TestParse(unittest.TestCase):
 
     def test_never_raises(self):
         for helper in (parse, lick_edge, sensor_edge, sol_pulse, mode_name,
-                       animal_id, reward_info):
+                       animal_id, reward_info, cue_info):
             for bad in ("", ",,,,", "garbage", "1,2,3", "\x00,\x00"):
                 helper(bad)  # must not raise
 
@@ -100,6 +100,30 @@ class TestReward(unittest.TestCase):
     def test_not_a_reward(self):
         self.assertIsNone(reward_info("500,SOL,2,1,150"))
         self.assertIsNone(reward_info("500,REWARD"))
+
+
+class TestCue(unittest.TestCase):
+    def test_on_choice_and_return(self):
+        self.assertEqual(cue_info("120,CUE,ON,CHOICE,8000"), ("ON", "CHOICE", 8000))
+        self.assertEqual(cue_info("120,CUE,ON,RETURN,4000"), ("ON", "RETURN", 4000))
+
+    def test_on_tolerates_whitespace_and_case(self):
+        self.assertEqual(cue_info("1,CUE, on , choice , 8000 "), ("ON", "CHOICE", 8000))
+
+    def test_off(self):
+        self.assertEqual(cue_info("999,CUE,OFF"), ("OFF", None, None))
+
+    def test_malformed(self):
+        self.assertIsNone(cue_info("1,CUE"))                 # no state
+        self.assertIsNone(cue_info("1,CUE,ON,CHOICE"))       # missing freq
+        self.assertIsNone(cue_info("1,CUE,ON,BOGUS,8000"))   # bad kind
+        self.assertIsNone(cue_info("1,CUE,ON,CHOICE,hz"))    # non-numeric freq
+        self.assertIsNone(cue_info("1,CUE,SIDEWAYS"))        # unknown state
+        self.assertIsNone(cue_info("120,MODE,FULLTASK"))     # not a CUE line
+
+    def test_never_raises(self):
+        for bad in ("", ",,,,", "garbage", "1,CUE,,,", "\x00,CUE,\x00"):
+            cue_info(bad)  # must not raise
 
 
 if __name__ == "__main__":

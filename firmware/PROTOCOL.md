@@ -1,9 +1,17 @@
-# Rig serial protocol v4
+# Rig serial protocol v5
 
 Both firmware sketches (`cue-guided-task`, `tmaze_test`) and the host tools
-(`maze_gui.py`, `lick_tuner.py`, `rig_logger.py`) speak this protocol. v4 adds a
-trailing pulse-duration field (`<dur_ms>`) to the `cue-guided-task` reward/
-solenoid lines (`REWARD,CENTER,<dur_ms>`, `REWARD,<port>,MANUAL,<dur_ms>`,
+(`maze_gui.py`, `lick_tuner.py`, `rig_logger.py`) speak this protocol. v5 adds
+the host-driven positional audio cue: the commands `CUE_ON,<CHOICE|RETURN>`,
+`CUE_OFF`, and the cue-source flag `CUE,VISION` / `CUE,BEAM`, plus a firmware
+`CUE` log line (`CUE,ON,<type>,<freq>` / `CUE,OFF`). The HOST decides tone
+ON/OFF from the rat's tracked position; the firmware synthesizes the tone and
+fires the `TONE_ON`/`TONE_OFF` TTLs. Under `CUE,VISION` the firmware suppresses
+its beam-driven `CueRunning` auto-tone so only one thing drives the DAC; `BEAM`
+(the default) keeps the v4 behavior (see docs/decisions/0044).
+
+v4 adds a trailing pulse-duration field (`<dur_ms>`) to the `cue-guided-task`
+reward/solenoid lines (`REWARD,CENTER,<dur_ms>`, `REWARD,<port>,MANUAL,<dur_ms>`,
 `SOL,<port>,<sol>,<dur_ms>`) so the host can map each pulse to a calibrated
 dispensed volume (see docs/decisions/0019). The field is appended, so a
 type-dispatching parser that ignores trailing fields it does not need is
@@ -45,7 +53,7 @@ Emitted at boot, in order, before the session begins:
 
 | Line | Meaning |
 |------|---------|
-| `0,PROTO,4` | protocol version (assert this on the client) |
+| `0,PROTO,5` | protocol version (assert this on the client) |
 | `0,ANIMAL,<id>` | configured animal id |
 
 The firmware then starts in its default **training mode** (Free Roam unless
@@ -83,6 +91,8 @@ log can contain several of them.
 | `REWARD` | `<port>,MANUAL,<dur_ms>` | manual reward-spout fire (`R<port>` / `R<port>1`): the experimenter delivered reward at `port` (0=left,1=right,2=center) for `<dur_ms>` ms. The Free Roam reward path; emitted alongside the `SOL` ack. |
 | `SOL` | `<port>,<sol>,<dur_ms>` | a solenoid was pulsed for `<dur_ms>` ms: a manual `R<port><sol>` fire, or the automatic well-clean (`SOL,2,4,<rinse_ms>` rinse then `SOL,2,3,<drain_ms>` drain) at trial start. Drives the Rig-view marker flash. |
 | `RETURN_ARM` | `ENTRY` | return-arm beam entered; trial advances |
+| `CUE` | `ON,<CHOICE\|RETURN>,<freq_hz>` | a host-driven cue tone started (v5): `<type>` is the cue, `<freq_hz>` the tone actually played (CHOICE = the trial's `correctArm` mapping; RETURN = a random hi/lo). Emitted only on a real onset, not a no-op. The `TONE_ON` TTL marks the acoustic onset. see docs/decisions/0044 |
+| `CUE` | `OFF` | a host-driven cue tone stopped (v5). Emitted only when a tone was actually playing. The `TONE_OFF` TTL marks the acoustic offset. |
 | `SESSION_SUMMARY` | `<trials>,<correct>,<incorrect>` | emitted before `SESSION_COMPLETE` for a Full task session |
 | `STATUS` | `<count>,<index>,<active>` | reply to `STATUS` command |
 | `PONG` | (none) | reply to `PING` |
@@ -118,6 +128,9 @@ Commands are newline-terminated and are NOT part of the `ms,TYPE` line schema.
 | `R<port><sol>[,<ms>]` | cue-guided-task, tmaze_test | pulse solenoid `[port][sol]` (port 0=left,1=right,2=center; sol 0-2 reward, 3 drain, 4 rinse); optional `<ms>` overrides `REWARD_PULSE_MS` (clamped <=5000). Both sketches ack with `SOL,<port>,<sol>` (`cue-guided-task` appends the pulse `<dur_ms>`: `SOL,<port>,<sol>,<dur_ms>`; `tmaze_test` does not). In `cue-guided-task` the pulse is non-blocking, works in any mode (independent of an active session), and a reward-spout fire (`<sol>` omitted or `=1`) also logs `REWARD,<port>,MANUAL,<dur_ms>`. A bare `R<port>` fires that port's reward spout. |
 | `PING` | cue-guided-task | -> `PONG` |
 | `STATUS` | cue-guided-task | -> `STATUS,<count>,<index>,<active>` |
+| `CUE_ON,CHOICE` / `CUE_ON,RETURN` | cue-guided-task | start the host-driven cue tone (v5). Frequency is chosen in firmware: `CHOICE` from the current trial's `correctArm` (`cueFor`), `RETURN` a random hi/lo from the session PRNG. Session-independent (works in any mode; in Free Roam `CHOICE` falls back to the low tone). Fires the `TONE_ON` TTL and emits `CUE,ON,<type>,<freq>`. No-op if a tone is already playing. see docs/decisions/0044 |
+| `CUE_OFF` | cue-guided-task | stop the host-driven cue tone (v5). Fires the `TONE_OFF` TTL and emits `CUE,OFF`. No-op if no tone is playing. |
+| `CUE,VISION` / `CUE,BEAM` | cue-guided-task | select the cue source (v5). `VISION`: the host drives the tone via `CUE_ON`/`CUE_OFF` and the firmware suppresses its `CueRunning` beam auto-tone (single DAC authority). `BEAM` (default): the v4 beam-driven auto-tone. All other trial FSM / scoring / reward / TTL behavior is unchanged. |
 
 ## Notes for analysis
 

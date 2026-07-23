@@ -136,3 +136,34 @@ def reward_info(line: str) -> Optional[Tuple[bool, Optional[int]]]:
     last = p.fields[-1].strip()
     dur = int(last) if last.lstrip("+-").isdigit() else None
     return manual, dur
+
+
+# --------------------------------- CUE lines ---------------------------------
+
+def cue_info(line: str) -> Optional[Tuple[str, Optional[str], Optional[int]]]:
+    """(state, kind, freq_hz) for a "<ms>,CUE,..." line (protocol v5), else None.
+
+    The firmware emits this for the host-driven positional cue, reflecting the
+    ACTUAL acoustic state (see docs/decisions/0044):
+
+      - "<ms>,CUE,ON,<CHOICE|RETURN>,<freq_hz>" -> ("ON", "CHOICE"|"RETURN", freq)
+      - "<ms>,CUE,OFF"                          -> ("OFF", None, None)
+
+    The TONE_ON/TONE_OFF TTLs (not serial) carry the hardware-synchronous onset
+    mark; this line is the behavioral-record companion (which cue, what tone).
+    """
+    p = parse(line)
+    if p is None or p.type != "CUE" or not p.fields:
+        return None
+    state = p.fields[0].strip().upper()
+    if state == "OFF":
+        return ("OFF", None, None)
+    if state == "ON":
+        if len(p.fields) < 3:
+            return None
+        kind = p.fields[1].strip().upper()
+        freq_s = p.fields[2].strip()
+        if kind not in ("CHOICE", "RETURN") or not freq_s.lstrip("+-").isdigit():
+            return None
+        return ("ON", kind, int(freq_s))
+    return None

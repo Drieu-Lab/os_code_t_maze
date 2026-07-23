@@ -32,6 +32,7 @@ static TaskConfig mkcfg() {
   c.rewardPulseMs = 300;        /* logged on REWARD,CENTER (see docs/decisions/0019) */
   c.highToneHz = 8000;
   c.lowToneHz  = 4000;
+  c.cueSourceVision = false;    /* BEAM (v4) auto-tone by default; see docs/decisions/0044 */
   return c;
 }
 
@@ -204,6 +205,40 @@ static void test_simultaneous_choice_resolves_once() {
   assert(hasLog(fx, "OUTCOME"));
   assert(s.trial.choiceArm == 0);                  /* left wins the tie */
   printf("  ok: simultaneous L+R resolves to exactly one choice\n");
+}
+
+static void test_cue_source_vision_suppresses_autotone() {
+  /* Under CUE,VISION the firmware must NOT auto-start/stop the tone in
+     CueRunning (the host drives it), but the trial FSM must still advance on the
+     beams exactly as in BEAM mode. see docs/decisions/0044 */
+  TaskConfig c = mkcfg();
+  c.cueSourceVision = true;
+  int8_t seq[20]; for (int i = 0; i < 20; i++) seq[i] = 0;   /* all LEFT */
+  Session s = initialSession(0, 42u);
+
+  /* entry -> CueRunning (unchanged) */
+  Inputs in = mkin(10); in.beam[B_ENTRY] = true; Effects fx{};
+  s = step(s, in, c, seq, fx);
+  assert(s.trial.phase == Phase::CueRunning);
+
+  /* in CueRunning with no tone playing: BEAM mode would StartTone; VISION must not */
+  in = mkin(20); fx = Effects{};
+  s = step(s, in, c, seq, fx);
+  assert(countTag(fx, FxTag::StartTone) == 0);
+
+  /* exit beam while a (host-started) tone is playing: VISION must NOT StopTone
+     (host owns off), but the phase still advances */
+  in = mkin(30); in.beam[B_EXIT] = true; in.tonePlaying = true; fx = Effects{};
+  s = step(s, in, c, seq, fx);
+  assert(s.trial.phase == Phase::AwaitChoice);
+  assert(countTag(fx, FxTag::StopTone) == 0);
+
+  /* ABORT still force-stops the tone even under VISION (safety) */
+  in = mkin(40); in.cmd = Command{ Command::Abort, 0 }; fx = Effects{};
+  s = step(s, in, c, seq, fx);
+  assert(countTag(fx, FxTag::StopTone) == 1);
+  assert(!s.active);
+  printf("  ok: CUE,VISION suppresses the beam auto-tone; FSM + abort unchanged\n");
 }
 
 static void test_free_roam() {
@@ -411,6 +446,7 @@ int main() {
   test_incorrect_no_reward();
   test_shaping_rewards_incorrect_at_center();
   test_simultaneous_choice_resolves_once();
+  test_cue_source_vision_suppresses_autotone();
   test_free_roam();
   test_anti_bias_run_length();
   test_session_summary();

@@ -154,6 +154,12 @@
  * see docs/decisions/0009 */
 #define DEFAULT_MODE         Mode::FreeRoam
 #define HIGH_TONE_IS_LEFT    true    /* true: high tone -> left, low -> right */
+/* Cue source at boot. false = BEAM: the firmware plays the tone the whole time
+ * it is in Phase::CueRunning (v4 behavior). true = VISION: the firmware
+ * suppresses that auto-tone and the HOST drives the tone via CUE_ON/CUE_OFF
+ * (the positional, vision-gated cue). Switchable at runtime with CUE,BEAM /
+ * CUE,VISION. see docs/decisions/0044 */
+#define DEFAULT_CUE_SOURCE_VISION false
 /* v1 reward is delivered at the central port, contingent on a correct choice
  * (see docs/decisions/0007). This flag additionally rewards the central port on
  * INCORRECT trials too (free/shaping reward); false = correct-only. */
@@ -183,7 +189,12 @@
 #define DAC_SAMPLE_RATE      80000.0f    /* Hz */
 
 /* ================================ Protocol ============================== */
-/* v4 adds a trailing pulse-duration field (ms) to the reward/solenoid lines so
+/* v5 adds the host-driven positional audio cue: commands CUE_ON,<CHOICE|RETURN>,
+ * CUE_OFF, and the cue-source flag CUE,VISION|CUE,BEAM, plus the firmware
+ * CUE,ON,<type>,<freq> / CUE,OFF log line. Under CUE,VISION the firmware
+ * suppresses its beam-driven CueRunning auto-tone so the host is the single DAC
+ * authority. see docs/decisions/0044.
+ * v4 adds a trailing pulse-duration field (ms) to the reward/solenoid lines so
  * the host can map each pulse to a calibrated dispensed volume:
  * REWARD,CENTER,<dur_ms>, REWARD,<port>,MANUAL,<dur_ms>, and SOL,<port>,<sol>,
  * <dur_ms> (cue-guided-task only). see docs/decisions/0019.
@@ -191,6 +202,6 @@
  * logging (REWARD,<port>,MANUAL), and SESSION_SUMMARY (see docs/decisions/0009);
  * plus full manual solenoid control in cue-guided-task (R<port><sol>[,<ms>] ->
  * SOL ack) and auto well-clean SOL lines at trial start (docs/decisions/0010). */
-#define PROTO_VERSION        4
+#define PROTO_VERSION        5
 
 #endif /* RIG_CONFIG_H */
