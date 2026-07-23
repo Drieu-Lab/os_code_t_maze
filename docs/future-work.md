@@ -70,7 +70,7 @@ criteria).
 | [FW-0013](#fw-0013-free-cpu-cores-during-recording-nvenc-or-encode-thread-cap) | Free CPU cores during recording (NVENC or encode-thread cap) | Camera recording | Proposed |
 | [FW-0014](#fw-0014-zone-entry-latency-floor-for-a-vision-triggered-cue-path) | Zone-entry latency floor for a vision-triggered cue path | Maze state + rules | Partially done |
 | [FW-0015](#fw-0015-scoped-ratblocker-de-merge-restore-splitting-only-if-needed) | Scoped rat/blocker de-merge (restore splitting only if needed) | Markerless tracker | Proposed |
-| [FW-0016](#fw-0016-migrate-trial-sequence--cue-identity-from-firmware-to-host) | Migrate trial-sequence / cue-identity from firmware to host | Firmware + protocol + host | Proposed |
+| [FW-0016](#fw-0016-migrate-trial-sequence--cue-identity-from-firmware-to-host) | Migrate trial-sequence / cue-identity from firmware to host | Firmware + protocol + host | Partially done (ADR-0046) |
 | [FW-0017](#fw-0017-end-to-end-cue-onset-latency-from-the-firmware-cue-echo) | End-to-end cue-onset latency from the firmware CUE echo | Validation harness | Proposed |
 
 ## Entries
@@ -687,17 +687,25 @@ part); no if it is a guarded, evidence-driven addition.
 
 ### FW-0016: Migrate trial-sequence / cue-identity from firmware to host
 
-- **Status:** Proposed
+- **Status:** Partially done - an initial host-owned realization LANDED as
+  [ADR-0046](decisions/0046-host-owned-phase3.md) (host owns the sequence,
+  identity, scoring, and reward in Free Roam with the firmware as an actuator;
+  `host/trial_sequence.py` + `host/phase3_task.py` + `host/phase3_controller.py`,
+  `CUE_ON,<kind>,<hz>` in PROTOCOL v6). What REMAINS open here is the
+  firmware-authoritative variant (host AUTHORS + uploads the sequence, firmware
+  stays the real-time trial-advance authority) for a Full-task deployment where
+  reward timing must be on-Due - see ADR-0046's "Alternatives considered".
 - **Date added:** 2026-07-22
 - **Author / Agent:** Agent (Cursor) on behalf of Celine
 - **Area / modules:** `firmware/cue-guided-task/task_core.h` (`generateSequence`,
   `cueFor`, `correctArm`), `firmware/cue-guided-task/cue-guided-task.ino`,
-  `firmware/PROTOCOL.md` (events / any bump), a new host module (e.g.
-  `host/trial_sequence.py`) + tests, `host/cue_controller.py` (resolve identity)
-- **Related ADRs:** [ADR-0044](decisions/0044-host-driven-cue-command.md) (the
+  `firmware/PROTOCOL.md` (a sequence-upload line + handshake), `host/trial_sequence.py`
+  (already exists; would author the uploaded schedule)
+- **Related ADRs:** [ADR-0046](decisions/0046-host-owned-phase3.md) (the initial
+  host-owned realization), [ADR-0044](decisions/0044-host-driven-cue-command.md) (the
   semantic `CUE_ON,<kind>` command chosen to stay valid across this migration),
-  [ADR-0045](decisions/0045-vision-cue-zone-gate.md) (the host cue gate that would
-  consume host-side identity), FW-0001 (transition-bias generator this would host)
+  [ADR-0045](decisions/0045-vision-cue-zone-gate.md) (the host cue gate that
+  consumes host-side identity), FW-0001 (transition-bias generator this would host)
 
 **Motivation / context.** Today the firmware owns the trial sequence and the tone
 identity: `generateSequence` builds the L/R schedule, `correctArm` is latched on

@@ -273,6 +273,31 @@ TIPS: Dict[str, Entry] = {
                           "the estimator's own validity threshold (0..1; 0 defers "
                           "entirely to the estimator).",
 
+    # ---- phase3_controller.py: Phase 3 tab (host-owned cued task) ----
+    "phase3.arm": "Arm the HOST-owned Phase 3 cued task (OFF by default). The "
+                  "firmware must be in Free Roam (its trial FSM off): the host "
+                  "owns the trial sequence, cue identity, scoring, and reward, "
+                  "and the Due only plays tones, pulses reward, and fires the "
+                  "Open Ephys TTLs. Disarming cuts the tone and restores firmware "
+                  "autonomy (CUE,BEAM). See docs/decisions/0046.",
+    "phase3.choice": "Play the CHOICE tone while the rat is in the central-stem "
+                     "zone. The host supplies the tone identity for the current "
+                     "trial (CUE_ON,CHOICE,<hz>). Fails OPEN: a confidence dropout "
+                     "never cuts a playing tone.",
+    "phase3.up_stem": "Only start the choice tone while the rat is heading UP the "
+                      "stem (toward the junction), not on the way back down.",
+    "phase3.return": "Play a random hi/lo tone on every return-arm run "
+                     "(CUE_ON,RETURN,<hz>). Fails SAFE on a track dropout.",
+    "phase3.reward_incorrect": "Shaping aid: dispense reward at the central well "
+                               "even on an INCORRECT choice (otherwise only "
+                               "correct choices are rewarded).",
+    "phase3.min_confidence": "Extra track-confidence floor for a cue onset, on top "
+                             "of the estimator's own validity threshold (0..1; 0 "
+                             "defers entirely to the estimator).",
+    "phase3.seed": "PRNG seed for the balanced L/R trial sequence (32-bit). The "
+                   "same seed reproduces the same schedule; applied when you arm.",
+    "phase3.new_seed": "Draw a fresh random seed (takes effect on the next arm).",
+
     # ---- maze_state_view.py: Maze state tab ----
     "maze.define_zones": "Draw the maze zones (central reward HUB, stem, "
                          "junction, choice/return arms), the well region (inside "

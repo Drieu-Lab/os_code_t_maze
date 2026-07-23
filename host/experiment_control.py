@@ -84,6 +84,14 @@ try:
 except Exception as e:  # pragma: no cover
     CueControlView = None  # type: ignore
     _TRACKER_ERR = _TRACKER_ERR or f"{type(e).__name__}: {e}"
+# Phase 3 tab: the host-owned cued task (firmware = actuator). Composes the cue
+# gate + trial FSM over the shared pipeline; drives CUE_ON,<kind>,<hz> / reward.
+# Optional; guarded like the tabs above. See docs/decisions/0046.
+try:
+    from phase3_controller import Phase3ControlView
+except Exception as e:  # pragma: no cover
+    Phase3ControlView = None  # type: ignore
+    _TRACKER_ERR = _TRACKER_ERR or f"{type(e).__name__}: {e}"
 # Live Phase 2a behavior readout: a read-only tracker consumer that fills the
 # empty bottom-right of the Rig view tab. Optional; guarded like the tabs above.
 # See docs/decisions/0032.
@@ -413,6 +421,15 @@ def main() -> int:
     if tracker is not None and CueControlView is not None:
         tabs.append(("Cue", [
             lambda parent: CueControlView(
+                parent, camera=camera_ref.get("cam"),
+                pipeline=pipeline, send=lambda cmd: client.send(cmd))]))
+    # Phase 3 tab: the initial HOST-OWNED cued task (firmware = actuator). Runs in
+    # Free Roam (firmware FSM off): the host owns the trial sequence, cue identity,
+    # scoring, and reward, driving CUE_ON,<kind>,<hz> / R<port> via the broker.
+    # See docs/decisions/0046.
+    if tracker is not None and Phase3ControlView is not None:
+        tabs.append(("Phase 3", [
+            lambda parent: Phase3ControlView(
                 parent, camera=camera_ref.get("cam"),
                 pipeline=pipeline, send=lambda cmd: client.send(cmd))]))
 
