@@ -286,14 +286,19 @@ TIPS: Dict[str, Entry] = {
                      "never cuts a playing tone.",
     "phase3.up_stem": "Only start the choice tone while the rat is heading UP the "
                       "stem (toward the junction), not on the way back down.",
-    "phase3.return": "Play a random hi/lo tone on every return-arm run "
-                     "(CUE_ON,RETURN,<hz>). Fails SAFE on a track dropout.",
+    "phase3.return": "Play the return-arm tone on every return run "
+                     "(CUE_ON,RETURN,<hz>). Identity is a balanced hi/lo schedule "
+                     "pre-generated per physical arm from the seed and looked up "
+                     "by the arm the rat enters (ADR-0047). Fails SAFE on dropout.",
     "phase3.reward_incorrect": "Shaping aid: dispense reward at the central well "
                                "even on an INCORRECT choice (otherwise only "
                                "correct choices are rewarded).",
     "phase3.min_confidence": "Extra track-confidence floor for a cue onset, on top "
                              "of the estimator's own validity threshold (0..1; 0 "
                              "defers entirely to the estimator).",
+    "phase3.animal": "Animal ID for the session data file "
+                     "(host/data/phase3_<animal>_<timestamp>.csv). Applied when "
+                     "you arm; blank falls back to 'unknown'.",
     "phase3.seed": "PRNG seed for the balanced L/R trial sequence (32-bit). The "
                    "same seed reproduces the same schedule; applied when you arm.",
     "phase3.new_seed": "Draw a fresh random seed (takes effect on the next arm).",

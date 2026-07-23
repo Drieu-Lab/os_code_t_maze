@@ -14,8 +14,18 @@ It composes two pure cores over the shared maze-state pipeline's FAST view:
 and turns their decisions into firmware commands:
   - cue onset -> ``CUE_ON,CHOICE,<hz>`` / ``CUE_ON,RETURN,<hz>`` (host supplies the
     tone identity, since the firmware trial FSM is off; PROTOCOL v6), offset ->
-    ``CUE_OFF``.
+    ``CUE_OFF``. The RETURN identity is now a balanced hi/lo schedule generated
+    per physical arm from the seed and looked up by the arm the rat enters (not a
+    random per-onset pick); see docs/decisions/0047.
   - a rewarded choice -> ``R<port>1,<ms>`` at the central well.
+
+It also writes a per-session data file (host/data/phase3_<animal>_<ts>.csv): the
+planned Nx3 cue matrix is written on arm and each trial's choice/outcome/reward
+and event timestamps are filled in as it resolves. The pure ``phase3_log.Phase3Log``
+core owns the table + CSV rendering; this shell only detects the events (from the
+gate/task decisions it already computes, plus center-well lick lines snooped in
+``apply()`` and routed to the actuation thread) and writes the file atomically.
+See docs/decisions/0047.
 
 Threading (mirrors the Cue/Rules tabs, ADR-0043): the pipeline's fast callback
 runs inline on the tracking worker and only ENQUEUES the bundle; a dedicated
@@ -41,18 +51,23 @@ the gate closes the tone is cut and firmware autonomy is restored.
 
 from __future__ import annotations
 
+import os
 import queue
 import random
 import threading
 import tkinter as tk
 from dataclasses import dataclass, field
+from datetime import datetime
 from tkinter import ttk
 from typing import Optional
 
 import protocol
 from cue_gate import CHOICE, RETURN, CueGate, CueParams
+from maze_state import CENTRAL_STEM, HUB
+from phase3_log import Phase3Log
 from phase3_task import CORRECT, INCORRECT, Phase3Config, Phase3Task
-from trial_sequence import TrialConfig, TrialSequence
+from rig_config import load_rig_config
+from trial_sequence import LEFT, RIGHT, TrialConfig, TrialSequence
 
 try:
     from task_events import TaskEvents
@@ -74,6 +89,24 @@ POLL_INTERVAL_MS = 100          # snapshot publish + status refresh (Tk)
 QUEUE_MAX = 512                 # bounded fast-frame hand-off (drop-newest on lag)
 SEED_MASK = 0xFFFFFFFF          # the sequence PRNG is 32-bit (trial_sequence.lcg)
 
+# Per-session data files live under host/data/ (same tree as rig_logger.py).
+DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+
+# Physical return arm ("left"/"right", from CueGate) -> trial_sequence side int,
+# to look up that arm's planned return cue (see docs/decisions/0047).
+_SIDE_OF_ARM = {"left": LEFT, "right": RIGHT}
+
+
+def _now_iso() -> str:
+    """Host wall-clock stamp for a logged event (millisecond resolution)."""
+    return datetime.now().isoformat(timespec="milliseconds")
+
+
+def _sanitize(name: str) -> str:
+    """Filename-safe slug of an animal id (mirrors rig_logger._sanitize)."""
+    slug = "".join(ch for ch in name.strip() if ch.isalnum() or ch in "-_")
+    return slug or "unknown"
+
 
 @dataclass(frozen=True)
 class _Phase3Snapshot:
@@ -86,6 +119,7 @@ class _Phase3Snapshot:
     params: CueParams = field(default_factory=CueParams)
     seed: int = 0
     reward_incorrect: bool = False
+    animal: str = ""
 
 
 class Phase3ControlView:
@@ -107,6 +141,17 @@ class Phase3ControlView:
         self._task_events = TaskEvents() if TaskEvents is not None else None
         self._gate_was_open = False
         self._last_fw_cue = ""            # last firmware CUE echo (for status)
+        # Session data log (plan matrix + live outcomes; ADR-0047), and the state
+        # needed to fill it: which cue is sounding (to route the CUE_OFF edge), the
+        # previous zone (to detect the HUB->stem trial-start edge), and the file
+        # path. All touched only by the actuation thread.
+        self._log: Optional[Phase3Log] = None
+        self._log_path: Optional[str] = None
+        self._active_cue: Optional[str] = None
+        self._prev_zone: Optional[str] = None
+        # The center-well lick channel (reward-collection lick), from the shared
+        # rig-config pin map (ADR-0021/0022); None if unavailable -> no lick times.
+        self._center_lick = load_rig_config().lick_index_by_role.get("center")
         # Live tallies (thread-written, Tk-read for status).
         self._correct = 0
         self._incorrect = 0
@@ -138,7 +183,11 @@ class Phase3ControlView:
         return self.frame
 
     def apply(self, line: str) -> None:
-        """Track the firmware mode (Tk) and reflect CUE echoes for status."""
+        """Track the firmware mode (Tk) and reflect CUE echoes for status.
+
+        Also snoop center-well lick edges (the reward-collection lick) and hand
+        them to the actuation thread, which is the sole writer of the data log
+        (this method runs on the serial-reader thread; ADR-0043/0047)."""
         mode = protocol.mode_name(line)
         if mode is not None:
             self._mode = mode.upper()
@@ -147,6 +196,17 @@ class Phase3ControlView:
         if info is not None:
             state, kind, freq = info
             self._last_fw_cue = f"fw: {kind} @ {freq} Hz" if state == "ON" else "fw: off"
+            return
+        lick = protocol.lick_edge(line)
+        if lick is not None and self._center_lick is not None:
+            index, rising = lick
+            if rising and index == self._center_lick:
+                parsed = protocol.parse(line)
+                fw_ms = parsed.ms if parsed is not None else None
+                try:
+                    self._queue.put_nowait(("lick", _now_iso(), fw_ms))
+                except queue.Full:
+                    self._drops += 1
 
     def close(self) -> None:
         self._closed = True
@@ -194,7 +254,10 @@ class Phase3ControlView:
             if item is None:                 # close() sentinel
                 continue
             try:
-                self._process_frame(item[1])
+                if item[0] == "lick":
+                    self._process_lick(item[1], item[2])
+                else:
+                    self._process_frame(item[1])
             except Exception:
                 pass
 
@@ -208,6 +271,16 @@ class Phase3ControlView:
             self._seq, Phase3Config(reward_incorrect=snap.reward_incorrect))
         self._active_seed = snap.seed
         self._correct = self._incorrect = self._reward_count = 0
+        self._active_cue = None
+        self._prev_zone = None
+        # Start a fresh session data file: the planned matrix is written now, then
+        # each trial's outcome is filled in as it resolves (ADR-0047).
+        animal = snap.animal or "unknown"
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self._log = Phase3Log(self._seq, animal=animal, session_start_iso=_now_iso(),
+                              reward_incorrect=snap.reward_incorrect)
+        self._log_path = os.path.join(DATA_DIR, f"phase3_{_sanitize(animal)}_{stamp}.csv")
+        self._write_log()
         self._send_cmd("CUE,VISION")         # host owns the DAC; suppress auto-tone
 
     def _process_frame(self, bundle) -> None:
@@ -220,6 +293,7 @@ class Phase3ControlView:
             self._send_cmd("CUE_OFF")
             self._send_cmd("CUE,BEAM")       # restore firmware autonomy
             self._gate.reset()
+            self._active_cue = None
         self._gate_was_open = snap.gate_open
 
         if not snap.gate_open or self._task is None or self._seq is None:
@@ -230,6 +304,20 @@ class Phase3ControlView:
         # Fold task-semantic context first (so a choice/return this tick is seen).
         task_frame = self._task_events.update(st) if self._task_events else None
 
+        # The trial in progress this tick (captured BEFORE task.update may advance
+        # it), and one wall-clock stamp shared by every event logged this tick.
+        idx = self._task.index
+        iso = _now_iso()
+        changed = False
+
+        # Trial start = the first HUB->stem transition of a trial (the log keeps
+        # only the first; a poke-and-retreat re-entry is ignored). ADR-0047.
+        if st.valid:
+            if self._prev_zone == HUB and st.zone == CENTRAL_STEM:
+                self._log_call(lambda: self._log.trial_started(idx, iso))
+                changed = True
+            self._prev_zone = st.zone
+
         # WHEN: the positional cue gate. Host supplies identity via ,<hz> (v6).
         self._gate.set_params(snap.params)
         d = self._gate.step(st.zone, st.direction, st.confidence, st.valid)
@@ -237,24 +325,81 @@ class Phase3ControlView:
             freq = self._task.current_choice_freq()
             self._send_cmd(f"CUE_ON,CHOICE,{freq}" if freq is not None
                            else "CUE_ON,CHOICE")
+            self._active_cue = CHOICE
+            self._log_call(lambda: self._log.choice_cue_started(idx, iso))
+            changed = True
         elif d.started == RETURN:
-            self._send_cmd(f"CUE_ON,RETURN,{self._seq.next_return_freq()}")
+            # Identity now comes from this arm's planned return schedule, looked up
+            # by the PHYSICAL return arm the rat entered (ADR-0047).
+            side = _SIDE_OF_ARM.get(d.return_arm)
+            freq = self._seq.return_freq(side, idx) if side is not None else None
+            cue = self._seq.return_cue(side, idx) if side is not None else None
+            self._send_cmd(f"CUE_ON,RETURN,{freq}" if freq is not None
+                           else "CUE_ON,RETURN")
+            self._active_cue = RETURN
+            self._log_call(lambda: self._log.return_cue_started(
+                idx, d.return_arm or "", cue, iso))
+            changed = True
         elif d.stopped:
             self._send_cmd("CUE_OFF")
+            if self._active_cue == CHOICE:
+                self._log_call(lambda: self._log.choice_cue_stopped(idx, iso))
+                changed = True
+            elif self._active_cue == RETURN:
+                self._log_call(lambda: self._log.return_cue_stopped(idx, iso))
+                changed = True
+            self._active_cue = None
 
         # WHAT/score: fold the task frame -> reward + advancement.
         if task_frame is not None:
             dec = self._task.update(task_frame)
+            if dec.choice_side is not None and dec.outcome is not None:
+                self._log_call(lambda: self._log.choice_scored(
+                    dec.trial_index, dec.choice_side, dec.outcome, iso))
+                changed = True
             if dec.reward:
                 self._send_cmd(f"R{self._task.cfg.reward_port}1,"
                                f"{self._task.cfg.reward_pulse_ms}")
                 self._reward_count += 1
+                self._log_call(lambda: self._log.reward_fired(dec.trial_index, iso))
+                changed = True
+            if dec.advanced:
+                self._log_call(lambda: self._log.trial_ended(dec.trial_index, iso))
+                changed = True
             if dec.outcome == CORRECT:
                 self._correct += 1
             elif dec.outcome == INCORRECT:
                 self._incorrect += 1
 
+        if changed:
+            self._write_log()
         self._publish_status(snap)
+
+    def _process_lick(self, iso: str, fw_ms) -> None:
+        """A center-well lick from the serial thread: attribute it to the trial
+        awaiting its reward-collection lick and persist (ADR-0047)."""
+        if self._log is not None and self._log.lick(iso, fw_ms):
+            self._write_log()
+
+    def _log_call(self, fn) -> None:
+        """Run a log mutation only if a session log exists (defensive; the log is
+        created on arm and the frame path already checks the task exists)."""
+        if self._log is not None:
+            fn()
+
+    def _write_log(self) -> None:
+        """Atomically persist the whole table (temp file + os.replace), so a crash
+        never leaves a half-written CSV. Cheap for a few hundred rows."""
+        if self._log is None or self._log_path is None:
+            return
+        try:
+            os.makedirs(os.path.dirname(self._log_path), exist_ok=True)
+            tmp = self._log_path + ".tmp"
+            with open(tmp, "w", encoding="utf-8", newline="") as fh:
+                fh.write(self._log.render_csv())
+            os.replace(tmp, self._log_path)
+        except OSError:
+            pass
 
     def _publish_status(self, snap: _Phase3Snapshot) -> None:
         if not snap.gate_open:
@@ -371,10 +516,16 @@ class Phase3ControlView:
         conf.grid(row=5, column=1, sticky="w", **pad)
         tip(conf, "phase3.min_confidence")
 
+        ttk.Label(root, text="Animal ID:").grid(row=6, column=0, sticky="w", **pad)
+        self._animal_var = tk.StringVar(value="")
+        animal = ttk.Entry(root, width=12, textvariable=self._animal_var)
+        animal.grid(row=6, column=1, sticky="w", **pad)
+        tip(animal, "phase3.animal")
+
         ttk.Label(root, text="Sequence seed:").grid(
-            row=6, column=0, sticky="w", **pad)
+            row=7, column=0, sticky="w", **pad)
         seed_row = ttk.Frame(root)
-        seed_row.grid(row=6, column=1, sticky="w", **pad)
+        seed_row.grid(row=7, column=1, sticky="w", **pad)
         self._seed_var = tk.StringVar(value=str(random.randint(1, SEED_MASK)))
         seed = ttk.Entry(seed_row, width=12, textvariable=self._seed_var)
         seed.pack(side=tk.LEFT)
@@ -383,15 +534,15 @@ class Phase3ControlView:
         newb.pack(side=tk.LEFT, padx=(4, 0))
         tip(newb, "phase3.new_seed")
         ttk.Label(root, text="(applied when you arm)").grid(
-            row=7, column=1, sticky="w", padx=6)
+            row=8, column=1, sticky="w", padx=6)
 
         ttk.Separator(root, orient="horizontal").grid(
-            row=8, column=0, columnspan=2, sticky="ew", pady=(8, 4))
+            row=9, column=0, columnspan=2, sticky="ew", pady=(8, 4))
 
         self._status_var = tk.StringVar(value="phase 3: off")
         ttk.Label(root, textvariable=self._status_var, anchor="w",
                   wraplength=460, justify="left").grid(
-            row=9, column=0, columnspan=2, sticky="w", **pad)
+            row=10, column=0, columnspan=2, sticky="w", **pad)
 
     # ------------------------------------------------------------- Tk poll
     def _schedule_poll(self) -> None:
@@ -414,4 +565,5 @@ class Phase3ControlView:
             gate_open=self._gate_open(),
             params=self._current_params(),
             seed=self._current_seed(),
-            reward_incorrect=bool(self._reward_incorrect_var.get()))
+            reward_incorrect=bool(self._reward_incorrect_var.get()),
+            animal=self._animal_var.get().strip())
