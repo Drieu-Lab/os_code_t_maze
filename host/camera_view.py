@@ -695,18 +695,63 @@ class CameraView:
             pass
 
     # ------------------------------------------------------- recording control
+    def is_recording(self) -> bool:
+        """True while a recording is in progress. Public seam (docs/decisions/0048)."""
+        return self._recording.is_set()
+
+    def current_recording_path(self) -> Optional[str]:
+        """The in-progress recording's video path, or None if not recording.
+
+        The per-frame sidecar CSV shares the base name with a ``.csv`` extension.
+        Used by the Session controller to record this stream in the session
+        manifest (see docs/decisions/0048).
+        """
+        if not self._recording.is_set() or self._rec_params is None:
+            return None
+        return self._rec_params.video_path
+
     def _toggle_record(self) -> None:
+        """Record-button handler: start or stop the recording."""
         if self._recording.is_set():
-            self._recording.clear()  # encode thread finalizes the file
-            self._record_btn.configure(text="Start recording")
-            self._set_format_locked(False)
+            self.stop_recording()
+        else:
+            self.start_recording()
+
+    def stop_recording(self) -> None:
+        """Stop the in-progress recording (encode thread finalizes the file).
+
+        Public seam so the Session controller can end recording with the session
+        (docs/decisions/0048); also the Record button's stop path. No-op if idle.
+        """
+        if not self._recording.is_set():
             return
+        self._recording.clear()
+        try:
+            self._record_btn.configure(text="Start recording")
+        except (tk.TclError, AttributeError):
+            pass
+        self._set_format_locked(False)
+
+    def start_recording(self, session_id: Optional[str] = None) -> bool:
+        """Begin a recording; return True iff it started.
+
+        Public seam used by the Session controller (one-click session start; see
+        docs/decisions/0048) as well as the Record button. When ``session_id`` is
+        given it names the file (so the video + Phase 3 file share the session
+        stamp) and is stamped into the sidecar header for correlation; otherwise
+        the file is named ``<animal>_<stamp>`` as before. Needs the camera UI +
+        PyAV; a no-op (returns False) if recording isn't available or already on.
+        """
+        if not self._can_record or not hasattr(self, "_record_btn"):
+            return False
+        if self._recording.is_set():
+            return False
 
         with self._latest_lock:
             frame = self._latest_frame
         if frame is None:
             self._show_warning("No frames yet - cannot start recording.")
-            return
+            return False
 
         h, w = frame.shape[:2]
         out_dir = self._outdir_var.get().strip() or DEFAULT_OUTPUT_DIR
@@ -714,7 +759,7 @@ class CameraView:
             os.makedirs(out_dir, exist_ok=True)
         except OSError as e:
             self._show_warning(f"Cannot create output folder: {e}")
-            return
+            return False
 
         codec, ext = self._selected_codec()
         try:
@@ -725,7 +770,10 @@ class CameraView:
 
         stamp = time.strftime("%Y%m%d_%H%M%S")
         animal = self._animal_id or "animal"
-        base = os.path.join(out_dir, f"{animal}_{stamp}")
+        # A session_id (from the Session controller) names the file so the video,
+        # its sidecar, and the Phase 3 file share the session stamp; otherwise
+        # fall back to <animal>_<stamp> (docs/decisions/0048).
+        base = os.path.join(out_dir, session_id if session_id else f"{animal}_{stamp}")
         # Record whether the saved frames are lens-corrected, so downstream
         # analysis knows the video is already undistorted (ADR-0015).
         calib = self._undistorter.calibration
@@ -749,6 +797,7 @@ class CameraView:
                     bg_name = ""
         header = {
             "animal": animal,
+            "session_id": session_id or "",
             "fps": f"{self._cam_fps:.3f}",
             "width": w,
             "height": h,
@@ -769,8 +818,12 @@ class CameraView:
         # Clear any stale frames so frame_idx starts clean at 0.
         self._drain_queue()
         self._recording.set()
-        self._record_btn.configure(text="Stop recording")
+        try:
+            self._record_btn.configure(text="Stop recording")
+        except (tk.TclError, AttributeError):
+            pass
         self._set_format_locked(True)  # don't change format mid-recording
+        return True
 
     def _set_format_locked(self, locked: bool) -> None:
         """Disable the format/quality controls while a recording is in progress."""

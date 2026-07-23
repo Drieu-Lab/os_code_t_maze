@@ -72,6 +72,7 @@ criteria).
 | [FW-0015](#fw-0015-scoped-ratblocker-de-merge-restore-splitting-only-if-needed) | Scoped rat/blocker de-merge (restore splitting only if needed) | Markerless tracker | Proposed |
 | [FW-0016](#fw-0016-migrate-trial-sequence--cue-identity-from-firmware-to-host) | Migrate trial-sequence / cue-identity from firmware to host | Firmware + protocol + host | Partially done (ADR-0046) |
 | [FW-0017](#fw-0017-end-to-end-cue-onset-latency-from-the-firmware-cue-echo) | End-to-end cue-onset latency from the firmware CUE echo | Validation harness | Proposed |
+| [FW-0018](#fw-0018-hardware-session-sync-fiducial-firmware-sync-ttl--camera-visible-led-barcode) | Hardware session sync fiducial (firmware `SYNC` TTL + camera-visible LED barcode) | Firmware + protocol + host session/camera | Proposed |
 
 ## Entries
 
@@ -783,6 +784,61 @@ is exported, for a firmware-internal latency number?
 
 **ADR needed?** No - it extends an existing measurement tool without changing
 behavior.
+
+### FW-0018: Hardware session sync fiducial (firmware `SYNC` TTL + camera-visible LED barcode)
+
+- **Status:** Proposed
+- **Date added:** 2026-07-23
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** `firmware/cue-guided-task/cue-guided-task.ino` (+ `firmware/common/rig_config.h`, `firmware/PROTOCOL.md`, `PROTO_VERSION` bump) for a `SYNC` command that pulses an Open Ephys TTL and drives an LED in the camera FOV; `host/session_controller.py` (`mark_session_start` — the seam it attaches to), `host/session_log.py` (fiducial record), `host/camera_view.py` (detect/record the LED barcode in the sidecar), later `host/rig_logger.py`
+- **Related ADRs:** [ADR-0048](decisions/0048-host-session-orchestration-and-manifest.md) (the host-only session orchestrator + the single fiducial seam this replaces the host-t0 anchor at), [ADR-0011](decisions/0011-camera-tab-freerun-ffv1.md) (free-run camera + the `cam_block_id`/`cam_timestamp` sidecar columns future-proofed for hardware triggering), [ADR-0002](decisions/0002-transparent-line-passthrough.md) (why a host marker must loop through firmware), [ADR-0009](decisions/0009-runtime-training-modes-and-logging.md) (the serial log the TTL/echo would anchor)
+
+**Motivation / context.** ADR-0048's session anchor is deliberately coarse: a
+host-t0 in wall/monotonic clocks plus an optional `PING`→`PONG` in the serial
+log, so cross-stream alignment is tens-of-ms and carries serial latency. Once
+neural recording (Open Ephys) is integrated the camera will be hardware-triggered
+or emit a per-frame TTL, and we will want **sub-ms, acquisition-grade** alignment
+of video ↔ serial ↔ neural. A single hardware fiducial at session start (and
+optionally periodically) that is simultaneously visible to *every* stream is the
+standard way to get it: a TTL edge into Open Ephys (and the serial log via the
+firmware echo) that co-occurs with a **camera-visible LED** flash, so the video
+can be aligned to the electrical timeline without trusting any software clock.
+
+**Sketch of approach.** Add a `SYNC` command the firmware accepts (alongside
+`MODE`/`PING`/`CUE_ON`...) that (a) pulses a dedicated Open Ephys TTL line, (b)
+flashes an LED positioned in the camera FOV, and (c) re-emits a stamped
+`<ms>,SYNC,<seq>` line so it lands in the serial log (respecting ADR-0002 — the
+host can't inject into other clients' streams, only the firmware re-emit reaches
+`rig_logger.py`). Randomize the flash as a short **barcode** (a few bits of
+on/off, à la Bpod/`labcams` sync) so each fiducial is uniquely identifiable and
+robust to dropped frames. Have `session_controller.mark_session_start` call
+`send("SYNC")` in addition to (or instead of) `PING`, and record the method in
+the manifest `fiducial` field (`method: firmware-sync`, with the TTL line + LED
+ROI). Detect the LED in `camera_view` (a fixed ROI intensity threshold) and log
+the barcode + frame index to the sidecar so the video timestamp of each fiducial
+is recovered offline; the same `SYNC` seq ties the serial-log line, the Open
+Ephys TTL, and the video frame together.
+
+**Evaluation / acceptance.** Bench: a scope/logic-analyzer shows the `SYNC` TTL
+edge and the LED-on transition co-occur within the required tolerance; the LED
+barcode is detected in the recorded video at the expected frames; the same seq
+appears in the serial log, the sidecar, and the Open Ephys TTL events, and the
+three timelines align to sub-ms after fitting. Regression: the host-t0 path still
+works when the hardware is absent (graceful fallback — no firmware = `PING` only).
+
+**Effort / risk.** Medium — needs a Due reflash (protocol change), a spare TTL
+line + an LED wired into the FOV, and LED-detection code in the camera path.
+Risks: LED placement that doesn't occlude behavior yet is reliably detected;
+exposure/rolling-shutter effects on the barcode; keeping the fallback clean.
+
+**Open questions.** One fiducial at start, or periodic re-syncs to bound clock
+drift over a long session? Barcode length / bit rate vs the camera frame rate?
+Which TTL line and LED GPIO on the Due? Should `camera_view` detect the LED live
+or only offline from the recording? Does the fiducial also gate the future
+hardware-triggered/per-frame-TTL camera mode?
+
+**ADR needed?** Yes — it changes the serial protocol (Due reflash) and defines
+the cross-stream synchronization mechanism, both non-obvious decisions.
 
 ## Completed
 

@@ -92,6 +92,13 @@ try:
 except Exception as e:  # pragma: no cover
     Phase3ControlView = None  # type: ignore
     _TRACKER_ERR = _TRACKER_ERR or f"{type(e).__name__}: {e}"
+# Session tab: a thin orchestrator that starts/stops the recorders together and
+# writes a shared session manifest (docs/decisions/0048). Needs no tracker (just
+# tk + the recorders' public seams), so it is guarded on its own import only.
+try:
+    from session_controller import SessionControlView
+except Exception:  # pragma: no cover
+    SessionControlView = None  # type: ignore
 # Live Phase 2a behavior readout: a read-only tracker consumer that fills the
 # empty bottom-right of the Rig view tab. Optional; guarded like the tabs above.
 # See docs/decisions/0032.
@@ -325,6 +332,9 @@ def main() -> int:
             print(f"[experiment_control] tracker unavailable: {e}", file=sys.stderr)
             tracker = None
     camera_ref = {}
+    # The Phase 3 module instance is captured (like the camera) so the Session tab
+    # can arm/disarm it and read its data-file path for the manifest (ADR-0048).
+    phase3_ref = {}
 
     # One shared maze-state pipeline (a single estimator on the camera tracking
     # worker), consumed by the Maze state / Rules / Behavior tabs instead of a
@@ -348,6 +358,13 @@ def main() -> int:
         if pipeline is not None:
             cam.subscribe_track(pipeline.on_track)
         return cam
+
+    def make_phase3(parent):
+        p3 = Phase3ControlView(
+            parent, camera=camera_ref.get("cam"),
+            pipeline=pipeline, send=lambda cmd: client.send(cmd))
+        phase3_ref["p3"] = p3
+        return p3
 
     modules = []
 
@@ -428,10 +445,14 @@ def main() -> int:
     # scoring, and reward, driving CUE_ON,<kind>,<hz> / R<port> via the broker.
     # See docs/decisions/0046.
     if tracker is not None and Phase3ControlView is not None:
-        tabs.append(("Phase 3", [
-            lambda parent: Phase3ControlView(
+        tabs.append(("Phase 3", [make_phase3]))
+    # Session tab: one-click start/stop of the recorders + a shared manifest. Built
+    # LAST so camera_ref/phase3_ref are populated when its factory runs (ADR-0048).
+    if SessionControlView is not None:
+        tabs.append(("Session", [
+            lambda parent: SessionControlView(
                 parent, camera=camera_ref.get("cam"),
-                pipeline=pipeline, send=lambda cmd: client.send(cmd))]))
+                phase3=phase3_ref.get("p3"), send=lambda cmd: client.send(cmd))]))
 
     # Build modules into tabs. Modules grouped in one tab are packed
     # left-to-right (schematic on the left, camera on the right). The Rig view

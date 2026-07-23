@@ -87,12 +87,16 @@ class Phase3Log:
     """The per-session Phase 3 data table (plan + live outcomes)."""
 
     def __init__(self, sequence: TrialSequence, *, animal: str,
-                 session_start_iso: str, reward_incorrect: bool = False) -> None:
+                 session_start_iso: str, reward_incorrect: bool = False,
+                 session_id: str = "") -> None:
         self.animal = animal
         self.seed = sequence.seed
         self.cfg = sequence.cfg
         self.session_start_iso = session_start_iso
         self.reward_incorrect = reward_incorrect
+        # Shared session id when armed via the Session controller (docs/decisions/
+        # 0048); links this file to the video + manifest. Empty on a manual arm.
+        self.session_id = session_id
         # Build the planned rows from the seed-deterministic schedules.
         self._rows: List[_Row] = [
             _Row(
@@ -188,7 +192,8 @@ class Phase3Log:
     def _header_comment(self) -> List[str]:
         c = self.cfg
         return [
-            f"# phase3_session animal={self.animal} seed={self.seed} proto=6",
+            f"# phase3_session animal={self.animal} session_id={self.session_id} "
+            f"seed={self.seed} proto=6",
             f"# high_tone_is_left={c.high_tone_is_left} "
             f"high_tone_hz={c.high_tone_hz} low_tone_hz={c.low_tone_hz}",
             f"# block_size={c.block_size} max_same_run={c.max_same_run} "

@@ -120,6 +120,7 @@ class _Phase3Snapshot:
     seed: int = 0
     reward_incorrect: bool = False
     animal: str = ""
+    session_id: str = ""
 
 
 class Phase3ControlView:
@@ -147,6 +148,9 @@ class Phase3ControlView:
         # path. All touched only by the actuation thread.
         self._log: Optional[Phase3Log] = None
         self._log_path: Optional[str] = None
+        # Shared session id when armed via the Session controller (docs/decisions/
+        # 0048); "" on a manual arm. Set on the Tk thread, snapshotted to the thread.
+        self._session_id = ""
         self._active_cue: Optional[str] = None
         self._prev_zone: Optional[str] = None
         # The center-well lick channel (reward-collection lick), from the shared
@@ -227,6 +231,33 @@ class Phase3ControlView:
             self._send_cmd("CUE_OFF")
             self._send_cmd("CUE,BEAM")
 
+    # ----------------------------------------------- Session controller seams
+    def arm(self, session_id: str = "") -> None:
+        """Arm Phase 3 as part of a coordinated session (see docs/decisions/0048).
+
+        Records the shared ``session_id`` (threaded into the data-file name +
+        header so it correlates with the video + manifest) and flips the Arm
+        checkbox. The task still starts only once the gate opens (Free Roam +
+        tracking + a valid zone map), exactly as a manual arm. No-op if the tab
+        is unavailable (no pipeline/task_events).
+        """
+        if not hasattr(self, "_enable_var"):
+            return
+        self._session_id = session_id or ""
+        self._enable_var.set(True)
+
+    def disarm(self) -> None:
+        """Disarm Phase 3 (Session controller stop). No-op if tab unavailable."""
+        if not hasattr(self, "_enable_var"):
+            return
+        self._enable_var.set(False)
+        self._session_id = ""
+
+    def current_log_path(self) -> Optional[str]:
+        """Path of the in-progress session data file, or None until the gate
+        opens and a session starts. Used by the Session controller's manifest."""
+        return self._log_path
+
     # --------------------------------------------------------------- thread
     def _start_thread(self) -> None:
         self._pipeline.subscribe_fast(self._on_fast_state)
@@ -274,12 +305,20 @@ class Phase3ControlView:
         self._active_cue = None
         self._prev_zone = None
         # Start a fresh session data file: the planned matrix is written now, then
-        # each trial's outcome is filled in as it resolves (ADR-0047).
+        # each trial's outcome is filled in as it resolves (ADR-0047). When armed
+        # via the Session controller the shared session_id names the file (so the
+        # video + Phase 3 file share the stamp) and is stamped into the header;
+        # otherwise fall back to <animal>_<stamp> (docs/decisions/0048).
         animal = snap.animal or "unknown"
-        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        if snap.session_id:
+            base = f"phase3_{_sanitize(snap.session_id)}"
+        else:
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            base = f"phase3_{_sanitize(animal)}_{stamp}"
         self._log = Phase3Log(self._seq, animal=animal, session_start_iso=_now_iso(),
-                              reward_incorrect=snap.reward_incorrect)
-        self._log_path = os.path.join(DATA_DIR, f"phase3_{_sanitize(animal)}_{stamp}.csv")
+                              reward_incorrect=snap.reward_incorrect,
+                              session_id=snap.session_id)
+        self._log_path = os.path.join(DATA_DIR, f"{base}.csv")
         self._write_log()
         self._send_cmd("CUE,VISION")         # host owns the DAC; suppress auto-tone
 
@@ -566,4 +605,5 @@ class Phase3ControlView:
             params=self._current_params(),
             seed=self._current_seed(),
             reward_incorrect=bool(self._reward_incorrect_var.get()),
-            animal=self._animal_var.get().strip())
+            animal=self._animal_var.get().strip(),
+            session_id=self._session_id)
