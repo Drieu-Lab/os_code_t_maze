@@ -64,8 +64,11 @@ unsigned long sensLastChange[BEAM_COUNT];
 bool          lickRaw[3], lickStable[3];
 unsigned long lickLastChange[3];
 
-// Serial command accumulator
-char    cmdBuf[16];
+// Serial command accumulator. Sized to hold the longest command line; the
+// v6 host-owned cue command carries an explicit frequency, e.g.
+// "CUE_ON,RETURN,20000" (19 chars), so 16 bytes is no longer enough.
+// see docs/decisions/0046
+char    cmdBuf[32];
 uint8_t cmdLen = 0;
 
 // ---------------- Serial output (protocol v4) ----------------
@@ -152,14 +155,31 @@ void handleManualSolenoid(const char* b) {
   }
 }
 
-// ---------------- Host-driven positional cue (protocol v5) ----------------
+// ---------------- Host-driven positional cue (protocol v5/v6) ----------------
 // The HOST owns the ON/OFF decision from the rat's tracked position; the firmware
 // just makes the sound and (via startTone/stopToneAsync) fires the TONE_ON/OFF
-// TTLs. Identity stays in firmware: CHOICE uses the current trial's correctArm;
-// RETURN is a random hi/lo from the session PRNG. Handled shell-side (like
-// R<port>), session-independent. The CUE line reflects the ACTUAL acoustic state
-// (emitted only on a real start/stop, never a no-op). see docs/decisions/0044
-void handleCueOn(const char* kind) {
+// TTLs. The CUE line reflects the ACTUAL acoustic state (emitted only on a real
+// start/stop, never a no-op). see docs/decisions/0044
+//
+// Command grammar: "CUE_ON,<CHOICE|RETURN>[,<hz>]". WITHOUT <hz> (v5) the firmware
+// resolves tone identity itself (CHOICE from the current trial's correctArm,
+// RETURN a random hi/lo from the session PRNG). WITH an explicit <hz> (v6) the
+// host supplies identity directly - used by the host-owned Phase 3, where the
+// firmware trial FSM is off (Free Roam) so correctArm is unset. The <hz> is
+// clamped to [CUE_HZ_MIN, CUE_HZ_MAX] so a bad value can't drive the DAC out of
+// range. see docs/decisions/0046
+void handleCueOn(const char* arg) {
+  // Split "<kind>[,<hz>]" into the kind token and an optional frequency.
+  char kind[8] = {0};
+  uint8_t k = 0;
+  const char* p = arg;
+  while (*p && *p != ',' && k < sizeof(kind) - 1) kind[k++] = *p++;
+  kind[k] = '\0';
+  long hz = 0;
+  if (*p == ',') {
+    for (const char* q = p + 1; *q >= '0' && *q <= '9'; q++) hz = hz * 10 + (*q - '0');
+  }
+
   uint16_t freq;
   const char* type;
   if (!strcmp(kind, "CHOICE")) {
@@ -172,6 +192,13 @@ void handleCueOn(const char* kind) {
     type = "RETURN";
   } else {
     return;                                          // unknown cue kind: ignore
+  }
+  // Explicit host-supplied identity (v6) overrides the firmware default, clamped
+  // to the configured tone band. see docs/decisions/0046
+  if (hz > 0) {
+    if (hz < CUE_HZ_MIN) hz = CUE_HZ_MIN;
+    if (hz > CUE_HZ_MAX) hz = CUE_HZ_MAX;
+    freq = (uint16_t)hz;
   }
   if (tonePlaying) return;                           // already sounding: don't relog / retrigger
   startToneAsync((float)freq);                       // also raises the TONE_ON TTL
@@ -213,7 +240,7 @@ Command drainSerial() {
         if (cmdBuf[0] == 'R' && cmdBuf[1] >= '0' && cmdBuf[1] <= '2') {
           handleManualSolenoid(cmdBuf);
         } else if (!strncmp(cmdBuf, "CUE_ON,", 7)) {
-          handleCueOn(cmdBuf + 7);                 // host-driven cue on (v5)
+          handleCueOn(cmdBuf + 7);                 // host-driven cue on (v5/v6: optional ,<hz>)
         } else if (!strcmp(cmdBuf, "CUE_OFF")) {
           handleCueOff();                          // host-driven cue off (v5)
         } else if (!strcmp(cmdBuf, "CUE,VISION")) {
@@ -448,6 +475,23 @@ void loop() {
     Effects fx; fx.n = 0;
     session = step(session, in, cfg, gSeq, fx);
     applyEffects(fx);
+  }
+
+  // Host-owned Phase 3 (docs/decisions/0046): with the trial FSM off (Free Roam)
+  // the HOST owns the choice/return decisions, but the hardware event marks for
+  // Open Ephys must still fire in real time. Pulse the choice / return-arm TTLs
+  // directly on their beam edges here so neural alignment is preserved while the
+  // FSM (which fires these via Effects in Full task) is inactive. No double-fire:
+  // in Free Roam the FSM never reaches AwaitChoice/AwaitReturn.
+  if (cfg.mode == Mode::FreeRoam) {
+    if (in.beam[B_LCHOICE] || in.beam[B_RCHOICE]) {
+      ttlChoice.startTime = millis(); ttlChoice.active = true;
+      digitalWrite(ttlChoice.pin, HIGH);
+    }
+    if (in.beam[B_LRETURN] || in.beam[B_RRETURN]) {
+      ttlReturnArm.startTime = millis(); ttlReturnArm.active = true;
+      digitalWrite(ttlReturnArm.pin, HIGH);
+    }
   }
 
   updateTTLPulse(ttlToneOn);

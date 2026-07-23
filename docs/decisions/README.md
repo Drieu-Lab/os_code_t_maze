@@ -89,3 +89,4 @@ The chain of records is the audit trail.
 | [0043](0043-rules-actuation-thread.md) | Move reward actuation onto a dedicated thread fed by fast-view pushes + routed lick edges (single-threaded engine, atomic gate snapshot) | Accepted | 2026-07-22 |
 | [0044](0044-host-driven-cue-command.md) | Host-driven positional audio cue command (CUE_ON/CUE_OFF + CUE,VISION\|BEAM source flag), PROTO_VERSION 5 | Accepted | 2026-07-22 |
 | [0045](0045-vision-cue-zone-gate.md) | Host vision cue as a zone-membership gate (fast view + CueGate, fail-open choice / fail-safe return) with a redrawn return zone + offline onset measurement | Accepted | 2026-07-22 |
+| [0046](0046-host-owned-phase3.md) | Initial host-owned Phase 3 (firmware as a real-time actuator): host owns sequence/identity/scoring off vision, `CUE_ON,<kind>,<hz>` + autonomous Free-Roam beam TTLs, PROTO_VERSION 6 | Accepted | 2026-07-22 |

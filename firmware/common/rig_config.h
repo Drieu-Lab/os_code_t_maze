@@ -182,6 +182,13 @@
 #define WELL_DRAIN_MS        300         /* CONFIRM: must clear what the rinse adds */
 #define TONE_HIGH_HZ         8000
 #define TONE_LOW_HZ          4000
+/* Clamp band for a host-supplied cue frequency (CUE_ON,<kind>,<hz>, v6). The
+ * host owns tone identity in the host-owned Phase 3; this bounds a bad value so
+ * it can never drive the DAC out of a sane range. The wavetable ISR is cleanest
+ * at/below ~8 kHz (>=10 samples/cycle at DAC_SAMPLE_RATE), so keep host tones in
+ * this band. see docs/decisions/0046 */
+#define CUE_HZ_MIN           500
+#define CUE_HZ_MAX           20000
 
 /* DAC / audio (Arduino Due). The tone ISR is wavetable-based (integer-only, see
  * sound.h), so this is cheap. 80 kHz gives a clean sine (>=10 samples/cycle at
@@ -189,7 +196,13 @@
 #define DAC_SAMPLE_RATE      80000.0f    /* Hz */
 
 /* ================================ Protocol ============================== */
-/* v5 adds the host-driven positional audio cue: commands CUE_ON,<CHOICE|RETURN>,
+/* v6 lets the host supply the cue tone identity explicitly:
+ * CUE_ON,<CHOICE|RETURN>,<hz> (the <hz> is optional and clamped to
+ * [CUE_HZ_MIN, CUE_HZ_MAX]); without it the firmware resolves identity as in v5.
+ * v6 also fires the choice / return-arm TTLs autonomously on their beam edges in
+ * Free Roam, so the host-owned Phase 3 keeps the Open Ephys event marks while the
+ * firmware trial FSM is off. see docs/decisions/0046.
+ * v5 adds the host-driven positional audio cue: commands CUE_ON,<CHOICE|RETURN>,
  * CUE_OFF, and the cue-source flag CUE,VISION|CUE,BEAM, plus the firmware
  * CUE,ON,<type>,<freq> / CUE,OFF log line. Under CUE,VISION the firmware
  * suppresses its beam-driven CueRunning auto-tone so the host is the single DAC
@@ -202,6 +215,6 @@
  * logging (REWARD,<port>,MANUAL), and SESSION_SUMMARY (see docs/decisions/0009);
  * plus full manual solenoid control in cue-guided-task (R<port><sol>[,<ms>] ->
  * SOL ack) and auto well-clean SOL lines at trial start (docs/decisions/0010). */
-#define PROTO_VERSION        5
+#define PROTO_VERSION        6
 
 #endif /* RIG_CONFIG_H */
