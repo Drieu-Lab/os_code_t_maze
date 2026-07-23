@@ -14,8 +14,8 @@ from __future__ import annotations
 import unittest
 
 from trial_sequence import (
-    LEFT, RIGHT, TrialConfig, TrialSequence, cue_for, generate_sequence, lcg,
-    max_run_ok,
+    HIGH, LEFT, LOW, RIGHT, TrialConfig, TrialSequence, cue_for,
+    generate_balanced, generate_sequence, lcg, max_run_ok,
 )
 
 
@@ -93,17 +93,79 @@ class TestTrialSequence(unittest.TestCase):
             arm = ts.correct_arm(i)
             self.assertIn(arm, (LEFT, RIGHT))
             self.assertEqual(ts.choice_freq(i), cue_for(arm, c))
+            # choice_cue is the HIGH/LOW identity consistent with choice_freq.
+            self.assertEqual(ts.choice_cue(i),
+                             HIGH if ts.choice_freq(i) == c.high_tone_hz else LOW)
 
-    def test_return_freq_is_hi_or_lo_and_deterministic(self):
-        c = TrialConfig(high_tone_hz=8000, low_tone_hz=4000)
-        a = TrialSequence(c, seed=777)
-        b = TrialSequence(c, seed=777)
-        seq_a = [a.next_return_freq() for _ in range(50)]
-        seq_b = [b.next_return_freq() for _ in range(50)]
-        self.assertEqual(seq_a, seq_b)                       # deterministic
-        self.assertTrue(all(f in (8000, 4000) for f in seq_a))
-        self.assertIn(8000, seq_a)                           # both values appear
-        self.assertIn(4000, seq_a)
+    def test_choice_cue_out_of_range(self):
+        ts = TrialSequence(TrialConfig(max_trials=20, block_size=20), seed=1)
+        self.assertIsNone(ts.choice_cue(-1))
+        self.assertIsNone(ts.choice_cue(20))
+
+
+class TestGenerateBalanced(unittest.TestCase):
+    def test_balanced_binary_and_run_cap(self):
+        seq, _ = generate_balanced(200, 20, 3, 12345)
+        self.assertEqual(len(seq), 200)
+        self.assertTrue(all(v in (0, 1) for v in seq))
+        self.assertTrue(max_run_ok(seq, 200, 3))
+        for off in range(0, 200, 20):
+            self.assertEqual(seq[off:off + 20].count(0), 10)  # exact per-block balance
+
+    def test_choice_is_balanced_binary(self):
+        # generate_sequence is just the choice-flavored generate_balanced.
+        c = TrialConfig(max_trials=40, block_size=20, max_same_run=3)
+        self.assertEqual(generate_sequence(c, 999),
+                         generate_balanced(40, 20, 3, 999))
+
+
+class TestReturnSchedules(unittest.TestCase):
+    def _cfg(self):
+        return TrialConfig(max_trials=200, block_size=20, max_same_run=3,
+                           high_tone_hz=8000, low_tone_hz=4000)
+
+    def test_balanced_run_capped_and_freq_maps(self):
+        c = self._cfg()
+        ts = TrialSequence(c, seed=777)
+        for side in (LEFT, RIGHT):
+            cues = [ts.return_cue(side, i) for i in range(len(ts))]
+            self.assertTrue(all(v in (HIGH, LOW) for v in cues))
+            self.assertEqual(cues.count(HIGH), 100)           # overall balance
+            self.assertEqual(cues.count(LOW), 100)
+            # per-block balance + anti-bias run cap (same engine as the choice seq)
+            bits = [1 if v == HIGH else 0 for v in cues]
+            self.assertTrue(max_run_ok(bits, len(bits), 3))
+            for off in range(0, 200, 20):
+                self.assertEqual(bits[off:off + 20].count(1), 10)
+            # return_freq agrees with return_cue
+            for i in range(len(ts)):
+                self.assertEqual(
+                    ts.return_freq(side, i),
+                    c.high_tone_hz if cues[i] == HIGH else c.low_tone_hz)
+
+    def test_deterministic_from_seed(self):
+        c = self._cfg()
+        a, b = TrialSequence(c, seed=42), TrialSequence(c, seed=42)
+        for side in (LEFT, RIGHT):
+            self.assertEqual([a.return_cue(side, i) for i in range(len(a))],
+                             [b.return_cue(side, i) for i in range(len(b))])
+
+    def test_columns_are_independent(self):
+        # choice, left-return and right-return are distinct shuffles (threaded off
+        # the one seed), so they should not be identical sequences.
+        c = self._cfg()
+        ts = TrialSequence(c, seed=13)
+        choice = [ts.choice_cue(i) for i in range(len(ts))]
+        left = [ts.return_cue(LEFT, i) for i in range(len(ts))]
+        right = [ts.return_cue(RIGHT, i) for i in range(len(ts))]
+        self.assertNotEqual(left, right)
+        self.assertNotEqual(choice, left)
+
+    def test_out_of_range(self):
+        ts = TrialSequence(self._cfg(), seed=1)
+        self.assertIsNone(ts.return_cue(LEFT, -1))
+        self.assertIsNone(ts.return_cue(RIGHT, 999))
+        self.assertIsNone(ts.return_freq(LEFT, 999))
 
 
 if __name__ == "__main__":
