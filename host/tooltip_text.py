@@ -409,6 +409,12 @@ TIPS: Dict[str, Entry] = {
 
     # ---- behavior_view.py: Phase 3 cued-task stats (shown while a Phase 3
     #      session is armed; computed by phase3_stats over the published table) ----
+    "behavior.phase3.session": "Session clock: start time, stop time, and duration, "
+                               "driven by the Session panel's Start/Stop button "
+                               "(docs/decisions/0060) - NOT the Phase 3 Arm "
+                               "checkbox. Duration is the wall-clock span from "
+                               "Start; because Stop leaves Phase 3 running, the "
+                               "stop time and final duration stay shown here.",
     "behavior.phase3.trials": "Session progress: trials the rat has completed "
                               "(a choice has been scored) out of the planned "
                               "total, and the correct / incorrect split. "

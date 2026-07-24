@@ -258,8 +258,35 @@ class Phase3ControlView(VisionActuator):
             self._send_cmd("CUE,BEAM")
 
     # ----------------------------------------------- Session controller seams
+    def is_armed(self) -> bool:
+        """Whether the "Arm Phase 3" checkbox is on. The Session controller now
+        REQUIRES Phase 3 to be armed before a session can start (it no longer arms
+        Phase 3 itself); see docs/decisions/0060. False if the tab is unavailable
+        (no ``_enable_var``)."""
+        if not hasattr(self, "_enable_var"):
+            return False
+        try:
+            return bool(self._enable_var.get())
+        except tk.TclError:
+            return False
+
+    def set_session_context(self, session_id: str = "", out_dir: str = "") -> None:
+        """Record the coordinated session's id + output folder WITHOUT arming.
+
+        The Session controller calls this on Start once it has confirmed Phase 3 is
+        already armed (docs/decisions/0060). The ``session_id`` is threaded into the
+        data-file name + header so it correlates with the video + manifest, and
+        ``out_dir`` is the session's ``task/`` folder the data file is written into
+        (docs/decisions/0049). Unlike the old ``arm()`` this does NOT flip the Arm
+        checkbox. No-op if the tab is unavailable (no pipeline)."""
+        if not hasattr(self, "_enable_var"):
+            return
+        self._session_id = session_id or ""
+        self._session_out_dir = out_dir or ""
+
     def arm(self, session_id: str = "", out_dir: str = "") -> None:
-        """Arm Phase 3 as part of a coordinated session (see docs/decisions/0048).
+        """Arm Phase 3, recording an optional coordinated ``session_id`` / ``out_dir``
+        (see docs/decisions/0048, 0060).
 
         Records the shared ``session_id`` (threaded into the data-file name +
         header so it correlates with the video + manifest) and, optionally, the
@@ -267,6 +294,10 @@ class Phase3ControlView(VisionActuator):
         data file is written into; then flips the Arm checkbox. The task still
         starts only once the gate opens (Free Roam + tracking + a valid zone map),
         exactly as a manual arm. No-op if the tab is unavailable (no pipeline).
+
+        Note: the Session controller no longer calls this - it requires Phase 3 to
+        be armed first and only sets the session context (set_session_context);
+        this remains for a direct/programmatic arm. See docs/decisions/0060.
         """
         if not hasattr(self, "_enable_var"):
             return
@@ -275,7 +306,11 @@ class Phase3ControlView(VisionActuator):
         self._enable_var.set(True)
 
     def disarm(self) -> None:
-        """Disarm Phase 3 (Session controller stop). No-op if tab unavailable."""
+        """Disarm Phase 3. No-op if tab unavailable.
+
+        The Session controller no longer calls this on Stop (Phase 3 keeps running
+        so the task + stats persist; docs/decisions/0060) - this remains for a
+        direct/programmatic disarm."""
         if not hasattr(self, "_enable_var"):
             return
         self._enable_var.set(False)

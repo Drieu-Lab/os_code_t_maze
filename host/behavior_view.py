@@ -19,6 +19,11 @@ publishes (docs/decisions/0050), resolved each poll through the injected
 no Phase 3 session is armed the panel falls back to the Phase 2a readout, and the
 LabelFrame title tracks the active phase.
 
+The Phase 3 sub-panel also shows a session start/stop/duration line, driven by the
+Session panel's Start/Stop button via the injected ``session_timing`` provider
+(docs/decisions/0060) - distinct from the Phase 2a session line, which is driven by
+this panel's own local Start/Stop button.
+
 It lives in the empty bottom-right of the Rig view tab (beside the solenoid /
 reward / lick controls) so the experimenter can watch shaping progress while
 hand-rewarding and recording. It is a pure OBSERVER: it never actuates reward.
@@ -65,7 +70,7 @@ class BehaviorView:
     """Tk module: live Phase 2a training-readout panel (widget/apply/close)."""
 
     def __init__(self, parent: tk.Misc, tracker=None, camera=None, pipeline=None,
-                 phase3_state=None):
+                 phase3_state=None, session_timing=None):
         self._tracker = tracker
         self._camera = camera
         # Shared maze-state pipeline (ADR-0041): consume its RatState stream
@@ -76,6 +81,11 @@ class BehaviorView:
         # phase3_log.Phase3StateSnapshot (or None), so this panel can go phase-aware
         # (docs/decisions/0050). Stored here; consumed by later work.
         self._phase3_state = phase3_state
+        # Cross-panel session-clock provider (docs/decisions/0060): a zero-arg
+        # callable returning the Session panel's session_timer.SessionTimerSnapshot
+        # (or None). Drives the Phase 3 sub-panel's session line off the Session
+        # panel's Start/Stop button (Phase 2a keeps its own local timer/button).
+        self._session_timing = session_timing
         self._sub = None
         self.frame = ttk.LabelFrame(parent, text=P2A_TITLE)
         self._closed = False
@@ -100,9 +110,11 @@ class BehaviorView:
             "status", "session", "compliance", "lr", "nonstem", "run",
             "throughput", "distance")}
         # Phase 3 stat lines (filled from phase3_stats.compute while a Phase 3
-        # session is armed); the key doubles as the tooltip-key suffix.
+        # session is armed); the key doubles as the tooltip-key suffix. "session"
+        # is the Session-button-driven clock line at the top (docs/decisions/0060).
         self._p3_vars = {k: tk.StringVar(value="-") for k in (
-            "trials", "accuracy", "bycue", "bias", "reward", "strategy", "rt")}
+            "session", "trials", "accuracy", "bycue", "bias", "reward",
+            "strategy", "rt")}
         self._window = tk.IntVar(value=self._stats.snapshot().window_n)
 
         self._build_ui()
@@ -181,8 +193,10 @@ class BehaviorView:
             lbl.pack(side=tk.TOP, anchor="w", **pad)
             tip(lbl, f"behavior.{_TIP_KEY.get(key, key)}")
 
-        # Phase 3 stat lines (filled by _refresh_phase3 from phase3_stats.compute).
-        for key in ("trials", "accuracy", "bycue", "bias", "reward", "strategy", "rt"):
+        # Phase 3 stat lines (filled by _refresh_phase3 from phase3_stats.compute);
+        # the "session" line at the top mirrors the Phase 2a session clock.
+        for key in ("session", "trials", "accuracy", "bycue", "bias", "reward",
+                    "strategy", "rt"):
             lbl = ttk.Label(self._p3_box, textvariable=self._p3_vars[key], anchor="w",
                             font=("TkDefaultFont", 10))
             lbl.pack(side=tk.TOP, anchor="w", **pad)
@@ -337,6 +351,7 @@ class BehaviorView:
         self._vars["status"].set(
             f"Phase 3 session active - trial "
             f"{min(st.current_index + 1, st.total)}/{st.total}")
+        self._p3_vars["session"].set(self._p3_session_text())
         self._p3_vars["trials"].set(
             f"Completed: {st.completed}/{st.total}   "
             f"correct {st.correct}  incorrect {st.incorrect}")
@@ -382,6 +397,21 @@ class BehaviorView:
             return "Distance: --  (needs scale - set it in the Rules tab)"
         return (f"Distance: {snap.distance_cm / 100.0:.1f} m   "
                 f"{_rate(snap.distance_m_per_min)} m/min")
+
+    def _p3_session_text(self) -> str:
+        """The Phase 3 session line, driven by the Session panel's Start/Stop
+        button (docs/decisions/0060) rather than a local timer. Reuses the same
+        formatting as the Phase 2a session line; shows 'not started' when no
+        Session panel is wired or none has been started."""
+        if self._session_timing is None:
+            return "Session: not started"
+        try:
+            snap = self._session_timing()
+        except Exception:
+            snap = None
+        if snap is None:
+            return "Session: not started"
+        return self._session_text(snap)
 
     @staticmethod
     def _session_text(snap) -> str:

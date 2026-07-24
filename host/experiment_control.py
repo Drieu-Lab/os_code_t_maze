@@ -472,6 +472,9 @@ def main() -> int:
     # its data-file path for the manifest (ADR-0048/0053).
     task_ref = {}
     phase3_ref = {}
+    # The Session panel is captured too, so the behavior panel can read its
+    # Start/Stop session clock for the Phase 3 session line (ADR-0060).
+    session_ref = {}
 
     # One shared maze-state pipeline (a single estimator on the camera tracking
     # worker), consumed by the Maze state / Rules / Behavior tabs instead of a
@@ -730,6 +733,13 @@ def main() -> int:
         def phase3_state():
             p3 = phase3_ref.get("p3")
             return p3.published_state() if p3 is not None else None
+
+        # The Phase 3 session line is driven by the Session panel's Start/Stop
+        # button (ADR-0060); resolve it through the shared holder (the Session
+        # panel is built just below), so the behavior panel needn't reach across.
+        def session_timing():
+            s = session_ref.get("session")
+            return s.session_timing() if s is not None else None
         # Split the right column so the operator trial-control buttons can fill the
         # empty area that spans BOTH the ribbon and the live-stats panels
         # (docs/decisions/0058): ribbon + behavior stack in a LEFT sub-column, the
@@ -751,7 +761,8 @@ def main() -> int:
             add_module(ribbon)
         behavior = BehaviorView(left_col, tracker=tracker,
                                 camera=camera_ref.get("cam"), pipeline=pipeline,
-                                phase3_state=phase3_state)
+                                phase3_state=phase3_state,
+                                session_timing=session_timing)
         behavior.widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         add_module(behavior)
         # Operator trial-control buttons on the RIGHT, wired to the live Phase 3
@@ -825,6 +836,8 @@ def main() -> int:
             recordings_root=recordings_root, animal_id=task_animal_id)
         session.widget().pack(side=tk.BOTTOM, fill=tk.X, padx=4, pady=4)
         add_module(session)
+        # Expose the session clock to the behavior panel's Phase 3 line (ADR-0060).
+        session_ref["session"] = session
 
     root.protocol("WM_DELETE_WINDOW", on_close)
 

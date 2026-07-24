@@ -19,11 +19,20 @@ On Start it creates a per-session folder tree under the recordings root
         task/    phase3_<session_id>.csv
         serial/  sensors_<session_id>.csv   (filtered raw serial - see below)
 
-and then:
+Start REQUIRES Phase 3 to already be armed (the "Arm Phase 3" checkbox on); if it
+is not, Start refuses and does nothing. The button no longer arms Phase 3 itself,
+and Stop no longer disarms it - the Session button is the canonical session
+boundary but the Phase 3 task keeps running across a Stop (docs/decisions/0060),
+so its live stats stay visible. The button's Start/Stop times also drive the
+Phase 3 stats panel's session clock (exposed via ``session_timing``).
+
+On Start (once Phase 3 is confirmed armed) it:
   - mints a ``session_id`` (``<animal>_<stamp>``) and captures ``t0`` in the three
     host clocks (wall/mono/iso, via session_log.clock_snapshot);
   - starts the camera recording into ``video/`` (``camera.start_recording(id, out_dir)``)
-    and arms Phase 3 to write ``task/`` (``phase3.arm(id, out_dir)``);
+    and hands Phase 3 the session id + ``task/`` folder so its data file correlates
+    with the video + manifest (``phase3.set_session_context(id, out_dir)`` - it does
+    NOT arm Phase 3, which the operator has already done; docs/decisions/0060);
   - opens a per-session **filtered** raw-serial file in ``serial/``: while the
     session is active it appends the SENSOR + CENTRAL-PORT lines it already sees
     via ``apply()`` (body-beam edges + the central well's lick/reward/solenoid; the
@@ -39,6 +48,9 @@ and then:
   - writes the manifest atomically and keeps it updated as each stream's file path
     resolves and again on Stop (with the end anchor).
 
+On Stop it stops the camera, stamps the manifest end anchor, and closes the
+filtered serial file - but leaves Phase 3 armed and running (docs/decisions/0060).
+
 The animal id is no longer entered here: it comes from the Task tab's single
 shared Animal ID field via the injected ``animal_id`` getter (docs/decisions/
 0053, FW-0005), so the session manifest and the Phase 3 log always agree. We
@@ -50,6 +62,8 @@ Module contract (like the other modules):
     apply(line: str) -> None   record the animal-id fallback + append filtered
                                serial lines
     close() -> None            stop an active session cleanly on app exit
+    session_timing() -> SessionTimerSnapshot   Start/Stop wall-clock span, read by
+                               the Phase 3 stats panel (docs/decisions/0060)
 """
 
 from __future__ import annotations
@@ -58,13 +72,14 @@ import os
 import time
 import tkinter as tk
 from datetime import datetime
-from tkinter import ttk
+from tkinter import messagebox, ttk
 from typing import Callable, Optional
 
 import protocol
 from rig_config import load_rig_config
 from session_log import SessionManifest, clock_snapshot
 from session_serial import is_sensor_or_central
+from session_timer import SessionTimer
 
 # Fallback recordings root if experiment_control doesn't pass one; normally the
 # GUI passes <camera default>/phase3_recordings (see docs/decisions/0049).
@@ -117,6 +132,9 @@ class SessionControlView:
         self._closed = False
 
         self._active = False
+        # Wall-clock span of the Start->Stop session, surfaced to the Phase 3 stats
+        # panel as its session clock (docs/decisions/0060). Reused pure core.
+        self._session_timer = SessionTimer()
         self._session_id = ""
         self._session_dir: Optional[str] = None
         self._video_dir: Optional[str] = None
@@ -133,6 +151,12 @@ class SessionControlView:
     # ------------------------------------------------------------ module API
     def widget(self) -> tk.Widget:
         return self.frame
+
+    def session_timing(self):
+        """Immutable Start/Stop wall-clock span (session_timer.SessionTimerSnapshot)
+        for the Phase 3 stats panel's session clock (docs/decisions/0060). Runs on
+        the Tk thread like the rest of this panel, so no locking is needed."""
+        return self._session_timer.snapshot(time.time())
 
     def apply(self, info) -> None:
         """Two jobs per serial line: (1) record the last animal id seen on the
@@ -166,7 +190,8 @@ class SessionControlView:
     def _build_ui(self) -> None:
         """Compact Start/Stop control with a status line below, sized to sit in
         the Rig view bottom strip beside Training mode. The animal id comes from
-        the Task tab's single shared field (docs/decisions/0053), not here."""
+        the Task tab's single shared field (docs/decisions/0053), not here. Start
+        requires Phase 3 to be armed first (docs/decisions/0060)."""
         root = self.frame
 
         self._start_btn = ttk.Button(root, text="Start session",
@@ -199,10 +224,28 @@ class SessionControlView:
             self._start_session()
 
     def _start_session(self) -> None:
+        # The Session button no longer arms Phase 3; it REQUIRES the operator to
+        # have armed it first, so a recording is never started without the task
+        # running (docs/decisions/0060). Only enforced when a Phase 3 controller
+        # exists (headless/standalone use still works).
+        if (self._phase3 is not None and hasattr(self._phase3, "is_armed")
+                and not self._phase3.is_armed()):
+            self._status_var.set("blocked: arm Phase 3 first (Phase 3 tab)")
+            messagebox.showwarning(
+                "Session - Phase 3 not armed",
+                'Arm Phase 3 first (the "Arm Phase 3" checkbox on the Phase 3 '
+                "tab).\n\nThe session records the Phase 3 task, so it won't start "
+                "until Phase 3 is armed. See docs/decisions/0060.")
+            return
+
         animal = protocol.sanitize_animal_id(
             self._animal_text() or self._learned_animal)
         stamp = time.strftime("%Y%m%d_%H%M%S")
         self._session_id = f"{animal}_{stamp}"
+        # Start the session clock now that the session is committed; its span
+        # drives the Phase 3 stats panel's session line (docs/decisions/0060).
+        self._session_timer.reset()
+        self._session_timer.start(time.time())
 
         # Per-session folder tree: <root>/<session_id>/{video,task,serial}/ with the
         # manifest at its root (docs/decisions/0049). Create it up front so every
@@ -240,8 +283,11 @@ class SessionControlView:
         cam_started = self._camera_start(self._video_dir)
         if not cam_started:
             notes.append("camera not recording")
-        if self._phase3 is not None and hasattr(self._phase3, "arm"):
-            self._phase3.arm(self._session_id, out_dir=task_dir)
+        # Phase 3 is already armed (guarded above); just hand it the session id +
+        # task/ folder so its data file correlates with the video + manifest - do
+        # NOT arm it here (docs/decisions/0060).
+        if self._phase3 is not None and hasattr(self._phase3, "set_session_context"):
+            self._phase3.set_session_context(self._session_id, out_dir=task_dir)
         else:
             notes.append("Phase 3 unavailable")
 
@@ -255,11 +301,10 @@ class SessionControlView:
         self._status_var.set(f"ACTIVE  {self._session_id}{extra}")
 
     def _stop_session(self) -> None:
-        if self._phase3 is not None and hasattr(self._phase3, "disarm"):
-            try:
-                self._phase3.disarm()
-            except Exception:
-                pass
+        # Stop the session clock (freezes the Phase 3 panel's session line at its
+        # final span). Phase 3 is deliberately left armed/running so the task and
+        # its live stats persist across a Stop (docs/decisions/0060).
+        self._session_timer.stop(time.time())
         if self._camera is not None and hasattr(self._camera, "stop_recording"):
             try:
                 self._camera.stop_recording()
