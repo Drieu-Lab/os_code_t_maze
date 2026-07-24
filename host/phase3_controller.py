@@ -52,9 +52,7 @@ the gate closes the tone is cut and firmware autonomy is restored.
 from __future__ import annotations
 
 import os
-import queue
 import random
-import threading
 import tkinter as tk
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -69,6 +67,7 @@ from phase3_ribbon import RIBBON_AFTER, RIBBON_BEFORE, RibbonRow, ribbon_rows
 from phase3_task import CORRECT, INCORRECT, Phase3Config, Phase3Task
 from rig_config import load_rig_config
 from trial_sequence import LEFT, RIGHT, TrialConfig, TrialSequence
+from vision_actuator import VisionActuator
 
 try:
     from task_events import TaskEvents
@@ -87,7 +86,6 @@ except Exception:  # pragma: no cover
 FREEROAM_TOKENS = ("FREEROAM", "FREE")
 
 POLL_INTERVAL_MS = 100          # snapshot publish + status refresh (Tk)
-QUEUE_MAX = 512                 # bounded fast-frame hand-off (drop-newest on lag)
 SEED_MASK = 0xFFFFFFFF          # the sequence PRNG is 32-bit (trial_sequence.lcg)
 
 # Per-session data files live under host/data/ (same tree as rig_logger.py).
@@ -145,8 +143,13 @@ class _Phase3Snapshot:
     session_out_dir: str = ""
 
 
-class Phase3ControlView:
-    """Tk module: the Phase 3 tab - host-owned cued task, firmware as actuator."""
+class Phase3ControlView(VisionActuator):
+    """Tk module: the Phase 3 tab - host-owned cued task, firmware as actuator.
+
+    Mixes in ``VisionActuator`` for the shared ADR-0043 skeleton (fast-view
+    subscription, bounded queue, dedicated actuation thread, atomic snapshot);
+    this class adds the cue-gate / task policy, the DAC-authority handshake, and
+    the per-session data log."""
 
     def __init__(self, parent: tk.Misc, camera=None, pipeline=None, send=None):
         self._parent = parent
@@ -186,18 +189,15 @@ class Phase3ControlView:
         self._incorrect = 0
         self._reward_count = 0
         self._active_seed = 0
-        self._drops = 0
         # Latest immutable table snapshot for cross-tab readers (the stats panel +
         # trial ribbon; docs/decisions/0050). Published by the actuation thread via
         # atomic reference assignment, read by published_state(); no lock needed
         # (mirrors the _snapshot Tk<->thread hand-off, ADR-0043). None until armed.
         self._state: Optional[Phase3StateSnapshot] = None
 
-        # --- actuation thread (ADR-0043 pattern) --------------------------
-        self._queue: "queue.Queue" = queue.Queue(maxsize=QUEUE_MAX)
-        self._stop = threading.Event()
-        self._thread: Optional[threading.Thread] = None
-        self._snapshot = _Phase3Snapshot()
+        # --- actuation thread (ADR-0043 skeleton, shared via VisionActuator) ---
+        self._init_actuator(thread_name="phase3-actuation")
+        self._act_snapshot = _Phase3Snapshot()
         self._status_text = "phase 3: off"
         # Change-signature of the last progress render (ribbon + planned-trial
         # list), so the Tk poll only rebuilds those widgets when the published
@@ -214,7 +214,8 @@ class Phase3ControlView:
             return
 
         self._build_ui()
-        self._start_thread()
+        # Subscribe to the fast view + spawn the actuation thread (VisionActuator).
+        self._start_actuation()
         self._schedule_poll()
 
     # ------------------------------------------------------------ module API
@@ -242,25 +243,13 @@ class Phase3ControlView:
             if rising and index == self._center_lick:
                 parsed = protocol.parse(line)
                 fw_ms = parsed.ms if parsed is not None else None
-                try:
-                    self._queue.put_nowait(("lick", _now_iso(), fw_ms))
-                except queue.Full:
-                    self._drops += 1
+                self._enqueue_act(("lick", _now_iso(), fw_ms))
 
     def close(self) -> None:
         self._closed = True
-        self._stop.set()
-        if self._pipeline is not None:
-            try:
-                self._pipeline.unsubscribe_fast(self._on_fast_state)
-            except Exception:
-                pass
-        try:
-            self._queue.put_nowait(None)   # wake the loop so it can exit
-        except queue.Full:
-            pass
-        if self._thread is not None and self._thread.is_alive():
-            self._thread.join(timeout=2.0)
+        # Stop the actuation thread + unsubscribe (VisionActuator) before the
+        # best-effort DAC restore below.
+        self._stop_actuation()
         # Best-effort: silence the tone + restore firmware autonomy.
         if self._gate_was_open:
             self._send_cmd("CUE_OFF")
@@ -305,38 +294,14 @@ class Phase3ControlView:
         return self._state
 
     # --------------------------------------------------------------- thread
-    def _start_thread(self) -> None:
-        self._pipeline.subscribe_fast(self._on_fast_state)
-        self._thread = threading.Thread(
-            target=self._loop, name="phase3-actuation", daemon=True)
-        self._thread.start()
-
-    def _on_fast_state(self, bundle) -> None:
-        """Pipeline fast-view callback - runs INLINE on the tracking worker.
-
-        Must be cheap + non-blocking: just enqueue for the actuation thread."""
-        try:
-            self._queue.put_nowait(("frame", bundle))
-        except queue.Full:
-            self._drops += 1
-
-    def _loop(self) -> None:
-        """The single actuation thread: drain frames and be the sole caller of
-        CueGate.step / TaskEvents.update / Phase3Task.update / self._send."""
-        while not self._stop.is_set():
-            try:
-                item = self._queue.get(timeout=0.2)
-            except queue.Empty:
-                continue
-            if item is None:                 # close() sentinel
-                continue
-            try:
-                if item[0] == "lick":
-                    self._process_lick(item[1], item[2])
-                else:
-                    self._process_frame(item[1])
-            except Exception:
-                pass
+    def _process_act_item(self, item, snap) -> None:
+        """Sole caller of CueGate.step / TaskEvents.update / Phase3Task.update /
+        self._send (ADR-0043). Called by the shared VisionActuator loop with the
+        atomic snapshot; splits frames from routed center-well lick edges."""
+        if item[0] == "lick":
+            self._process_lick(item[1], item[2])
+        else:
+            self._process_frame(item[1], snap)
 
     def _arm_session(self, snap: _Phase3Snapshot) -> None:
         """Rising-edge setup: fresh sequence + task from the seed; take the DAC."""
@@ -372,9 +337,7 @@ class Phase3ControlView:
         self._publish_state(armed=True)      # expose the fresh plan to other tabs
         self._send_cmd("CUE,VISION")         # host owns the DAC; suppress auto-tone
 
-    def _process_frame(self, bundle) -> None:
-        snap = self._snapshot                # atomic read of the immutable snapshot
-
+    def _process_frame(self, bundle, snap) -> None:
         # Gate edges own the DAC-authority handshake + a clean session (re)start.
         if snap.gate_open and not self._gate_was_open:
             self._arm_session(snap)
@@ -513,7 +476,7 @@ class Phase3ControlView:
         idx = self._task.index if self._task is not None else 0
         done = self._correct + self._incorrect
         acc = (100.0 * self._correct / done) if done else 0.0
-        extra = f"  drops:{self._drops}" if self._drops else ""
+        extra = f"  drops:{self._act_drops}" if self._act_drops else ""
         self._status_text = (
             f"ARMED  seed:{self._active_seed}  trial:{min(idx + 1, n)}/{n}  "
             f"correct:{self._correct}/{done} ({acc:.0f}%)  "
@@ -718,7 +681,7 @@ class Phase3ControlView:
     def _publish_snapshot(self) -> None:
         """Tk poll: snapshot the gate + tunables the actuation thread needs, so
         the thread never reads Tk state (ADR-0043)."""
-        self._snapshot = _Phase3Snapshot(
+        self._act_snapshot = _Phase3Snapshot(
             gate_open=self._gate_open(),
             params=self._current_params(),
             seed=self._current_seed(),

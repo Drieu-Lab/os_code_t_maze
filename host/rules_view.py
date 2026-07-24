@@ -49,7 +49,6 @@ from __future__ import annotations
 import csv
 import json
 import os
-import queue
 import threading
 import time
 import tkinter as tk
@@ -61,6 +60,7 @@ import protocol
 from gui_deps import cv2, missing_dependency
 from preview import render_bgr_to_label, safe_after
 from tooltips import tip
+from vision_actuator import VisionActuator
 
 try:
     from tracker import draw_overlay as _draw_overlay  # noqa: E402
@@ -107,12 +107,6 @@ POLL_INTERVAL_MS = 100        # gate-snapshot publish + status refresh (Tk)
 PREVIEW_INTERVAL_MS = 66      # ~15 fps live preview (only while the tab is visible)
 PREVIEW_MAX_W = 640
 
-# The actuation queue merges fast-view frame pushes (worker) with routed lick edges
-# (Tk). Sized to several seconds of frames at 30-60 fps; the actuation work per item
-# is tiny so it never backs up in practice. Overflow drops the newest item (counted)
-# rather than growing unbounded or blocking the tracking worker.
-ACT_QUEUE_MAX = 512
-
 # Free Roam is the only firmware mode we actuate in (see module docstring).
 FREEROAM_TOKENS = ("FREEROAM", "FREE")
 
@@ -133,8 +127,13 @@ class _GateSnapshot:
     landmarks: tuple = field(default_factory=tuple)
 
 
-class RulesControlView:
-    """Tk module: the Rules tab - controls + executor for the rules engine."""
+class RulesControlView(VisionActuator):
+    """Tk module: the Rules tab - controls + executor for the rules engine.
+
+    Mixes in ``VisionActuator`` for the shared ADR-0043 skeleton (fast-view
+    subscription, bounded queue, dedicated actuation thread, atomic snapshot);
+    this class adds the engine/scale policy, the gate-edge task reset, and the
+    thread-safe rule-event log."""
 
     def __init__(self, parent: tk.Misc, tracker=None, camera=None, pipeline=None,
                  send=None):
@@ -170,15 +169,13 @@ class RulesControlView:
         self._log_status_text = "log: off"
         self._closed = False
 
-        # --- actuation thread (ADR-0043) -----------------------------------
-        # Merged queue of ("frame", bundle) fast pushes + ("lick", line, now) edges.
-        # The gate snapshot is the Tk->thread hand-off; the reset flag lets Tk ask
-        # the thread (sole owner of task_events) to clear it on a config change.
-        self._act_queue: "queue.Queue" = queue.Queue(maxsize=ACT_QUEUE_MAX)
-        self._act_stop = threading.Event()
-        self._act_thread: Optional[threading.Thread] = None
-        self._act_drops = 0                 # items dropped on a full queue (lag)
-        self._gate_snapshot = _GateSnapshot()
+        # --- actuation thread (ADR-0043 skeleton, shared via VisionActuator) ---
+        # The merged queue carries ("frame", bundle) fast pushes + ("lick", line,
+        # now) edges; the gate snapshot is the Tk->thread hand-off; the reset flag
+        # lets Tk ask the thread (sole owner of task_events) to clear it on a
+        # config change.
+        self._init_actuator(thread_name="rules-actuation")
+        self._act_snapshot = _GateSnapshot()
         self._log_dir_str = self._log_dir()  # refreshed each Tk poll for the thread
         self._task_reset_pending = False
 
@@ -197,20 +194,12 @@ class RulesControlView:
         self._build_ui()
         self._refresh_landmark_options()
         self._render_measurements()
+        # Subscribe to the fast view + spawn the actuation thread (VisionActuator).
+        # Without a pipeline this is a no-op and the tab degrades to the legacy Tk
+        # poll path (proximity-only rules); see _poll.
         self._start_actuation()
         self._schedule_poll()
         self._schedule_preview()
-
-    def _start_actuation(self) -> None:
-        """Start the dedicated actuation thread and subscribe to the pipeline's
-        fast view (ADR-0042/0043). Without a pipeline we degrade to the legacy Tk
-        poll path (proximity-only rules); nothing to start."""
-        if not self._use_worker_actuation:
-            return
-        self._pipeline.subscribe_fast(self._on_fast_state)
-        self._act_thread = threading.Thread(
-            target=self._actuation_loop, name="rules-actuation", daemon=True)
-        self._act_thread.start()
 
     # ------------------------------------------------------------ module API
     def widget(self) -> tk.Widget:
@@ -242,18 +231,7 @@ class RulesControlView:
     def close(self) -> None:
         self._closed = True
         # Stop the actuation thread BEFORE closing the log it writes to.
-        self._act_stop.set()
-        if self._use_worker_actuation and self._pipeline is not None:
-            try:
-                self._pipeline.unsubscribe_fast(self._on_fast_state)
-            except Exception:
-                pass
-        try:
-            self._act_queue.put_nowait(None)   # wake the loop so it can exit
-        except queue.Full:
-            pass
-        if self._act_thread is not None and self._act_thread.is_alive():
-            self._act_thread.join(timeout=2.0)
+        self._stop_actuation()
         self._stop_log()
 
     # ---------------------------------------------------------- dependencies
@@ -873,38 +851,10 @@ class RulesControlView:
                 self._log_event(a)
 
     # ------------------------------------------------- actuation thread (2b)
-    def _on_fast_state(self, bundle) -> None:
-        """Pipeline fast-view callback - runs INLINE on the tracking worker.
-
-        Must be cheap + non-blocking: just enqueue the bundle for the actuation
-        thread. Never call the engine or Tk from here (ADR-0042/0043)."""
-        self._enqueue_act(("frame", bundle))
-
-    def _enqueue_act(self, item) -> None:
-        """Put an item on the actuation queue, dropping (and counting) on overflow
-        rather than blocking the caller (the tracking worker or Tk)."""
-        try:
-            self._act_queue.put_nowait(item)
-        except queue.Full:
-            self._act_drops += 1
-
-    def _actuation_loop(self) -> None:
-        """The single actuation thread: drain frames + licks in arrival order and
-        be the sole caller of engine.tick/event + TaskEvents.update (ADR-0043)."""
-        while not self._act_stop.is_set():
-            try:
-                item = self._act_queue.get(timeout=0.2)
-            except queue.Empty:
-                continue
-            if item is None:                 # close() sentinel
-                continue
-            try:
-                self._process_act_item(item)
-            except Exception:
-                pass
-
-    def _process_act_item(self, item) -> None:
-        snap = self._gate_snapshot           # atomic read of the immutable snapshot
+    def _process_act_item(self, item, snap) -> None:
+        """Sole caller of engine.tick/event + TaskEvents.update (ADR-0043). Called
+        by the shared VisionActuator loop with the atomic gate snapshot; drains
+        frames + licks in arrival order so the engine stays single-threaded."""
         engine = self._engine
         if engine is None:
             return
@@ -943,7 +893,7 @@ class RulesControlView:
         except Exception:
             landmarks = []
         self._log_dir_str = self._log_dir()
-        self._gate_snapshot = _GateSnapshot(
+        self._act_snapshot = _GateSnapshot(
             gate_open=self._gate_open(),
             needs_task=self._needs_task(),
             scale=self._scale,
