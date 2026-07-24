@@ -23,6 +23,9 @@ This project spans **two sibling folders**:
     "pure core + thin shell" pattern, the run-from-`host/` rule, the new-coder
     learning path), framed around minimizing comprehension debt. **Read it before
     writing or changing host code.**
+  - [`docs/glossary.md`](docs/glossary.md) — plain-language definitions of the
+    recurring technical terms (thread, lock, hot path, pure core, snapshot, …).
+    Point to it (or gloss briefly) when you use jargon; add new recurring terms.
   - [`docs/notes/`](docs/notes/) — the human-owned **capture inbox** (raw bug /
     idea jottings). Read it for context and triage it (see "Triage the capture
     inbox" below); don't treat it as authoritative.
@@ -70,6 +73,24 @@ code-level conventions live in [`CONTRIBUTING.md`](CONTRIBUTING.md)):
   pass), pause and **offer to commit** — propose a commit message, and if the work
   spans multiple purposes, propose how to split it — rather than letting one large
   diff accumulate. Only commit when the human agrees; never commit automatically.
+
+## Explain for a non-specialist audience
+
+The humans who own this code are not all trained in computer science, so an
+explanation they cannot follow doesn't count as explained — the same
+comprehension-debt principle, applied to prose. Two rules:
+
+- **Prefer plain language; don't assume a CS background.** In chat, commit
+  messages, ADRs, and comments, favour plain wording over jargon. When you use a
+  live conversation to explain something and hit an unavoidable term, gloss it in
+  a few words on the spot (e.g. "a *lock* — a way to let only one thread touch
+  shared data at a time") rather than leaving it bare.
+- **In documents, point to the glossary instead of re-defining.** On first use of
+  a recurring technical term in a written doc (ADR, comment, PROGRAMS.md), briefly
+  gloss it and/or link [`docs/glossary.md`](docs/glossary.md) rather than
+  re-explaining it from scratch each time. When you introduce a *new* term that
+  will recur, add a short entry to the glossary in the same change so it stays the
+  single source of truth.
 
 ## Keep `PROGRAMS.md` up to date
 
