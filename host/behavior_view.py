@@ -1,5 +1,5 @@
 """
-behavior_view.py - live "Phase 2a behavior" readout panel for experiment_control.py.
+behavior_view.py - phase-aware live behavior readout panel for experiment_control.py.
 
 The thin Tk shell around the pure behavior-stats core (behavior_stats.BehaviorStats).
 Like the Maze state / Rules tabs, it is a UI-free consumer of the shared maze-state
@@ -9,6 +9,15 @@ worker produced since last poll, turns each into task-semantic events
 Phase 2a training measures, shown both cumulatively and over a rolling window.
 Draining (not sampling the latest) is required because the choice/loop events are
 one-frame edges that would otherwise be missed between polls.
+
+Phase-aware (docs/decisions/0052). The one panel hosts two switched sub-panels:
+the Phase 2a shaping readout above (default), and a Phase 3 cued-task stats panel
+shown WHILE a Phase 3 session is armed. The Phase 3 view is driven not by the
+local estimator but by the immutable Phase3StateSnapshot the Phase 3 controller
+publishes (docs/decisions/0050), resolved each poll through the injected
+``phase3_state`` provider and reduced by the pure phase3_stats.compute core. When
+no Phase 3 session is armed the panel falls back to the Phase 2a readout, and the
+LabelFrame title tracks the active phase.
 
 It lives in the empty bottom-right of the Rig view tab (beside the solenoid /
 reward / lick controls) so the experimenter can watch shaping progress while
@@ -32,6 +41,7 @@ import protocol
 from preview import safe_after
 from tooltips import tip
 
+import phase3_stats
 from behavior_stats import BehaviorStats
 from session_timer import SessionTimer
 from task_events import TaskEvents
@@ -47,21 +57,33 @@ SCALE_PATH = os.path.join(_HERE, "rig_scale.json")   # shared with rules_view.py
 
 POLL_INTERVAL_MS = 150   # readout / estimator refresh (~ the Maze state tab rate)
 
+# Sub-panel titles - the LabelFrame text tracks the active phase (ADR-0052).
+P2A_TITLE = "Phase 2a behavior  -  live readout"
+P3_TITLE = "Phase 3 cued task  -  live stats"
+
 
 class BehaviorView:
     """Tk module: live Phase 2a training-readout panel (widget/apply/close)."""
 
-    def __init__(self, parent: tk.Misc, tracker=None, camera=None, pipeline=None):
+    def __init__(self, parent: tk.Misc, tracker=None, camera=None, pipeline=None,
+                 phase3_state=None):
         self._tracker = tracker
         self._camera = camera
         # Shared maze-state pipeline (ADR-0041): consume its RatState stream
         # instead of running a private estimator. Draining every bundle keeps the
         # one-frame choice/loop edges (folded into TaskEvents/BehaviorStats).
         self._pipeline = pipeline
+        # Cross-tab Phase 3 provider: a zero-arg callable returning the latest
+        # phase3_log.Phase3StateSnapshot (or None), so this panel can go phase-aware
+        # (docs/decisions/0050). Stored here; consumed by later work.
+        self._phase3_state = phase3_state
         self._sub = None
-        self.frame = ttk.LabelFrame(parent, text="Phase 2a behavior  -  live readout")
+        self.frame = ttk.LabelFrame(parent, text=P2A_TITLE)
         self._closed = False
         self._running = False
+        # Which sub-panel is currently packed ("2a" or "3"); _show_phase() only
+        # re-packs when this changes, so a steady session doesn't churn widgets.
+        self._shown_phase = "2a"
 
         if tracker is None or pipeline is None:
             ttk.Label(self.frame, padding=16, anchor="center", justify="center",
@@ -78,6 +100,10 @@ class BehaviorView:
         self._vars = {k: tk.StringVar(value="-") for k in (
             "status", "session", "compliance", "lr", "nonstem", "run",
             "throughput", "distance")}
+        # Phase 3 stat lines (filled from phase3_stats.compute while a Phase 3
+        # session is armed); the key doubles as the tooltip-key suffix.
+        self._p3_vars = {k: tk.StringVar(value="-") for k in (
+            "trials", "accuracy", "bycue", "bias", "reward", "strategy", "rt")}
         self._window = tk.IntVar(value=self._stats.snapshot().window_n)
 
         self._build_ui()
@@ -131,19 +157,33 @@ class BehaviorView:
         status_lbl.pack(side=tk.TOP, anchor="w", **pad)
         tip(status_lbl, "behavior.status")
 
-        session_lbl = ttk.Label(self.frame, textvariable=self._vars["session"],
+        # Two switched sub-panels share the strip (ADR-0052): the Phase 2a readout
+        # (default, packed now) and a Phase 3 cued-task stats panel shown while a
+        # Phase 3 session is armed. _show_phase() packs one and forgets the other.
+        self._p2a_box = ttk.Frame(self.frame)
+        self._p2a_box.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        self._p3_box = ttk.Frame(self.frame)
+
+        session_lbl = ttk.Label(self._p2a_box, textvariable=self._vars["session"],
                                 anchor="w", font=("TkDefaultFont", 10))
         session_lbl.pack(side=tk.TOP, anchor="w", **pad)
         tip(session_lbl, "behavior.session")
 
-        # Measures - one bold value line each. The var key doubles as the tooltip
-        # key suffix, except the same-side run (var "run" -> tip "sameside").
+        # Phase 2a measures - one bold value line each. The var key doubles as the
+        # tooltip key suffix, except the same-side run (var "run" -> tip "sameside").
         _TIP_KEY = {"run": "sameside"}
         for key in ("compliance", "lr", "nonstem", "run", "throughput", "distance"):
-            lbl = ttk.Label(self.frame, textvariable=self._vars[key], anchor="w",
+            lbl = ttk.Label(self._p2a_box, textvariable=self._vars[key], anchor="w",
                             font=("TkDefaultFont", 10))
             lbl.pack(side=tk.TOP, anchor="w", **pad)
             tip(lbl, f"behavior.{_TIP_KEY.get(key, key)}")
+
+        # Phase 3 stat lines (filled by _refresh_phase3 from phase3_stats.compute).
+        for key in ("trials", "accuracy", "bycue", "bias", "reward", "strategy", "rt"):
+            lbl = ttk.Label(self._p3_box, textvariable=self._p3_vars[key], anchor="w",
+                            font=("TkDefaultFont", 10))
+            lbl.pack(side=tk.TOP, anchor="w", **pad)
+            tip(lbl, f"behavior.phase3.{key}")
 
     # ------------------------------------------------------------- controls
     def _toggle_run(self) -> None:
@@ -241,9 +281,78 @@ class BehaviorView:
             return "waiting for zones (draw them in the Maze state tab)"
         return "running"
 
+    def _phase3_snapshot(self):
+        """The active Phase 3 session snapshot (armed), or None. Reading the
+        injected provider is cheap and thread-safe: it returns the controller's
+        latest immutable Phase3StateSnapshot (docs/decisions/0050). A snapshot
+        whose gate has closed (armed=False) is treated as inactive, so the panel
+        falls back to the Phase 2a readout between sessions."""
+        if self._phase3_state is None:
+            return None
+        try:
+            snap = self._phase3_state()
+        except Exception:
+            return None
+        return snap if (snap is not None and snap.armed) else None
+
+    def _show_phase(self, phase: str) -> None:
+        """Pack the requested sub-panel ("2a"/"3") and forget the other, retitling
+        the frame. A no-op when that panel is already shown (avoids re-packing on
+        every poll)."""
+        if phase == self._shown_phase:
+            return
+        self._shown_phase = phase
+        if phase == "3":
+            self._p2a_box.pack_forget()
+            self._p3_box.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+            self.frame.configure(text=P3_TITLE)
+        else:
+            self._p3_box.pack_forget()
+            self._p2a_box.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+            self.frame.configure(text=P2A_TITLE)
+
+    def _window_n(self) -> int:
+        try:
+            return int(self._window.get())
+        except (tk.TclError, ValueError):
+            return self._stats.snapshot().window_n
+
     def _refresh(self) -> None:
         if self._tracker is None:
             return
+        snap3 = self._phase3_snapshot()
+        if snap3 is not None:
+            self._show_phase("3")
+            self._refresh_phase3(snap3)
+        else:
+            self._show_phase("2a")
+            self._refresh_phase2a()
+
+    def _refresh_phase3(self, snap3) -> None:
+        st = phase3_stats.compute(snap3, window_n=self._window_n())
+        n = st.window_n
+        self._vars["status"].set(
+            f"Phase 3 session active - trial "
+            f"{min(st.current_index + 1, st.total)}/{st.total}")
+        self._p3_vars["trials"].set(
+            f"Completed: {st.completed}/{st.total}   "
+            f"correct {st.correct}  incorrect {st.incorrect}")
+        self._p3_vars["accuracy"].set(
+            f"Accuracy: {_pct(st.accuracy_cum)}  (last {n}: {_pct(st.accuracy_win)})"
+            f"   [{st.correct}/{st.completed}]")
+        self._p3_vars["bycue"].set(
+            f"By cue: HIGH {_pct(st.high_accuracy)} [{st.high_completed}]   "
+            f"LOW {_pct(st.low_accuracy)} [{st.low_completed}]")
+        self._p3_vars["bias"].set(
+            f"Side bias (chose): {_lr(st.lr_bias)}   "
+            f"[{st.left_choices}L/{st.right_choices}R]")
+        self._p3_vars["reward"].set(
+            f"Reward rate: {_pct(st.reward_rate)}   [{st.rewarded}/{st.completed}]")
+        self._p3_vars["strategy"].set(
+            f"Win-stay: {_pct(st.win_stay)}   Lose-shift: {_pct(st.lose_shift)}")
+        self._p3_vars["rt"].set(f"Choice RT: {_rt(st.mean_rt_s)}   [n={st.rt_n}]")
+
+    def _refresh_phase2a(self) -> None:
         snap = self._stats.snapshot()
         n = snap.window_n
         self._vars["status"].set(self._status_text())
@@ -292,6 +401,10 @@ def _lr(t) -> str:
 
 def _rate(x: Optional[float]) -> str:
     return "--" if x is None else f"{x:.1f}"
+
+
+def _rt(x: Optional[float]) -> str:
+    return "--" if x is None else f"{x:.2f} s"
 
 
 def _side(side: Optional[str]) -> str:

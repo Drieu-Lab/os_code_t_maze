@@ -554,8 +554,16 @@ def main() -> int:
     # so it gets each serial line (to reset on a MODE switch) and close().
     if (tracker is not None and BehaviorView is not None
             and rig_controls_right is not None):
+        # Cross-tab seam (docs/decisions/0050): resolve the live Phase 3 controller
+        # through the shared holder (populated when the Phase 3 tab is built) and
+        # hand its immutable published snapshot to the behavior panel, so the panel
+        # can go phase-aware without reaching across tabs itself.
+        def phase3_state():
+            p3 = phase3_ref.get("p3")
+            return p3.published_state() if p3 is not None else None
         behavior = BehaviorView(rig_controls_right, tracker=tracker,
-                                camera=camera_ref.get("cam"), pipeline=pipeline)
+                                camera=camera_ref.get("cam"), pipeline=pipeline,
+                                phase3_state=phase3_state)
         behavior.widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         modules.append(behavior)
 

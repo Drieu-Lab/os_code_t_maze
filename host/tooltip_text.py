@@ -302,6 +302,17 @@ TIPS: Dict[str, Entry] = {
     "phase3.seed": "PRNG seed for the balanced L/R trial sequence (32-bit). The "
                    "same seed reproduces the same schedule; applied when you arm.",
     "phase3.new_seed": "Draw a fresh random seed (takes effect on the next arm).",
+    "phase3.ribbon": "The current trial flanked by the last few resolved trials "
+                     "and the next few upcoming ones. Each cell shows the choice "
+                     "cue and the arm it means (e.g. HIGH->L), the two planned "
+                     "return-arm cues (ret L:_ R:_), and, once scored, the arm the "
+                     "rat chose with OK/X. The current trial is highlighted; blank "
+                     "until you arm.",
+    "phase3.sequence": "The whole planned trial sequence for this session (from "
+                       "the seed): choice cue -> correct arm and the two return-arm "
+                       "cues per trial, with the rat's choice + OK/X filled in as "
+                       "trials resolve. The current trial is highlighted and kept "
+                       "scrolled into view.",
 
     # ---- maze_state_view.py: Maze state tab ----
     "maze.define_zones": "Draw the maze zones (central reward HUB, stem, "
@@ -371,6 +382,45 @@ TIPS: Dict[str, Entry] = {
                          "minute. Both >= 0 (rate -- until ~1 s of active time). "
                          "Untracked stretches are not counted; shows -- (needs "
                          "scale) without the Rules-tab scale.",
+
+    # ---- behavior_view.py: Phase 3 cued-task stats (shown while a Phase 3
+    #      session is armed; computed by phase3_stats over the published table) ----
+    "behavior.phase3.trials": "Session progress: trials the rat has completed "
+                              "(a choice has been scored) out of the planned "
+                              "total, and the correct / incorrect split. "
+                              "Read live from the Phase 3 tab's published trial "
+                              "table (docs/decisions/0050).",
+    "behavior.phase3.accuracy": "Choice accuracy = correct / completed trials, "
+                                "cumulative and over the last N completed trials "
+                                "(the Window control). The primary 'is the rat "
+                                "learning the cue' number; -- until the first "
+                                "completed trial.",
+    "behavior.phase3.bycue": "Accuracy split by the trial's CHOICE cue: HIGH tone "
+                             "vs LOW tone (each with its completed-trial count). "
+                             "A rat following the cue is accurate on both; a large "
+                             "gap flags a cue it hasn't learned. -- until that cue "
+                             "has been seen.",
+    "behavior.phase3.bias": "Side bias: the fraction of completed trials on which "
+                            "the rat chose LEFT vs RIGHT (its own choice, "
+                            "regardless of correctness), with the L/R counts. "
+                            "50/50 is unbiased; a lopsided split flags a side "
+                            "preference. -- before the first choice.",
+    "behavior.phase3.reward": "Reward rate = rewarded / completed trials. With the "
+                              "'reward incorrect choices' shaping aid on this "
+                              "approaches 100% and no longer tracks accuracy.",
+    "behavior.phase3.strategy": "Naive-strategy readout over adjacent completed "
+                                "trials, on the trial OUTCOME (not reward, so it "
+                                "stays meaningful under the shaping aid): Win-stay "
+                                "= chose the same arm again after a CORRECT trial; "
+                                "Lose-shift = switched arms after an INCORRECT "
+                                "one. High values flag a rat repeating/alternating "
+                                "on its own result instead of following the cue. "
+                                "-- until the conditioning outcome has occurred.",
+    "behavior.phase3.rt": "Mean choice reaction time: choice-cue onset -> scored "
+                          "choice, averaged over completed trials that carry both "
+                          "stamps (n). These are host wall-clock times (they carry "
+                          "serial/actuation latency), so it is an approximate "
+                          "latency, not a hardware-precise reaction time.",
 
     # ---- tracker_view.py: tuning sliders (keyed by param name) ----
     "tracker.thresh": "Foreground threshold on the background difference (0-255).",

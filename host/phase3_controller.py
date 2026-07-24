@@ -64,7 +64,8 @@ from typing import Optional
 import protocol
 from cue_gate import CHOICE, RETURN, CueGate, CueParams
 from maze_state import CENTRAL_STEM, HUB
-from phase3_log import Phase3Log
+from phase3_log import Phase3Log, Phase3StateSnapshot
+from phase3_ribbon import RIBBON_AFTER, RIBBON_BEFORE, RibbonRow, ribbon_rows
 from phase3_task import CORRECT, INCORRECT, Phase3Config, Phase3Task
 from rig_config import load_rig_config
 from trial_sequence import LEFT, RIGHT, TrialConfig, TrialSequence
@@ -95,6 +96,26 @@ DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 # Physical return arm ("left"/"right", from CueGate) -> trial_sequence side int,
 # to look up that arm's planned return cue (see docs/decisions/0047).
 _SIDE_OF_ARM = {"left": LEFT, "right": RIGHT}
+
+# In-tab progress visualization (docs/decisions/0051). The ribbon holds a fixed
+# strip of RIBBON_BEFORE + 1 + RIBBON_AFTER cells (the helper clamps near the
+# ends, so unused cells are hidden). Colours are cosmetic only.
+RIBBON_CELLS = RIBBON_BEFORE + 1 + RIBBON_AFTER
+SEQ_LIST_ROWS = 8               # visible rows of the scrollable planned-trial list
+_CELL_BG = "#f2f2f2"            # a ribbon cell at rest
+_CELL_CURRENT_BG = "#ffe9a8"    # the current trial (ribbon cell + list row)
+_FG = "#222222"
+_FG_MUTED = "#888888"           # not-yet-resolved trials
+_FG_CORRECT = "#1a7f37"         # a correct choice
+_FG_INCORRECT = "#b3261e"       # an incorrect choice
+
+# Compact one-letter labels for the strip (arms and cue tones).
+_ARM_SHORT = {"LEFT": "L", "RIGHT": "R"}
+_CUE_SHORT = {"HIGH": "H", "LOW": "L"}
+
+# Sentinel for "no progress render yet": distinct from any real signature
+# (including ``None`` for the not-armed state), so the first poll always draws.
+_UNSET = object()
 
 
 def _now_iso() -> str:
@@ -166,6 +187,11 @@ class Phase3ControlView:
         self._reward_count = 0
         self._active_seed = 0
         self._drops = 0
+        # Latest immutable table snapshot for cross-tab readers (the stats panel +
+        # trial ribbon; docs/decisions/0050). Published by the actuation thread via
+        # atomic reference assignment, read by published_state(); no lock needed
+        # (mirrors the _snapshot Tk<->thread hand-off, ADR-0043). None until armed.
+        self._state: Optional[Phase3StateSnapshot] = None
 
         # --- actuation thread (ADR-0043 pattern) --------------------------
         self._queue: "queue.Queue" = queue.Queue(maxsize=QUEUE_MAX)
@@ -173,6 +199,11 @@ class Phase3ControlView:
         self._thread: Optional[threading.Thread] = None
         self._snapshot = _Phase3Snapshot()
         self._status_text = "phase 3: off"
+        # Change-signature of the last progress render (ribbon + planned-trial
+        # list), so the Tk poll only rebuilds those widgets when the published
+        # table actually changes, not every 100 ms (docs/decisions/0051). Starts
+        # as a sentinel so the first poll always draws (None is a valid signature).
+        self._progress_sig = _UNSET
 
         if pipeline is None or TaskEvents is None:
             reason = ("the maze-state pipeline (tracker) is not available"
@@ -265,6 +296,14 @@ class Phase3ControlView:
         opens and a session starts. Used by the Session controller's manifest."""
         return self._log_path
 
+    def published_state(self) -> Optional[Phase3StateSnapshot]:
+        """Latest immutable Phase 3 table snapshot for cross-tab readers (the
+        stats panel + trial ribbon), or None until a session is armed. Thread-safe:
+        the actuation thread publishes a fresh immutable snapshot by atomic
+        reference assignment; this getter just returns the current reference
+        (docs/decisions/0050; mirrors the _snapshot hand-off, ADR-0043)."""
+        return self._state
+
     # --------------------------------------------------------------- thread
     def _start_thread(self) -> None:
         self._pipeline.subscribe_fast(self._on_fast_state)
@@ -330,6 +369,7 @@ class Phase3ControlView:
         out_dir = snap.session_out_dir or DATA_DIR
         self._log_path = os.path.join(out_dir, f"{base}.csv")
         self._write_log()
+        self._publish_state(armed=True)      # expose the fresh plan to other tabs
         self._send_cmd("CUE,VISION")         # host owns the DAC; suppress auto-tone
 
     def _process_frame(self, bundle) -> None:
@@ -343,6 +383,7 @@ class Phase3ControlView:
             self._send_cmd("CUE,BEAM")       # restore firmware autonomy
             self._gate.reset()
             self._active_cue = None
+            self._publish_state(armed=False)  # keep the last table, mark disarmed
         self._gate_was_open = snap.gate_open
 
         if not snap.gate_open or self._task is None or self._seq is None:
@@ -422,6 +463,7 @@ class Phase3ControlView:
 
         if changed:
             self._write_log()
+            self._publish_state(armed=True)
         self._publish_status(snap)
 
     def _process_lick(self, iso: str, fw_ms) -> None:
@@ -429,12 +471,25 @@ class Phase3ControlView:
         awaiting its reward-collection lick and persist (ADR-0047)."""
         if self._log is not None and self._log.lick(iso, fw_ms):
             self._write_log()
+            self._publish_state(armed=True)
 
     def _log_call(self, fn) -> None:
         """Run a log mutation only if a session log exists (defensive; the log is
         created on arm and the frame path already checks the task exists)."""
         if self._log is not None:
             fn()
+
+    def _publish_state(self, *, armed: bool) -> None:
+        """Publish an immutable freeze of the table for cross-tab readers (P0,
+        docs/decisions/0050). Called by the actuation thread whenever the table
+        changes (and on arm/disarm), so readers on the Tk thread always see a
+        consistent snapshot without touching the live rows."""
+        log = self._log
+        if log is None:
+            self._state = None
+            return
+        idx = self._task.index if self._task is not None else 0
+        self._state = log.snapshot(idx, armed=armed)
 
     def _write_log(self) -> None:
         """Atomically persist the whole table (temp file + os.replace), so a crash
@@ -593,6 +648,58 @@ class Phase3ControlView:
                   wraplength=460, justify="left").grid(
             row=10, column=0, columnspan=2, sticky="w", **pad)
 
+        # In-tab progress visualization (docs/decisions/0051): a compact ribbon of
+        # the current trial + neighbours, and a scrollable list of all N planned
+        # trials with the current one highlighted. Both are read-only views of the
+        # published table snapshot (self._state), refreshed on the Tk poll.
+        self._build_progress_ui(root, row=11)
+
+    def _build_progress_ui(self, root: ttk.Frame, *, row: int) -> None:
+        """Build the trial ribbon + scrollable planned-trial list (ADR-0051)."""
+        ribbon = ttk.LabelFrame(root, text="Trial ribbon (recent / current / upcoming)")
+        ribbon.grid(row=row, column=0, columnspan=2, sticky="ew", padx=6, pady=(8, 3))
+        tip(ribbon, "phase3.ribbon")
+        self._ribbon_hint = ttk.Label(ribbon, text="", foreground=_FG_MUTED)
+        self._ribbon_hint.grid(row=1, column=0, sticky="w", padx=4, pady=2)
+        strip = ttk.Frame(ribbon)
+        strip.grid(row=0, column=0, sticky="w", padx=4, pady=2)
+        # Pre-create the fixed cells once and update them in place each poll, so a
+        # steady session doesn't churn widgets (the helper clamps near the ends;
+        # extra cells are hidden with grid_remove).
+        self._ribbon_cells = [self._make_ribbon_cell(strip, i)
+                              for i in range(RIBBON_CELLS)]
+
+        seq = ttk.LabelFrame(root, text="Planned trials")
+        seq.grid(row=row + 1, column=0, columnspan=2, sticky="nsew",
+                 padx=6, pady=3)
+        seq.rowconfigure(0, weight=1)
+        seq.columnconfigure(0, weight=1)
+        tip(seq, "phase3.sequence")
+        self._seq_list = tk.Listbox(
+            seq, height=SEQ_LIST_ROWS, activestyle="none", exportselection=False,
+            font=("TkFixedFont", 9), borderwidth=0, highlightthickness=0)
+        self._seq_list.grid(row=0, column=0, sticky="nsew")
+        bar = ttk.Scrollbar(seq, orient="vertical", command=self._seq_list.yview)
+        bar.grid(row=0, column=1, sticky="ns")
+        self._seq_list.configure(yscrollcommand=bar.set)
+        # Let the planned-trial list take the slack when the tab is tall.
+        root.rowconfigure(row + 1, weight=1)
+        root.columnconfigure(0, weight=1)
+
+    def _make_ribbon_cell(self, parent: tk.Misc, col: int) -> dict:
+        """One ribbon cell: a coloured frame of stacked labels, updated in place."""
+        frame = tk.Frame(parent, bg=_CELL_BG, bd=1, relief="solid",
+                         padx=5, pady=3)
+        frame.grid(row=0, column=col, padx=2, sticky="n")
+        trial = tk.Label(frame, bg=_CELL_BG, fg=_FG, font=("TkDefaultFont", 8, "bold"))
+        choice = tk.Label(frame, bg=_CELL_BG, fg=_FG, font=("TkDefaultFont", 8))
+        ret = tk.Label(frame, bg=_CELL_BG, fg=_FG, font=("TkDefaultFont", 8))
+        outcome = tk.Label(frame, bg=_CELL_BG, fg=_FG_MUTED, font=("TkDefaultFont", 8))
+        for w in (trial, choice, ret, outcome):
+            w.pack(anchor="w")
+        return {"frame": frame, "trial": trial, "choice": choice,
+                "ret": ret, "outcome": outcome}
+
     # ------------------------------------------------------------- Tk poll
     def _schedule_poll(self) -> None:
         if self._closed:
@@ -600,6 +707,7 @@ class Phase3ControlView:
         try:
             self._publish_snapshot()
             self._status_var.set(self._status_text)
+            self._refresh_progress()
         except tk.TclError:
             return
         try:
@@ -618,3 +726,82 @@ class Phase3ControlView:
             animal=self._animal_var.get().strip(),
             session_id=self._session_id,
             session_out_dir=self._session_out_dir)
+
+    # -------------------------------------------------- progress visualization
+    def _refresh_progress(self) -> None:
+        """Redraw the ribbon + planned-trial list from the published snapshot.
+
+        Reads the immutable ``self._state`` (ADR-0050) on the Tk poll - never the
+        actuation thread's live table - and guards ``None`` (before the first
+        arm). Rebuilds only when the table actually changed (a cheap change
+        signature), so a steady session doesn't churn widgets every 100 ms
+        (docs/decisions/0051)."""
+        state = self._state
+        sig = None if state is None else (
+            state.seed, state.total, state.current_index, state.armed,
+            sum(1 for r in state.rows if r.outcome is not None))
+        if sig == self._progress_sig:
+            return
+        self._progress_sig = sig
+        self._rebuild_ribbon(state)
+        self._rebuild_sequence(state)
+
+    def _rebuild_ribbon(self, state: Optional[Phase3StateSnapshot]) -> None:
+        rows = ribbon_rows(state)
+        for i, cell in enumerate(self._ribbon_cells):
+            if i < len(rows):
+                self._fill_ribbon_cell(cell, rows[i])
+                cell["frame"].grid()
+            else:
+                cell["frame"].grid_remove()
+        self._ribbon_hint.configure(
+            text="" if rows else "Not armed - arm to generate the trial plan.")
+
+    def _fill_ribbon_cell(self, cell: dict, row: RibbonRow) -> None:
+        """Update one pre-made ribbon cell in place (text, colours, highlight)."""
+        bg = _CELL_CURRENT_BG if row.is_current else _CELL_BG
+        for key in ("frame", "trial", "choice", "ret"):
+            cell[key].configure(bg=bg)
+        cell["trial"].configure(text=f"#{row.trial}")
+        cell["choice"].configure(
+            text=f"{row.choice_cue}->{_ARM_SHORT.get(row.choice_side, '?')}")
+        cell["ret"].configure(
+            text=f"ret L:{_CUE_SHORT.get(row.return_cue_left, '?')} "
+                 f"R:{_CUE_SHORT.get(row.return_cue_right, '?')}")
+        if row.resolved:
+            ok = row.outcome == CORRECT
+            cell["outcome"].configure(
+                bg=bg, fg=_FG_CORRECT if ok else _FG_INCORRECT,
+                text=f"{_ARM_SHORT.get(row.chosen_arm, '?')} {'OK' if ok else 'X'}")
+        else:
+            cell["outcome"].configure(bg=bg, fg=_FG_MUTED, text="-")
+
+    def _rebuild_sequence(self, state: Optional[Phase3StateSnapshot]) -> None:
+        lb = self._seq_list
+        lb.delete(0, tk.END)
+        if state is None or state.total == 0:
+            lb.insert(tk.END, "  (not armed)")
+            return
+        current = max(0, min(state.current_index, state.total - 1))
+        for row in state.rows:
+            lb.insert(tk.END, self._seq_line(row, current))
+        if 0 <= current < lb.size():
+            lb.itemconfig(current, background=_CELL_CURRENT_BG)
+            lb.see(current)                  # keep the current trial in view
+
+    @staticmethod
+    def _seq_line(row, current: int) -> str:
+        """One monospace planned-trial row for the scrollable list. ``row`` is a
+        phase3_log.Phase3RowView; ``correct_arm`` is the arm the choice cue maps
+        to (identity checked in test_phase3_ribbon)."""
+        mark = ">" if (row.trial - 1) == current else " "
+        arm = _ARM_SHORT.get(row.correct_arm, "?")
+        left = _CUE_SHORT.get(row.return_cue_left, "?")
+        right = _CUE_SHORT.get(row.return_cue_right, "?")
+        if row.outcome is not None:
+            chosen = _ARM_SHORT.get(row.chosen_arm, "?")
+            result = f"chose {chosen} {'OK' if row.outcome == CORRECT else 'X'}"
+        else:
+            result = ""
+        return (f"{mark}{row.trial:>4}  {row.choice_cue:<4}->{arm}  "
+                f"ret L:{left} R:{right}   {result}")
