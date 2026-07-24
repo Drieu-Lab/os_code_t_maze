@@ -73,6 +73,11 @@ criteria).
 | [FW-0016](#fw-0016-migrate-trial-sequence--cue-identity-from-firmware-to-host) | Migrate trial-sequence / cue-identity from firmware to host | Firmware + protocol + host | Partially done (ADR-0046) |
 | [FW-0017](#fw-0017-end-to-end-cue-onset-latency-from-the-firmware-cue-echo) | End-to-end cue-onset latency from the firmware CUE echo | Validation harness | Proposed |
 | [FW-0018](#fw-0018-hardware-session-sync-fiducial-firmware-sync-ttl--camera-visible-led-barcode) | Hardware session sync fiducial (firmware `SYNC` TTL + camera-visible LED barcode) | Firmware + protocol + host session/camera | Proposed |
+| [FW-0019](#fw-0019-one-reward-seam--rate-backstop-across-the-task-controllers) | One reward seam + rate backstop across the task controllers | Rules engine + Phase 3 host | Proposed |
+| [FW-0020](#fw-0020-shared-choice-commit-edge-in-the-task-event-layer) | Shared choice-commit edge in the task-event layer | Task-event layer + task controllers | Proposed |
+| [FW-0021](#fw-0021-single-parse-serial-fan-out-in-the-gui-orchestrator) | Single-parse serial fan-out in the GUI orchestrator | GUI orchestrator + protocol | Proposed |
+| [FW-0022](#fw-0022-unified-mode-switch-reset-seam) | Unified MODE-switch reset seam | GUI orchestrator + tab modules | Proposed |
+| [FW-0023](#fw-0023-shared-preview-producer-loop-helper) | Shared preview *producer* loop helper | Preview helpers + tab modules | Proposed |
 
 ## Entries
 
@@ -231,7 +236,19 @@ are non-obvious enough to warrant their own ADR (or an extension of ADR-0014).
 - **Date added:** 2026-07-01
 - **Author / Agent:** Agent (Cursor) on behalf of Celine
 - **Area / modules:** `firmware/cue-guided-task/cue-guided-task.ino` (new `ANIMAL,<id>` command + re-emit), `firmware/common/rig_config.h` + `firmware/PROTOCOL.md` (`PROTO_VERSION` bump), `host/rig_logger.py` (roll file on a new `ANIMAL` line), `host/experiment_control.py` (rat-id field), a new ADR
-- **Related ADRs:** [ADR-0009](decisions/0009-runtime-training-modes-and-logging.md) (the `ANIMAL` handshake + session/mode logging this extends)
+- **Related ADRs:** [ADR-0009](decisions/0009-runtime-training-modes-and-logging.md) (the `ANIMAL` handshake + session/mode logging this extends), [ADR-0053](decisions/0053-gui-tab-streamlining.md) (the GUI regroup that surfaced the duplicated host-side id state)
+
+**Update (2026-07-24).** The GUI-streamlining review (ADR-0053) found that the
+animal id is now entered/held in **two** places on the host with **two** copies
+of the same `_sanitize` slug helper: the Phase 3 tab (`phase3_controller.py`
+"Animal ID" entry, ~623-627) and the Session panel (`session_controller.py`
+`_sanitize`, 85-88, which its docstring notes "mirrors rig_logger/
+phase3_controller"). When the Task tab gains a single controller-agnostic
+animal-id field (ADR-0053 phase 4), that field should be the **one** host-side
+id source, feeding both the session manifest and any future firmware `ANIMAL`
+command, and the duplicated `_sanitize` should collapse to one shared helper.
+This is the host-side consolidation that precedes the firmware protocol work
+below.
 
 **Motivation / context.** The log filename comes from the firmware's
 `0,ANIMAL,<id>` handshake, but `ANIMAL_ID` is hard-coded (`RAT001`), so every
@@ -839,6 +856,225 @@ hardware-triggered/per-frame-TTL camera mode?
 
 **ADR needed?** Yes — it changes the serial protocol (Due reflash) and defines
 the cross-stream synchronization mechanism, both non-obvious decisions.
+
+### FW-0019: One reward seam + rate backstop across the task controllers
+
+- **Status:** Proposed
+- **Date added:** 2026-07-24
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** `host/rules_engine.py` (`_apply_global`, the global rate
+  backstop + LogEvent pairing), `host/phase3_controller.py` (`_send_cmd`, the
+  direct `R<port>` fire at 451/522), `host/phase3_task.py` (reward config)
+- **Related ADRs:** [ADR-0053](decisions/0053-gui-tab-streamlining.md) (the
+  GUI regroup that surfaced this; it deliberately deferred the reward-core dedup),
+  [ADR-0026](decisions/0026-reward-shaping-phases.md) / [ADR-0030](decisions/0030-prime-at-choice-entry.md)
+  (reward-shaping seam the rules engine gates), [ADR-0019](decisions/0019-reward-volume-and-pulse-duration-logging.md)
+  (pulse/volume logging any seam must preserve)
+- **Related FW:** [FW-0009](#fw-0009-triggerdispenser-decomposition-of-the-well-reward-rule)
+  (Trigger/Dispenser split of the well rule — the same reward plumbing viewed
+  from the rules side)
+
+**Motivation / context.** The two host task controllers dispense reward through
+**two unrelated paths**. The Rules engine routes every `FireReward` intent
+through `_apply_global` (`rules_engine.py` 815-838), which enforces a global
+minimum-interval **rate backstop** and pairs each accepted fire with a
+`LogEvent` (and a `"suppressed"` event when rate-limited). Phase 3 instead fires
+reward directly (`phase3_controller._send_cmd`, `R<port>...`) with no shared
+backstop and its own logging. So the anti-spam guarantee, the reward-volume
+accounting (ADR-0019), and the log shape differ between the two task modes for
+no principled reason — an accident of the tabs having grown separately.
+
+**Sketch of approach.** Introduce one small **reward seam** (e.g. a
+`RewardDispatcher`) that both controllers call: it owns the global rate backstop,
+the pulse/volume log record, and the actual `R<port>` send, so a fire is
+identical whichever task drove it. Rules keeps emitting `FireReward` intents into
+it; Phase 3 emits its scored-choice reward into the same seam instead of building
+the command inline. Fold this in after ADR-0053's shared vision-actuator skeleton
+(refactor A) exists, since both controllers will already share a base.
+
+**Evaluation / acceptance.** The existing rules reward tests
+(`test_well_reward.py` / rules engine tests) pass unchanged; add a focused test
+that a Phase 3 reward is rate-limited and logged identically to a rules reward;
+no change to on-wire `R<port>` framing or reward volume accounting.
+
+**Effort / risk.** Medium. Risk is coupling a behavioral seam (reward gating) to
+the two task modes — do it only once the shared skeleton lands, and keep the
+backstop interval configurable per mode if their timing budgets differ.
+
+**Open questions.** Should the global backstop interval be shared or per-mode?
+Does Phase 3 want the `"suppressed"` LogEvent semantics, or a lighter record?
+
+**ADR needed?** Yes — it unifies a reward-gating/logging seam across two task
+modes (a behavioral-timing decision), likely a small follow-up to ADR-0026/0053.
+
+### FW-0020: Shared choice-commit edge in the task-event layer
+
+- **Status:** Proposed
+- **Date added:** 2026-07-24
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** `host/task_events.py` (task-semantic event layer over the
+  maze-state estimator), `host/rules_engine.py` (`_earn_credential`
+  `choice_via_stem` + the per-excursion latch), `host/phase3_task.py` (choice
+  scoring + `_scored_this_trial` latch)
+- **Related ADRs:** [ADR-0053](decisions/0053-gui-tab-streamlining.md) (deferred
+  this event-layer dedup out of the regroup), [ADR-0026](decisions/0026-reward-shaping-phases.md)
+  (the task-event layer), [ADR-0038](decisions/0038-once-per-excursion-well-credit.md)
+  (per-excursion choice latch), [ADR-0025](decisions/0025-maze-state-module.md)
+  (the maze-state stream both consume)
+- **Related FW:** [FW-0019](#fw-0019-one-reward-seam--rate-backstop-across-the-task-controllers)
+  (the reward seam this feeds)
+
+**Motivation / context.** Both task controllers independently answer the same
+question — *"has the rat just committed an outbound left/right choice, once per
+trip?"* — with their own latch. The rules engine earns a `choice_via_stem`
+credential and latches it per excursion (ADR-0038); Phase 3 scores the choice and
+guards it with `_scored_this_trial`. Same maze-state input, same
+"once-per-outbound-trip" predicate, two hand-rolled implementations that can
+drift (e.g. different debounce or re-arm rules), which is exactly the kind of
+silent behavioral divergence the comprehension-debt guardrails warn about.
+
+**Sketch of approach.** Promote a single **choice-commit edge** into the shared
+task-event layer (`task_events.py`): emit one `ChoiceCommitted(side, trip_id)`
+event, latched once per outbound excursion, that both the rules credential logic
+and the Phase 3 scorer subscribe to instead of each detecting the edge itself.
+Keep the maze-state estimator as the sole upstream source.
+
+**Evaluation / acceptance.** Pure refactor: rules `choice_via_stem` behavior and
+Phase 3 scoring are unchanged on the shipped profiles (existing task-event and
+well-reward tests pass); add a focused test that the shared edge fires exactly
+once per outbound trip and re-arms on return.
+
+**Effort / risk.** Medium. Risk is subtle timing differences between the two
+current latches; capture both behaviors in tests before unifying.
+
+**Open questions.** Do the two consumers agree on the exact commit point
+(stem-gated vs zone-entry), or does unifying force a behavioral choice? Does the
+edge belong in `task_events.py` or a thin layer above the estimator?
+
+**ADR needed?** Yes if unifying changes either mode's commit semantics; no if it
+is a pure extraction that both already agree on.
+
+### FW-0021: Single-parse serial fan-out in the GUI orchestrator
+
+- **Status:** Proposed
+- **Date added:** 2026-07-24
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** `host/experiment_control.py` (`on_line`, 515-532),
+  `host/protocol.py` (`mode_name` / `lick_edge` / `reward_info` parsers)
+- **Related ADRs:** [ADR-0053](decisions/0053-gui-tab-streamlining.md) (the
+  Operate-group review that surfaced this), [ADR-0024](decisions/0024-shared-host-protocol-parser.md)
+  (the centralized parser this builds on), [ADR-0043](decisions/0043-rules-actuation-thread.md)
+  (the actuation seam that also consumes serial lines)
+
+**Motivation / context.** `on_line` (`experiment_control.py` 515-532) parses each
+serial line **once** for the bottom-strip tallies (`protocol.mode_name`,
+`lick_edge`, `reward_info`), then passes the **raw line** to every registered
+module, each of which re-parses it with the same `protocol` helpers. On a busy
+line rate this is N+1 parses of the same string, and it means the mode/lick/
+reward classification lives in two layers that must be kept in agreement.
+
+**Sketch of approach.** Parse once at the fan-out point into a small immutable
+`ParsedLine` (mode/lick/reward/... plus the raw text) and hand **that** to
+modules, so each module reads the pre-parsed fields instead of re-running the
+parsers. Keep `protocol.py` as the single parser (ADR-0024); this is just about
+not calling it repeatedly per line.
+
+**Evaluation / acceptance.** No behavior change: modules react identically; a
+micro-benchmark shows one parse per line instead of N+1; the `protocol` parser
+API stays the single source of truth.
+
+**Effort / risk.** Low-medium. Touches every module's `apply()` signature, so it
+is best done alongside the ADR-0053 regroup when those modules are already being
+edited.
+
+**Open questions.** Do all modules only ever need the pre-parsed fields, or do
+some still need the raw line (they can keep it — `ParsedLine` carries it)?
+
+**ADR needed?** No — a mechanical fan-out/perf refactor within the ADR-0024 model.
+
+### FW-0022: Unified MODE-switch reset seam
+
+- **Status:** Proposed
+- **Date added:** 2026-07-24
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** `host/experiment_control.py` (`on_line` resets the tallies
+  on a MODE line, 519-522), `host/behavior_view.py` (`apply` resets on
+  `protocol.mode_name`), and any other module that resets its own state on a
+  MODE switch
+- **Related ADRs:** [ADR-0053](decisions/0053-gui-tab-streamlining.md) (the
+  review that surfaced the split resets), [ADR-0024](decisions/0024-shared-host-protocol-parser.md)
+  (the shared MODE parse), [ADR-0009](decisions/0009-runtime-training-modes-and-logging.md)
+  (the `0,MODE,<name>` line that triggers the reset)
+
+**Motivation / context.** A firmware MODE switch (`0,MODE,<name>`) means "new
+run, drop stale state", but each consumer notices this independently: `on_line`
+resets the reward/lick tallies (`experiment_control.py` 519-522), `behavior_view`
+resets its stats on the same line, and other modules do their own thing. There is
+no single "session/mode boundary" signal, so it is easy to add a new stateful
+module and forget to reset it on a MODE change.
+
+**Sketch of approach.** Emit one explicit **mode-changed** notification from the
+fan-out point (naturally paired with FW-0021's single parse) that stateful
+modules subscribe to, replacing the scattered per-module `if mode is not None:
+reset()` checks with one seam. Modules that need no reset simply don't subscribe.
+
+**Evaluation / acceptance.** No behavior change: tallies and the behavior readout
+still clear on a MODE switch; add a test that a newly-registered stateful module
+gets the reset callback without touching `on_line`.
+
+**Effort / risk.** Low. Mostly a wiring change; pairs with FW-0021.
+
+**Open questions.** Should the seam distinguish "MODE changed to X" (some modules
+only reset for specific transitions) vs a blanket "boundary" signal?
+
+**ADR needed?** No — a small internal wiring cleanup.
+
+### FW-0023: Shared preview *producer* loop helper
+
+- **Status:** Proposed
+- **Date added:** 2026-07-24
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** `host/preview.py` (currently holds `safe_after` +
+  `render_bgr_to_label`), the per-tab preview loops in `host/tracker_view.py`
+  (`_schedule_preview` / `_render_preview`), `host/maze_state_view.py` (same
+  pair), `host/rules_view.py`, and `host/phase3_controller.py`
+- **Related ADRs:** [ADR-0053](decisions/0053-gui-tab-streamlining.md) (the
+  Setup/Operate review that surfaced the remaining duplication),
+  [ADR-0018](decisions/0018-landmark-annotations.md) / [ADR-0025](decisions/0025-maze-state-module.md)
+  (the overlays the loops draw)
+- **Related FW:** [FW-0006](#fw-0006-shared-base-class-for-still-frame-editors)
+  (the modal still-frame editors — the *other* half of the tabs' shared UI
+  scaffolding)
+
+**Motivation / context.** `preview.py` already deduped the **render** step
+(`render_bgr_to_label`) and the `after`-scheduling guard (`safe_after`), but each
+tab still hand-writes the surrounding **producer loop**: a `_schedule_preview`
+that re-arms via `after(PREVIEW_INTERVAL_MS, ...)`, grabs the newest frame from
+the camera/tracker, computes the display scale to `PREVIEW_MAX_W`, calls a
+per-tab `draw(disp, scale)` overlay, and tears down on close. That outer loop is
+copied across at least four modules with only the draw callback differing.
+
+**Sketch of approach.** Add a small **preview-loop driver** to `preview.py` that
+owns the `after`-based re-arm, the newest-frame fetch, the scale computation, and
+the teardown, taking `(interval_ms, max_w, source, draw)` — so each tab supplies
+only its overlay `draw` callback and its source. Keep it opt-in (tabs with
+unusual needs, e.g. the mask view, can stay bespoke). Best done while ADR-0053 is
+already touching these modules (Setup merge).
+
+**Evaluation / acceptance.** No visible change: each tab's live preview + overlay
+looks and updates the same; the per-tab `_schedule_preview`/`_render_preview`
+boilerplate collapses to a driver call + a draw callback; teardown still ignores
+`TclError` on a closed widget.
+
+**Effort / risk.** Low-medium. Risk is over-generalizing for tabs whose sources
+differ (camera vs tracker publisher); keep the driver small and opt-in.
+
+**Open questions.** One driver parameterized by source, or a thin base the tabs
+subclass? Does the fast-view/actuation preview (Phase 3) fit the same driver or
+stay separate?
+
+**ADR needed?** No — a mechanical UI-loop extraction, like the original
+`preview.py` split.
 
 ## Completed
 
