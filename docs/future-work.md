@@ -75,7 +75,7 @@ criteria).
 | [FW-0018](#fw-0018-hardware-session-sync-fiducial-firmware-sync-ttl--camera-visible-led-barcode) | Hardware session sync fiducial (firmware `SYNC` TTL + camera-visible LED barcode) | Firmware + protocol + host session/camera | Proposed |
 | [FW-0019](#fw-0019-one-reward-seam--rate-backstop-across-the-task-controllers) | One reward seam + rate backstop across the task controllers | Rules engine + Phase 3 host | Done |
 | [FW-0020](#fw-0020-shared-choice-commit-edge-in-the-task-event-layer) | Shared choice-commit edge in the task-event layer | Task-event layer + task controllers | Done |
-| [FW-0023](#fw-0023-shared-preview-producer-loop-helper) | Shared preview *producer* loop helper | Preview helpers + tab modules | Proposed |
+| [FW-0023](#fw-0023-shared-preview-producer-loop-helper) | Shared preview *producer* loop helper | Preview helpers + tab modules | Done |
 | [FW-0024](#fw-0024-config-driven-phase-3-taskreward-parameters-parity-with-rules) | Config-driven Phase 3 task/reward parameters (parity with Rules) | Phase 3 host + config | Proposed |
 
 ## Entries
@@ -983,7 +983,21 @@ is a pure extraction that both already agree on.
 
 ### FW-0023: Shared preview *producer* loop helper
 
-- **Status:** Proposed
+- **Status:** Done - implemented directly (a mechanical UI-loop extraction, no
+  ADR, as anticipated below). Added `preview.PreviewLoop`, a small opt-in driver
+  taking `(frame, label, interval_ms, max_w, source, draw, is_closed)` that owns
+  the `after`-based re-arm, the closed/viewable/`TclError` guards, the
+  newest-frame fetch, the scale-to-`max_w`, the `PhotoImage` retention, and
+  teardown (reusing `safe_after` + `render_bgr_to_label` unchanged). The three
+  tabs with this loop - `tracker_view.py`, `maze_state_view.py`, `rules_view.py` -
+  now build one `PreviewLoop` and pass a `_draw_preview(disp, scale)` overlay
+  callback; their `_schedule_preview`/`_render_preview` pairs and per-tab
+  `_photo_preview` refs are gone. Tracker's mask render folded into its draw
+  callback (same per-frame `result`); rules recovers the full-frame size from
+  `disp.shape / scale`. No visible change. **Phase 3 excluded:**
+  `phase3_controller.py` has no live-preview loop to collapse (it consumes the
+  frame *subscription* for task processing, never rendering frames to a Tk
+  label), which answers this item's open question about the Phase 3 view.
 - **Date added:** 2026-07-24
 - **Author / Agent:** Agent (Cursor) on behalf of Celine
 - **Area / modules:** `host/preview.py` (currently holds `safe_after` +

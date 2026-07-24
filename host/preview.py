@@ -57,3 +57,70 @@ def render_bgr_to_label(
         return photo
     except Exception:
         return None
+
+
+class PreviewLoop:
+    """Opt-in live-preview producer loop shared by the camera/tracking tabs.
+
+    Each tab used to hand-copy the same outer loop around ``safe_after`` and
+    ``render_bgr_to_label``: re-arm on the Tk loop, skip work while hidden, grab
+    the newest frame, render it (scaled to ``max_w``) with a per-tab overlay, and
+    tear down quietly once the widget is gone. This class owns that loop so a tab
+    supplies only its frame ``source`` and overlay ``draw`` callback.
+
+    Args:
+        frame: widget used for ``after``-scheduling the next tick.
+        label: target Label the rendered ``PhotoImage`` is shown on.
+        interval_ms: re-arm interval (a tab's ``PREVIEW_INTERVAL_MS``).
+        max_w: max display width (a tab's ``PREVIEW_MAX_W``).
+        source: ``() -> newest BGR frame or None`` (returns None when there is
+            nothing to show, e.g. no camera / no frame yet).
+        draw: ``(disp, scale) -> None`` overlay drawn on the scaled frame.
+        is_closed: optional ``() -> bool``; when it returns True the loop stops
+            re-arming. Lets a tab share its existing ``self._closed`` flag rather
+            than keep a second one. Defaults to never-closed.
+    """
+
+    def __init__(
+        self,
+        frame: tk.Misc,
+        label: tk.Widget,
+        interval_ms: int,
+        max_w: int,
+        source: Callable[[], Optional[object]],
+        draw: Optional[Callable[[object, float], None]] = None,
+        is_closed: Optional[Callable[[], bool]] = None,
+    ) -> None:
+        self._frame = frame
+        self._label = label
+        self._interval_ms = interval_ms
+        self._max_w = max_w
+        self._source = source
+        self._draw = draw
+        self._is_closed = is_closed if is_closed is not None else (lambda: False)
+        self._photo = None  # retain last good PhotoImage so Tk doesn't GC it
+
+    def start(self) -> None:
+        """Kick off the loop; it re-arms itself until ``is_closed`` is True."""
+        self._schedule()
+
+    def _schedule(self) -> None:
+        if self._is_closed():
+            return
+        try:
+            self._render()
+        finally:
+            safe_after(self._frame, self._interval_ms, self._schedule)
+
+    def _render(self) -> None:
+        try:
+            if not self._label.winfo_viewable():
+                return  # on another tab / hidden -> don't spend any work
+        except tk.TclError:
+            return
+        frame = self._source()
+        if frame is None:
+            return
+        photo = render_bgr_to_label(self._label, frame, self._max_w, draw=self._draw)
+        if photo is not None:
+            self._photo = photo

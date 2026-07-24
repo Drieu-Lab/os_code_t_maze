@@ -39,7 +39,7 @@ from typing import Optional
 
 import protocol
 from gui_deps import Image, ImageTk, cv2, missing_dependency, np
-from preview import render_bgr_to_label, safe_after
+from preview import PreviewLoop, safe_after
 from still_frame_editor import _StillFrameEditorBase
 from tooltips import tip
 from tracker import TRACK_COLUMNS, track_row
@@ -120,8 +120,7 @@ class TrackerControlView:
         self._camera = camera
         self.frame = ttk.Frame(parent)
         self._animal = ""
-        self._photo_mask = None       # keep refs so Tk doesn't GC images
-        self._photo_preview = None
+        self._photo_mask = None       # keep ref so Tk doesn't GC the mask image
         self._log_file = None
         self._log_writer = None
         self._log_idx = 0
@@ -155,7 +154,11 @@ class TrackerControlView:
         self._set_landmark_status()
         self._push_params()
         self._schedule_poll()
-        self._schedule_preview()
+        self._preview_loop = PreviewLoop(
+            self.frame, self._preview, PREVIEW_INTERVAL_MS, PREVIEW_MAX_W,
+            source=lambda: self._camera.get_latest_frame() if self._camera else None,
+            draw=self._draw_preview, is_closed=lambda: self._closed)
+        self._preview_loop.start()
 
     # ------------------------------------------------------------ module API
     def widget(self) -> tk.Widget:
@@ -746,37 +749,17 @@ class TrackerControlView:
             self._mask_label.configure(image="")
             self._photo_mask = None
 
-    def _schedule_preview(self) -> None:
-        if self._closed:
-            return
-        try:
-            self._render_preview()
-        finally:
-            safe_after(self.frame, PREVIEW_INTERVAL_MS, self._schedule_preview)
+    def _draw_preview(self, disp, scale: float) -> None:
+        """Overlay for the shared preview loop: tracker overlay + optional mask.
 
-    def _render_preview(self) -> None:
-        """Show the shared latest camera frame + overlay, only while visible."""
-        if self._camera is None:
-            return
-        try:
-            if not self._preview.winfo_viewable():
-                return  # on another tab / hidden -> don't spend any work
-        except tk.TclError:
-            return
-        frame = self._camera.get_latest_frame()
-        if frame is None:
-            return
+        The mask render needs the same per-frame ``result`` as the overlay, so it
+        lives here (it targets the separate mask label, so drawing it during the
+        preview draw callback doesn't affect the preview image)."""
         result = self._tracker.snapshot_result() if self.tracking_running() else None
-
-        def draw(disp, scale: float) -> None:
-            if _draw_overlay is not None:
-                _draw_overlay(disp, scale, self._tracker, result)
-
-        photo = render_bgr_to_label(self._preview, frame, PREVIEW_MAX_W, draw=draw)
-        if photo is not None:
-            self._photo_preview = photo
-            if self._show_mask_var.get() and result is not None and result.mask is not None:
-                self._render_mask(result.mask, result.chosen_contour)
+        if _draw_overlay is not None:
+            _draw_overlay(disp, scale, self._tracker, result)
+        if self._show_mask_var.get() and result is not None and result.mask is not None:
+            self._render_mask(result.mask, result.chosen_contour)
 
     def _schedule_poll(self) -> None:
         if self._closed:

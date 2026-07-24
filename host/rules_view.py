@@ -57,7 +57,7 @@ from tkinter import messagebox, ttk
 from typing import Optional
 
 from gui_deps import cv2, missing_dependency
-from preview import render_bgr_to_label, safe_after
+from preview import PreviewLoop, safe_after
 from tooltips import tip
 from vision_actuator import VisionActuator
 
@@ -151,7 +151,6 @@ class RulesControlView(VisionActuator):
         # drove it (docs/decisions/0054, FW-0019). None -> legacy direct send.
         self._dispatcher = dispatcher
         self.frame = ttk.Frame(parent)
-        self._photo_preview = None
         self._mode = ""                  # last firmware MODE token
         self._engine: Optional[RulesEngine] = None
         self._scale = Scale()
@@ -203,7 +202,11 @@ class RulesControlView(VisionActuator):
         # poll path (proximity-only rules); see _poll.
         self._start_actuation()
         self._schedule_poll()
-        self._schedule_preview()
+        self._preview_loop = PreviewLoop(
+            self.frame, self._preview, PREVIEW_INTERVAL_MS, PREVIEW_MAX_W,
+            source=lambda: self._camera.get_latest_frame() if self._camera else None,
+            draw=self._draw_preview, is_closed=lambda: self._closed)
+        self._preview_loop.start()
 
     # ------------------------------------------------------------ module API
     def widget(self) -> tk.Widget:
@@ -1198,36 +1201,15 @@ class RulesControlView(VisionActuator):
         self._status_var.set("  |  ".join(parts) if parts else "rules: none loaded")
         self._gate_var.set(self._gate_reason())
 
-    def _schedule_preview(self) -> None:
-        if self._closed:
-            return
-        try:
-            self._render_preview()
-        finally:
-            safe_after(self.frame, PREVIEW_INTERVAL_MS, self._schedule_preview)
-
-    def _render_preview(self) -> None:
-        if self._camera is None:
-            return
-        try:
-            if not self._preview.winfo_viewable():
-                return
-        except tk.TclError:
-            return
-        frame = self._camera.get_latest_frame()
-        if frame is None:
-            return
-        h, w = frame.shape[:2]
+    def _draw_preview(self, disp, scale: float) -> None:
+        # Recover the full-frame size from the scaled preview: the zone/landmark
+        # drawing takes normalized coords times the original (w, h), so
+        # disp_size / scale reproduces it to sub-pixel accuracy.
+        h, w = disp.shape[0] / scale, disp.shape[1] / scale
         result = self._tracker.snapshot_result() if self._tracking_running() else None
-
-        def draw(disp, scale: float) -> None:
-            if _draw_overlay is not None:
-                _draw_overlay(disp, scale, self._tracker, result)
-            self._draw_zones(disp, scale, (w, h))
-
-        photo = render_bgr_to_label(self._preview, frame, PREVIEW_MAX_W, draw=draw)
-        if photo is not None:
-            self._photo_preview = photo
+        if _draw_overlay is not None:
+            _draw_overlay(disp, scale, self._tracker, result)
+        self._draw_zones(disp, scale, (w, h))
 
     def _draw_zone_polys(self, img, scale: float, frame_size) -> None:
         """Outline the maze zones + well on the preview (task/loop phases)."""

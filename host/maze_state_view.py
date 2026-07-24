@@ -31,7 +31,7 @@ from tkinter import filedialog, messagebox, ttk
 from typing import Optional
 
 from gui_deps import cv2, missing_dependency, np
-from preview import render_bgr_to_label, safe_after
+from preview import PreviewLoop, safe_after
 from still_frame_editor import _StillFrameEditorBase
 from tooltips import tip
 
@@ -122,7 +122,6 @@ class MazeStateControlView:
         self._sub = None
         self.frame = ttk.Frame(parent)
         self._animal = ""
-        self._photo_preview = None
         self._log_file = None
         self._log_writer = None
         self._closed = False
@@ -143,7 +142,11 @@ class MazeStateControlView:
         self._sync_params()
         self._set_zone_status()
         self._schedule_poll()
-        self._schedule_preview()
+        self._preview_loop = PreviewLoop(
+            self.frame, self._preview, PREVIEW_INTERVAL_MS, PREVIEW_MAX_W,
+            source=lambda: self._camera.get_latest_frame() if self._camera else None,
+            draw=self._draw_preview, is_closed=lambda: self._closed)
+        self._preview_loop.start()
 
     # ------------------------------------------------------------ module API
     def widget(self) -> tk.Widget:
@@ -406,35 +409,12 @@ class MazeStateControlView:
                 except Exception:
                     pass
 
-    def _schedule_preview(self) -> None:
-        if self._closed:
-            return
-        try:
-            self._render_preview()
-        finally:
-            safe_after(self.frame, PREVIEW_INTERVAL_MS, self._schedule_preview)
-
-    def _render_preview(self) -> None:
-        if self._camera is None:
-            return
-        try:
-            if not self._preview.winfo_viewable():
-                return
-        except tk.TclError:
-            return
-        frame = self._camera.get_latest_frame()
-        if frame is None:
-            return
+    def _draw_preview(self, disp, scale) -> None:
+        # Base tracker overlay (ROI/landmarks/path/centroid), then the zones.
         result = self._tracker.snapshot_result() if self._tracking_running() else None
-
-        def draw(disp, scale):
-            # Base tracker overlay (ROI/landmarks/path/centroid), then the zones.
-            if _draw_overlay is not None:
-                _draw_overlay(disp, scale, self._tracker, result)
-            self._draw_zones(disp)
-
-        self._photo_preview = render_bgr_to_label(
-            self._preview, frame, PREVIEW_MAX_W, draw=draw) or self._photo_preview
+        if _draw_overlay is not None:
+            _draw_overlay(disp, scale, self._tracker, result)
+        self._draw_zones(disp)
 
     def _draw_zones(self, disp) -> None:
         """Draw the zone polygons + well + stem axis on the (scaled) preview."""
