@@ -87,6 +87,12 @@ QUEUE_SECONDS = 2.0           # bounded queue holds ~this many seconds of frames
 # separate peak-hold catches transient spikes. Diagnostic only (see #260720).
 TRACK_MS_EMA_ALPHA = 0.1
 
+# The status bar shows the live grab rate (fps), measured by differentiating the
+# cumulative grabbed count over wall time. Recompute over at least this window so
+# the readout is stable (the preview refresh is much faster, ~15/s, which would
+# otherwise make fps jump between quantized frame-per-tick values).
+FPS_WINDOW_S = 0.5
+
 # Lens-distortion correction (see docs/decisions/0015). The calibration is
 # computed offline in MATLAB cameraCalibrator and exported to an OpenCV-
 # convention JSON (rig-hardware/camera/export_calibration_to_json.m -> .json,
@@ -254,6 +260,11 @@ class CameraView:
         self._counters_lock = threading.Lock()
         self._counters = _Counters()
         self._cam_fps = DEFAULT_FPS
+        # Live grab-rate readout state (see _measure_fps): last sampled grab count
+        # + monotonic time, and the last computed fps we keep showing between windows.
+        self._fps_last_grabbed: Optional[int] = None
+        self._fps_last_mono: Optional[float] = None
+        self._fps_display = 0.0
         self._animal_id = ""                   # learned from the serial ANIMAL line
         self._latest_rig_ms = ""               # latest <ms> seen on the serial stream
 
@@ -657,11 +668,32 @@ class CameraView:
         result = snap[0] if snap is not None else None
         _draw_track_overlay_shared(disp, scale, self._tracker, result)
 
+    def _measure_fps(self, grabbed: int) -> float:
+        """Estimate the live grab rate (frames/s) from the cumulative grab count.
+
+        Called on each status refresh. Differentiates ``grabbed`` over wall time,
+        but only recomputes once at least FPS_WINDOW_S has elapsed (otherwise it
+        keeps returning the last value), so the readout stays stable rather than
+        jumping with the fast preview refresh. Diagnostic only.
+        """
+        now = time.monotonic()
+        if self._fps_last_mono is None:
+            self._fps_last_grabbed = grabbed
+            self._fps_last_mono = now
+            return 0.0
+        dt = now - self._fps_last_mono
+        if dt >= FPS_WINDOW_S:
+            self._fps_display = (grabbed - self._fps_last_grabbed) / dt
+            self._fps_last_grabbed = grabbed
+            self._fps_last_mono = now
+        return self._fps_display
+
     def _update_status(self) -> None:
         track_on = self._tracker is not None and self._track_on.is_set()
         with self._counters_lock:
             c = self._counters
-            line = (f"frames: {c.grabbed}   saved: {c.saved}   "
+            fps = self._measure_fps(c.grabbed)
+            line = (f"fps: {fps:.1f}   saved: {c.saved}   "
                     f"src-drop: {c.src_drops}   incomplete: {c.incomplete}   "
                     f"q-drop: {c.queue_drops}   queue: {self._queue.qsize()}/"
                     f"{self._queue.maxsize}")

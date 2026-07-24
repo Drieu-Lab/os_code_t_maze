@@ -147,9 +147,9 @@ TIPS: Dict[str, Entry] = {
                           "undistortion.",
     "camera.calib_status": "Active lens calibration (file, resolution, RMS "
                            "reprojection error).",
-    "camera.status": "Live acquisition health: frames grabbed / saved, source "
-                     "drops, incomplete grabs, encode-queue drops, and queue "
-                     "fill.",
+    "camera.status": "Live acquisition health: grab rate (fps), frames saved, "
+                     "source drops, incomplete grabs, encode-queue drops, and "
+                     "queue fill.",
 
     # ---- tracker_view.py: controls ----
     "tracker.enable": "Run the markerless tracker on each camera frame (off by "
