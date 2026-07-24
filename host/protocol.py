@@ -119,6 +119,16 @@ def animal_id(line: str) -> Optional[str]:
     return aid or None
 
 
+def sanitize_animal_id(name: str) -> str:
+    """Filename-safe slug of an animal id: keep alphanumerics plus '-'/'_',
+    drop everything else, and fall back to "unknown" if nothing remains. The
+    single host-side helper shared by rig_logger, the Session panel, and the
+    Task tab so an id maps to the same slug everywhere (see docs/decisions/0053,
+    docs/future-work.md FW-0005)."""
+    slug = "".join(ch for ch in name.strip() if ch.isalnum() or ch in "-_")
+    return slug or "unknown"
+
+
 # -------------------------------- REWARD lines --------------------------------
 
 def reward_info(line: str) -> Optional[Tuple[bool, Optional[int]]]:

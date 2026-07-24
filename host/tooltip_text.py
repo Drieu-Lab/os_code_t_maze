@@ -253,6 +253,17 @@ TIPS: Dict[str, Entry] = {
                            "segments (high CV suggests the single scale is "
                            "inaccurate across the frame - consider a homography).",
 
+    # ---- task_view.py: Task tab (controller selector + shared animal id) ----
+    "task.animal": "Animal ID for this session - the SINGLE host-side source "
+                   "(docs/decisions/0053). It names the session manifest + folder "
+                   "(<animal>_<timestamp>) and the Phase 3 data file, and is "
+                   "auto-filled from the firmware ANIMAL handshake if you leave it "
+                   "blank; blank falls back to 'unknown'.",
+    "task.controller": "Which task controller is active. Only the selected one is "
+                       "shown and can actuate reward - switching disarms the other "
+                       "(Phase 3 = the host-owned cued task; Rules = the "
+                       "position-based reward-shaping engine).",
+
     # ---- phase3_controller.py: Phase 3 tab (host-owned cued task) ----
     "phase3.arm": "Arm the HOST-owned Phase 3 cued task (OFF by default). The "
                   "firmware must be in Free Roam (its trial FSM off): the host "
@@ -276,9 +287,6 @@ TIPS: Dict[str, Entry] = {
     "phase3.min_confidence": "Extra track-confidence floor for a cue onset, on top "
                              "of the estimator's own validity threshold (0..1; 0 "
                              "defers entirely to the estimator).",
-    "phase3.animal": "Animal ID for the session data file "
-                     "(host/data/phase3_<animal>_<timestamp>.csv). Applied when "
-                     "you arm; blank falls back to 'unknown'.",
     "phase3.seed": "PRNG seed for the balanced L/R trial sequence (32-bit). The "
                    "same seed reproduces the same schedule; applied when you arm.",
     "phase3.new_seed": "Draw a fresh random seed (takes effect on the next arm).",

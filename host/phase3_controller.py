@@ -57,7 +57,7 @@ import tkinter as tk
 from dataclasses import dataclass, field
 from datetime import datetime
 from tkinter import ttk
-from typing import Optional
+from typing import Callable, Optional
 
 import protocol
 from cue_gate import CHOICE, RETURN, CueGate, CueParams
@@ -121,12 +121,6 @@ def _now_iso() -> str:
     return datetime.now().isoformat(timespec="milliseconds")
 
 
-def _sanitize(name: str) -> str:
-    """Filename-safe slug of an animal id (mirrors rig_logger._sanitize)."""
-    slug = "".join(ch for ch in name.strip() if ch.isalnum() or ch in "-_")
-    return slug or "unknown"
-
-
 @dataclass(frozen=True)
 class _Phase3Snapshot:
     """Atomic, immutable Tk->thread hand-off (read whole by the actuation thread).
@@ -151,11 +145,15 @@ class Phase3ControlView(VisionActuator):
     this class adds the cue-gate / task policy, the DAC-authority handshake, and
     the per-session data log."""
 
-    def __init__(self, parent: tk.Misc, camera=None, pipeline=None, send=None):
+    def __init__(self, parent: tk.Misc, camera=None, pipeline=None, send=None,
+                 animal_id: Optional[Callable[[], str]] = None):
         self._parent = parent
         self._camera = camera
         self._pipeline = pipeline
         self._send = send                 # callable(str) -> None (RigClient.send)
+        # The single host-side animal-id source (the Task tab's shared field;
+        # docs/decisions/0053). None -> no id (manual arms fall back to "unknown").
+        self._animal_id = animal_id
         self.frame = ttk.Frame(parent)
         self._mode = ""                   # last firmware MODE token
         self._closed = False
@@ -322,10 +320,10 @@ class Phase3ControlView(VisionActuator):
         # otherwise fall back to <animal>_<stamp> (docs/decisions/0048).
         animal = snap.animal or "unknown"
         if snap.session_id:
-            base = f"phase3_{_sanitize(snap.session_id)}"
+            base = f"phase3_{protocol.sanitize_animal_id(snap.session_id)}"
         else:
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            base = f"phase3_{_sanitize(animal)}_{stamp}"
+            base = f"phase3_{protocol.sanitize_animal_id(animal)}_{stamp}"
         self._log = Phase3Log(self._seq, animal=animal, session_start_iso=_now_iso(),
                               reward_incorrect=snap.reward_incorrect,
                               session_id=snap.session_id)
@@ -583,16 +581,13 @@ class Phase3ControlView(VisionActuator):
         conf.grid(row=5, column=1, sticky="w", **pad)
         tip(conf, "phase3.min_confidence")
 
-        ttk.Label(root, text="Animal ID:").grid(row=6, column=0, sticky="w", **pad)
-        self._animal_var = tk.StringVar(value="")
-        animal = ttk.Entry(root, width=12, textvariable=self._animal_var)
-        animal.grid(row=6, column=1, sticky="w", **pad)
-        tip(animal, "phase3.animal")
-
+        # NOTE: the animal id is no longer entered here - it comes from the Task
+        # tab's single shared Animal ID field via the injected ``animal_id``
+        # provider (docs/decisions/0053, FW-0005).
         ttk.Label(root, text="Sequence seed:").grid(
-            row=7, column=0, sticky="w", **pad)
+            row=6, column=0, sticky="w", **pad)
         seed_row = ttk.Frame(root)
-        seed_row.grid(row=7, column=1, sticky="w", **pad)
+        seed_row.grid(row=6, column=1, sticky="w", **pad)
         self._seed_var = tk.StringVar(value=str(random.randint(1, SEED_MASK)))
         seed = ttk.Entry(seed_row, width=12, textvariable=self._seed_var)
         seed.pack(side=tk.LEFT)
@@ -601,21 +596,21 @@ class Phase3ControlView(VisionActuator):
         newb.pack(side=tk.LEFT, padx=(4, 0))
         tip(newb, "phase3.new_seed")
         ttk.Label(root, text="(applied when you arm)").grid(
-            row=8, column=1, sticky="w", padx=6)
+            row=7, column=1, sticky="w", padx=6)
 
         ttk.Separator(root, orient="horizontal").grid(
-            row=9, column=0, columnspan=2, sticky="ew", pady=(8, 4))
+            row=8, column=0, columnspan=2, sticky="ew", pady=(8, 4))
 
         self._status_var = tk.StringVar(value="phase 3: off")
         ttk.Label(root, textvariable=self._status_var, anchor="w",
                   wraplength=460, justify="left").grid(
-            row=10, column=0, columnspan=2, sticky="w", **pad)
+            row=9, column=0, columnspan=2, sticky="w", **pad)
 
         # In-tab progress visualization (docs/decisions/0051): a compact ribbon of
         # the current trial + neighbours, and a scrollable list of all N planned
         # trials with the current one highlighted. Both are read-only views of the
         # published table snapshot (self._state), refreshed on the Tk poll.
-        self._build_progress_ui(root, row=11)
+        self._build_progress_ui(root, row=10)
 
     def _build_progress_ui(self, root: ttk.Frame, *, row: int) -> None:
         """Build the trial ribbon + scrollable planned-trial list (ADR-0051)."""
@@ -686,9 +681,19 @@ class Phase3ControlView(VisionActuator):
             params=self._current_params(),
             seed=self._current_seed(),
             reward_incorrect=bool(self._reward_incorrect_var.get()),
-            animal=self._animal_var.get().strip(),
+            animal=self._current_animal(),
             session_id=self._session_id,
             session_out_dir=self._session_out_dir)
+
+    def _current_animal(self) -> str:
+        """Current animal id from the Task tab's shared field (docs/decisions/
+        0053); "" when no provider is wired."""
+        if self._animal_id is None:
+            return ""
+        try:
+            return self._animal_id().strip()
+        except Exception:
+            return ""
 
     # -------------------------------------------------- progress visualization
     def _refresh_progress(self) -> None:

@@ -234,6 +234,18 @@ class RulesControlView(VisionActuator):
         self._stop_actuation()
         self._stop_log()
 
+    def disarm(self) -> None:
+        """Disarm the engine (clear the Arm checkbox). Called by the Task tab's
+        exclusive selector when this controller is switched away from, so only
+        the visible controller can actuate (docs/decisions/0053). No-op if the
+        tab is unavailable (no Arm checkbox was built)."""
+        var = getattr(self, "_enable_var", None)
+        if var is not None:
+            try:
+                var.set(False)
+            except tk.TclError:
+                pass
+
     # ---------------------------------------------------------- dependencies
     @staticmethod
     def _missing_dependency() -> Optional[str]:

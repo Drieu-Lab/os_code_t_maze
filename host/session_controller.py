@@ -39,9 +39,16 @@ and then:
   - writes the manifest atomically and keeps it updated as each stream's file path
     resolves and again on Stop (with the end anchor).
 
+The animal id is no longer entered here: it comes from the Task tab's single
+shared Animal ID field via the injected ``animal_id`` getter (docs/decisions/
+0053, FW-0005), so the session manifest and the Phase 3 log always agree. We
+still record the last id seen on the ``ANIMAL`` handshake as a fallback for when
+the field is empty.
+
 Module contract (like the other modules):
     widget() -> a Tk widget to place in the Rig view bottom strip
-    apply(line: str) -> None   learn the animal id + append filtered serial lines
+    apply(line: str) -> None   record the animal-id fallback + append filtered
+                               serial lines
     close() -> None            stop an active session cleanly on app exit
 """
 
@@ -52,7 +59,7 @@ import time
 import tkinter as tk
 from datetime import datetime
 from tkinter import ttk
-from typing import Optional
+from typing import Callable, Optional
 
 import protocol
 from rig_config import load_rig_config
@@ -82,23 +89,21 @@ RESOLVE_INTERVAL_MS = 500
 _CODEC_BY_EXT = {".mkv": "ffv1", ".mp4": "h264"}
 
 
-def _sanitize(name: str) -> str:
-    """Filename-safe slug of an id (mirrors rig_logger/phase3_controller)."""
-    slug = "".join(ch for ch in name.strip() if ch.isalnum() or ch in "-_")
-    return slug or "unknown"
-
-
 class SessionControlView:
     """Tk module: the Session panel - one-click start/stop + a shared manifest
     and a per-session folder tree (docs/decisions/0048, 0049)."""
 
     def __init__(self, parent: tk.Misc, camera=None, phase3=None, send=None,
-                 recordings_root: Optional[str] = None):
+                 recordings_root: Optional[str] = None,
+                 animal_id: Optional[Callable[[], str]] = None):
         self._parent = parent
         self._camera = camera
         self._phase3 = phase3
         self._send = send                 # callable(str) -> None (RigClient.send)
         self._recordings_root = recordings_root or DEFAULT_RECORDINGS_ROOT
+        # The single host-side animal-id source (the Task tab's shared field;
+        # docs/decisions/0053). None -> rely on the ANIMAL-handshake fallback.
+        self._animal_id = animal_id
         # Central-well lick channel (from the rig pin map; None -> central licks
         # simply aren't captured) for the filtered serial file. ADR-0022/0049.
         self._center_lick = load_rig_config().lick_index_by_role.get("center")
@@ -130,19 +135,15 @@ class SessionControlView:
         return self.frame
 
     def apply(self, line: str) -> None:
-        """Two jobs per serial line: (1) learn the animal id to prefill the field
-        (convenience; the field wins once the user edits it), and (2) while a
-        session is active, append the SENSOR + CENTRAL-PORT lines to this session's
-        filtered serial file (docs/decisions/0049). Runs on the Tk thread (the sole
-        writer of that file), so no locking is needed."""
+        """Two jobs per serial line: (1) record the last animal id seen on the
+        ``ANIMAL`` handshake as a fallback (the Task tab's field is the primary
+        source now; docs/decisions/0053), and (2) while a session is active,
+        append the SENSOR + CENTRAL-PORT lines to this session's filtered serial
+        file (docs/decisions/0049). Runs on the Tk thread (the sole writer of
+        that file), so no locking is needed."""
         animal = protocol.animal_id(line)
         if animal:
             self._learned_animal = animal
-            try:
-                if not self._active and not self._animal_var.get().strip():
-                    self._animal_var.set(animal)
-            except tk.TclError:
-                pass
         if (self._active and self._serial_file is not None
                 and is_sensor_or_central_line(
                     line, center_lick_index=self._center_lick,
@@ -163,25 +164,34 @@ class SessionControlView:
 
     # ------------------------------------------------------------------- UI
     def _build_ui(self) -> None:
-        """Compact one-row control (Animal ID + Start/Stop) with a status line
-        below, sized to sit in the Rig view bottom strip beside Training mode."""
+        """Compact Start/Stop control with a status line below, sized to sit in
+        the Rig view bottom strip beside Training mode. The animal id comes from
+        the Task tab's single shared field (docs/decisions/0053), not here."""
         root = self.frame
 
-        ttk.Label(root, text="Animal ID:").grid(
-            row=0, column=0, sticky="e", padx=(6, 4), pady=4)
-        self._animal_var = tk.StringVar(value="")
-        ttk.Entry(root, width=12, textvariable=self._animal_var).grid(
-            row=0, column=1, sticky="w", padx=(0, 8), pady=4)
         self._start_btn = ttk.Button(root, text="Start session",
                                      command=self._on_toggle)
-        self._start_btn.grid(row=0, column=2, sticky="w", padx=4, pady=4)
+        self._start_btn.grid(row=0, column=0, sticky="w", padx=6, pady=4)
+        ttk.Label(root, text="(animal id from the Task tab)",
+                  font=("TkDefaultFont", 8)).grid(
+            row=0, column=1, sticky="w", padx=(4, 6), pady=4)
 
         self._status_var = tk.StringVar(value="session: off")
         ttk.Label(root, textvariable=self._status_var, anchor="w",
                   wraplength=360, justify="left").grid(
-            row=1, column=0, columnspan=3, sticky="w", padx=6, pady=(0, 4))
+            row=1, column=0, columnspan=2, sticky="w", padx=6, pady=(0, 4))
 
     # ------------------------------------------------------- start/stop
+    def _animal_text(self) -> str:
+        """Current animal id from the Task tab's shared field (docs/decisions/
+        0053); "" when no getter is wired or it errors."""
+        if self._animal_id is None:
+            return ""
+        try:
+            return (self._animal_id() or "").strip()
+        except Exception:
+            return ""
+
     def _on_toggle(self) -> None:
         if self._active:
             self._stop_session()
@@ -189,7 +199,8 @@ class SessionControlView:
             self._start_session()
 
     def _start_session(self) -> None:
-        animal = _sanitize(self._animal_var.get() or self._learned_animal)
+        animal = protocol.sanitize_animal_id(
+            self._animal_text() or self._learned_animal)
         stamp = time.strftime("%Y%m%d_%H%M%S")
         self._session_id = f"{animal}_{stamp}"
 

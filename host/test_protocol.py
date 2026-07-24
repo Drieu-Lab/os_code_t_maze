@@ -12,7 +12,7 @@ import unittest
 
 import protocol
 from protocol import (animal_id, cue_info, lick_edge, mode_name, parse,
-                      reward_info, sensor_edge, sol_pulse)
+                      reward_info, sanitize_animal_id, sensor_edge, sol_pulse)
 
 
 class TestParse(unittest.TestCase):
@@ -82,6 +82,21 @@ class TestHandshake(unittest.TestCase):
         self.assertEqual(animal_id("0,ANIMAL, rat602 "), "rat602")
         self.assertIsNone(animal_id("0,ANIMAL,"))
         self.assertIsNone(animal_id("0,MODE,FREEROAM"))
+
+
+class TestSanitizeAnimalId(unittest.TestCase):
+    def test_keeps_slug_chars(self):
+        self.assertEqual(sanitize_animal_id("RAT001"), "RAT001")
+        self.assertEqual(sanitize_animal_id("rat-602_a"), "rat-602_a")
+
+    def test_strips_and_drops_disallowed(self):
+        self.assertEqual(sanitize_animal_id("  rat 602!  "), "rat602")
+        self.assertEqual(sanitize_animal_id("a/b\\c:d"), "abcd")
+
+    def test_empty_falls_back_to_unknown(self):
+        self.assertEqual(sanitize_animal_id(""), "unknown")
+        self.assertEqual(sanitize_animal_id("   "), "unknown")
+        self.assertEqual(sanitize_animal_id("!@#"), "unknown")
 
 
 class TestReward(unittest.TestCase):

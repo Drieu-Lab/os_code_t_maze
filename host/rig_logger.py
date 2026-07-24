@@ -45,12 +45,6 @@ RECV_BYTES = 4096
 RECONNECT_DELAY_S = 2.0
 
 
-def _sanitize(name: str) -> str:
-    """Keep a filename-safe slug of the animal id."""
-    slug = "".join(ch for ch in name.strip() if ch.isalnum() or ch in "-_")
-    return slug or "unknown"
-
-
 class SessionLog:
     """Lazily opens one file per process run and streams lines to it.
 
@@ -70,7 +64,8 @@ class SessionLog:
     def _open(self, animal: str) -> None:
         os.makedirs(self._directory, exist_ok=True)
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.path = os.path.join(self._directory, f"{_sanitize(animal)}_{stamp}.csv")
+        self.path = os.path.join(
+            self._directory, f"{protocol.sanitize_animal_id(animal)}_{stamp}.csv")
         self._file = open(self.path, "a", encoding="utf-8", newline="")
         self._file.write("# wall_clock_iso,firmware_line (ms,TYPE,payload...)\n")
         for line in self._buffer:

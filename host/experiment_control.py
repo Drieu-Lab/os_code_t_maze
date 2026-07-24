@@ -90,6 +90,14 @@ try:
 except Exception as e:  # pragma: no cover
     Phase3ControlView = None  # type: ignore
     _TRACKER_ERR = _TRACKER_ERR or f"{type(e).__name__}: {e}"
+# Task tab: groups the Rules + Phase 3 controllers under one tab with an
+# exclusive selector and the single shared Animal ID field (ADR-0053 phase 4).
+# Pure Tk container; guarded like the tabs above. See docs/decisions/0053.
+try:
+    from task_view import TaskControlView
+except Exception as e:  # pragma: no cover
+    TaskControlView = None  # type: ignore
+    _TRACKER_ERR = _TRACKER_ERR or f"{type(e).__name__}: {e}"
 # Session tab: a thin orchestrator that starts/stops the recorders together and
 # writes a shared session manifest (docs/decisions/0048). Needs no tracker (just
 # tk + the recorders' public seams), so it is guarded on its own import only.
@@ -330,8 +338,10 @@ def main() -> int:
             print(f"[experiment_control] tracker unavailable: {e}", file=sys.stderr)
             tracker = None
     camera_ref = {}
-    # The Phase 3 module instance is captured (like the camera) so the Session tab
-    # can arm/disarm it and read its data-file path for the manifest (ADR-0048).
+    # The Task tab + its Phase 3 controller are captured (like the camera) so the
+    # Session panel can read the shared animal id and arm/disarm Phase 3 / read
+    # its data-file path for the manifest (ADR-0048/0053).
+    task_ref = {}
     phase3_ref = {}
 
     # One shared maze-state pipeline (a single estimator on the camera tracking
@@ -357,12 +367,16 @@ def main() -> int:
             cam.subscribe_track(pipeline.on_track)
         return cam
 
-    def make_phase3(parent):
-        p3 = Phase3ControlView(
-            parent, camera=camera_ref.get("cam"),
-            pipeline=pipeline, send=lambda cmd: client.send(cmd))
-        phase3_ref["p3"] = p3
-        return p3
+    def make_task(parent):
+        tv = TaskControlView(
+            parent, tracker=tracker, camera=camera_ref.get("cam"),
+            pipeline=pipeline, send=lambda cmd: client.send(cmd),
+            phase3_cls=Phase3ControlView, rules_cls=RulesControlView)
+        task_ref["task"] = tv
+        # Keep the cross-tab holder pointing at the live Phase 3 controller (the
+        # Session panel + behavior readout reach it through here; ADR-0048/0050).
+        phase3_ref["p3"] = tv.phase3
+        return tv
 
     modules = []
 
@@ -429,21 +443,17 @@ def main() -> int:
         labels = [label for label, _ in setup_subtabs]
         factories = [factory for _, factory in setup_subtabs]
         tabs.append(("Setup", factories, labels))
-    # Rules tab: the position-based rules engine (off by default). It is injected
-    # with the shared tracker, the camera (for frames + still-frame calibration),
-    # and a send callback so it can actuate reward via the broker. The send
-    # closure resolves `client` at call time (created below). See ADR-0023.
-    if tracker is not None and RulesControlView is not None:
-        tabs.append(("Rules", [
-            lambda parent: RulesControlView(
-                parent, tracker=tracker, camera=camera_ref.get("cam"),
-                pipeline=pipeline, send=lambda cmd: client.send(cmd))]))
-    # Phase 3 tab: the initial HOST-OWNED cued task (firmware = actuator). Runs in
-    # Free Roam (firmware FSM off): the host owns the trial sequence, cue identity,
-    # scoring, and reward, driving CUE_ON,<kind>,<hz> / R<port> via the broker.
-    # See docs/decisions/0046.
-    if tracker is not None and Phase3ControlView is not None:
-        tabs.append(("Phase 3", [make_phase3]))
+    # Task tab (ADR-0053 phase 4): the host-owned task controllers under ONE tab
+    # with an exclusive controller selector and the single shared Animal ID field
+    # (the one host-side id source feeding the session manifest; FW-0005). It
+    # groups the Rules engine (position-based reward shaping; ADR-0023) and the
+    # Phase 3 cued task (host owns the trial sequence, cue identity, scoring, and
+    # reward, driving CUE_ON,<kind>,<hz> / R<port> via the broker; ADR-0046). The
+    # send closure resolves `client` at call time (created below). Present when
+    # the tracker + at least one controller are available.
+    if tracker is not None and TaskControlView is not None and (
+            Phase3ControlView is not None or RulesControlView is not None):
+        tabs.append(("Task", [make_task]))
     # NOTE: the Session control is NOT a tab - it lives in the Rig view bottom
     # strip's RIGHT column, under the live behavior readout (filling the dead
     # space there so it doesn't lengthen the left column / the window). It is
@@ -591,10 +601,15 @@ def main() -> int:
         # (ADR-0049). Use the camera's fixed default recordings folder as the base
         # (not the live Output: box), so sessions always land in one place.
         recordings_root = os.path.join(DEFAULT_OUTPUT_DIR, "phase3_recordings")
+        # The animal id comes from the Task tab's single shared field (ADR-0053,
+        # FW-0005); the session slugs it into the session_id + manifest.
+        def task_animal_id():
+            tv = task_ref.get("task")
+            return tv.animal_id() if tv is not None else ""
         session = SessionControlView(
             session_parent, camera=camera_ref.get("cam"),
             phase3=phase3_ref.get("p3"), send=lambda cmd: client.send(cmd),
-            recordings_root=recordings_root)
+            recordings_root=recordings_root, animal_id=task_animal_id)
         session.widget().pack(side=tk.BOTTOM, fill=tk.X, padx=4, pady=4)
         modules.append(session)
 

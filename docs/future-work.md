@@ -238,17 +238,19 @@ are non-obvious enough to warrant their own ADR (or an extension of ADR-0014).
 - **Area / modules:** `firmware/cue-guided-task/cue-guided-task.ino` (new `ANIMAL,<id>` command + re-emit), `firmware/common/rig_config.h` + `firmware/PROTOCOL.md` (`PROTO_VERSION` bump), `host/rig_logger.py` (roll file on a new `ANIMAL` line), `host/experiment_control.py` (rat-id field), a new ADR
 - **Related ADRs:** [ADR-0009](decisions/0009-runtime-training-modes-and-logging.md) (the `ANIMAL` handshake + session/mode logging this extends), [ADR-0053](decisions/0053-gui-tab-streamlining.md) (the GUI regroup that surfaced the duplicated host-side id state)
 
-**Update (2026-07-24).** The GUI-streamlining review (ADR-0053) found that the
-animal id is now entered/held in **two** places on the host with **two** copies
-of the same `_sanitize` slug helper: the Phase 3 tab (`phase3_controller.py`
-"Animal ID" entry, ~623-627) and the Session panel (`session_controller.py`
-`_sanitize`, 85-88, which its docstring notes "mirrors rig_logger/
-phase3_controller"). When the Task tab gains a single controller-agnostic
-animal-id field (ADR-0053 phase 4), that field should be the **one** host-side
-id source, feeding both the session manifest and any future firmware `ANIMAL`
-command, and the duplicated `_sanitize` should collapse to one shared helper.
-This is the host-side consolidation that precedes the firmware protocol work
-below.
+**Update (2026-07-24, host-side consolidation done under ADR-0053 phase 4).**
+The GUI-streamlining review (ADR-0053) found the animal id entered/held in
+**two** host places with **two** copies of the `_sanitize` slug helper (the
+Phase 3 tab entry and the Session panel), plus a third copy in `rig_logger.py`.
+Phase 4 of ADR-0053 has now **landed** this consolidation: the new "Task" tab
+(`task_view.py`) owns the **single** controller-agnostic Animal ID field, which
+is the one host-side id source feeding both the Phase 3 data file and the session
+manifest (the Session panel and Phase 3 read it via injected getters; it
+auto-fills from the firmware `ANIMAL` handshake). The three `_sanitize` copies
+collapsed to one shared helper, `protocol.sanitize_animal_id`. What **remains**
+open for FW-0005 is only the firmware protocol work below (a Due `ANIMAL,<id>`
+command + logger file-roll) so a GUI-typed id can also name the verbatim
+`rig_logger.py` file and re-attribute mid-session.
 
 **Motivation / context.** The log filename comes from the firmware's
 `0,ANIMAL,<id>` handshake, but `ANIMAL_ID` is hard-coded (`RAT001`), so every
@@ -273,8 +275,8 @@ re-emitting the `ANIMAL` line.
 **Evaluation / acceptance.** Set an id in the GUI -> the logger opens
 `data/<id>_<time>.csv` and subsequent lines go there; changing the id rolls to a
 new file without losing buffered lines; blank/invalid ids are rejected/sanitized
-(reuse `rig_logger._sanitize`). Confirm a reflashed Due reports the command in
-its handshake/version.
+(reuse `protocol.sanitize_animal_id`). Confirm a reflashed Due reports the command
+in its handshake/version.
 
 **Effort / risk.** Small-medium. Needs a Due reflash (protocol change). Main
 risks: not losing lines across a file roll, and id sanitization.
