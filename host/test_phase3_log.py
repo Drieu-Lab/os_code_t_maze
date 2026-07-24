@@ -14,7 +14,8 @@ from __future__ import annotations
 import unittest
 from dataclasses import fields
 
-from phase3_log import COLUMNS, Phase3Log, _Row
+from phase3_log import (COLUMNS, Phase3Log, Phase3RowView, Phase3StateSnapshot,
+                        _Row)
 from trial_sequence import HIGH, LEFT, LOW, RIGHT, TrialConfig, TrialSequence
 
 
@@ -147,6 +148,54 @@ class TestRender(unittest.TestCase):
         self.assertEqual(first[0], "1")
         self.assertEqual(first[COLUMNS.index("chosen_arm")], "LEFT")
         self.assertEqual(first[COLUMNS.index("outcome")], "CORRECT")
+
+
+class TestSnapshot(unittest.TestCase):
+    def test_rowview_fields_align(self):
+        # Phase3RowView is "trial" + the _Row fields, in order; guards drift
+        # between the live row and the published view (like TestColumns).
+        self.assertEqual([f.name for f in fields(Phase3RowView)],
+                         ["trial"] + [f.name for f in fields(_Row)])
+
+    def test_snapshot_mirrors_rows_and_plan(self):
+        s = _seq(n=20)
+        log = Phase3Log(s, animal="R", session_start_iso="t")
+        snap = log.snapshot(0, armed=True)
+        self.assertIsInstance(snap, Phase3StateSnapshot)
+        self.assertEqual(snap.total, len(log))
+        self.assertEqual(len(snap.rows), len(log))
+        self.assertEqual(snap.rows[0].trial, 1)
+        self.assertEqual(snap.rows[-1].trial, len(log))
+        for view, row in zip(snap.rows, log._rows):
+            self.assertEqual(view.correct_arm, row.correct_arm)
+            self.assertEqual(view.choice_cue, row.choice_cue)
+            self.assertEqual(view.return_cue_left, row.return_cue_left)
+            self.assertEqual(view.return_cue_right, row.return_cue_right)
+        # run/tone metadata comes straight off the sequence config
+        self.assertEqual(snap.seed, s.seed)
+        self.assertEqual(snap.high_tone_is_left, s.cfg.high_tone_is_left)
+        self.assertEqual(snap.high_tone_hz, s.cfg.high_tone_hz)
+        self.assertEqual(snap.low_tone_hz, s.cfg.low_tone_hz)
+
+    def test_snapshot_is_decoupled(self):
+        # A snapshot copies rows by value, so mutating the log afterwards must not
+        # change the already-published snapshot; a fresh snapshot does reflect it.
+        log = _log()
+        before = log.snapshot(0, armed=True)
+        self.assertIsNone(before.rows[0].outcome)
+        log.choice_scored(0, "left", "CORRECT", "t_choice")
+        self.assertIsNone(before.rows[0].outcome)          # frozen freeze
+        after = log.snapshot(0, armed=True)
+        self.assertEqual(after.rows[0].outcome, "CORRECT")  # new snapshot sees it
+        self.assertEqual(after.rows[0].chosen_arm, "LEFT")
+
+    def test_snapshot_current_index_and_armed(self):
+        log = _log()
+        armed = log.snapshot(3, armed=True)
+        self.assertEqual(armed.current_index, 3)
+        self.assertTrue(armed.armed)
+        disarmed = log.snapshot(3, armed=False)
+        self.assertFalse(disarmed.armed)
 
 
 if __name__ == "__main__":

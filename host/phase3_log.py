@@ -36,7 +36,7 @@ rendered text), no locks. Headless tests: python -m unittest test_phase3_log.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, fields
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from trial_sequence import HIGH, LEFT, LOW, RIGHT, TrialSequence
 
@@ -81,6 +81,52 @@ class _Row:
     trial_end_iso: Optional[str] = None
     lick_time_iso: Optional[str] = None
     lick_fw_ms: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class Phase3RowView:
+    """Immutable, decoupled view of one trial row for cross-thread publishing.
+
+    Mirrors :class:`_Row` plus a 1-based ``trial`` index; every field is an
+    immutable str/None captured by value, so later mutation of the live ``_Row``
+    never changes a published view (docs/decisions/0050)."""
+    trial: int
+    correct_arm: str
+    choice_cue: str
+    return_cue_left: str
+    return_cue_right: str
+    chosen_arm: Optional[str]
+    outcome: Optional[str]
+    rewarded: Optional[str]
+    return_arm_used: Optional[str]
+    return_cue_played: Optional[str]
+    trial_start_iso: Optional[str]
+    choice_cue_on_iso: Optional[str]
+    choice_cue_off_iso: Optional[str]
+    choice_time_iso: Optional[str]
+    reward_cmd_iso: Optional[str]
+    return_cue_on_iso: Optional[str]
+    return_cue_off_iso: Optional[str]
+    trial_end_iso: Optional[str]
+    lick_time_iso: Optional[str]
+    lick_fw_ms: Optional[str]
+
+
+@dataclass(frozen=True)
+class Phase3StateSnapshot:
+    """Immutable freeze of the session table + run cursor, published by the
+    controller for other tabs/panels to read off the Tk thread (docs/decisions/
+    0050). ``current_index`` is the 0-based trial in progress; ``total`` equals
+    ``len(rows)``; ``armed`` is False once a session's gate has closed (the rows
+    persist as the last session's table)."""
+    rows: Tuple[Phase3RowView, ...]
+    current_index: int
+    total: int
+    armed: bool
+    seed: int
+    high_tone_is_left: bool
+    high_tone_hz: int
+    low_tone_hz: int
 
 
 class Phase3Log:
@@ -187,6 +233,24 @@ class Phase3Log:
         r.lick_fw_ms = "" if fw_ms is None else str(fw_ms)
         self._pending_lick_index = None
         return True
+
+    # ----------------------------------------------------------- snapshot
+    def snapshot(self, current_index: int, *, armed: bool) -> Phase3StateSnapshot:
+        """Immutable freeze of the whole table for cross-thread publishing
+        (docs/decisions/0050). Copies each row by value, so the returned snapshot
+        is decoupled from later mutation of the live rows. ``current_index`` is
+        the 0-based trial in progress; ``armed`` records whether a session's gate
+        is still open."""
+        names = [f.name for f in fields(_Row)]
+        rows = tuple(
+            Phase3RowView(trial=i + 1, **{n: getattr(r, n) for n in names})
+            for i, r in enumerate(self._rows)
+        )
+        c = self.cfg
+        return Phase3StateSnapshot(
+            rows=rows, current_index=current_index, total=len(self._rows),
+            armed=armed, seed=self.seed, high_tone_is_left=c.high_tone_is_left,
+            high_tone_hz=c.high_tone_hz, low_tone_hz=c.low_tone_hz)
 
     # ------------------------------------------------------------- render
     def _header_comment(self) -> List[str]:
