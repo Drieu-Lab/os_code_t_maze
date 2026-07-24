@@ -213,3 +213,33 @@ class TrialSequence:
         if cue is None:
             return None
         return self.cfg.high_tone_hz if cue == HIGH else self.cfg.low_tone_hz
+
+    def extend(self, n_more: Optional[int] = None) -> int:
+        """Append more trials to all three schedules, in place; return the new length.
+
+        Used when the rat runs past the planned count (docs/decisions/0059): the
+        session is extended rather than ending. The extra trials continue the ONE
+        stored PRNG cursor (``self._rng``, the state left after the initial three
+        schedules), so the result is deterministic per seed + how much was appended
+        and the existing prefix is left byte-identical (append-only). ``n_more`` is
+        rounded up to a whole ``block_size`` so each appended segment keeps the same
+        exact per-block L/R (and hi/lo) balance as the initial plan; ``None`` adds
+        one block. The anti-bias run cap is enforced only WITHIN each appended
+        block, not across the join with the existing tail.
+        """
+        block = self.cfg.block_size
+        run = self.cfg.max_same_run
+        if n_more is None:
+            n_more = block
+        if n_more <= 0:
+            return len(self.seq)
+        n_more = ((n_more + block - 1) // block) * block   # whole blocks only
+        rng = self._rng
+        choice_ext, rng = generate_balanced(n_more, block, run, rng)
+        left_ext, rng = generate_balanced(n_more, block, run, rng)
+        right_ext, rng = generate_balanced(n_more, block, run, rng)
+        self.seq.extend(choice_ext)
+        self._return_bits[LEFT].extend(left_ext)
+        self._return_bits[RIGHT].extend(right_ext)
+        self._rng = rng
+        return len(self.seq)

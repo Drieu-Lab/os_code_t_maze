@@ -135,10 +135,12 @@ def compute(snapshot: Optional[Phase3StateSnapshot], *,
     total = snapshot.total if snapshot is not None else 0
     current_index = snapshot.current_index if snapshot is not None else 0
 
-    # A trial is "completed" once the snapshot has scored it (outcome set). Trials
-    # resolve in order, so this list is a contiguous prefix and its tail is the
-    # rolling window.
-    completed = [r for r in rows if r.outcome]
+    # A trial is "completed" once the snapshot has SCORED it (a real
+    # CORRECT/INCORRECT outcome). Operator-abandoned trials (outcome ABANDONED,
+    # docs/decisions/0058) are excluded so a skip never counts against accuracy or
+    # reward rate. Trials resolve in order, so this list is a contiguous prefix and
+    # its tail is the rolling window.
+    completed = [r for r in rows if r.outcome in (CORRECT, INCORRECT)]
     ncomp = len(completed)
     correct = sum(1 for r in completed if r.outcome == CORRECT)
     incorrect = sum(1 for r in completed if r.outcome == INCORRECT)

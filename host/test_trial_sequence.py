@@ -168,5 +168,57 @@ class TestReturnSchedules(unittest.TestCase):
         self.assertIsNone(ts.return_freq(LEFT, 999))
 
 
+class TestExtend(unittest.TestCase):
+    """Append-only, seed-deterministic extension (docs/decisions/0059)."""
+
+    def _cfg(self, n=40):
+        return TrialConfig(max_trials=n, block_size=20, max_same_run=3)
+
+    def test_appends_whole_blocks_and_preserves_prefix(self):
+        ts = TrialSequence(self._cfg(40), seed=555)
+        before_choice = list(ts.seq)
+        before_left = [ts.return_cue(LEFT, i) for i in range(len(ts))]
+        before_right = [ts.return_cue(RIGHT, i) for i in range(len(ts))]
+        self.assertEqual(ts.extend(20), 60)
+        self.assertEqual(len(ts), 60)
+        # existing rows are byte-identical (append-only)
+        self.assertEqual(ts.seq[:40], before_choice)
+        self.assertEqual([ts.return_cue(LEFT, i) for i in range(40)], before_left)
+        self.assertEqual([ts.return_cue(RIGHT, i) for i in range(40)], before_right)
+        # the appended block keeps exact per-block balance on all three schedules
+        self.assertEqual(ts.seq[40:60].count(LEFT), 10)
+        self.assertEqual(ts.seq[40:60].count(RIGHT), 10)
+        for side in (LEFT, RIGHT):
+            tail = [ts.return_cue(side, i) for i in range(40, 60)]
+            self.assertEqual(tail.count(HIGH), 10)
+            self.assertEqual(tail.count(LOW), 10)
+
+    def test_rounds_up_to_whole_block(self):
+        ts = TrialSequence(self._cfg(20), seed=1)
+        self.assertEqual(ts.extend(5), 40)     # 5 rounds up to one 20-block
+        self.assertEqual(ts.extend(21), 80)    # 21 rounds up to two 20-blocks
+
+    def test_default_adds_one_block(self):
+        ts = TrialSequence(self._cfg(20), seed=1)
+        self.assertEqual(ts.extend(), 40)
+
+    def test_deterministic_per_seed_and_call_pattern(self):
+        # Same seed + same extend calls -> identical schedules (reproducible).
+        a = TrialSequence(self._cfg(40), seed=99)
+        b = TrialSequence(self._cfg(40), seed=99)
+        a.extend(20)
+        b.extend(20)
+        self.assertEqual(a.seq, b.seq)
+        for side in (LEFT, RIGHT):
+            self.assertEqual([a.return_cue(side, i) for i in range(len(a))],
+                             [b.return_cue(side, i) for i in range(len(b))])
+
+    def test_noop_on_nonpositive(self):
+        ts = TrialSequence(self._cfg(20), seed=1)
+        self.assertEqual(ts.extend(0), 20)
+        self.assertEqual(ts.extend(-5), 20)
+        self.assertEqual(len(ts), 20)
+
+
 if __name__ == "__main__":
     unittest.main()

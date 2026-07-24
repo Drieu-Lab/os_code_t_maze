@@ -70,6 +70,20 @@ TIPS: Dict[str, Entry] = {
     "sol.header.drain": "Drain valve for this port.",
     "sol.header.rinse": "Rinse valve for this port.",
 
+    # ---- experiment_control.py: audio cue test ----
+    "cue.high": "Play the HIGH choice tone through the speakers to test them "
+                "(sends CUE_ON, auto-stops after the burst).",
+    "cue.low": "Play the LOW choice tone through the speakers to test them "
+               "(sends CUE_ON, auto-stops after the burst).",
+    "cue.custom": "Frequency (Hz) for the Play button (500-20000).",
+    "cue.play": "Play the custom-frequency tone (auto-stops after the burst).",
+    "cue.stop": "Stop any playing test tone now (sends CUE_OFF).",
+    "cue.kind": "Which cue this test tone counts as - fires the matching Open "
+                "Ephys tone TTL. The audible tone is set by the frequency, not "
+                "the kind.",
+    "cue.burst": "How long each test tone plays before the host auto-stops it, "
+                 "in ms (1-5000).",
+
     # ---- experiment_control.py: training mode ----
     "mode.free": "Switch the firmware to Free Roam (no cues/trials); refill the "
                  "central well manually. Restarts the session.",
@@ -301,6 +315,28 @@ TIPS: Dict[str, Entry] = {
                        "cues per trial, with the rat's choice + OK/X filled in as "
                        "trials resolve. The current trial is highlighted and kept "
                        "scrolled into view.",
+
+    # ---- trial_control_bar.py: Rig-view operator buttons (ADR-0058) ----
+    "phase3.controls": "Operator controls for the live Phase 3 run - steer the "
+                       "trial cursor without leaving the Rig view. Buttons enable "
+                       "only while a session is armed. See docs/decisions/0058.",
+    "phase3.skip": "Abandon the current trial (marked SKIP in the data), cut the "
+                   "cues, and advance to the next trial. The next choice cue only "
+                   "sounds once the rat is back at the hub and heads up the stem.",
+    "phase3.repeat": "Re-run the CURRENT trial: cut the cues and clear this trial's "
+                     "recorded fields so it starts clean, WITHOUT advancing. The "
+                     "cue re-arms on the next up-the-stem run from the hub.",
+    "phase3.back": "Step back one trial (undo an accidental advance) and clear that "
+                   "trial's recorded fields so it can be re-run cleanly.",
+    "phase3.extend": "Append one more balanced block of trials to the plan, for "
+                     "when the rat runs past the planned count. Append-only: the "
+                     "trials already run are untouched (docs/decisions/0059).",
+    "phase3.restart": "Restart the session at trial 1 from the same seed. The "
+                      "current run's progress is discarded (its data file is kept); "
+                      "asks for confirmation first.",
+    "phase3.pause": "Mute the cues and freeze trial progress WITHOUT disarming; "
+                    "press again (Resume) to continue. The next cue re-arms from a "
+                    "fresh hub->stem run.",
 
     # ---- maze_state_view.py: Maze state tab ----
     "maze.define_zones": "Draw the maze zones (central reward HUB, stem, "

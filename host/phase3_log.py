@@ -38,6 +38,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, fields
 from typing import List, Optional, Tuple
 
+from phase3_task import ABANDONED
 from trial_sequence import HIGH, LEFT, LOW, RIGHT, TrialSequence
 
 # Row values use these arm labels (uppercased); the sequence uses int LEFT/RIGHT
@@ -221,6 +222,51 @@ class Phase3Log:
         if r is not None:
             r.trial_end_iso = iso
 
+    def trial_abandoned(self, index: int, iso: str) -> None:
+        """Mark a trial the operator abandoned mid-run (Skip / Repeat buttons;
+        docs/decisions/0058). Records the distinct ``ABANDONED`` outcome and the
+        end time, but only if the trial was not already scored - so a genuine
+        CORRECT/INCORRECT is never overwritten by a stray abandon."""
+        r = self._row(index)
+        if r is None or r.outcome is not None:
+            return
+        r.outcome = ABANDONED
+        if r.trial_end_iso is None:
+            r.trial_end_iso = iso
+
+    def reset_trial(self, index: int) -> None:
+        """Clear a trial's live (filled) fields back to unrecorded, keeping its
+        planned cue columns, so it can be re-run cleanly (Repeat / Back buttons;
+        docs/decisions/0058). Also drops a pending reward-lick pointer aimed at it,
+        so a stale lick can't attach to the reset row."""
+        r = self._row(index)
+        if r is None:
+            return
+        planned = ("correct_arm", "choice_cue", "return_cue_left",
+                   "return_cue_right")
+        for f in fields(_Row):
+            if f.name not in planned:
+                setattr(r, f.name, None)
+        if self._pending_lick_index == index:
+            self._pending_lick_index = None
+
+    def extend_to(self, sequence: TrialSequence) -> int:
+        """Append planned rows for trials added to ``sequence`` (append-only).
+
+        Called after :meth:`TrialSequence.extend` when the rat runs past the
+        planned count (docs/decisions/0059). Existing rows - including every
+        already-recorded outcome and timestamp - are left untouched; only the new
+        indices get fresh planned rows. Returns the number of rows appended."""
+        start = len(self._rows)
+        for i in range(start, len(sequence)):
+            self._rows.append(_Row(
+                correct_arm=_ARM_LABEL[sequence.correct_arm(i)],
+                choice_cue=sequence.choice_cue(i) or "",
+                return_cue_left=sequence.return_cue(LEFT, i) or "",
+                return_cue_right=sequence.return_cue(RIGHT, i) or "",
+            ))
+        return len(self._rows) - start
+
     def lick(self, iso: str, fw_ms: Optional[int]) -> bool:
         """A center-well lick. Attributed to the trial awaiting its reward lick;
         ignored (no pending reward) otherwise, and only the first lick counts.
@@ -261,7 +307,8 @@ class Phase3Log:
             f"# high_tone_is_left={c.high_tone_is_left} "
             f"high_tone_hz={c.high_tone_hz} low_tone_hz={c.low_tone_hz}",
             f"# block_size={c.block_size} max_same_run={c.max_same_run} "
-            f"max_trials={c.max_trials} reward_incorrect={self.reward_incorrect}",
+            f"max_trials={c.max_trials} planned_trials={len(self._rows)} "
+            f"reward_incorrect={self.reward_incorrect}",
             f"# session_start_iso={self.session_start_iso}",
             "# note: *_iso are host actuation-decision times (serial latency ~ms); "
             "lick_fw_ms is the firmware hardware clock. see docs/decisions/0047",

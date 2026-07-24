@@ -150,6 +150,52 @@ class TestRender(unittest.TestCase):
         self.assertEqual(first[COLUMNS.index("outcome")], "CORRECT")
 
 
+class TestExtendAndAbandon(unittest.TestCase):
+    """Append-only extension + operator-abandon rows (docs/decisions/0058/0059)."""
+
+    def test_extend_to_appends_only_new_rows(self):
+        s = _seq(n=20)
+        log = Phase3Log(s, animal="R", session_start_iso="t")
+        log.choice_scored(0, "left", "CORRECT", "t_choice")
+        s.extend(20)
+        self.assertEqual(log.extend_to(s), 20)
+        self.assertEqual(len(log), 40)
+        # the already-scored row is untouched
+        self.assertEqual(log._rows[0].outcome, "CORRECT")
+        # the new rows carry the extended plan and start unscored
+        for i in range(20, 40):
+            self.assertEqual(log._rows[i].correct_arm,
+                             "LEFT" if s.correct_arm(i) == LEFT else "RIGHT")
+            self.assertEqual(log._rows[i].choice_cue, s.choice_cue(i))
+            self.assertIsNone(log._rows[i].outcome)
+
+    def test_extend_to_is_idempotent_when_no_growth(self):
+        s = _seq(n=20)
+        log = Phase3Log(s, animal="R", session_start_iso="t")
+        self.assertEqual(log.extend_to(s), 0)   # sequence not grown -> nothing added
+        self.assertEqual(len(log), 20)
+
+    def test_trial_abandoned_sets_outcome_and_end(self):
+        log = _log()
+        log.trial_abandoned(2, "t_end")
+        self.assertEqual(log._rows[2].outcome, "ABANDONED")
+        self.assertEqual(log._rows[2].trial_end_iso, "t_end")
+
+    def test_trial_abandoned_never_overwrites_a_score(self):
+        log = _log()
+        log.choice_scored(1, "left", "CORRECT", "t_choice")
+        log.trial_abandoned(1, "t_end")
+        self.assertEqual(log._rows[1].outcome, "CORRECT")   # scored row preserved
+
+    def test_planned_trials_header_reflects_extension(self):
+        s = _seq(n=20)
+        log = Phase3Log(s, animal="R", session_start_iso="t")
+        s.extend(20)
+        log.extend_to(s)
+        header = [ln for ln in log.render_csv().split("\n") if ln.startswith("#")]
+        self.assertTrue(any("planned_trials=40" in ln for ln in header))
+
+
 class TestSnapshot(unittest.TestCase):
     def test_rowview_fields_align(self):
         # Phase3RowView is "trial" + the _Row fields, in order; guards drift

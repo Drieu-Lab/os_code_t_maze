@@ -40,6 +40,11 @@ _ARM_OF_SIDE = {"left": LEFT, "right": RIGHT}
 
 CORRECT = "CORRECT"
 INCORRECT = "INCORRECT"
+# Outcome for a trial the operator abandoned mid-run (Skip / Repeat buttons on
+# the Rig view; docs/decisions/0058). Distinct from a scored CORRECT/INCORRECT so
+# the stats readout can exclude it from accuracy and the ribbon can mark it
+# neutrally.
+ABANDONED = "ABANDONED"
 
 
 @dataclass(frozen=True)
@@ -90,6 +95,40 @@ class Phase3Task:
         # trip" guard now lives in the shared task_events choice-commit edge
         # (docs/decisions/0055, FW-0020), so no separate _scored_this_trial flag.
         self._awaiting_return = False
+
+    # ----------------------------------------------- operator manual controls
+    # The Rig-view trial-control buttons drive these directly (via the actuation
+    # thread; docs/decisions/0058). They move the trial cursor WITHOUT folding a
+    # frame, so scoring/advancement stay driven only by vision edges in update().
+    def abandon_current(self) -> int:
+        """Abandon the current trial and advance to the next (Skip button).
+
+        Clears the awaiting-return latch so the next trial scores fresh, and moves
+        the cursor on by one (clamped at the end). Returns the index of the trial
+        that was abandoned."""
+        abandoned = self._index
+        self._awaiting_return = False
+        if self._index < len(self.seq):
+            self._index += 1
+        return abandoned
+
+    def repeat_current(self) -> int:
+        """Abandon the current trial but stay on it, to be re-run (Repeat button).
+
+        Clears the awaiting-return latch so the SAME trial can be re-scored on the
+        next up-the-stem excursion; the cursor does not move. Returns the index."""
+        self._awaiting_return = False
+        return self._index
+
+    def step_back(self) -> int:
+        """Step the cursor back one trial (Back button; undo an accidental advance).
+
+        Clears the awaiting-return latch and decrements the index (floored at 0).
+        Returns the new current index."""
+        self._awaiting_return = False
+        if self._index > 0:
+            self._index -= 1
+        return self._index
 
     # ---------------------------------------------------------------- reads
     @property

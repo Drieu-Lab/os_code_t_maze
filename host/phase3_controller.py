@@ -63,9 +63,11 @@ import protocol
 from cue_gate import CHOICE, RETURN, CueGate, CueParams
 from maze_state import CENTRAL_STEM, HUB
 from phase3_log import Phase3Log, Phase3StateSnapshot
-from phase3_ribbon import RIBBON_AFTER, RIBBON_BEFORE, RibbonRow, ribbon_rows
-from phase3_task import CORRECT, INCORRECT, Phase3Config, Phase3Task
+from phase3_task import ABANDONED, CORRECT, INCORRECT, Phase3Config, Phase3Task
 from rig_config import load_rig_config
+from trial_ribbon_view import (
+    _ARM_SHORT, _CELL_CURRENT_BG, _CUE_SHORT, _UNSET, TrialRibbonView,
+    progress_signature)
 from trial_sequence import LEFT, RIGHT, TrialConfig, TrialSequence
 from vision_actuator import VisionActuator
 
@@ -95,25 +97,12 @@ DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 # to look up that arm's planned return cue (see docs/decisions/0047).
 _SIDE_OF_ARM = {"left": LEFT, "right": RIGHT}
 
-# In-tab progress visualization (docs/decisions/0051). The ribbon holds a fixed
-# strip of RIBBON_BEFORE + 1 + RIBBON_AFTER cells (the helper clamps near the
-# ends, so unused cells are hidden). Colours are cosmetic only.
-RIBBON_CELLS = RIBBON_BEFORE + 1 + RIBBON_AFTER
+# In-tab progress visualization (docs/decisions/0051). The trial ribbon strip
+# itself (cells + colours) now lives in trial_ribbon_view.TrialRibbonView so it
+# can be shared with the Rig view (docs/decisions/0057); this tab keeps only the
+# scrollable planned-trial list below it (which reuses the ribbon's shared
+# short-labels / highlight colour, imported above).
 SEQ_LIST_ROWS = 8               # visible rows of the scrollable planned-trial list
-_CELL_BG = "#f2f2f2"            # a ribbon cell at rest
-_CELL_CURRENT_BG = "#ffe9a8"    # the current trial (ribbon cell + list row)
-_FG = "#222222"
-_FG_MUTED = "#888888"           # not-yet-resolved trials
-_FG_CORRECT = "#1a7f37"         # a correct choice
-_FG_INCORRECT = "#b3261e"       # an incorrect choice
-
-# Compact one-letter labels for the strip (arms and cue tones).
-_ARM_SHORT = {"LEFT": "L", "RIGHT": "R"}
-_CUE_SHORT = {"HIGH": "H", "LOW": "L"}
-
-# Sentinel for "no progress render yet": distinct from any real signature
-# (including ``None`` for the not-armed state), so the first poll always draws.
-_UNSET = object()
 
 
 def _now_iso() -> str:
@@ -135,6 +124,10 @@ class _Phase3Snapshot:
     animal: str = ""
     session_id: str = ""
     session_out_dir: str = ""
+    # Operator "pause cues" toggle (Rig-view button; docs/decisions/0058). When
+    # set, the actuation thread silences any tone and freezes trial progress
+    # without disarming (the gate stays open).
+    paused: bool = False
 
 
 class Phase3ControlView(VisionActuator):
@@ -186,6 +179,12 @@ class Phase3ControlView(VisionActuator):
         self._session_out_dir = ""
         self._active_cue: Optional[str] = None
         self._prev_zone: Optional[str] = None
+        # Operator controls (Rig-view buttons; docs/decisions/0058). ``_paused`` is
+        # a plain Tk-thread bool (button + poll both run on the Tk thread) folded
+        # into the atomic snapshot for the actuation thread. ``_restart_count``
+        # tags each restart's data file so a restart never clobbers the prior run.
+        self._paused = False
+        self._restart_count = 0
         # The center-well lick channel (reward-collection lick), from the shared
         # rig-config pin map (ADR-0021/0022); None if unavailable -> no lick times.
         self._center_lick = load_rig_config().lick_index_by_role.get("center")
@@ -293,8 +292,46 @@ class Phase3ControlView(VisionActuator):
         stats panel + trial ribbon), or None until a session is armed. Thread-safe:
         the actuation thread publishes a fresh immutable snapshot by atomic
         reference assignment; this getter just returns the current reference
-        (docs/decisions/0050; mirrors the _snapshot hand-off, ADR-0043)."""
+        (docs/decisions/0050; mirrors         the _snapshot hand-off, ADR-0043)."""
         return self._state
+
+    # ------------------------------------------------ operator button seams
+    # The Rig-view trial-control buttons (docs/decisions/0058) call these from the
+    # Tk thread. Skip/Repeat/Back/Extend/Restart enqueue a command the actuation
+    # thread applies (it is the sole task-state mutator); Pause is a Tk-thread bool
+    # folded into the snapshot. All are no-ops when the tab is unavailable.
+    def skip_current_trial(self) -> None:
+        """Abandon the current trial, stop the cues, advance to the next (pending
+        the rat's return to the hub)."""
+        self._enqueue_act(("cmd", "skip"))
+
+    def repeat_current_trial(self) -> None:
+        """Abandon the current trial and re-run the SAME trial (don't advance)."""
+        self._enqueue_act(("cmd", "repeat"))
+
+    def step_back_trial(self) -> None:
+        """Step back one trial (undo an accidental advance) and clear its row."""
+        self._enqueue_act(("cmd", "back"))
+
+    def extend_trials(self) -> None:
+        """Append one balanced block of trials to the live plan (docs/decisions/0059)."""
+        self._enqueue_act(("cmd", "extend"))
+
+    def restart_session(self) -> None:
+        """Regenerate the session from the seed at trial 1 into a fresh data file."""
+        self._enqueue_act(("cmd", "restart"))
+
+    def set_paused(self, paused: bool) -> None:
+        """Mute/unmute the cues (freezes trial progress without disarming)."""
+        self._paused = bool(paused)
+
+    def toggle_paused(self) -> bool:
+        """Flip the pause state; return the new value (for the toggle button)."""
+        self._paused = not self._paused
+        return self._paused
+
+    def is_paused(self) -> bool:
+        return self._paused
 
     # --------------------------------------------------------------- thread
     def _process_act_item(self, item, snap) -> None:
@@ -303,11 +340,19 @@ class Phase3ControlView(VisionActuator):
         atomic snapshot; splits frames from routed center-well lick edges."""
         if item[0] == "lick":
             self._process_lick(item[1], item[2])
+        elif item[0] == "cmd":
+            self._process_command(item[1], snap)
         else:
             self._process_frame(item[1], snap)
 
-    def _arm_session(self, snap: _Phase3Snapshot) -> None:
-        """Rising-edge setup: fresh sequence + task from the seed; take the DAC."""
+    def _arm_session(self, snap: _Phase3Snapshot, *, restart_index: int = 0) -> None:
+        """Rising-edge setup: fresh sequence + task from the seed; take the DAC.
+
+        ``restart_index`` > 0 means this is an operator Restart (docs/decisions/
+        0058), not a gate rising edge: it tags the data-file name (``_r<n>``) so the
+        aborted run's file is preserved. A normal arm (index 0) resets the counter."""
+        if restart_index == 0:
+            self._restart_count = 0
         self._gate.reset()
         if self._task_events is not None:
             self._task_events.reset()
@@ -329,6 +374,8 @@ class Phase3ControlView(VisionActuator):
         else:
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             base = f"phase3_{protocol.sanitize_animal_id(animal)}_{stamp}"
+        if restart_index:
+            base = f"{base}_r{restart_index}"
         self._log = Phase3Log(self._seq, animal=animal, session_start_iso=_now_iso(),
                               reward_incorrect=snap.reward_incorrect,
                               session_id=snap.session_id)
@@ -339,6 +386,69 @@ class Phase3ControlView(VisionActuator):
         self._write_log()
         self._publish_state(armed=True)      # expose the fresh plan to other tabs
         self._send_cmd("CUE,VISION")         # host owns the DAC; suppress auto-tone
+
+    # ------------------------------------------------- operator button commands
+    def _process_command(self, name: str, snap: _Phase3Snapshot) -> None:
+        """Apply one Rig-view trial-control command (docs/decisions/0058).
+
+        Runs on the actuation thread like every other core call, so it is the sole
+        mutator of the task state. Skip/Repeat/Back cut any sounding tone and clear
+        the per-trip cue/gate state, so the (new) current trial is "pending start"
+        - its choice cue only re-arms once the rat is back at the hub and heads up
+        the stem again."""
+        if name == "extend":
+            self._extend_trials(snap)
+            return
+        if name == "restart":
+            self._restart_session(snap)
+            return
+        if self._task is None or self._seq is None or self._log is None:
+            return
+        idx = self._task.index
+        iso = _now_iso()
+        if name == "skip":
+            self._log_call(lambda: self._log.trial_abandoned(idx, iso))
+            self._task.abandon_current()
+        elif name == "repeat":
+            self._log_call(lambda: self._log.reset_trial(idx))
+            self._task.repeat_current()
+        elif name == "back":
+            new_idx = self._task.step_back()
+            self._log_call(lambda: self._log.reset_trial(new_idx))
+        else:
+            return
+        self._silence_and_rearm()
+        self._write_log()
+        self._publish_state(armed=snap.gate_open)
+
+    def _silence_and_rearm(self) -> None:
+        """Cut any sounding tone and reset the per-trip cue/gate state, so the next
+        trial's cue waits for a fresh up-the-stem excursion from the hub."""
+        self._send_cmd("CUE_OFF")
+        self._active_cue = None
+        self._prev_zone = None
+        self._gate.reset()
+
+    def _extend_trials(self, snap: _Phase3Snapshot) -> None:
+        """Append one balanced block of trials to the live plan (docs/decisions/
+        0059), for when the rat runs past the planned count. Append-only: the
+        already-run trials are untouched, and a task that had completed resumes."""
+        if self._seq is None or self._log is None:
+            return
+        self._seq.extend()                   # one block_size block
+        self._log.extend_to(self._seq)
+        self._write_log()
+        self._publish_state(armed=snap.gate_open)
+
+    def _restart_session(self, snap: _Phase3Snapshot) -> None:
+        """Regenerate the session from the seed at trial 1 into a FRESH data file
+        (the aborted run's file is preserved via the ``_r<n>`` tag; docs/decisions/
+        0058). No-op unless a session has been armed at least once."""
+        if self._log is None:
+            return
+        self._restart_count += 1
+        self._silence_and_rearm()
+        self._arm_session(snap, restart_index=self._restart_count)
 
     def _process_frame(self, bundle, snap) -> None:
         # Gate edges own the DAC-authority handshake + a clean session (re)start.
@@ -353,6 +463,18 @@ class Phase3ControlView(VisionActuator):
         self._gate_was_open = snap.gate_open
 
         if not snap.gate_open or self._task is None or self._seq is None:
+            self._publish_status(snap)
+            return
+
+        # Operator "pause cues" (docs/decisions/0058): silence any tone and freeze
+        # trial progress without disarming. Resetting the gate/prev-zone each tick
+        # means that on resume the next cue re-arms only from a fresh hub->stem run.
+        if snap.paused:
+            if self._active_cue is not None:
+                self._send_cmd("CUE_OFF")
+                self._active_cue = None
+            self._gate.reset()
+            self._prev_zone = None
             self._publish_status(snap)
             return
 
@@ -474,6 +596,9 @@ class Phase3ControlView(VisionActuator):
     def _publish_status(self, snap: _Phase3Snapshot) -> None:
         if not snap.gate_open:
             self._status_text = f"gated ({self._gate_reason()})"
+            return
+        if snap.paused:
+            self._status_text = "PAUSED  (cues muted; still armed - press Resume)"
             return
         n = len(self._seq) if self._seq is not None else 0
         idx = self._task.index if self._task is not None else 0
@@ -631,19 +756,14 @@ class Phase3ControlView(VisionActuator):
         self._build_progress_ui(root, row=10)
 
     def _build_progress_ui(self, root: ttk.Frame, *, row: int) -> None:
-        """Build the trial ribbon + scrollable planned-trial list (ADR-0051)."""
-        ribbon = ttk.LabelFrame(root, text="Trial ribbon (recent / current / upcoming)")
-        ribbon.grid(row=row, column=0, columnspan=2, sticky="ew", padx=6, pady=(8, 3))
-        tip(ribbon, "phase3.ribbon")
-        self._ribbon_hint = ttk.Label(ribbon, text="", foreground=_FG_MUTED)
-        self._ribbon_hint.grid(row=1, column=0, sticky="w", padx=4, pady=2)
-        strip = ttk.Frame(ribbon)
-        strip.grid(row=0, column=0, sticky="w", padx=4, pady=2)
-        # Pre-create the fixed cells once and update them in place each poll, so a
-        # steady session doesn't churn widgets (the helper clamps near the ends;
-        # extra cells are hidden with grid_remove).
-        self._ribbon_cells = [self._make_ribbon_cell(strip, i)
-                              for i in range(RIBBON_CELLS)]
+        """Build the trial ribbon + scrollable planned-trial list (ADR-0051).
+
+        The ribbon is the shared TrialRibbonView widget (docs/decisions/0057);
+        this tab drives it in push mode (its own Tk poll calls render()), so it
+        also rebuilds the planned-trial list on the same change signature."""
+        self._ribbon = TrialRibbonView(root)
+        self._ribbon.widget().grid(row=row, column=0, columnspan=2, sticky="ew",
+                                   padx=6, pady=(8, 3))
 
         seq = ttk.LabelFrame(root, text="Planned trials")
         seq.grid(row=row + 1, column=0, columnspan=2, sticky="nsew",
@@ -661,20 +781,6 @@ class Phase3ControlView(VisionActuator):
         # Let the planned-trial list take the slack when the tab is tall.
         root.rowconfigure(row + 1, weight=1)
         root.columnconfigure(0, weight=1)
-
-    def _make_ribbon_cell(self, parent: tk.Misc, col: int) -> dict:
-        """One ribbon cell: a coloured frame of stacked labels, updated in place."""
-        frame = tk.Frame(parent, bg=_CELL_BG, bd=1, relief="solid",
-                         padx=5, pady=3)
-        frame.grid(row=0, column=col, padx=2, sticky="n")
-        trial = tk.Label(frame, bg=_CELL_BG, fg=_FG, font=("TkDefaultFont", 8, "bold"))
-        choice = tk.Label(frame, bg=_CELL_BG, fg=_FG, font=("TkDefaultFont", 8))
-        ret = tk.Label(frame, bg=_CELL_BG, fg=_FG, font=("TkDefaultFont", 8))
-        outcome = tk.Label(frame, bg=_CELL_BG, fg=_FG_MUTED, font=("TkDefaultFont", 8))
-        for w in (trial, choice, ret, outcome):
-            w.pack(anchor="w")
-        return {"frame": frame, "trial": trial, "choice": choice,
-                "ret": ret, "outcome": outcome}
 
     # ------------------------------------------------------------- Tk poll
     def _schedule_poll(self) -> None:
@@ -701,7 +807,8 @@ class Phase3ControlView(VisionActuator):
             reward_incorrect=bool(self._reward_incorrect_var.get()),
             animal=self._current_animal(),
             session_id=self._session_id,
-            session_out_dir=self._session_out_dir)
+            session_out_dir=self._session_out_dir,
+            paused=self._paused)
 
     def _current_animal(self) -> str:
         """Current animal id from the Task tab's shared field (docs/decisions/
@@ -723,44 +830,12 @@ class Phase3ControlView(VisionActuator):
         signature), so a steady session doesn't churn widgets every 100 ms
         (docs/decisions/0051)."""
         state = self._state
-        sig = None if state is None else (
-            state.seed, state.total, state.current_index, state.armed,
-            sum(1 for r in state.rows if r.outcome is not None))
+        sig = progress_signature(state)
         if sig == self._progress_sig:
             return
         self._progress_sig = sig
-        self._rebuild_ribbon(state)
+        self._ribbon.render(state)
         self._rebuild_sequence(state)
-
-    def _rebuild_ribbon(self, state: Optional[Phase3StateSnapshot]) -> None:
-        rows = ribbon_rows(state)
-        for i, cell in enumerate(self._ribbon_cells):
-            if i < len(rows):
-                self._fill_ribbon_cell(cell, rows[i])
-                cell["frame"].grid()
-            else:
-                cell["frame"].grid_remove()
-        self._ribbon_hint.configure(
-            text="" if rows else "Not armed - arm to generate the trial plan.")
-
-    def _fill_ribbon_cell(self, cell: dict, row: RibbonRow) -> None:
-        """Update one pre-made ribbon cell in place (text, colours, highlight)."""
-        bg = _CELL_CURRENT_BG if row.is_current else _CELL_BG
-        for key in ("frame", "trial", "choice", "ret"):
-            cell[key].configure(bg=bg)
-        cell["trial"].configure(text=f"#{row.trial}")
-        cell["choice"].configure(
-            text=f"{row.choice_cue}->{_ARM_SHORT.get(row.choice_side, '?')}")
-        cell["ret"].configure(
-            text=f"ret L:{_CUE_SHORT.get(row.return_cue_left, '?')} "
-                 f"R:{_CUE_SHORT.get(row.return_cue_right, '?')}")
-        if row.resolved:
-            ok = row.outcome == CORRECT
-            cell["outcome"].configure(
-                bg=bg, fg=_FG_CORRECT if ok else _FG_INCORRECT,
-                text=f"{_ARM_SHORT.get(row.chosen_arm, '?')} {'OK' if ok else 'X'}")
-        else:
-            cell["outcome"].configure(bg=bg, fg=_FG_MUTED, text="-")
 
     def _rebuild_sequence(self, state: Optional[Phase3StateSnapshot]) -> None:
         lb = self._seq_list
@@ -784,7 +859,9 @@ class Phase3ControlView(VisionActuator):
         arm = _ARM_SHORT.get(row.correct_arm, "?")
         left = _CUE_SHORT.get(row.return_cue_left, "?")
         right = _CUE_SHORT.get(row.return_cue_right, "?")
-        if row.outcome is not None:
+        if row.outcome == ABANDONED:
+            result = "skipped"
+        elif row.outcome is not None:
             chosen = _ARM_SHORT.get(row.chosen_arm, "?")
             result = f"chose {chosen} {'OK' if row.outcome == CORRECT else 'X'}"
         else:

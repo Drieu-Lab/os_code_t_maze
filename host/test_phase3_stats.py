@@ -54,6 +54,21 @@ def _side_for(log, index, correct):
     return "left" if want_left else "right"
 
 
+class TestAbandonedExcluded(unittest.TestCase):
+    def test_abandoned_trials_do_not_count_as_completed(self):
+        # A skipped (ABANDONED) trial must not dilute accuracy or reward rate:
+        # only genuinely scored CORRECT/INCORRECT trials count as completed.
+        log = _log(n=20)
+        _resolve(log, 0, _side_for(log, 0, True), CORRECT)
+        log.trial_abandoned(1, "t_end1")            # operator skip
+        _resolve(log, 2, _side_for(log, 2, True), CORRECT)
+        st = compute(log.snapshot(3, armed=True))
+        self.assertEqual(st.completed, 2)           # trial 1 excluded
+        self.assertEqual(st.correct, 2)
+        self.assertEqual(st.incorrect, 0)
+        self.assertEqual(st.accuracy_cum, 1.0)
+
+
 class TestEmpty(unittest.TestCase):
     def test_none_snapshot_is_all_empty(self):
         s = compute(None)

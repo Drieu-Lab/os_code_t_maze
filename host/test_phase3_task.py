@@ -122,6 +122,65 @@ class TestPhase3Task(unittest.TestCase):
         self.assertIsNone(t.current_correct_arm())
 
 
+class TestManualControls(unittest.TestCase):
+    """Operator buttons drive the cursor directly (docs/decisions/0058)."""
+
+    def test_abandon_advances_and_clears_latch(self):
+        t = make_task()
+        correct = t.current_correct_arm()
+        # Score a choice so the awaiting-return latch is set, then abandon.
+        t.update(frame(choice_committed=side_of(correct), outbound_used_stem=True))
+        self.assertEqual(t.abandon_current(), 0)      # returns abandoned index
+        self.assertEqual(t.index, 1)
+        # Latch cleared: the next trial scores immediately on a stem choice (no
+        # need to wait for a return lap first).
+        c1 = t.current_correct_arm()
+        d = t.update(frame(choice_committed=side_of(c1), outbound_used_stem=True))
+        self.assertIsNotNone(d.outcome)
+        self.assertEqual(d.trial_index, 1)
+
+    def test_abandon_clamps_at_end(self):
+        t = make_task()
+        for _ in range(len(t.seq)):
+            t.abandon_current()
+        self.assertEqual(t.index, len(t.seq))
+        self.assertTrue(t.complete)
+        self.assertEqual(t.abandon_current(), len(t.seq))   # clamped, no overrun
+        self.assertEqual(t.index, len(t.seq))
+
+    def test_repeat_stays_on_trial_and_clears_latch(self):
+        t = make_task()
+        correct = t.current_correct_arm()
+        t.update(frame(choice_committed=side_of(correct), outbound_used_stem=True))
+        self.assertEqual(t.repeat_current(), 0)
+        self.assertEqual(t.index, 0)
+        # The SAME trial can be re-scored after a repeat.
+        d = t.update(frame(choice_committed=side_of(correct), outbound_used_stem=True))
+        self.assertIsNotNone(d.outcome)
+        self.assertEqual(d.trial_index, 0)
+
+    def test_step_back_decrements_and_floors_at_zero(self):
+        t = make_task()
+        c0 = t.current_correct_arm()
+        t.update(frame(choice_committed=side_of(c0), outbound_used_stem=True))
+        t.update(frame(loop_closed=side_of(c0)))
+        self.assertEqual(t.index, 1)
+        self.assertEqual(t.step_back(), 0)
+        self.assertEqual(t.index, 0)
+        self.assertEqual(t.step_back(), 0)             # floored at 0
+
+    def test_step_back_reenables_scoring_after_advance(self):
+        t = make_task()
+        c0 = t.current_correct_arm()
+        t.update(frame(choice_committed=side_of(c0), outbound_used_stem=True))
+        t.update(frame(loop_closed=side_of(c0)))       # advanced to trial 1
+        t.step_back()                                  # back to trial 0
+        d = t.update(frame(choice_committed=side_of(t.current_correct_arm()),
+                           outbound_used_stem=True))
+        self.assertEqual(d.trial_index, 0)
+        self.assertIsNotNone(d.outcome)
+
+
 # --------------------------------------------------------------------------- #
 # End-to-end integration: real MazeStateEstimator -> TaskEvents -> Phase3Task  #
 # over synthetic centroid trajectories. This pins the CURRENT scoring/reward/  #

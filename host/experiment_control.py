@@ -6,7 +6,9 @@ modules in a tabbed notebook. The first module is a live maze illustration
 (rig_view.RigView). The rig/firmware controls live at the bottom of the Rig view
 tab: a "Solenoid test" bar fires R<port><sol>,<ms> commands (the pulse width is
 configurable, default DEFAULT_PULSE_MS) so you can map each solenoid by watching
-which physical valve clicks and which marker flashes in Rig view, a "Training
+which physical valve clicks and which marker flashes in Rig view, an "Audio cue
+test" bar plays host-driven tones (CUE_ON / CUE_OFF) through the speakers so they
+can be checked without running a trial, a "Training
 mode" bar switches the firmware between Free Roam and the Full task, and a
 "Session" panel (bottom-right, under the behavior readout) starts/stops recording
 everything (camera + Phase 3) under one shared session id + manifest (ADR-0048).
@@ -122,6 +124,22 @@ try:
 except Exception as e:  # pragma: no cover
     BehaviorView = None  # type: ignore
     _TRACKER_ERR = _TRACKER_ERR or f"{type(e).__name__}: {e}"
+# Trial ribbon (recent / current / upcoming trials): the shared Phase 3 strip,
+# shown on the Rig view too so the current trial is visible during a run without
+# switching tabs. Reads the published Phase 3 snapshot. Optional; guarded like
+# the tabs above. See docs/decisions/0057.
+try:
+    from trial_ribbon_view import TrialRibbonView
+except Exception:  # pragma: no cover
+    TrialRibbonView = None  # type: ignore
+# Trial-control buttons (Skip / Repeat / Back / +Trials / Restart / Pause): the
+# operator's steering controls for a live Phase 3 run, in the empty area beside
+# the ribbon + live-stats panels on the Rig view. Wired to the live Phase 3
+# controller. Optional; guarded like the tabs above. See docs/decisions/0058.
+try:
+    from trial_control_bar import TrialControlBar
+except Exception:  # pragma: no cover
+    TrialControlBar = None  # type: ignore
 # One shared maze-state pipeline (pure stdlib): a single estimator driven on the
 # camera tracking worker that fans a RatState stream out to the three tabs above,
 # replacing their per-tab estimators. Optional; guarded like the tabs above.
@@ -142,6 +160,16 @@ except Exception as e:  # pragma: no cover
 BROKER_HOST = "127.0.0.1"
 BROKER_PORT = 5555
 DEFAULT_PULSE_MS = 150   # matches REWARD_PULSE_MS in firmware/common/rig_config.h
+
+# Audio-cue speaker-test tones. The HIGH/LOW frequencies mirror the Phase 3
+# choice tones and the clamp range guards the DAC; all four match
+# firmware/common/rig_config.h (TONE_HIGH_HZ / TONE_LOW_HZ / CUE_HZ_MIN /
+# CUE_HZ_MAX). DEFAULT_CUE_BURST_MS is a host-side auto-off so a test tone
+# doesn't play forever (it plays for the burst, then the host sends CUE_OFF).
+CUE_TEST_HIGH_HZ = 8000   # TONE_HIGH_HZ
+CUE_TEST_LOW_HZ = 4000    # TONE_LOW_HZ
+CUE_HZ_MIN, CUE_HZ_MAX = 500, 20000
+DEFAULT_CUE_BURST_MS = 500
 
 # Firmware pin map (single source of truth) - used to label the lick counters by
 # port role. Degrades gracefully if the header can't be parsed. NOTE: trusts
@@ -292,6 +320,98 @@ def build_solenoid_panel(parent: tk.Misc, client: RigClient) -> None:
     tip(pulse_spin, "sol.pulse")
     ttk.Label(sol_frame, text="per click (<= 5000)", font=("TkDefaultFont", 8)).grid(
         row=4, column=3, columnspan=3, sticky="w", pady=(6, 4))
+
+
+def build_cue_panel(parent: tk.Misc, client: RigClient) -> None:
+    """Speaker-test helper: play a host-driven cue tone (CUE_ON / CUE_OFF).
+
+    Mirrors the solenoid test bar but for the audio cues: each button plays a
+    tone through the rig speakers so the speakers (and the matching Open Ephys
+    tone TTL) can be checked without running a trial. Uses PROTOCOL v6's
+    host-supplied tone identity (CUE_ON,<kind>,<hz>), which works in any mode.
+    """
+    cue_frame = ttk.LabelFrame(
+        parent,
+        text="Audio cue test  -  play a tone through the speakers (CUE_ON / CUE_OFF)")
+    cue_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=4, pady=4)
+
+    kind_var = tk.StringVar(value="CHOICE")
+    burst_var = tk.StringVar(value=str(DEFAULT_CUE_BURST_MS))
+    custom_var = tk.StringVar(value=str(CUE_TEST_HIGH_HZ))
+    # One pending auto-off timer id, so a new press (or Stop) cancels the old one
+    # instead of leaving a stale CUE_OFF that would cut a fresh tone short.
+    pending = {"after_id": None}
+
+    def stop() -> None:
+        if pending["after_id"] is not None:
+            parent.after_cancel(pending["after_id"])
+            pending["after_id"] = None
+        client.send("CUE_OFF")
+
+    def play(hz: int) -> None:
+        hz = max(CUE_HZ_MIN, min(CUE_HZ_MAX, hz))
+        # The firmware no-ops CUE_ON while a tone is already playing, so stop
+        # any current/pending tone first, then start the new one.
+        stop()
+        client.send(f"CUE_ON,{kind_var.get()},{hz}")
+        raw = burst_var.get().strip()
+        try:
+            ms = int(raw)
+        except ValueError:
+            ms = DEFAULT_CUE_BURST_MS
+        ms = max(1, min(5000, ms))
+        burst_var.set(str(ms))
+        pending["after_id"] = parent.after(ms, stop)
+
+    def play_custom() -> None:
+        raw = custom_var.get().strip()
+        try:
+            hz = int(raw)
+        except ValueError:
+            hz = CUE_TEST_HIGH_HZ
+        hz = max(CUE_HZ_MIN, min(CUE_HZ_MAX, hz))
+        custom_var.set(str(hz))
+        play(hz)
+
+    # Row 0: preset tones + Stop.
+    high_btn = ttk.Button(cue_frame, text=f"HIGH ({CUE_TEST_HIGH_HZ} Hz)",
+                          command=lambda: play(CUE_TEST_HIGH_HZ))
+    high_btn.grid(row=0, column=0, padx=4, pady=(4, 2))
+    tip(high_btn, "cue.high")
+    low_btn = ttk.Button(cue_frame, text=f"LOW ({CUE_TEST_LOW_HZ} Hz)",
+                         command=lambda: play(CUE_TEST_LOW_HZ))
+    low_btn.grid(row=0, column=1, padx=4, pady=(4, 2))
+    tip(low_btn, "cue.low")
+    stop_btn = ttk.Button(cue_frame, text="Stop", command=stop)
+    stop_btn.grid(row=0, column=2, padx=4, pady=(4, 2))
+    tip(stop_btn, "cue.stop")
+
+    # Row 1: custom frequency.
+    ttk.Label(cue_frame, text="Custom (Hz):").grid(
+        row=1, column=0, sticky="e", padx=(6, 8), pady=2)
+    custom_spin = ttk.Spinbox(cue_frame, from_=CUE_HZ_MIN, to=CUE_HZ_MAX,
+                              increment=100, width=7, textvariable=custom_var)
+    custom_spin.grid(row=1, column=1, sticky="w", pady=2)
+    tip(custom_spin, "cue.custom")
+    play_btn = ttk.Button(cue_frame, text="Play", command=play_custom)
+    play_btn.grid(row=1, column=2, padx=4, pady=2)
+    tip(play_btn, "cue.play")
+
+    # Row 2: cue kind + burst duration (the two shared settings).
+    ttk.Label(cue_frame, text="Cue kind:").grid(
+        row=2, column=0, sticky="e", padx=(6, 8), pady=(2, 4))
+    kind_combo = ttk.Combobox(cue_frame, textvariable=kind_var, width=8,
+                              state="readonly", values=("CHOICE", "RETURN"))
+    kind_combo.grid(row=2, column=1, sticky="w", pady=(2, 4))
+    tip(kind_combo, "cue.kind")
+    ttk.Label(cue_frame, text="Burst (ms):").grid(
+        row=3, column=0, sticky="e", padx=(6, 8), pady=(2, 4))
+    burst_spin = ttk.Spinbox(cue_frame, from_=1, to=5000, increment=50, width=6,
+                             textvariable=burst_var)
+    burst_spin.grid(row=3, column=1, sticky="w", pady=(2, 4))
+    tip(burst_spin, "cue.burst")
+    ttk.Label(cue_frame, text="auto-off (<= 5000)", font=("TkDefaultFont", 8)).grid(
+        row=3, column=2, sticky="w", pady=(2, 4))
 
 
 def build_reward_panel(parent: tk.Misc, tally: RewardTally) -> None:
@@ -594,6 +714,7 @@ def main() -> int:
 
     build_mode_controls(rig_controls_left, client, mode_var)
     build_solenoid_panel(rig_controls_left, client)
+    build_cue_panel(rig_controls_left, client)
     build_reward_panel(rig_controls_left, reward_tally)
     build_lick_panel(rig_controls_left, lick_tally)
 
@@ -609,11 +730,76 @@ def main() -> int:
         def phase3_state():
             p3 = phase3_ref.get("p3")
             return p3.published_state() if p3 is not None else None
-        behavior = BehaviorView(rig_controls_right, tracker=tracker,
+        # Split the right column so the operator trial-control buttons can fill the
+        # empty area that spans BOTH the ribbon and the live-stats panels
+        # (docs/decisions/0058): ribbon + behavior stack in a LEFT sub-column, the
+        # button bar sits in a RIGHT sub-column of the same height. The Session
+        # panel stays pinned to the bottom of the column (built after this block).
+        upper = ttk.Frame(rig_controls_right)
+        upper.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        left_col = ttk.Frame(upper)
+        left_col.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        # Trial ribbon at the TOP of the left sub-column (above the behavior
+        # readout): the same strip as the Phase 3 tab, so the current/upcoming
+        # trials are visible on the default Rig view during a run (docs/decisions/
+        # 0057). It self-polls the published snapshot (pull mode) since the Rig view
+        # has no Phase 3 poll; registered as a module so its self-poll is cancelled
+        # on exit.
+        if TrialRibbonView is not None:
+            ribbon = TrialRibbonView(left_col, state_getter=phase3_state)
+            ribbon.widget().pack(side=tk.TOP, fill=tk.X, padx=4, pady=(4, 0))
+            add_module(ribbon)
+        behavior = BehaviorView(left_col, tracker=tracker,
                                 camera=camera_ref.get("cam"), pipeline=pipeline,
                                 phase3_state=phase3_state)
         behavior.widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         add_module(behavior)
+        # Operator trial-control buttons on the RIGHT, wired to the live Phase 3
+        # controller through the shared holder (each call null-safe if the Phase 3
+        # tab is absent). Restart confirms first (it discards the current run's
+        # progress). Registered as a module so its self-poll is cancelled on exit.
+        if TrialControlBar is not None:
+            def _p3_call(method_name):
+                def call():
+                    p3 = phase3_ref.get("p3")
+                    fn = getattr(p3, method_name, None) if p3 is not None else None
+                    if fn is not None:
+                        fn()
+                return call
+
+            def _restart():
+                p3 = phase3_ref.get("p3")
+                if p3 is None:
+                    return
+                if messagebox.askyesno(
+                        "Restart session",
+                        "Restart this session at trial 1?\n\nThe current run's "
+                        "progress is discarded (its data file is kept); a fresh "
+                        "plan is generated from the same seed."):
+                    p3.restart_session()
+
+            def _toggle_pause():
+                p3 = phase3_ref.get("p3")
+                if p3 is not None:
+                    p3.toggle_paused()
+
+            def _paused():
+                p3 = phase3_ref.get("p3")
+                return bool(p3.is_paused()) if p3 is not None else False
+
+            controls = {
+                "skip": _p3_call("skip_current_trial"),
+                "repeat": _p3_call("repeat_current_trial"),
+                "back": _p3_call("step_back_trial"),
+                "extend": _p3_call("extend_trials"),
+                "restart": _restart,
+                "pause": _toggle_pause,
+            }
+            ctrl_bar = TrialControlBar(
+                upper, callbacks=controls, state_getter=phase3_state,
+                paused_getter=_paused)
+            ctrl_bar.widget().pack(side=tk.RIGHT, fill=tk.Y, padx=(4, 4), pady=4)
+            add_module(ctrl_bar)
 
     # Session start/stop panel: pinned to the BOTTOM of the right column, filling
     # the dead space under the behavior readout (keeps it off the left column so
