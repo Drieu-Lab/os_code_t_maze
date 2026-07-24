@@ -25,8 +25,9 @@ Design (see docs/decisions/0045):
 
 This module is a stateful PURE core (stdlib only, no Tk/OpenCV/serial), like
 maze_state.py / task_events.py / rules_engine.py: it takes RatState fields and
-returns a CueDecision; the thin cue_controller.py shell turns decisions into
-CUE_ON/CUE_OFF commands. Headless tests: python -m unittest test_cue_gate.
+returns a CueDecision; the thin Phase 3 shell (phase3_controller.py) turns
+decisions into CUE_ON/CUE_OFF commands. Headless tests: python -m unittest
+test_cue_gate.
 
 Thread-safety: driven single-threaded (the cue actuation thread), like the other
 cores; it takes no locks.

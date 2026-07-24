@@ -79,14 +79,6 @@ try:
 except Exception as e:  # pragma: no cover
     MazeStateControlView = None  # type: ignore
     _TRACKER_ERR = _TRACKER_ERR or f"{type(e).__name__}: {e}"
-# Cue tab: the host-side actuator for the vision-triggered, spatially-gated audio
-# cue (reads the shared maze-state pipeline's fast view; drives CUE_ON/CUE_OFF via
-# the broker). Optional; guarded like the tabs above. See docs/decisions/0044/0045.
-try:
-    from cue_controller import CueControlView
-except Exception as e:  # pragma: no cover
-    CueControlView = None  # type: ignore
-    _TRACKER_ERR = _TRACKER_ERR or f"{type(e).__name__}: {e}"
 # Phase 3 tab: the host-owned cued task (firmware = actuator). Composes the cue
 # gate + trial FSM over the shared pipeline; drives CUE_ON,<kind>,<hz> / reward.
 # Optional; guarded like the tabs above. See docs/decisions/0046.
@@ -435,14 +427,6 @@ def main() -> int:
             lambda parent: MazeStateControlView(
                 parent, tracker=tracker, camera=camera_ref.get("cam"),
                 pipeline=pipeline)]))
-    # Cue tab: host-side actuator for the vision-triggered, spatially-gated audio
-    # cue. Reads the shared pipeline's fast view and drives CUE_ON/CUE_OFF via the
-    # broker (firmware owns tone + TTLs). See docs/decisions/0044/0045.
-    if tracker is not None and CueControlView is not None:
-        tabs.append(("Cue", [
-            lambda parent: CueControlView(
-                parent, camera=camera_ref.get("cam"),
-                pipeline=pipeline, send=lambda cmd: client.send(cmd))]))
     # Phase 3 tab: the initial HOST-OWNED cued task (firmware = actuator). Runs in
     # Free Roam (firmware FSM off): the host owns the trial sequence, cue identity,
     # scoring, and reward, driving CUE_ON,<kind>,<hz> / R<port> via the broker.
