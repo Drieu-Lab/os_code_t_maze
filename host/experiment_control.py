@@ -51,6 +51,7 @@ from reward_volume import (reward_volume_ul, format_volume,
                            DEFAULT_REWARD_PULSE_MS)
 from rig_config import load_rig_config, RigConfig
 from rig_process import find_rig_pids, rig_session_id, taskkill
+from line_router import LineRouter
 from tooltips import tip
 
 # Markerless tracker + its control tab are optional (need opencv/numpy/pillow);
@@ -391,7 +392,16 @@ def main() -> int:
         phase3_ref["p3"] = tv.phase3
         return tv
 
+    # Registered modules + the single fan-out/reset seam (docs/decisions/0056).
+    # Every module is both kept in ``modules`` (for close()) and added to the
+    # router, which parses each line once and hands the pre-parsed LineInfo to
+    # apply(info), plus fires one mode-changed reset to subscribers (FW-0021/22).
     modules = []
+    router = LineRouter()
+
+    def add_module(module) -> None:
+        modules.append(module)
+        router.add_module(module)
 
     def on_close() -> None:
         client.stop()
@@ -501,7 +511,7 @@ def main() -> int:
                 module = factory(sub)
                 module.widget().pack(side=tk.LEFT, fill=tk.BOTH, expand=True,
                                      padx=2, pady=2)
-                modules.append(module)
+                add_module(module)
             continue
         if title == "Rig view":
             toolbar = ttk.Frame(tab)
@@ -531,7 +541,7 @@ def main() -> int:
             # The first module keeps its natural size; the rest expand to fill.
             module.widget().pack(side=tk.LEFT, fill=tk.BOTH,
                                  expand=(i > 0), padx=2, pady=2)
-            modules.append(module)
+            add_module(module)
 
     # Status bar.
     status_var = tk.StringVar(value="Connecting...")
@@ -546,24 +556,28 @@ def main() -> int:
     # Connect to the broker (must exist before wiring callbacks).
     client = RigClient(root, host=BROKER_HOST, port=BROKER_PORT)
 
+    # The bottom-strip tallies are stateful consumers of a MODE switch, so they
+    # subscribe to the ONE reset seam (docs/decisions/0056) alongside the modules
+    # that define on_mode_changed - no more per-consumer "if mode: reset" checks.
+    router.subscribe_mode(
+        lambda mode: mode_var.set(f"Mode: {MODE_LABELS.get(mode, mode)}"))
+    router.subscribe_mode(lambda mode: reward_tally.reset())
+    router.subscribe_mode(lambda mode: lick_tally.reset())
+
     def on_line(line: str) -> None:
-        mode = protocol.mode_name(line)
-        lick = protocol.lick_edge(line)
-        reward = protocol.reward_info(line)
-        if mode is not None:
-            mode_var.set(f"Mode: {MODE_LABELS.get(mode, mode)}")
-            reward_tally.reset()
-            lick_tally.reset()
-        elif lick is not None:
-            index, rising = lick
+        # Parse ONCE, then fan the pre-parsed line out. The reward/lick tallies
+        # ADD here; their MODE reset (and the mode label) run via the router's
+        # mode seam, which fires before modules see the line (FW-0021/0022).
+        info = protocol.classify(line)
+        if info.lick is not None:
+            index, rising = info.lick
             if rising:
                 lick_tally.add(index)
-        elif reward is not None:
-            manual, dur = reward
+        elif info.reward is not None:
+            manual, dur = info.reward
             reward_tally.add(
                 dur if dur is not None else DEFAULT_REWARD_PULSE_MS, manual)
-        for module in modules:
-            module.apply(line)
+        router.dispatch(info)
 
     client.on_line(on_line)
     client.on_status(status_var.set)
@@ -599,7 +613,7 @@ def main() -> int:
                                 camera=camera_ref.get("cam"), pipeline=pipeline,
                                 phase3_state=phase3_state)
         behavior.widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-        modules.append(behavior)
+        add_module(behavior)
 
     # Session start/stop panel: pinned to the BOTTOM of the right column, filling
     # the dead space under the behavior readout (keeps it off the left column so
@@ -624,7 +638,7 @@ def main() -> int:
             phase3=phase3_ref.get("p3"), send=lambda cmd: client.send(cmd),
             recordings_root=recordings_root, animal_id=task_animal_id)
         session.widget().pack(side=tk.BOTTOM, fill=tk.X, padx=4, pady=4)
-        modules.append(session)
+        add_module(session)
 
     root.protocol("WM_DELETE_WINDOW", on_close)
 

@@ -12,7 +12,8 @@ from __future__ import annotations
 
 import unittest
 
-from session_serial import is_sensor_or_central_line
+import protocol
+from session_serial import is_sensor_or_central, is_sensor_or_central_line
 
 # Verified central-well mapping (docs/decisions/0022): center lick = L2; the
 # central solenoid port = 2 ("Center / start").
@@ -62,6 +63,22 @@ class TestDroppedLines(unittest.TestCase):
     def test_malformed_is_dropped(self):
         for line in ("", "garbage", ",,,", "abc,S,0,1"):
             self.assertFalse(_keep(line), line)
+
+
+class TestInfoAndLineParity(unittest.TestCase):
+    """The pre-parsed is_sensor_or_central(info) and the raw-line wrapper agree
+    on every line (the wrapper just classifies once first; docs/decisions/0056)."""
+
+    LINES = ("1000,S,0,1", "1200,L,2,1", "1200,L,0,1", "1300,REWARD,CENTER,150",
+             "1400,SOL,2,0,150", "1400,SOL,0,1", "0,MODE,FREEROAM",
+             "0,ANIMAL,RAT600", "1500,CUE,OFF", "", "garbage")
+
+    def test_parity(self):
+        for line in self.LINES:
+            info_based = is_sensor_or_central(
+                protocol.classify(line), center_lick_index=CENTER_LICK,
+                center_sol_port=CENTER_PORT)
+            self.assertEqual(info_based, _keep(line), line)
 
 
 if __name__ == "__main__":

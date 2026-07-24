@@ -75,8 +75,6 @@ criteria).
 | [FW-0018](#fw-0018-hardware-session-sync-fiducial-firmware-sync-ttl--camera-visible-led-barcode) | Hardware session sync fiducial (firmware `SYNC` TTL + camera-visible LED barcode) | Firmware + protocol + host session/camera | Proposed |
 | [FW-0019](#fw-0019-one-reward-seam--rate-backstop-across-the-task-controllers) | One reward seam + rate backstop across the task controllers | Rules engine + Phase 3 host | Done |
 | [FW-0020](#fw-0020-shared-choice-commit-edge-in-the-task-event-layer) | Shared choice-commit edge in the task-event layer | Task-event layer + task controllers | Done |
-| [FW-0021](#fw-0021-single-parse-serial-fan-out-in-the-gui-orchestrator) | Single-parse serial fan-out in the GUI orchestrator | GUI orchestrator + protocol | Proposed |
-| [FW-0022](#fw-0022-unified-mode-switch-reset-seam) | Unified MODE-switch reset seam | GUI orchestrator + tab modules | Proposed |
 | [FW-0023](#fw-0023-shared-preview-producer-loop-helper) | Shared preview *producer* loop helper | Preview helpers + tab modules | Proposed |
 | [FW-0024](#fw-0024-config-driven-phase-3-taskreward-parameters-parity-with-rules) | Config-driven Phase 3 task/reward parameters (parity with Rules) | Phase 3 host + config | Proposed |
 
@@ -983,81 +981,6 @@ edge belong in `task_events.py` or a thin layer above the estimator?
 **ADR needed?** Yes if unifying changes either mode's commit semantics; no if it
 is a pure extraction that both already agree on.
 
-### FW-0021: Single-parse serial fan-out in the GUI orchestrator
-
-- **Status:** Proposed
-- **Date added:** 2026-07-24
-- **Author / Agent:** Agent (Cursor) on behalf of Celine
-- **Area / modules:** `host/experiment_control.py` (`on_line`, 515-532),
-  `host/protocol.py` (`mode_name` / `lick_edge` / `reward_info` parsers)
-- **Related ADRs:** [ADR-0053](decisions/0053-gui-tab-streamlining.md) (the
-  Operate-group review that surfaced this), [ADR-0024](decisions/0024-shared-host-protocol-parser.md)
-  (the centralized parser this builds on), [ADR-0043](decisions/0043-rules-actuation-thread.md)
-  (the actuation seam that also consumes serial lines)
-
-**Motivation / context.** `on_line` (`experiment_control.py` 515-532) parses each
-serial line **once** for the bottom-strip tallies (`protocol.mode_name`,
-`lick_edge`, `reward_info`), then passes the **raw line** to every registered
-module, each of which re-parses it with the same `protocol` helpers. On a busy
-line rate this is N+1 parses of the same string, and it means the mode/lick/
-reward classification lives in two layers that must be kept in agreement.
-
-**Sketch of approach.** Parse once at the fan-out point into a small immutable
-`ParsedLine` (mode/lick/reward/... plus the raw text) and hand **that** to
-modules, so each module reads the pre-parsed fields instead of re-running the
-parsers. Keep `protocol.py` as the single parser (ADR-0024); this is just about
-not calling it repeatedly per line.
-
-**Evaluation / acceptance.** No behavior change: modules react identically; a
-micro-benchmark shows one parse per line instead of N+1; the `protocol` parser
-API stays the single source of truth.
-
-**Effort / risk.** Low-medium. Touches every module's `apply()` signature, so it
-is best done alongside the ADR-0053 regroup when those modules are already being
-edited.
-
-**Open questions.** Do all modules only ever need the pre-parsed fields, or do
-some still need the raw line (they can keep it — `ParsedLine` carries it)?
-
-**ADR needed?** No — a mechanical fan-out/perf refactor within the ADR-0024 model.
-
-### FW-0022: Unified MODE-switch reset seam
-
-- **Status:** Proposed
-- **Date added:** 2026-07-24
-- **Author / Agent:** Agent (Cursor) on behalf of Celine
-- **Area / modules:** `host/experiment_control.py` (`on_line` resets the tallies
-  on a MODE line, 519-522), `host/behavior_view.py` (`apply` resets on
-  `protocol.mode_name`), and any other module that resets its own state on a
-  MODE switch
-- **Related ADRs:** [ADR-0053](decisions/0053-gui-tab-streamlining.md) (the
-  review that surfaced the split resets), [ADR-0024](decisions/0024-shared-host-protocol-parser.md)
-  (the shared MODE parse), [ADR-0009](decisions/0009-runtime-training-modes-and-logging.md)
-  (the `0,MODE,<name>` line that triggers the reset)
-
-**Motivation / context.** A firmware MODE switch (`0,MODE,<name>`) means "new
-run, drop stale state", but each consumer notices this independently: `on_line`
-resets the reward/lick tallies (`experiment_control.py` 519-522), `behavior_view`
-resets its stats on the same line, and other modules do their own thing. There is
-no single "session/mode boundary" signal, so it is easy to add a new stateful
-module and forget to reset it on a MODE change.
-
-**Sketch of approach.** Emit one explicit **mode-changed** notification from the
-fan-out point (naturally paired with FW-0021's single parse) that stateful
-modules subscribe to, replacing the scattered per-module `if mode is not None:
-reset()` checks with one seam. Modules that need no reset simply don't subscribe.
-
-**Evaluation / acceptance.** No behavior change: tallies and the behavior readout
-still clear on a MODE switch; add a test that a newly-registered stateful module
-gets the reset callback without touching `on_line`.
-
-**Effort / risk.** Low. Mostly a wiring change; pairs with FW-0021.
-
-**Open questions.** Should the seam distinguish "MODE changed to X" (some modules
-only reset for specific transitions) vs a blanket "boundary" signal?
-
-**ADR needed?** No — a small internal wiring cleanup.
-
 ### FW-0023: Shared preview *producer* loop helper
 
 - **Status:** Proposed
@@ -1173,3 +1096,5 @@ referenced from those ADRs resolve.
 | FW-0004 | Position-based task-rule engine over landmarks | [ADR-0023](decisions/0023-position-based-rules-engine.md) |
 | FW-0007 | Maze-state consumers - rule-shaping + behavior stats | [ADR-0026](decisions/0026-reward-shaping-phases.md), [ADR-0032](decisions/0032-live-behavior-readout.md) |
 | FW-0012 | Run tracking off the camera grab thread | [ADR-0040](decisions/0040-tracking-off-grab-thread.md) |
+| FW-0021 | Single-parse serial fan-out in the GUI orchestrator | [ADR-0056](decisions/0056-single-parse-fanout-and-mode-reset-seam.md) |
+| FW-0022 | Unified MODE-switch reset seam | [ADR-0056](decisions/0056-single-parse-fanout-and-mode-reset-seam.md) |

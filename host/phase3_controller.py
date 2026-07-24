@@ -227,27 +227,25 @@ class Phase3ControlView(VisionActuator):
     def widget(self) -> tk.Widget:
         return self.frame
 
-    def apply(self, line: str) -> None:
+    def apply(self, info) -> None:
         """Track the firmware mode (Tk) and reflect CUE echoes for status.
 
-        Also snoop center-well lick edges (the reward-collection lick) and hand
-        them to the actuation thread, which is the sole writer of the data log
-        (this method runs on the serial-reader thread; ADR-0043/0047)."""
-        mode = protocol.mode_name(line)
-        if mode is not None:
-            self._mode = mode.upper()
+        Reads the pre-parsed protocol.LineInfo (docs/decisions/0056). Also snoop
+        center-well lick edges (the reward-collection lick) and hand them to the
+        actuation thread, which is the sole writer of the data log (this method
+        runs on the serial-reader thread; ADR-0043/0047)."""
+        if info.mode is not None:
+            self._mode = info.mode.upper()
             return
-        info = protocol.cue_info(line)
-        if info is not None:
-            state, kind, freq = info
+        if info.cue is not None:
+            state, kind, freq = info.cue
             self._last_fw_cue = f"fw: {kind} @ {freq} Hz" if state == "ON" else "fw: off"
             return
-        lick = protocol.lick_edge(line)
+        lick = info.lick
         if lick is not None and self._center_lick is not None:
             index, rising = lick
             if rising and index == self._center_lick:
-                parsed = protocol.parse(line)
-                fw_ms = parsed.ms if parsed is not None else None
+                fw_ms = info.parsed.ms if info.parsed is not None else None
                 self._enqueue_act(("lick", _now_iso(), fw_ms))
 
     def close(self) -> None:

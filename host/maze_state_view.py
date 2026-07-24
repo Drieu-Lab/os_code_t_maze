@@ -149,11 +149,11 @@ class MazeStateControlView:
     def widget(self) -> tk.Widget:
         return self.frame
 
-    def apply(self, line: str) -> None:
-        """Learn the animal id from the serial stream (for the log filename)."""
-        aid = protocol.animal_id(line)
-        if aid:
-            self._animal = aid
+    def apply(self, info: protocol.LineInfo) -> None:
+        """Learn the animal id from the serial stream (for the log filename).
+        Reads the pre-parsed protocol.LineInfo (docs/decisions/0056)."""
+        if info.animal:
+            self._animal = info.animal
 
     def close(self) -> None:
         self._closed = True

@@ -56,7 +56,6 @@ from dataclasses import dataclass, field, replace
 from tkinter import messagebox, ttk
 from typing import Optional
 
-import protocol
 from gui_deps import cv2, missing_dependency
 from preview import render_bgr_to_label, safe_after
 from tooltips import tip
@@ -210,28 +209,28 @@ class RulesControlView(VisionActuator):
     def widget(self) -> tk.Widget:
         return self.frame
 
-    def apply(self, line: str) -> None:
+    def apply(self, info) -> None:
         """Track firmware mode (Tk) and ROUTE lick edges to the actuation thread.
 
-        The engine must stay single-threaded, so a lick edge is never fed to the
-        engine here - it is enqueued (with its arrival timestamp) onto the same
-        queue the fast-view frames use, and the actuation thread calls
+        Reads the pre-parsed protocol.LineInfo (docs/decisions/0056). The engine
+        must stay single-threaded, so a lick edge is never fed to the engine
+        here - the RAW line is enqueued (with its arrival timestamp) onto the
+        same queue the fast-view frames use, and the actuation thread calls
         ``engine.event`` in arrival order (ADR-0043)."""
-        mode = protocol.mode_name(line)
-        if mode is not None:
-            self._mode = mode.upper()
+        if info.mode is not None:
+            self._mode = info.mode.upper()
             return
         if self._engine is None:
             return
-        if protocol.lick_edge(line) is None:
+        if info.lick is None:
             return
         if self._use_worker_actuation:
-            self._enqueue_act(("lick", line, time.monotonic()))
+            self._enqueue_act(("lick", info.raw, time.monotonic()))
         else:
             # No pipeline: legacy in-line handling on the Tk thread.
             self._engine.enabled = self._gate_open()
             if self._engine.enabled:
-                self._execute(self._engine.event(line, time.monotonic()))
+                self._execute(self._engine.event(info.raw, time.monotonic()))
 
     def close(self) -> None:
         self._closed = True

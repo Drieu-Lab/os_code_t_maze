@@ -40,8 +40,6 @@ import tkinter as tk
 from tkinter import ttk
 from typing import List, Optional, Tuple
 
-import protocol
-
 try:
     from tooltips import tip
 except Exception:  # pragma: no cover
@@ -121,21 +119,20 @@ class TaskControlView:
     def widget(self) -> tk.Widget:
         return self.frame
 
-    def apply(self, line: str) -> None:
+    def apply(self, info) -> None:
         """Auto-fill the shared Animal ID from the firmware ANIMAL handshake when
-        the field is empty (the field wins once the user types), then fan the line
-        out to both controllers so each keeps its own firmware-mode / lick state
-        regardless of which is currently shown."""
-        animal = protocol.animal_id(line)
-        if animal:
+        the field is empty (the field wins once the user types), then fan the
+        pre-parsed line (docs/decisions/0056) out to both controllers so each
+        keeps its own firmware-mode / lick state regardless of which is shown."""
+        if info.animal:
             try:
                 if not self._animal_var.get().strip():
-                    self._animal_var.set(animal)
+                    self._animal_var.set(info.animal)
             except tk.TclError:
                 pass
         for _, module in self._panels:
             try:
-                module.apply(line)
+                module.apply(info)
             except Exception:
                 pass
 

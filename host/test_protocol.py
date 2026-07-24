@@ -10,9 +10,12 @@ from __future__ import annotations
 
 import unittest
 
+import dataclasses
+
 import protocol
-from protocol import (animal_id, cue_info, lick_edge, mode_name, parse,
-                      reward_info, sanitize_animal_id, sensor_edge, sol_pulse)
+from protocol import (animal_id, classify, cue_info, lick_edge, mode_name,
+                      parse, reward_info, sanitize_animal_id, sensor_edge,
+                      sol_pulse)
 
 
 class TestParse(unittest.TestCase):
@@ -139,6 +142,50 @@ class TestCue(unittest.TestCase):
     def test_never_raises(self):
         for bad in ("", ",,,,", "garbage", "1,CUE,,,", "\x00,CUE,\x00"):
             cue_info(bad)  # must not raise
+
+
+class TestClassify(unittest.TestCase):
+    """classify() parses ONCE and pre-computes every typed field, matching the
+    individual helpers on the same line (see docs/decisions/0056)."""
+
+    # One representative line per type, exercising every LineInfo field.
+    LINES = (
+        "0,MODE,FREEROAM",
+        "100,L,2,1",
+        "55,S,3,1",
+        "10,SOL,2,4,500",
+        "500,REWARD,CENTER,150",
+        "0,ANIMAL,RAT001",
+        "120,CUE,ON,CHOICE,8000",
+        "123,TRIAL,4,LEFT",   # a line no per-type helper claims
+    )
+
+    def test_fields_match_helpers(self):
+        for line in self.LINES:
+            info = classify(line)
+            self.assertEqual(info.raw, line)
+            self.assertEqual(info.parsed, parse(line))
+            self.assertEqual(info.mode, mode_name(line), line)
+            self.assertEqual(info.lick, lick_edge(line), line)
+            self.assertEqual(info.sensor, sensor_edge(line), line)
+            self.assertEqual(info.sol, sol_pulse(line), line)
+            self.assertEqual(info.reward, reward_info(line), line)
+            self.assertEqual(info.animal, animal_id(line), line)
+            self.assertEqual(info.cue, cue_info(line), line)
+
+    def test_malformed_all_none_but_raw_preserved(self):
+        for bad in ("", "garbage", "hello,world", "\x00,\x00"):
+            info = classify(bad)
+            self.assertEqual(info.raw, bad, bad)
+            self.assertIsNone(info.parsed, bad)
+            for field in ("mode", "lick", "sensor", "sol", "reward",
+                          "animal", "cue"):
+                self.assertIsNone(getattr(info, field), f"{bad}:{field}")
+
+    def test_frozen(self):
+        info = classify("0,MODE,FREEROAM")
+        with self.assertRaises(dataclasses.FrozenInstanceError):
+            info.mode = "FULLTASK"  # type: ignore[misc]
 
 
 if __name__ == "__main__":

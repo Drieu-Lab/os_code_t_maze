@@ -329,21 +329,21 @@ class CameraView:
     def widget(self) -> tk.Widget:
         return self.frame
 
-    def apply(self, line: str) -> None:
+    def apply(self, info: protocol.LineInfo) -> None:
         """Handle one serial line (runs on the Tk main thread).
 
         Captures the latest rig <ms> for the sidecar, learns the animal id, and
-        drives the dismissable session/record mismatch warnings.
+        drives the dismissable session/record mismatch warnings. Reads the
+        pre-parsed protocol.LineInfo (docs/decisions/0056).
         """
-        parsed = protocol.parse(line)
+        parsed = info.parsed
         if parsed is None:
             return
         self._latest_rig_ms = str(parsed.ms)
         typ = parsed.type
 
-        animal = protocol.animal_id(line)
-        if animal is not None:
-            self._animal_id = animal
+        if info.animal is not None:
+            self._animal_id = info.animal
             return
 
         # Session start: first TRIAL (or the sequence dump that precedes it).

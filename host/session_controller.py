@@ -64,7 +64,7 @@ from typing import Callable, Optional
 import protocol
 from rig_config import load_rig_config
 from session_log import SessionManifest, clock_snapshot
-from session_serial import is_sensor_or_central_line
+from session_serial import is_sensor_or_central
 
 # Fallback recordings root if experiment_control doesn't pass one; normally the
 # GUI passes <camera default>/phase3_recordings (see docs/decisions/0049).
@@ -134,21 +134,21 @@ class SessionControlView:
     def widget(self) -> tk.Widget:
         return self.frame
 
-    def apply(self, line: str) -> None:
+    def apply(self, info) -> None:
         """Two jobs per serial line: (1) record the last animal id seen on the
         ``ANIMAL`` handshake as a fallback (the Task tab's field is the primary
         source now; docs/decisions/0053), and (2) while a session is active,
         append the SENSOR + CENTRAL-PORT lines to this session's filtered serial
-        file (docs/decisions/0049). Runs on the Tk thread (the sole writer of
-        that file), so no locking is needed."""
-        animal = protocol.animal_id(line)
-        if animal:
-            self._learned_animal = animal
+        file (docs/decisions/0049). Reads the pre-parsed protocol.LineInfo
+        (docs/decisions/0056). Runs on the Tk thread (the sole writer of that
+        file), so no locking is needed."""
+        if info.animal:
+            self._learned_animal = info.animal
         if (self._active and self._serial_file is not None
-                and is_sensor_or_central_line(
-                    line, center_lick_index=self._center_lick,
+                and is_sensor_or_central(
+                    info, center_lick_index=self._center_lick,
                     center_sol_port=CENTER_SOL_PORT)):
-            self._write_serial(line)
+            self._write_serial(info.raw)
 
     def close(self) -> None:
         self._closed = True

@@ -161,11 +161,11 @@ class TrackerControlView:
     def widget(self) -> tk.Widget:
         return self.frame
 
-    def apply(self, line: str) -> None:
-        """Learn the animal id from the serial stream (for model filenames)."""
-        animal = protocol.animal_id(line)
-        if animal is not None:
-            self._animal = animal
+    def apply(self, info: protocol.LineInfo) -> None:
+        """Learn the animal id from the serial stream (for model filenames).
+        Reads the pre-parsed protocol.LineInfo (docs/decisions/0056)."""
+        if info.animal is not None:
+            self._animal = info.animal
             if self._tracker is not None:
                 self._tracker.set_animal(self._animal)
 

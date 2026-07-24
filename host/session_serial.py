@@ -26,27 +26,37 @@ from typing import Optional
 import protocol
 
 
-def is_sensor_or_central_line(line: str, *, center_lick_index: Optional[int],
-                              center_sol_port: int) -> bool:
-    """True if ``line`` is a body-beam edge or central-port lick/reward/solenoid.
+def is_sensor_or_central(info: protocol.LineInfo, *,
+                         center_lick_index: Optional[int],
+                         center_sol_port: int) -> bool:
+    """True if the pre-parsed line is a body-beam edge or central-port
+    lick/reward/solenoid. Reads the fields the shared parser already computed
+    (docs/decisions/0056) instead of re-parsing.
 
     ``center_lick_index`` is the lick channel of the central well (from the rig
     pin map; ``None`` if unknown -> central licks are simply not captured), and
     ``center_sol_port`` is the solenoid port of the central well.
     """
     # Body-beam sensor edges: the rat's position signal (all beams).
-    if protocol.sensor_edge(line) is not None:
+    if info.sensor is not None:
         return True
     # Central-well lick edges (ignore the left/right choice-well licks).
-    lick = protocol.lick_edge(line)
-    if (lick is not None and center_lick_index is not None
-            and lick[0] == center_lick_index):
+    if (info.lick is not None and center_lick_index is not None
+            and info.lick[0] == center_lick_index):
         return True
     # Reward delivery - all reward is at the central port (docs/decisions/0007).
-    if protocol.reward_info(line) is not None:
+    if info.reward is not None:
         return True
     # The central well's solenoid acks (drop other ports' valve-test acks).
-    sol = protocol.sol_pulse(line)
-    if sol is not None and sol[0] == center_sol_port:
+    if info.sol is not None and info.sol[0] == center_sol_port:
         return True
     return False
+
+
+def is_sensor_or_central_line(line: str, *, center_lick_index: Optional[int],
+                              center_sol_port: int) -> bool:
+    """Raw-string convenience wrapper over is_sensor_or_central() for callers
+    that hold a line rather than a pre-parsed protocol.LineInfo."""
+    return is_sensor_or_central(
+        protocol.classify(line), center_lick_index=center_lick_index,
+        center_sol_port=center_sol_port)

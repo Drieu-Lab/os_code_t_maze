@@ -37,7 +37,6 @@ import tkinter as tk
 from tkinter import ttk
 from typing import Optional
 
-import protocol
 from preview import safe_after
 from tooltips import tip
 
@@ -115,16 +114,20 @@ class BehaviorView:
     def widget(self) -> tk.Widget:
         return self.frame
 
-    def apply(self, line: str) -> None:
+    def apply(self, info) -> None:
+        """No per-line work: this panel is driven by the shared pipeline poll,
+        and its MODE-switch reset now runs via on_mode_changed (the shared reset
+        seam; docs/decisions/0056)."""
+
+    def on_mode_changed(self, mode: str) -> None:
         """Reset the session counters on a firmware MODE switch (a new session),
         matching the Reward/Lick tallies on this tab."""
         if self._tracker is None:
             return
-        if protocol.mode_name(line) is not None:
-            self._stats.reset()
-            self._stats.mark_gap()
-            self._timer.reset()
-            self._refresh()
+        self._stats.reset()
+        self._stats.mark_gap()
+        self._timer.reset()
+        self._refresh()
 
     def close(self) -> None:
         self._closed = True

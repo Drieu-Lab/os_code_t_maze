@@ -8,8 +8,11 @@ momentarily on each SOL pulse (the ack tmaze_test emits for an R<port><sol>
 command) and on each task REWARD line (cue-guided-task emits REWARD, not SOL).
 
 Design (functional core + thin Tk shell):
-  - parse_line() and update() are pure: no Tk, no I/O. They turn a serial line
-    into an event and fold it into an immutable RigState.
+  - event_from()/parse_line() and update() are pure: no Tk, no I/O. They turn a
+    (pre-)parsed serial line into an event and fold it into an immutable
+    RigState. The view consumes the shared protocol.LineInfo (parsed once at the
+    GUI fan-out; docs/decisions/0056) via event_from(); parse_line() is the
+    same decode from a raw string, kept for headless/standalone callers.
   - RigView is the only side-effecting part: it builds the canvas once, recolors
     sensor/lick markers when the state changes, and flashes solenoid markers
     (which are momentary, so they live in the view, not in RigState).
@@ -81,27 +84,34 @@ REWARD_SOL_INDEX = _RIG_CFG.reward_sol_index if _RIG_CFG.ok and _RIG_CFG.reward_
 _REWARD_PORT = {"LEFT": 0, "RIGHT": 1, "CENTER": 2, "START": 2}
 
 
-def parse_line(line: str) -> Optional[Event]:
-    """Parse a firmware line into an Event (via the shared protocol parser).
+def event_from(info: protocol.LineInfo) -> Optional[Event]:
+    """Turn a pre-parsed protocol.LineInfo into an Event, or None. Pure.
 
     Handles "<ms>,S|L,<i>,<state>" (sensor/lick edge), "<ms>,SOL,<port>,<sol>"
     (solenoid pulse), and "<ms>,REWARD,<LEFT|RIGHT|CENTER>" (task reward, mapped
-    to the reward-column marker at that port). Returns None otherwise. Pure.
+    to the reward-column marker at that port). Reads the fields the shared parser
+    already computed (docs/decisions/0056) instead of re-parsing.
     """
-    edge = protocol.sensor_edge(line)
-    if edge is not None:
-        return SensorEdge(*edge)
-    edge = protocol.lick_edge(line)
-    if edge is not None:
-        return LickEdge(*edge)
-    pulse = protocol.sol_pulse(line)
-    if pulse is not None:
-        return SolenoidPulse(*pulse)
-    parsed = protocol.parse(line)
+    if info.sensor is not None:
+        return SensorEdge(*info.sensor)
+    if info.lick is not None:
+        return LickEdge(*info.lick)
+    if info.sol is not None:
+        return SolenoidPulse(*info.sol)
+    parsed = info.parsed
     if parsed is not None and parsed.type == "REWARD" and parsed.fields:
         port = _REWARD_PORT.get(parsed.fields[0].strip().upper())
         return SolenoidPulse(port, REWARD_SOL_INDEX) if port is not None else None
     return None
+
+
+def parse_line(line: str) -> Optional[Event]:
+    """Parse a raw firmware line into an Event (via the shared protocol parser).
+
+    Thin wrapper over event_from() for headless/standalone callers that hold a
+    raw string rather than a pre-parsed LineInfo. Pure.
+    """
+    return event_from(protocol.classify(line))
 
 
 # ============================= Pure: state ==============================
@@ -317,8 +327,8 @@ class RigView:
     def widget(self) -> tk.Widget:
         return self.canvas
 
-    def apply(self, line: str) -> None:
-        event = parse_line(line)
+    def apply(self, info: protocol.LineInfo) -> None:
+        event = event_from(info)
         new_state = update(self.state, event)
         if new_state != self.state:
             self.state = new_state

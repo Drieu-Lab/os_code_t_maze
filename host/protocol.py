@@ -14,10 +14,17 @@ Two layers:
         The generic "<ms>,<TYPE>,fields..." split, validating the uniform
         prefix. Use this when dispatching on several types.
   - Per-type helpers (lick_edge, sensor_edge, sol_pulse, mode_name, animal_id,
-        reward_info)
+        reward_info, cue_info)
         Each returns the decoded payload for exactly one line type, or None if
         the line is not (a well-formed instance of) that type. Use these when a
         call site cares about one or two specific types.
+
+A call site that fans one line out to many consumers can instead parse ONCE via
+classify(line) -> LineInfo, which runs parse() a single time and pre-computes
+every typed field (plus the raw text), so downstream modules read fields instead
+of re-parsing (see docs/decisions/0056, docs/future-work.md FW-0021). Each
+per-type helper is a thin wrapper over a "*_from(ParsedLine)" core so classify
+can reuse the same decoders without re-splitting the line.
 
 All functions are pure and total: they never raise on malformed input, they
 just return None. Pure stdlib (no Tk/numpy), so headless modules such as
@@ -61,9 +68,8 @@ def parse(line: str) -> Optional[ParsedLine]:
 
 # ------------------------------ edge lines (S / L) ------------------------------
 
-def _edge(line: str, wanted_type: str) -> Optional[Tuple[int, bool]]:
-    """Decode "<ms>,<S|L>,<i>,<state>" -> (index, active) with state in {0, 1}."""
-    p = parse(line)
+def _edge_from(p: Optional[ParsedLine], wanted_type: str) -> Optional[Tuple[int, bool]]:
+    """Decode a pre-parsed "<ms>,<S|L>,<i>,<state>" -> (index, active), state in {0,1}."""
     if p is None or p.type != wanted_type or len(p.fields) != 2:
         return None
     idx_s, state_s = p.fields[0].strip(), p.fields[1].strip()
@@ -74,23 +80,18 @@ def _edge(line: str, wanted_type: str) -> Optional[Tuple[int, bool]]:
 
 def lick_edge(line: str) -> Optional[Tuple[int, bool]]:
     """(index, active) for a lick edge "<ms>,L,<i>,<state>", else None."""
-    return _edge(line, "L")
+    return _edge_from(parse(line), "L")
 
 
 def sensor_edge(line: str) -> Optional[Tuple[int, bool]]:
     """(index, active) for a body-beam edge "<ms>,S,<i>,<state>", else None."""
-    return _edge(line, "S")
+    return _edge_from(parse(line), "S")
 
 
 # --------------------------------- SOL lines ---------------------------------
 
-def sol_pulse(line: str) -> Optional[Tuple[int, int]]:
-    """(port, sol) for a solenoid ack "<ms>,SOL,<port>,<sol>[,<dur_ms>]".
-
-    The trailing <dur_ms> (protocol v4, cue-guided-task only) is tolerated and
-    ignored, per the append-only field rule in PROTOCOL.md.
-    """
-    p = parse(line)
+def sol_pulse_from(p: Optional[ParsedLine]) -> Optional[Tuple[int, int]]:
+    """(port, sol) for a pre-parsed solenoid ack, else None (see sol_pulse)."""
     if p is None or p.type != "SOL" or len(p.fields) < 2:
         return None
     port_s, sol_s = p.fields[0].strip(), p.fields[1].strip()
@@ -99,24 +100,41 @@ def sol_pulse(line: str) -> Optional[Tuple[int, int]]:
     return int(port_s), int(sol_s)
 
 
+def sol_pulse(line: str) -> Optional[Tuple[int, int]]:
+    """(port, sol) for a solenoid ack "<ms>,SOL,<port>,<sol>[,<dur_ms>]".
+
+    The trailing <dur_ms> (protocol v4, cue-guided-task only) is tolerated and
+    ignored, per the append-only field rule in PROTOCOL.md.
+    """
+    return sol_pulse_from(parse(line))
+
+
 # ------------------------------ handshake lines ------------------------------
 
-def mode_name(line: str) -> Optional[str]:
-    """The mode token of a "<ms>,MODE,<name>" line (stripped), else None."""
-    p = parse(line)
+def mode_name_from(p: Optional[ParsedLine]) -> Optional[str]:
+    """The mode token of a pre-parsed "<ms>,MODE,<name>" line, else None."""
     if p is None or p.type != "MODE" or not p.fields:
         return None
     name = p.fields[0].strip()
     return name or None
 
 
-def animal_id(line: str) -> Optional[str]:
-    """The id of a "<ms>,ANIMAL,<id>" handshake line (stripped), else None."""
-    p = parse(line)
+def mode_name(line: str) -> Optional[str]:
+    """The mode token of a "<ms>,MODE,<name>" line (stripped), else None."""
+    return mode_name_from(parse(line))
+
+
+def animal_id_from(p: Optional[ParsedLine]) -> Optional[str]:
+    """The id of a pre-parsed "<ms>,ANIMAL,<id>" handshake line, else None."""
     if p is None or p.type != "ANIMAL" or not p.fields:
         return None
     aid = p.fields[0].strip()
     return aid or None
+
+
+def animal_id(line: str) -> Optional[str]:
+    """The id of a "<ms>,ANIMAL,<id>" handshake line (stripped), else None."""
+    return animal_id_from(parse(line))
 
 
 def sanitize_animal_id(name: str) -> str:
@@ -131,15 +149,9 @@ def sanitize_animal_id(name: str) -> str:
 
 # -------------------------------- REWARD lines --------------------------------
 
-def reward_info(line: str) -> Optional[Tuple[bool, Optional[int]]]:
-    """(manual, dur_ms) for a "<ms>,REWARD,..." line, else None.
-
-    manual is True for "REWARD,<port>,MANUAL,<dur_ms>" (experimenter fire) and
-    False for the automatic "REWARD,CENTER,<dur_ms>". dur_ms is None when the
-    trailing duration field is absent (pre-v4 firmware / old logs); the caller
-    picks the fallback pulse width. see docs/decisions/0019
-    """
-    p = parse(line)
+def reward_info_from(p: Optional[ParsedLine]) -> Optional[Tuple[bool, Optional[int]]]:
+    """(manual, dur_ms) for a pre-parsed "<ms>,REWARD,..." line, else None
+    (see reward_info)."""
     if p is None or p.type != "REWARD" or not p.fields:
         return None
     manual = any(f.strip() == "MANUAL" for f in p.fields)
@@ -148,21 +160,22 @@ def reward_info(line: str) -> Optional[Tuple[bool, Optional[int]]]:
     return manual, dur
 
 
+def reward_info(line: str) -> Optional[Tuple[bool, Optional[int]]]:
+    """(manual, dur_ms) for a "<ms>,REWARD,..." line, else None.
+
+    manual is True for "REWARD,<port>,MANUAL,<dur_ms>" (experimenter fire) and
+    False for the automatic "REWARD,CENTER,<dur_ms>". dur_ms is None when the
+    trailing duration field is absent (pre-v4 firmware / old logs); the caller
+    picks the fallback pulse width. see docs/decisions/0019
+    """
+    return reward_info_from(parse(line))
+
+
 # --------------------------------- CUE lines ---------------------------------
 
-def cue_info(line: str) -> Optional[Tuple[str, Optional[str], Optional[int]]]:
-    """(state, kind, freq_hz) for a "<ms>,CUE,..." line (protocol v5), else None.
-
-    The firmware emits this for the host-driven positional cue, reflecting the
-    ACTUAL acoustic state (see docs/decisions/0044):
-
-      - "<ms>,CUE,ON,<CHOICE|RETURN>,<freq_hz>" -> ("ON", "CHOICE"|"RETURN", freq)
-      - "<ms>,CUE,OFF"                          -> ("OFF", None, None)
-
-    The TONE_ON/TONE_OFF TTLs (not serial) carry the hardware-synchronous onset
-    mark; this line is the behavioral-record companion (which cue, what tone).
-    """
-    p = parse(line)
+def cue_info_from(p: Optional[ParsedLine]) -> Optional[Tuple[str, Optional[str], Optional[int]]]:
+    """(state, kind, freq_hz) for a pre-parsed "<ms>,CUE,..." line, else None
+    (see cue_info)."""
     if p is None or p.type != "CUE" or not p.fields:
         return None
     state = p.fields[0].strip().upper()
@@ -177,3 +190,63 @@ def cue_info(line: str) -> Optional[Tuple[str, Optional[str], Optional[int]]]:
             return None
         return ("ON", kind, int(freq_s))
     return None
+
+
+def cue_info(line: str) -> Optional[Tuple[str, Optional[str], Optional[int]]]:
+    """(state, kind, freq_hz) for a "<ms>,CUE,..." line (protocol v5), else None.
+
+    The firmware emits this for the host-driven positional cue, reflecting the
+    ACTUAL acoustic state (see docs/decisions/0044):
+
+      - "<ms>,CUE,ON,<CHOICE|RETURN>,<freq_hz>" -> ("ON", "CHOICE"|"RETURN", freq)
+      - "<ms>,CUE,OFF"                          -> ("OFF", None, None)
+
+    The TONE_ON/TONE_OFF TTLs (not serial) carry the hardware-synchronous onset
+    mark; this line is the behavioral-record companion (which cue, what tone).
+    """
+    return cue_info_from(parse(line))
+
+
+# ----------------------------- single-parse fan-out -----------------------------
+
+@dataclass(frozen=True)
+class LineInfo:
+    """One serial line parsed ONCE into every field a consumer might want.
+
+    Built by classify(); handed to modules at the GUI fan-out point so each
+    reads pre-decoded fields instead of re-running the parsers on the raw string
+    (see docs/decisions/0056, docs/future-work.md FW-0021). ``raw`` is the
+    original line (kept so modules that re-parse on another thread - e.g. the
+    Rules/Phase 3 actuation threads - can still pass it along), ``parsed`` is the
+    generic split (or None if malformed), and the remaining fields mirror the
+    per-type helpers (each None when the line is not that type).
+    """
+    raw: str
+    parsed: Optional[ParsedLine]
+    mode: Optional[str]
+    lick: Optional[Tuple[int, bool]]
+    sensor: Optional[Tuple[int, bool]]
+    sol: Optional[Tuple[int, int]]
+    reward: Optional[Tuple[bool, Optional[int]]]
+    animal: Optional[str]
+    cue: Optional[Tuple[str, Optional[str], Optional[int]]]
+
+
+def classify(line: str) -> LineInfo:
+    """Parse ``line`` ONCE and pre-compute every typed field (see LineInfo).
+
+    Never raises: a malformed line yields a LineInfo whose ``parsed`` and all
+    typed fields are None but whose ``raw`` is preserved.
+    """
+    p = parse(line)
+    return LineInfo(
+        raw=line,
+        parsed=p,
+        mode=mode_name_from(p),
+        lick=_edge_from(p, "L"),
+        sensor=_edge_from(p, "S"),
+        sol=sol_pulse_from(p),
+        reward=reward_info_from(p),
+        animal=animal_id_from(p),
+        cue=cue_info_from(p),
+    )
