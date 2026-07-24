@@ -62,7 +62,7 @@ criteria).
 | [FW-0002](#fw-0002-head-vs-body-orientation-heading-from-the-tracker) | Head-vs-body orientation (heading) | Markerless tracker | Deferred |
 | [FW-0003](#fw-0003-multi-animal-association-and-irlow-saturation-tracking) | Multi-animal association + IR/low-saturation | Markerless tracker | Proposed |
 | [FW-0005](#fw-0005-in-gui-rat-id-entry-firmware-animal-command--logger-file-roll) | In-GUI rat id entry (firmware `ANIMAL` command + logger file-roll) | Firmware + protocol + logger + GUI | Deferred |
-| [FW-0006](#fw-0006-shared-base-class-for-still-frame-editors) | Shared base class for still-frame editors | Tracker tab UI | Deferred |
+| [FW-0006](#fw-0006-shared-base-class-for-still-frame-editors) | Shared base class for still-frame editors | Tracker tab UI | Done |
 | [FW-0008](#fw-0008-phase-3-transition---firmware-correction-trials--spatially-gated-cue) | Phase 3 transition - correction trials + spatially-gated cue | Firmware + protocol | Deferred |
 | [FW-0009](#fw-0009-triggerdispenser-decomposition-of-the-well-reward-rule) | Trigger/Dispenser decomposition of the well-reward rule | Rules engine | Deferred |
 | [FW-0010](#fw-0010-deeplabcut-live-pose-estimation-for-body-part-tracking) | DeepLabCut-Live pose estimation for body-part tracking | Markerless tracker | Proposed |
@@ -288,13 +288,20 @@ file-naming behavior.
 
 ### FW-0006: Shared base class for still-frame editors
 
-- **Status:** Deferred
+- **Status:** Done - implemented under
+  [ADR-0053](decisions/0053-gui-tab-streamlining.md) phase 3 (the Setup-tab
+  merge). Extracted `host/still_frame_editor.py` (`_StillFrameEditorBase`: the
+  scaled canvas, photo ref, grabbed `Toplevel`, and modal `_close`); the three
+  editors (`tracker_view._RoiEditor` / `_LandmarkEditor`,
+  `maze_state_view._ZoneEditor`) now subclass it and keep only their own
+  placement/commit semantics. No behavior change.
 - **Date added:** 2026-07-06
 - **Author / Agent:** Agent (Cursor) on behalf of Celine
 - **Area / modules:** `host/tracker_view.py` (`_RoiEditor`, `_LandmarkEditor`),
-  `host/maze_state_view.py` (`_ZoneEditor`)
+  `host/maze_state_view.py` (`_ZoneEditor`), `host/still_frame_editor.py` (new)
 - **Related ADRs:** [ADR-0018](decisions/0018-landmark-annotations.md),
-  [ADR-0025](decisions/0025-maze-state-module.md)
+  [ADR-0025](decisions/0025-maze-state-module.md),
+  [ADR-0053](decisions/0053-gui-tab-streamlining.md)
 
 **Motivation / context.** During the host dedup refactor, `_RoiEditor` and
 `_LandmarkEditor` in `tracker_view.py` share still-frame setup (scale to

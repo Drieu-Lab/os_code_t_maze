@@ -30,8 +30,9 @@ from dataclasses import replace
 from tkinter import filedialog, messagebox, ttk
 from typing import Optional
 
-from gui_deps import Image, ImageTk, cv2, missing_dependency, np
+from gui_deps import cv2, missing_dependency, np
 from preview import render_bgr_to_label, safe_after
+from still_frame_editor import _StillFrameEditorBase
 from tooltips import tip
 
 import protocol
@@ -66,7 +67,7 @@ TRACK_LOG_SUBDIR = "track_logs"   # subfolder of the recordings dir, shared with
 POLL_INTERVAL_MS = 150       # readout / estimator / state-log refresh (~ tracker UI rate)
 PREVIEW_INTERVAL_MS = 66     # ~15 fps live preview (only while the tab is visible)
 PREVIEW_MAX_W = 640          # live preview width
-EDITOR_MAX_W = 960           # still-frame zone editor display width
+# EDITOR_MAX_W (still-frame editor display width) is shared via still_frame_editor.
 
 # Per-zone draw colours (hex for Tk canvas; converted to BGR for OpenCV overlay).
 ZONE_HEX = {
@@ -467,7 +468,7 @@ class MazeStateControlView:
             pass
 
 
-class _ZoneEditor:
+class _ZoneEditor(_StillFrameEditorBase):
     """Modal still-frame, multi-region polygon editor for the maze zone map.
 
     Right list = editable targets (the six zones, the well region, the two
@@ -485,15 +486,12 @@ class _ZoneEditor:
 
     def __init__(self, parent, frame_bgr, existing: ZoneMap, on_commit,
                  landmarks=None):
+        super().__init__(
+            parent, frame_bgr,
+            "Define zones - select a target, L-click to draw; "
+            "r/right-click finish region, z undo, Enter save, Esc cancel")
         self._on_commit = on_commit
         self._landmarks = landmarks or []
-        h, w = frame_bgr.shape[:2]
-        self._scale = min(1.0, EDITOR_MAX_W / float(w)) if w else 1.0
-        dw, dh = max(1, int(w * self._scale)), max(1, int(h * self._scale))
-        disp = cv2.resize(frame_bgr, (dw, dh), interpolation=cv2.INTER_AREA) \
-            if self._scale < 1.0 else frame_bgr.copy()
-        rgb = cv2.cvtColor(disp, cv2.COLOR_BGR2RGB)
-        self._dw, self._dh = dw, dh
 
         self._targets = _editor_targets()
         # Committed geometry, keyed by target key: polygon -> list of norm verts;
@@ -508,11 +506,6 @@ class _ZoneEditor:
         if existing.stem_tip is not None:
             self._geoms["__stem_tip__"] = existing.stem_tip
         self._current_pts = []   # in-progress polygon, display px
-
-        self._top = tk.Toplevel(parent)
-        self._top.title("Define zones - select a target, L-click to draw; "
-                        "r/right-click finish region, z undo, Enter save, Esc cancel")
-        self._top.transient(parent.winfo_toplevel())
 
         body = ttk.Frame(self._top)
         body.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
@@ -535,10 +528,8 @@ class _ZoneEditor:
                             "boundaries to them.")).pack(
                 side=tk.TOP, anchor="w", pady=(6, 0))
 
-        self._photo = ImageTk.PhotoImage(Image.fromarray(rgb))
-        self._canvas = tk.Canvas(body, width=dw, height=dh, highlightthickness=0)
+        self._canvas = self._make_canvas(body)
         self._canvas.pack(side=tk.LEFT)
-        self._canvas.create_image(0, 0, anchor="nw", image=self._photo)
 
         bar = ttk.Frame(self._top)
         bar.pack(fill=tk.X)
@@ -704,13 +695,3 @@ class _ZoneEditor:
 
     def _cancel(self) -> None:
         self._close()
-
-    def _close(self) -> None:
-        try:
-            self._top.grab_release()
-        except tk.TclError:
-            pass
-        try:
-            self._top.destroy()
-        except tk.TclError:
-            pass

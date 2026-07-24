@@ -21,7 +21,10 @@ monitor, ...) drop in by adding an entry to TABS; each module only needs:
     close() -> None           (optional) to release resources on app exit
 
 A TABS entry is (title, [factory, ...]); modules listed together share one tab,
-packed left-to-right. The first tab places the live maze schematic
+packed left-to-right. An optional third element - a list of sub-tab labels
+parallel to the factories - nests those modules as sub-tabs of an inner notebook
+instead (the "Setup" tab groups Tracking + Maze state this way; ADR-0053). The
+first tab places the live maze schematic
 (rig_view.RigView) beside the camera preview/recording (camera_view.CameraView).
 The Camera module uses the optional close() hook to stop its threads and finalize
 any in-progress recording when the window closes.
@@ -405,10 +408,27 @@ def main() -> int:
     # together share one tab, packed left-to-right. The first tab puts the live
     # maze schematic (RigView) beside the camera preview/recording (CameraView).
     tabs = [("Rig view", [RigView, make_camera])]
+    # Setup tab (ADR-0053 phase 3): the calibration/definition surface done
+    # before a run. Tracking (tracker tuning + ROI/landmark editors) and Maze
+    # state (zone editor + discrete-state readout) are nested as sub-tabs of one
+    # top-level tab (an inner ttk.Notebook), grouping the two still-frame-editing
+    # workflows together. Only the sub-views whose deps are present are added.
+    setup_subtabs = []
     if tracker is not None and TrackerControlView is not None:
-        tabs.append(("Tracking", [
-            lambda parent: TrackerControlView(
-                parent, tracker=tracker, camera=camera_ref.get("cam"))]))
+        setup_subtabs.append(("Tracking", lambda parent: TrackerControlView(
+            parent, tracker=tracker, camera=camera_ref.get("cam"))))
+    # Maze state: reduces the tracker centroid to a discrete per-tick maze state
+    # (zone + direction + loops) and hosts the zone editor. Read-only consumer of
+    # the shared tracker; needs the camera for still-frame editing + preview.
+    # See docs/decisions/0025.
+    if tracker is not None and MazeStateControlView is not None:
+        setup_subtabs.append(("Maze state", lambda parent: MazeStateControlView(
+            parent, tracker=tracker, camera=camera_ref.get("cam"),
+            pipeline=pipeline)))
+    if setup_subtabs:
+        labels = [label for label, _ in setup_subtabs]
+        factories = [factory for _, factory in setup_subtabs]
+        tabs.append(("Setup", factories, labels))
     # Rules tab: the position-based rules engine (off by default). It is injected
     # with the shared tracker, the camera (for frames + still-frame calibration),
     # and a send callback so it can actuate reward via the broker. The send
@@ -418,15 +438,6 @@ def main() -> int:
             lambda parent: RulesControlView(
                 parent, tracker=tracker, camera=camera_ref.get("cam"),
                 pipeline=pipeline, send=lambda cmd: client.send(cmd))]))
-    # Maze state tab: reduces the tracker centroid to a discrete per-tick maze
-    # state (zone + direction + loops) and hosts the zone editor. Read-only
-    # consumer of the shared tracker; needs the camera for still-frame editing +
-    # preview. See docs/decisions/0025.
-    if tracker is not None and MazeStateControlView is not None:
-        tabs.append(("Maze state", [
-            lambda parent: MazeStateControlView(
-                parent, tracker=tracker, camera=camera_ref.get("cam"),
-                pipeline=pipeline)]))
     # Phase 3 tab: the initial HOST-OWNED cued task (firmware = actuator). Runs in
     # Free Roam (firmware FSM off): the host owns the trial sequence, cue identity,
     # scoring, and reward, driving CUE_ON,<kind>,<hz> / R<port> via the broker.
@@ -450,9 +461,25 @@ def main() -> int:
     rig_controls_parent = root  # fallback; reassigned to the Rig view bottom strip
     rig_controls_left = root     # left column: the existing rig/firmware controls
     rig_controls_right = None    # right column: the live behavior readout (or None)
-    for title, factories in tabs:
+    for entry in tabs:
+        title, factories = entry[0], entry[1]
+        # A third element (parallel sub-tab labels) marks a NESTED group: the
+        # factories become sub-tabs of an inner notebook instead of being packed
+        # left-to-right (ADR-0053 phase 3, the Setup tab).
+        subtitles = entry[2] if len(entry) > 2 else None
         tab = ttk.Frame(notebook)
         notebook.add(tab, text=title)
+        if subtitles is not None:
+            inner = ttk.Notebook(tab)
+            inner.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+            for label, factory in zip(subtitles, factories):
+                sub = ttk.Frame(inner)
+                inner.add(sub, text=label)
+                module = factory(sub)
+                module.widget().pack(side=tk.LEFT, fill=tk.BOTH, expand=True,
+                                     padx=2, pady=2)
+                modules.append(module)
+            continue
         if title == "Rig view":
             toolbar = ttk.Frame(tab)
             toolbar.pack(side=tk.TOP, fill=tk.X, padx=2, pady=(2, 0))

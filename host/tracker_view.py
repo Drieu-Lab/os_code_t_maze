@@ -40,6 +40,7 @@ from typing import Optional
 import protocol
 from gui_deps import Image, ImageTk, cv2, missing_dependency, np
 from preview import render_bgr_to_label, safe_after
+from still_frame_editor import _StillFrameEditorBase
 from tooltips import tip
 from tracker import TRACK_COLUMNS, track_row
 
@@ -86,7 +87,7 @@ POLL_INTERVAL_MS = 150       # readout / mask / standalone-log refresh
 PREVIEW_INTERVAL_MS = 66     # ~15 fps live preview (only while the tab is visible)
 PREVIEW_MAX_W = 640          # live preview width on this tab (right column)
 MASK_VIEW_W = 420            # colorized mask width, stacked under the preview
-EDITOR_MAX_W = 960           # still-frame ROI editor display width
+# EDITOR_MAX_W (still-frame editor display width) is shared via still_frame_editor.
 
 # Tuning sliders: (label, param-name, lo, hi, is_float, scale-to-param).
 _SLIDERS = (
@@ -859,7 +860,7 @@ class TrackerControlView:
             pass
 
 
-class _RoiEditor:
+class _RoiEditor(_StillFrameEditorBase):
     """Modal still-frame polygon editor (precise clicking; rat won't interfere).
 
     Left-click adds a vertex, right-click / Enter / "Save" commits (>=3 verts),
@@ -868,23 +869,14 @@ class _RoiEditor:
     """
 
     def __init__(self, parent, frame_bgr, on_commit):
+        super().__init__(
+            parent, frame_bgr,
+            "Define region - L-click add, R-click/Enter commit, z undo, Esc cancel")
         self._on_commit = on_commit
-        h, w = frame_bgr.shape[:2]
-        self._scale = min(1.0, EDITOR_MAX_W / float(w)) if w else 1.0
-        dw, dh = max(1, int(w * self._scale)), max(1, int(h * self._scale))
-        disp = cv2.resize(frame_bgr, (dw, dh), interpolation=cv2.INTER_AREA) \
-            if self._scale < 1.0 else frame_bgr.copy()
-        rgb = cv2.cvtColor(disp, cv2.COLOR_BGR2RGB)
-        self._dw, self._dh = dw, dh
         self._pts = []
 
-        self._top = tk.Toplevel(parent)
-        self._top.title("Define region - L-click add, R-click/Enter commit, z undo, Esc cancel")
-        self._top.transient(parent.winfo_toplevel())
-        self._photo = ImageTk.PhotoImage(Image.fromarray(rgb))
-        self._canvas = tk.Canvas(self._top, width=dw, height=dh, highlightthickness=0)
+        self._canvas = self._make_canvas(self._top)
         self._canvas.pack()
-        self._canvas.create_image(0, 0, anchor="nw", image=self._photo)
 
         bar = ttk.Frame(self._top)
         bar.pack(fill=tk.X)
@@ -933,18 +925,8 @@ class _RoiEditor:
     def _cancel(self) -> None:
         self._close()
 
-    def _close(self) -> None:
-        try:
-            self._top.grab_release()
-        except tk.TclError:
-            pass
-        try:
-            self._top.destroy()
-        except tk.TclError:
-            pass
 
-
-class _LandmarkEditor:
+class _LandmarkEditor(_StillFrameEditorBase):
     """Modal still-frame editor for single-point landmark annotations.
 
     Shows the captured frame with a side list of landmarks: the fixed named set
@@ -956,14 +938,11 @@ class _LandmarkEditor:
     """
 
     def __init__(self, parent, frame_bgr, fixed_spec, existing, on_commit):
+        super().__init__(
+            parent, frame_bgr,
+            "Define landmarks - select one, click to place; "
+            "Enter/Save commit, Esc cancel")
         self._on_commit = on_commit
-        h, w = frame_bgr.shape[:2]
-        self._scale = min(1.0, EDITOR_MAX_W / float(w)) if w else 1.0
-        dw, dh = max(1, int(w * self._scale)), max(1, int(h * self._scale))
-        disp = cv2.resize(frame_bgr, (dw, dh), interpolation=cv2.INTER_AREA) \
-            if self._scale < 1.0 else frame_bgr.copy()
-        rgb = cv2.cvtColor(disp, cv2.COLOR_BGR2RGB)
-        self._dw, self._dh = dw, dh
 
         # Working list of entries: {kind, index, label, x, y(or None)}. Seed the
         # fixed set, pre-filling coords from any matching existing landmark, then
@@ -994,11 +973,6 @@ class _LandmarkEditor:
                 "x": lm.get("x"), "y": lm.get("y"),
             })
 
-        self._top = tk.Toplevel(parent)
-        self._top.title("Define landmarks - select one, click to place; "
-                        "Enter/Save commit, Esc cancel")
-        self._top.transient(parent.winfo_toplevel())
-
         body = ttk.Frame(self._top)
         body.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
@@ -1019,10 +993,8 @@ class _LandmarkEditor:
                    command=self._clear_all).pack(side=tk.TOP, fill=tk.X)
 
         # Left: the image canvas.
-        self._photo = ImageTk.PhotoImage(Image.fromarray(rgb))
-        self._canvas = tk.Canvas(body, width=dw, height=dh, highlightthickness=0)
+        self._canvas = self._make_canvas(body)
         self._canvas.pack(side=tk.LEFT)
-        self._canvas.create_image(0, 0, anchor="nw", image=self._photo)
 
         bar = ttk.Frame(self._top)
         bar.pack(fill=tk.X)
@@ -1142,13 +1114,3 @@ class _LandmarkEditor:
 
     def _cancel(self) -> None:
         self._close()
-
-    def _close(self) -> None:
-        try:
-            self._top.grab_release()
-        except tk.TclError:
-            pass
-        try:
-            self._top.destroy()
-        except tk.TclError:
-            pass
