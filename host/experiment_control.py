@@ -97,6 +97,14 @@ try:
     from task_view import TaskControlView
 except Exception as e:  # pragma: no cover
     TaskControlView = None  # type: ignore
+# Shared reward seam: one RewardDispatcher owns the global rate backstop, the
+# pulse/volume record, and the R<port> send for BOTH task controllers (Rules +
+# Phase 3), so a reward is handled identically whichever task drove it. Stdlib
+# only; guarded like the tabs above. See docs/decisions/0054 (FW-0019).
+try:
+    from reward_dispatcher import RewardDispatcher
+except Exception:  # pragma: no cover
+    RewardDispatcher = None  # type: ignore
     _TRACKER_ERR = _TRACKER_ERR or f"{type(e).__name__}: {e}"
 # Session tab: a thin orchestrator that starts/stops the recorders together and
 # writes a shared session manifest (docs/decisions/0048). Needs no tracker (just
@@ -368,9 +376,14 @@ def main() -> int:
         return cam
 
     def make_task(parent):
+        # One shared reward dispatcher for both controllers (docs/decisions/0054).
+        # The send closure resolves `client` at fire time (created below).
+        dispatcher = (RewardDispatcher(lambda cmd: client.send(cmd))
+                      if RewardDispatcher is not None else None)
         tv = TaskControlView(
             parent, tracker=tracker, camera=camera_ref.get("cam"),
             pipeline=pipeline, send=lambda cmd: client.send(cmd),
+            dispatcher=dispatcher,
             phase3_cls=Phase3ControlView, rules_cls=RulesControlView)
         task_ref["task"] = tv
         # Keep the cross-tab holder pointing at the live Phase 3 controller (the

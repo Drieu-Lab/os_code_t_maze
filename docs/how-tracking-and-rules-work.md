@@ -452,8 +452,10 @@ Nothing fires unless the track is a confident lock (`min_confidence`). If the
 tracker briefly loses the rat at the well, the visit is **not** dropped and the
 prime is **not** repeated - the rule only treats the rat as having left the well
 on a confident "outside" reading, so a momentary track glitch never
-double-rewards. And the engine-wide `global_min_interval_ms` backstop still caps
-the absolute reward rate no matter what any phase asks for.
+double-rewards. And the shared reward dispatcher's `global_min_interval_ms`
+backstop still caps the absolute reward rate no matter what any phase (or the
+Phase 3 task) asks for - it is now one seam shared by both task controllers
+(see `docs/decisions/0054`).
 
 ---
 
@@ -594,7 +596,7 @@ live in `host/rules.json`, which you edit directly. Its knobs:
 | `min_confidence` | 0.5 | Only act while the track is `TRACKING` at or above this confidence. |
 | `topup_cooldown_ms` | 500 | Minimum time between fires *within* one well visit (prime→top-up, top-up→top-up). Keep short. |
 | `rearm_refractory_ms` | 5000 | Anti-camp timer: minimum time before a rule may *prime* again on a fresh visit. |
-| `global_min_interval_ms` | 500 | Runaway backstop: minimum time between *any* two fires across all rules. |
+| `global_min_interval_ms` | 500 | Runaway backstop: minimum time between *any* two fires, across all rules and both task controllers (shared reward dispatcher; `docs/decisions/0054`). |
 
 **Per-rule fields:**
 

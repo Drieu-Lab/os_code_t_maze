@@ -136,7 +136,7 @@ class RulesControlView(VisionActuator):
     thread-safe rule-event log."""
 
     def __init__(self, parent: tk.Misc, tracker=None, camera=None, pipeline=None,
-                 send=None):
+                 send=None, dispatcher=None):
         self._parent = parent
         self._tracker = tracker
         self._camera = camera
@@ -146,6 +146,11 @@ class RulesControlView(VisionActuator):
         self._pipeline = pipeline
         self._use_worker_actuation = pipeline is not None
         self._send = send                # callable(str) -> None (RigClient.send)
+        # Shared reward seam (reward_dispatcher.RewardDispatcher): owns the global
+        # rate backstop, the pulse/volume record, and the R<port> send, shared with
+        # the Phase 3 controller so a reward is handled identically whichever task
+        # drove it (docs/decisions/0054, FW-0019). None -> legacy direct send.
+        self._dispatcher = dispatcher
         self.frame = ttk.Frame(parent)
         self._photo_preview = None
         self._mode = ""                  # last firmware MODE token
@@ -337,6 +342,10 @@ class RulesControlView(VisionActuator):
                "enabled": False, "defaults": defaults.__dict__, "rules": rules}
         self._engine = RulesEngine.from_config(cfg)
         self._engine.enabled = False
+        # Keep the shared reward backstop in sync with this profile's configured
+        # interval (the engine no longer enforces it; ADR-0054).
+        if self._dispatcher is not None:
+            self._dispatcher.set_min_interval_ms(defaults.global_min_interval_ms)
         self._request_task_reset()
         self._sync_nonstem_widget()
         self._rebuild_editor()
@@ -854,13 +863,35 @@ class RulesControlView(VisionActuator):
     def _execute(self, actions) -> None:
         for a in actions:
             if isinstance(a, FireReward):
-                if self._send is not None:
-                    # Bare reward-spout fire at the port (sol=1 = reward). The
-                    # firmware logs REWARD,<port>,MANUAL,<ms> so the GUI tally
-                    # already counts it. See PROTOCOL.md / ADR-0007.
-                    self._send(f"R{a.port}1,{a.ms}")
+                self._dispatch_reward(a)
             elif isinstance(a, LogEvent):
                 self._log_event(a)
+
+    def _dispatch_reward(self, fire: FireReward) -> None:
+        """Route a FireReward through the shared dispatcher, then log the outcome.
+
+        The dispatcher owns the global rate backstop + the R<port> send (ADR-0054);
+        the reason/suppressed LogEvent that the engine used to pair with each fire
+        is now derived from the returned record, so the rule-event CSV is unchanged
+        in shape (plus a volume_ul detail). A bare reward-spout fire (sol=1) is
+        echoed by the firmware as REWARD,<port>,MANUAL,<ms>, so the GUI tally still
+        counts it. See PROTOCOL.md / ADR-0007/0019."""
+        if self._dispatcher is None:
+            # Legacy fallback (no shared dispatcher wired): send directly, no
+            # backstop/volume record.
+            if self._send is not None:
+                self._send(f"R{fire.port}1,{fire.ms}")
+            return
+        rec = self._dispatcher.fire(fire.port, fire.ms, reason=fire.reason,
+                                    rule_id=fire.rule_id)
+        if rec.fired:
+            self._log_event(LogEvent(rec.reason, rec.rule_id,
+                                     {"port": rec.port, "pulse_ms": rec.pulse_ms,
+                                      "volume_ul": round(rec.volume_ul, 2)}))
+        else:
+            self._log_event(LogEvent("suppressed", rec.rule_id,
+                                     {"reason": rec.suppressed_reason,
+                                      "intended": rec.reason, "port": rec.port}))
 
     # ------------------------------------------------- actuation thread (2b)
     def _process_act_item(self, item, snap) -> None:

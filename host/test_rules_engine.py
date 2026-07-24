@@ -8,7 +8,8 @@ snapshots and lick lines. Run from host/:
 
 Covers (see docs/decisions/0023): enter fires prime once with re-arm on exit;
 cm->px distance thresholds; per-visit top-up count cap; the within-zone-at-lick
-conjunction; the confidence gate; lick debounce and the global rate backstop;
+conjunction; the confidence gate; lick debounce (the global rate backstop now
+lives in reward_dispatcher, ADR-0054, tested in test_reward_dispatcher.py);
 the split timing model (short topup_cooldown_ms within a visit vs the longer
 rearm_refractory_ms between visits, incl. the anti-camp guarantee that a
 re-entry inside the refractory pays nothing) with legacy cooldown_ms back-compat;
@@ -101,8 +102,10 @@ class TestPrimeAndReArm(unittest.TestCase):
         # Enter the zone (50 px = 5 cm < 8 cm) -> prime once.
         a = eng.tick(tr(550, 500), CENTER_LANDMARKS, SCALE, 0.0)
         self.assertEqual(len(fires(a)), 1)
+        # The FireReward still carries its reason; the paired "prime" LogEvent is
+        # now emitted by the executor from the dispatcher record, not the engine
+        # (ADR-0054), so it is asserted in test_reward_dispatcher.py instead.
         self.assertEqual(fires(a)[0].reason, "prime")
-        self.assertEqual(len(logs(a, "prime")), 1)
 
         # Staying inside does not re-fire.
         a = eng.tick(tr(550, 500), CENTER_LANDMARKS, SCALE, 0.1)
@@ -211,7 +214,12 @@ class TestCooldownAndBackstop(unittest.TestCase):
         r2 = eng.event("2,L,2,1", 1.06)  # > 1000 ms since last fire
         self.assertEqual(len(fires(r2)), 1)
 
-    def test_global_backstop_suppresses_second_rule(self):
+    def test_engine_no_longer_rate_limits(self):
+        """The global rate backstop moved out of the engine to the shared
+        reward_dispatcher (ADR-0054, FW-0019): the engine now returns EVERY
+        rule's FireReward and emits no 'suppressed' LogEvent. The actual
+        rate-limiting (one fire through, the next dropped) is asserted in
+        test_reward_dispatcher.py against the shared seam."""
         rules = [
             {"id": "a", "template": "prime_and_lick_topup", "enabled": True,
              "landmark": {"kind": "well", "index": 2}, "radius_cm": 8.0,
@@ -227,9 +235,9 @@ class TestCooldownAndBackstop(unittest.TestCase):
         eng = RulesEngine.from_config(config)
         eng.enabled = True
         a = eng.tick(tr(550, 500), CENTER_LANDMARKS, SCALE, 0.0)
-        # Both rules want to prime; the backstop lets exactly one through.
-        self.assertEqual(len(fires(a)), 1)
-        self.assertEqual(len(logs(a, "suppressed")), 1)
+        # Both rules prime; the engine passes both through (no backstop here).
+        self.assertEqual(len(fires(a)), 2)
+        self.assertEqual(len(logs(a, "suppressed")), 0)
 
 
 class TestSplitTiming(unittest.TestCase):

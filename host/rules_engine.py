@@ -32,9 +32,10 @@ Design (see ADR-0023):
   - Rule templates (declarative, parameterized) so a non-coder edits rules.json
     without touching Python. First template: prime_and_lick_topup.
   - RulesEngine: holds rules + gating (per-rule cooldown, per-visit max count,
-    re-arm on exit, lick debounce, and a global max-reward-rate backstop against
-    runaway firing). tick(track_result, landmarks, scale, now) and
-    event(line, now) return List[Action]; the engine holds all state.
+    re-arm on exit, lick debounce). tick(track_result, landmarks, scale, now)
+    and event(line, now) return List[Action]; the engine holds all state. The
+    global max-reward-rate backstop is no longer here - it moved to the shared
+    reward_dispatcher.RewardDispatcher (see docs/decisions/0054).
 
 Thread-safety: the engine is intended to be driven from a single thread (the Tk
 main thread in the GUI, which is where both the poll loop and serial-line
@@ -737,16 +738,18 @@ class RulesEngine:
     """Owns the rules + gating; returns action intents from tick()/event().
 
     Enforces per-rule cooldown + per-visit count + re-arm (inside each rule) and
-    a GLOBAL max-reward-rate backstop here (``global_min_interval_ms``) that
-    drops any FireReward too soon after the last accepted one, regardless of
-    which rule produced it - a last-resort guard against runaway firing.
+    returns raw ``FireReward`` intents (plus the rules' own ``LogEvent``s). The
+    GLOBAL max-reward-rate backstop no longer lives here: it moved to the shared
+    ``reward_dispatcher.RewardDispatcher`` so the Rules engine and the Phase 3
+    controller share ONE backstop + reward record (see docs/decisions/0054,
+    FW-0019). ``EngineDefaults.global_min_interval_ms`` is still read from
+    rules.json and pushed into that shared dispatcher by the Rules tab.
     """
 
     def __init__(self, rules: List, defaults: EngineDefaults, enabled: bool = False):
         self.rules = rules
         self.defaults = defaults
         self.enabled = enabled
-        self._last_global_fire_now: Optional[float] = None
 
     @classmethod
     def from_config(cls, config: dict) -> "RulesEngine":
@@ -796,7 +799,7 @@ class RulesEngine:
             if getattr(rule, "needs_task", False) and not task_ok:
                 continue
             out.extend(rule.tick(frame))
-        return self._apply_global(out, now)
+        return out
 
     def event(self, line: str, now: float) -> List:
         """Feed one firmware serial line (only rising lick edges act)."""
@@ -809,34 +812,9 @@ class RulesEngine:
         for rule in self.rules:
             if getattr(rule, "enabled", True):
                 out.extend(rule.on_lick(port, now))
-        return self._apply_global(out, now)
-
-    # --------------------------------------------------------------- gating
-    def _apply_global(self, actions: List, now: float) -> List:
-        """Apply the global rate backstop and emit a LogEvent per accepted fire.
-
-        Rules emit FireReward intents (carrying a ``reason``); the engine pairs
-        each accepted fire with a LogEvent(reason) for the executor to record,
-        and replaces a rate-limited fire with a LogEvent("suppressed").
-        """
-        out: List = []
-        for a in actions:
-            if isinstance(a, FireReward):
-                if self._last_global_fire_now is not None and \
-                        (now - self._last_global_fire_now) * 1000.0 \
-                        < self.defaults.global_min_interval_ms:
-                    out.append(LogEvent("suppressed", a.rule_id,
-                                        {"reason": "global_backstop",
-                                         "intended": a.reason, "port": a.port}))
-                    continue
-                self._last_global_fire_now = now
-                out.append(a)
-                out.append(LogEvent(a.reason, a.rule_id,
-                                    {"port": a.port, "pulse_ms": a.ms}))
-            else:
-                out.append(a)
         return out
 
+    # --------------------------------------------------------------- gating
     @staticmethod
     def _parse_lick(line: str) -> Optional[int]:
         """Return the port of a rising lick edge (``<ms>,L,<i>,1``) else None."""

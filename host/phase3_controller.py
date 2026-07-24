@@ -146,11 +146,18 @@ class Phase3ControlView(VisionActuator):
     the per-session data log."""
 
     def __init__(self, parent: tk.Misc, camera=None, pipeline=None, send=None,
+                 dispatcher=None,
                  animal_id: Optional[Callable[[], str]] = None):
         self._parent = parent
         self._camera = camera
         self._pipeline = pipeline
         self._send = send                 # callable(str) -> None (RigClient.send)
+        # Shared reward seam (reward_dispatcher.RewardDispatcher): the ONE place a
+        # reward is gated (global rate backstop), recorded (pulse/volume), and sent
+        # (R<port>), shared with the Rules engine so a Phase 3 reward is handled
+        # identically to a rules reward (docs/decisions/0054, FW-0019). None -> a
+        # direct send fallback (no backstop) so the tab still works standalone.
+        self._dispatcher = dispatcher
         # The single host-side animal-id source (the Task tab's shared field;
         # docs/decisions/0053). None -> no id (manual arms fall back to "unknown").
         self._animal_id = animal_id
@@ -408,9 +415,9 @@ class Phase3ControlView(VisionActuator):
                 self._log_call(lambda: self._log.choice_scored(
                     dec.trial_index, dec.choice_side, dec.outcome, iso))
                 changed = True
-            if dec.reward:
-                self._send_cmd(f"R{self._task.cfg.reward_port}1,"
-                               f"{self._task.cfg.reward_pulse_ms}")
+            if dec.reward and self._fire_reward():
+                # Only count + log the reward when it actually fired: the shared
+                # backstop may drop one too soon after the last (ADR-0054).
                 self._reward_count += 1
                 self._log_call(lambda: self._log.reward_fired(dec.trial_index, iso))
                 changed = True
@@ -487,6 +494,19 @@ class Phase3ControlView(VisionActuator):
             self._send(cmd)
         except Exception:
             pass
+
+    def _fire_reward(self) -> bool:
+        """Dispense the trial reward through the shared dispatcher; return whether
+        it actually fired (the global backstop may suppress it). Falls back to a
+        direct R<port> send (no backstop) if no dispatcher is wired. ADR-0054."""
+        port = self._task.cfg.reward_port
+        pulse = self._task.cfg.reward_pulse_ms
+        if self._dispatcher is None:
+            self._send_cmd(f"R{port}1,{pulse}")
+            return True
+        rec = self._dispatcher.fire(port, pulse, reason="phase3_reward",
+                                    rule_id="phase3")
+        return rec.fired
 
     # ---------------------------------------------------------------- gating
     def _tracking_running(self) -> bool:

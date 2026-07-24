@@ -73,11 +73,12 @@ criteria).
 | [FW-0016](#fw-0016-migrate-trial-sequence--cue-identity-from-firmware-to-host) | Migrate trial-sequence / cue-identity from firmware to host | Firmware + protocol + host | Partially done (ADR-0046) |
 | [FW-0017](#fw-0017-end-to-end-cue-onset-latency-from-the-firmware-cue-echo) | End-to-end cue-onset latency from the firmware CUE echo | Validation harness | Proposed |
 | [FW-0018](#fw-0018-hardware-session-sync-fiducial-firmware-sync-ttl--camera-visible-led-barcode) | Hardware session sync fiducial (firmware `SYNC` TTL + camera-visible LED barcode) | Firmware + protocol + host session/camera | Proposed |
-| [FW-0019](#fw-0019-one-reward-seam--rate-backstop-across-the-task-controllers) | One reward seam + rate backstop across the task controllers | Rules engine + Phase 3 host | Proposed |
+| [FW-0019](#fw-0019-one-reward-seam--rate-backstop-across-the-task-controllers) | One reward seam + rate backstop across the task controllers | Rules engine + Phase 3 host | Done |
 | [FW-0020](#fw-0020-shared-choice-commit-edge-in-the-task-event-layer) | Shared choice-commit edge in the task-event layer | Task-event layer + task controllers | Proposed |
 | [FW-0021](#fw-0021-single-parse-serial-fan-out-in-the-gui-orchestrator) | Single-parse serial fan-out in the GUI orchestrator | GUI orchestrator + protocol | Proposed |
 | [FW-0022](#fw-0022-unified-mode-switch-reset-seam) | Unified MODE-switch reset seam | GUI orchestrator + tab modules | Proposed |
 | [FW-0023](#fw-0023-shared-preview-producer-loop-helper) | Shared preview *producer* loop helper | Preview helpers + tab modules | Proposed |
+| [FW-0024](#fw-0024-config-driven-phase-3-taskreward-parameters-parity-with-rules) | Config-driven Phase 3 task/reward parameters (parity with Rules) | Phase 3 host + config | Proposed |
 
 ## Entries
 
@@ -868,7 +869,16 @@ the cross-stream synchronization mechanism, both non-obvious decisions.
 
 ### FW-0019: One reward seam + rate backstop across the task controllers
 
-- **Status:** Proposed
+- **Status:** Done - implemented under
+  [ADR-0054](decisions/0054-unified-reward-dispatcher.md). A shared
+  `host/reward_dispatcher.py` (`RewardDispatcher`) now owns the global rate
+  backstop (moved out of `rules_engine._apply_global`), the pulse/volume record,
+  and the `R<port>` send; one instance is injected into both the Rules
+  (`rules_view._dispatch_reward`) and Phase 3 (`phase3_controller._fire_reward`)
+  controllers, so a Phase 3 reward is rate-limited + recorded like a rules reward.
+  No on-wire framing change. Tests: `host/test_reward_dispatcher.py` (+ the
+  relocated engine backstop assertion). The reward-parameter parity follow-up is
+  FW-0024.
 - **Date added:** 2026-07-24
 - **Author / Agent:** Agent (Cursor) on behalf of Celine
 - **Area / modules:** `host/rules_engine.py` (`_apply_global`, the global rate
@@ -1084,6 +1094,63 @@ stay separate?
 
 **ADR needed?** No — a mechanical UI-loop extraction, like the original
 `preview.py` split.
+
+### FW-0024: Config-driven Phase 3 task/reward parameters (parity with Rules)
+
+- **Status:** Proposed
+- **Date added:** 2026-07-24
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** `host/phase3_task.py` (`Phase3Config`), `host/trial_sequence.py`
+  (`TrialConfig` + tone Hz), `host/cue_gate.py` (`CueParams`),
+  `host/phase3_controller.py` (load/apply + persist), a new `host/phase3.json`,
+  optionally a pure config/editor core mirroring `rules_engine.py`'s editor support
+- **Related ADRs:** [ADR-0026](decisions/0026-reward-shaping-phases.md) /
+  [ADR-0031](decisions/0031-gui-edit-rules-json.md) (the profiles + GUI-edit-and-
+  write-back pattern to mirror), [ADR-0046](decisions/0046-host-owned-phase3.md) /
+  [ADR-0047](decisions/0047-phase3-return-schedules-and-session-log.md) (host-owned
+  Phase 3 + session log), [ADR-0054](decisions/0054-unified-reward-dispatcher.md)
+  (the unified reward dispatcher the reward params feed)
+- **Related FW:** [FW-0019](#fw-0019-one-reward-seam--rate-backstop-across-the-task-controllers)
+  (reward execution seam this parameterizes),
+  [FW-0008](#fw-0008-phase-3-transition---firmware-correction-trials--spatially-gated-cue)
+  (a second Phase 3 stage that would justify profiles),
+  [FW-0016](#fw-0016-migrate-trial-sequence--cue-identity-from-firmware-to-host)
+  (trial-sequence ownership this must not pre-empt)
+
+**Motivation / context.** Phase 3's reward, sequence, and cue knobs are hardcoded
+in frozen dataclasses (`Phase3Config` = port 2 / 300 ms / reward-incorrect) plus
+ephemeral Tk vars (seed, cue params) that reset every launch, whereas Rules is
+fully driven by a versioned `rules.json` with a GUI editor, validation, and
+write-back (ADR-0031). So Phase 3 parameters can't be changed without editing
+code, aren't reproducible, and the operator's mental model differs between the two
+task tabs.
+
+**Sketch of approach.** Add a versioned `host/phase3.json` with `reward` (port,
+pulse_ms, reward_incorrect), `sequence` (max_trials, block_size, max_same_run,
+tone Hz, seed policy), and `cue` (choice/return enabled, require_up_stem,
+min_confidence) sections, loaded into `Phase3Config`/`TrialConfig`/`CueParams`
+with defaults matching today's behavior. Put loading/coercion/validation in a pure
+core (like `rules_engine`'s editor support) and keep the Tk shell thin. Start
+**flat** (no profiles); add a named-profile map + phase dropdown only once a second
+real Phase 3 stage exists (e.g. FW-0008 correction trials). Stamp the resolved
+config into the Phase 3 data-file header / session manifest for reproducibility.
+
+**Evaluation / acceptance.** Defaults reproduce current behavior with no
+`phase3.json` present; edits persist across launches and are rejected if malformed
+(reuse the ADR-0031 validate-before-write pattern); the resolved reward
+`port`/`pulse_ms` flow through the shared `RewardDispatcher` (ADR-0054); the
+session data file records the parameters used.
+
+**Effort / risk.** Medium. Main risks: over-building profiles ahead of need
+(CONTRIBUTING #6); putting scientific params (tone Hz, balancing) in JSON without
+guarding them; and not pre-empting FW-0016's trial-sequence ownership decision.
+
+**Open questions.** One shared task-config file or per-controller files? Fixed vs
+random seed policy in config? Which sequence/cue params are safe to expose vs
+remain ADR-gated? Flat now and profiles later, or profiles from the start?
+
+**ADR needed?** Yes — it changes how Phase 3 is configured and persisted (a small
+follow-up to ADR-0046, mirroring ADR-0031).
 
 ## Completed
 

@@ -54,7 +54,8 @@ class TaskControlView:
     controller selector over the Phase 3 and Rules controllers."""
 
     def __init__(self, parent: tk.Misc, *, tracker=None, camera=None,
-                 pipeline=None, send=None, phase3_cls=None, rules_cls=None):
+                 pipeline=None, send=None, dispatcher=None, phase3_cls=None,
+                 rules_cls=None):
         self.frame = ttk.Frame(parent)
         self._closed = False
         # (label, module) in selector order; the shared Animal ID var must exist
@@ -84,12 +85,12 @@ class TaskControlView:
         if phase3_cls is not None:
             self.phase3 = phase3_cls(
                 self._body, camera=camera, pipeline=pipeline, send=send,
-                animal_id=self.animal_id)
+                dispatcher=dispatcher, animal_id=self.animal_id)
             self._panels.append(("Phase 3", self.phase3))
         if rules_cls is not None:
             self.rules = rules_cls(
                 self._body, tracker=tracker, camera=camera, pipeline=pipeline,
-                send=send)
+                send=send, dispatcher=dispatcher)
             self._panels.append(("Rules", self.rules))
 
         # Controller selector (only when there is a real choice to make).
