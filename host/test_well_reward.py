@@ -372,5 +372,31 @@ class TestExcursionDoubleReward(unittest.TestCase):
         self.assertEqual(len(fires(c)), 1)
 
 
+class TestNonStemFirstEntryBurnsTrip(unittest.TestCase):
+    """Pins the once-per-excursion commit semantics for choice_via_stem: the FIRST
+    choice-arm entry of a trip commits the excursion regardless of route, so a
+    non-stem first entry is denied AND burns the trip - a later stem-gated entry
+    the SAME trip does not re-credit. This must hold identically before and after
+    the shared-edge refactor (see docs/decisions/0038, FW-0020)."""
+
+    def test_nonstem_first_entry_denies_and_burns_the_trip(self):
+        h = Harness({"credential": "choice_via_stem", "prime_on": "credential"})
+        h.step(P_HUB)
+        # First choice-arm entry of the trip is reached via a return arm (no stem):
+        # denied, and the excursion's single commit is consumed.
+        a = h.run([P_LRETURN, P_LCHOICE])
+        self.assertEqual(len(logs(a, "credit_denied")), 1)
+        self.assertEqual(len(logs(a, "armed")), 0)
+        # Same trip (no HUB visit): now reach a choice arm via the stem. The trip is
+        # already committed, so this must NOT arm or fire.
+        b = h.run([P_JUNCTION, P_STEM, P_JUNCTION, P_RCHOICE])
+        self.assertEqual(len(logs(b, "armed")), 0)
+        self.assertEqual(len(fires(b)), 0)
+        # A fresh excursion (after a HUB visit) earns normally.
+        h.run([P_RRETURN, P_HUB])
+        c = h.run([P_STEM, P_JUNCTION, P_LCHOICE])
+        self.assertEqual(len(logs(c, "armed")), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

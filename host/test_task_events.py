@@ -208,5 +208,44 @@ class TestSameSideChoiceRun(unittest.TestCase):
         self.assertEqual(f.same_side_choice_run, 1)
 
 
+class TestChoiceCommitted(unittest.TestCase):
+    """The shared once-per-outbound-excursion choice-commit edge (FW-0020,
+    docs/decisions/0055): fires the FIRST choice-arm entry per trip regardless of
+    route, re-arms on HUB presence, and bumps trip_id per commit."""
+
+    def test_commits_once_per_trip_and_rearms_at_hub(self):
+        h = _Harness()
+        f = h.run([P_HUB, P_STEM, P_JUNCTION, P_LCHOICE])
+        self.assertEqual(f.choice_committed, LEFT)
+        self.assertEqual(f.trip_id, 1)
+        # Staying in the arm does not re-fire the commit.
+        f = h.step(P_LCHOICE)
+        self.assertIsNone(f.choice_committed)
+        # Close the lap and start a fresh trip -> commits again, new trip_id.
+        f = h.run([P_LRETURN, P_HUB, P_STEM, P_JUNCTION, P_RCHOICE])
+        self.assertEqual(f.choice_committed, RIGHT)
+        self.assertEqual(f.trip_id, 2)
+
+    def test_figure8_second_arm_same_trip_does_not_recommit(self):
+        # HUB -> stem -> left choice (commit) -> junction -> right choice: the
+        # second arm of the SAME trip must NOT commit again.
+        h = _Harness()
+        f = h.run([P_HUB, P_STEM, P_JUNCTION, P_LCHOICE])
+        self.assertEqual(f.choice_committed, LEFT)
+        f = h.run([P_JUNCTION, P_RCHOICE])
+        self.assertEqual(f.choice_entered, RIGHT)   # a choice entry edge...
+        self.assertIsNone(f.choice_committed)       # ...but the trip already committed
+        self.assertEqual(f.trip_id, 1)
+
+    def test_nonstem_first_entry_still_commits(self):
+        # Reaching a choice arm via the return arm (no stem) still commits the
+        # trip: the edge is route-agnostic (the stem gate is a consumer's job).
+        h = _Harness()
+        f = h.run([P_HUB, P_LRETURN, P_LCHOICE])
+        self.assertEqual(f.choice_committed, LEFT)
+        self.assertFalse(f.outbound_used_stem)
+        self.assertEqual(f.trip_id, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -19,16 +19,28 @@ from task_events import TaskEventFrame
 from rules_engine import Scale
 
 
-def frame(now, *, valid=True, choice=None, stem=False, zone=UNKNOWN):
-    """Build a TaskEventFrame with just the fields BehaviorStats reads."""
+_UNSET = object()
+
+
+def frame(now, *, valid=True, choice=None, stem=False, zone=UNKNOWN,
+          committed=_UNSET):
+    """Build a TaskEventFrame with just the fields BehaviorStats reads.
+
+    ``choice`` sets choice_entered; ``committed`` sets the shared once-per-trip
+    choice_committed edge (docs/decisions/0055) BehaviorStats now counts off, and
+    defaults to ``choice`` so a choice frame commits by default. Pass
+    ``committed=None`` to model a same-trip re-entry that does NOT re-commit (the
+    shared edge already fired this trip)."""
+    committed_side = choice if committed is _UNSET else committed
     return TaskEventFrame(
         now=now, valid=valid,
         at_well=False, outbound_used_stem=stem,
         well_arrived=False, choice_entered=choice,
+        choice_committed=committed_side,
         loop_closed=None, loop_clean=False,
         same_side_run=0, same_side_choice_run=0,
         left_loops=0, right_loops=0,
-        rat_state=RatState(zone=zone, valid=valid, now=now))
+        trip_id=0, rat_state=RatState(zone=zone, valid=valid, now=now))
 
 
 def hub(now):
@@ -85,8 +97,8 @@ class TestPerExcursionCounting(unittest.TestCase):
         # in one trip must count as a single non-stem choice, not two.
         s = BehaviorStats()
         s.update(hub(0.0))
-        s.update(frame(0.1, choice=LEFT, stem=False))      # enters L (from return)
-        s.update(frame(0.2, choice=RIGHT, stem=False))     # crosses to R, same trip
+        s.update(frame(0.1, choice=LEFT, stem=False))      # enters L (from return): commits
+        s.update(frame(0.2, choice=RIGHT, stem=False, committed=None))  # cross to R, same trip
         s.update(hub(0.3))                                 # back home
         snap = s.snapshot()
         self.assertEqual(snap.total_choices, 1)
@@ -105,8 +117,8 @@ class TestPerExcursionCounting(unittest.TestCase):
     def test_within_trip_arm_cross_after_stem_counts_one(self):
         s = BehaviorStats()
         s.update(hub(0.0))
-        s.update(frame(0.1, choice=LEFT, stem=True))       # stem-gated L (counted)
-        s.update(frame(0.2, choice=RIGHT, stem=True))      # cross to R, same trip: ignored
+        s.update(frame(0.1, choice=LEFT, stem=True))       # stem-gated L (commits, counted)
+        s.update(frame(0.2, choice=RIGHT, stem=True, committed=None))  # cross to R: ignored
         s.update(hub(0.3))
         snap = s.snapshot()
         self.assertEqual(snap.total_choices, 1)

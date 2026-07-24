@@ -16,11 +16,13 @@ Division of labour (see docs/decisions/0046):
     (CUE_ON,<kind>,<hz> / CUE_OFF / R<port> reward).
 
 This mirrors the firmware's trial FSM (task_core.h ``step``) but keyed off
-vision edges rather than beams: a choice is scored on ``choice_entered`` (gated
-by ``outbound_used_stem`` so only a genuine up-the-stem cued trial counts), and
-the trial advances on ``loop_closed`` (the rat's return to the hub) - the same
-choice-then-return structure, resolved from continuous position instead of the
-ENTRY/EXIT/CHOICE/RETURN beam sequence.
+vision edges rather than beams: a choice is scored on the shared once-per-trip
+``choice_committed`` edge (task_events.py; gated by ``outbound_used_stem`` so only
+a genuine up-the-stem cued trial counts), and the trial advances on
+``loop_closed`` (the rat's return to the hub) - the same choice-then-return
+structure, resolved from continuous position instead of the ENTRY/EXIT/CHOICE/
+RETURN beam sequence. The once-per-trip guard is the shared edge, not a local
+latch (docs/decisions/0055, FW-0020).
 
 Pure and single-threaded (the Phase 3 actuation thread), like the other cores;
 no Tk/OpenCV/serial, no locks.
@@ -83,8 +85,11 @@ class Phase3Task:
     def reset(self) -> None:
         """Restart at trial 0 (e.g. when the tab is re-armed)."""
         self._index = 0
-        self._scored_this_trial = False   # one score per trial (choice-arm dithering safe)
-        self._awaiting_return = False     # a choice was scored; waiting for the return lap
+        # A choice was scored; waiting for the return lap to advance. This also
+        # blocks scoring a second choice before the return. The "one commit per
+        # trip" guard now lives in the shared task_events choice-commit edge
+        # (docs/decisions/0055, FW-0020), so no separate _scored_this_trial flag.
+        self._awaiting_return = False
 
     # ---------------------------------------------------------------- reads
     @property
@@ -107,7 +112,7 @@ class Phase3Task:
         """Fold one TaskEventFrame; return the trial decision for this tick.
 
         ``frame`` is a duck-typed task_events.TaskEventFrame (fields read by name:
-        ``valid``, ``choice_entered``, ``outbound_used_stem``, ``loop_closed``).
+        ``valid``, ``choice_committed``, ``outbound_used_stem``, ``loop_closed``).
         Invalid frames are inert (no scoring/advance), so a tracking dropout never
         fabricates a choice or advances a trial.
         """
@@ -117,14 +122,18 @@ class Phase3Task:
             return Phase3Decision(trial_index=idx, correct_arm=correct,
                                   complete=self.complete)
 
-        # --- Score the choice: a genuine cued trial is an up-the-stem excursion
-        # into a choice arm (outbound_used_stem), scored once per trial. ---
-        choice_side = getattr(frame, "choice_entered", None)
+        # --- Score the choice on the SHARED once-per-excursion choice-commit edge
+        # (task_events.choice_committed; docs/decisions/0055, FW-0020). A genuine
+        # cued trial is an up-the-stem excursion into a choice arm, so we still
+        # gate on outbound_used_stem; a non-stem commit yields no score and leaves
+        # the trial in place (the trip's single commit is spent, but the trial
+        # index only advances after a real score, so the sequence is preserved).
+        # _awaiting_return blocks a second score before the rat returns home. ---
+        choice_side = getattr(frame, "choice_committed", None)
         if (choice_side in _ARM_OF_SIDE and getattr(frame, "outbound_used_stem", False)
-                and not self._scored_this_trial and not self._awaiting_return):
+                and not self._awaiting_return):
             chosen = _ARM_OF_SIDE[choice_side]
             is_correct = (chosen == correct)
-            self._scored_this_trial = True
             self._awaiting_return = True
             return Phase3Decision(
                 trial_index=idx, correct_arm=correct,
@@ -135,7 +144,6 @@ class Phase3Task:
         # --- Advance on the return lap (rat back at the hub after the choice). ---
         if self._awaiting_return and getattr(frame, "loop_closed", None) is not None:
             self._index += 1
-            self._scored_this_trial = False
             self._awaiting_return = False
             return Phase3Decision(
                 trial_index=idx, correct_arm=correct,

@@ -51,7 +51,6 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 import protocol  # shared serial-line parser (pure stdlib; see docs/decisions/0024)
-from maze_state import HUB  # zone vocabulary constant (pure stdlib; see docs/decisions/0038)
 
 # Tracker state string that means "confirmed lock" (kept local so this core does
 # not import tracker.py / opencv). Must match tracker.STATE_TRACKING.
@@ -447,8 +446,10 @@ class WellRewardWithExcursionRule:
     needs_task = True     # requires the task-event context (zone map + estimator)
     _CREDENTIALS = ("choice", "choice_via_stem", "clean_loop")
     # Credentials that EARN at choice-arm entry (as opposed to loop close). Only
-    # these are gated by the once-per-excursion choice latch; clean_loop earns at
-    # the HUB when the lap closes and needs no latch. See docs/decisions/0038.
+    # these are gated by the shared once-per-excursion choice-commit edge
+    # (task_events.choice_committed; docs/decisions/0055, FW-0020); clean_loop
+    # earns at the HUB when the lap closes and needs no latch. See docs/decisions/
+    # 0038 (the per-excursion latch this edge replaces).
     _CHOICE_CREDENTIALS = ("choice", "choice_via_stem")
 
     def __init__(self, params: dict, defaults: EngineDefaults):
@@ -519,14 +520,6 @@ class WellRewardWithExcursionRule:
         # A prime fired at credential time (prime_on == "credential") that is
         # awaiting the well visit to open its lick-top-up window.
         self._credit_primed = False
-        # Once-per-excursion latch for the choice-family credentials: True while
-        # the current hub->...->hub trip has not yet earned. Re-armed whenever the
-        # rat is at the HUB and consumed on the FIRST choice-arm entry of the trip,
-        # so a figure-8 that crosses into the OTHER choice arm on the way back is
-        # one excursion, not two (the double-reward bug). Starts True so a first
-        # choice counts even without a prior HUB tick. Mirrors the counting unit in
-        # behavior_stats.py. See docs/decisions/0038.
-        self._excursion_open = True
         self._at_well = False
         self._last_tick_now: Optional[float] = None
         self._last_fire_now: Optional[float] = None
@@ -633,17 +626,18 @@ class WellRewardWithExcursionRule:
             return []
         actions: List = []
         if task.valid:
-            # Once-per-excursion choice latch (see docs/decisions/0038): re-arm at
-            # the HUB, then let only the FIRST choice-arm entry of the trip earn.
-            # This stops a figure-8 that re-enters the OTHER choice arm on the way
-            # back (still outbound_used_stem, no HUB since) from re-crediting.
-            if task.rat_state.zone == HUB:
-                self._excursion_open = True
+            # Gate the choice-family credentials on the SHARED once-per-excursion
+            # choice-commit edge (task_events.choice_committed; docs/decisions/0055,
+            # FW-0020), rather than a private latch. It fires the FIRST choice-arm
+            # entry per outbound trip (re-armed at the HUB, robust to a dropped
+            # loop-close edge - see docs/decisions/0038), so a figure-8 that
+            # re-enters the OTHER arm on the way back cannot re-credit. On the
+            # commit tick task.choice_entered == the committed side, so
+            # _earn_credential is unchanged. clean_loop earns at loop close and is
+            # not gated.
             earn = True
-            if (task.choice_entered is not None
-                    and self.credential in self._CHOICE_CREDENTIALS):
-                earn = self._excursion_open
-                self._excursion_open = False
+            if self.credential in self._CHOICE_CREDENTIALS:
+                earn = task.choice_committed is not None
             if earn:
                 actions.extend(self._earn_credential(task))
             # Prime the instant the credential arms (Phase 2a/2b): fire out at

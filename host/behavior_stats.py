@@ -11,11 +11,11 @@ the most recent N choice entries.
 Why a separate pure core (single source of truth). Like task_events.py and
 rules_engine.py, the measurement logic lives in a headless, stdlib-only core the
 Tk shell (behavior_view.py) drives on the poll loop. It reuses task_events'
-per-tick predicates (choice_entered, outbound_used_stem) so the definition of a
-choice and of stem use cannot drift from the reward rule. The same-side run is
-recomputed here over per-excursion choices (see the counting note below) rather
-than read from task_events' per-entry same_side_choice_run, so all readout
-measures share one counting unit. See docs/decisions/0032 and FW-0007.
+shared per-excursion choice-commit edge (choice_committed) plus outbound_used_stem
+so the definition of a choice and of stem use cannot drift from the reward rule.
+The same-side run is recomputed here over stem-gated commits (see the counting
+note below) rather than read from task_events' same_side_choice_run, so all
+readout measures share one counting unit. See docs/decisions/0032 and FW-0007.
 
 Distance. Locomotion is summed from successive smoothed centroids using a caller-
 supplied scale object (rules_engine.Scale) exposing ``distance_cm(p_px, q_px)``
@@ -39,8 +39,10 @@ This matters because a lap that goes out one arm and back the other (a figure-8
 that crosses the junction) enters two choice zones in a single hub->...->hub trip;
 counting per-entry would score that as two choices (and, when neither used the
 stem, as two non-stem denials), double-counting one trip and skewing compliance.
-The reward engine (task_events.py) keeps its per-entry semantics; this readout
-de-duplicates to per-excursion so "trials" match trips. See docs/decisions/0032.
+task_events.py exposes this de-duplicated signal directly as the once-per-trip
+choice_committed edge (docs/decisions/0055, FW-0020); this readout, the reward
+rule, and the Phase 3 scorer all consume that one edge, so "trials" match trips
+identically across them. See docs/decisions/0032.
 """
 
 from __future__ import annotations
@@ -50,7 +52,7 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Deque, Optional, Tuple
 
-from maze_state import HUB, LEFT, RIGHT
+from maze_state import LEFT, RIGHT
 from task_events import TaskEventFrame
 
 DEFAULT_WINDOW = 10          # rolling window size, in most-recent choice entries
@@ -123,10 +125,6 @@ class BehaviorStats:
         self._distance_cm = 0.0
         self._distance_contributed = False
         self._last_pos: Optional[Tuple[float, float]] = None
-        # True while the current hub->...->hub excursion has not yet had a choice
-        # counted (re-armed each time the animal is at the hub). Starts True so a
-        # first choice counts even if a hub tick was never seen.
-        self._excursion_open = True
 
     def set_window(self, window_n: int) -> None:
         """Resize the rolling window, preserving the most recent entries."""
@@ -182,16 +180,15 @@ class BehaviorStats:
         self._last_pos = pos_px
 
     def _accumulate_choice(self, frame: TaskEventFrame) -> None:
-        # Re-arm the excursion whenever the animal is back at the hub, so only the
-        # FIRST choice-zone entry per hub->...->hub trip is counted (a figure-8
+        # Count only the FIRST choice-zone entry per hub->...->hub trip (a figure-8
         # that crosses between the two arms enters two choice zones but is one
-        # trip). See the module docstring / docs/decisions/0032.
-        if frame.rat_state.zone == HUB:
-            self._excursion_open = True
-        if frame.choice_entered is None or not self._excursion_open:
+        # trip). This is exactly the shared once-per-excursion choice-commit edge
+        # from task_events (choice_committed; docs/decisions/0055, FW-0020), which
+        # replaces the local per-excursion latch this module used to keep. See the
+        # module docstring / docs/decisions/0032.
+        side = frame.choice_committed
+        if side is None:
             return
-        self._excursion_open = False
-        side = frame.choice_entered
         stem = bool(frame.outbound_used_stem)
         self._total += 1
         self._recent.append((side, stem))

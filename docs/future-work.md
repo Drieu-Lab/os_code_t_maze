@@ -74,7 +74,7 @@ criteria).
 | [FW-0017](#fw-0017-end-to-end-cue-onset-latency-from-the-firmware-cue-echo) | End-to-end cue-onset latency from the firmware CUE echo | Validation harness | Proposed |
 | [FW-0018](#fw-0018-hardware-session-sync-fiducial-firmware-sync-ttl--camera-visible-led-barcode) | Hardware session sync fiducial (firmware `SYNC` TTL + camera-visible LED barcode) | Firmware + protocol + host session/camera | Proposed |
 | [FW-0019](#fw-0019-one-reward-seam--rate-backstop-across-the-task-controllers) | One reward seam + rate backstop across the task controllers | Rules engine + Phase 3 host | Done |
-| [FW-0020](#fw-0020-shared-choice-commit-edge-in-the-task-event-layer) | Shared choice-commit edge in the task-event layer | Task-event layer + task controllers | Proposed |
+| [FW-0020](#fw-0020-shared-choice-commit-edge-in-the-task-event-layer) | Shared choice-commit edge in the task-event layer | Task-event layer + task controllers | Done |
 | [FW-0021](#fw-0021-single-parse-serial-fan-out-in-the-gui-orchestrator) | Single-parse serial fan-out in the GUI orchestrator | GUI orchestrator + protocol | Proposed |
 | [FW-0022](#fw-0022-unified-mode-switch-reset-seam) | Unified MODE-switch reset seam | GUI orchestrator + tab modules | Proposed |
 | [FW-0023](#fw-0023-shared-preview-producer-loop-helper) | Shared preview *producer* loop helper | Preview helpers + tab modules | Proposed |
@@ -928,7 +928,17 @@ modes (a behavioral-timing decision), likely a small follow-up to ADR-0026/0053.
 
 ### FW-0020: Shared choice-commit edge in the task-event layer
 
-- **Status:** Proposed
+- **Status:** Done - implemented under
+  [ADR-0055](decisions/0055-shared-choice-commit-edge.md). Added
+  `TaskEventFrame.choice_committed` + `trip_id` (a once-per-outbound-excursion
+  edge in `host/task_events.py`, re-armed on HUB presence, consumed on the first
+  choice entry regardless of stem); the rules `choice`/`choice_via_stem`
+  credentials, `Phase3Task` scoring, and `behavior_stats` now all read it, and
+  each dropped its own private latch. Chose "Option A" on both open questions
+  (fire regardless of stem; re-arm on HUB presence): the rules reward path and the
+  readout are unchanged on the shipped profiles; Phase 3 changes only the rare
+  non-stem-first-entry case (that trip yields no score, but the sequence trial is
+  preserved, not burnt). Behavior pinned by tests before and after.
 - **Date added:** 2026-07-24
 - **Author / Agent:** Agent (Cursor) on behalf of Celine
 - **Area / modules:** `host/task_events.py` (task-semantic event layer over the

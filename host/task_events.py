@@ -48,11 +48,20 @@ _RETURN_OF_SIDE = {LEFT: LEFT_RETURN, RIGHT: RIGHT_RETURN}
 class TaskEventFrame:
     """Per-tick task-semantic context derived from one ``RatState``.
 
-    Edges (``well_arrived``, ``choice_entered``, ``loop_closed``) are true only on
-    the tick the event occurs; predicates (``at_well``, ``outbound_used_stem``)
-    describe the current tick / current lap; aggregates (``same_side_run``,
-    ``left_loops``, ``right_loops``) accumulate across laps. ``rat_state`` is the
-    source state, passed through so consumers can reach raw fields if needed.
+    Edges (``well_arrived``, ``choice_entered``, ``choice_committed``,
+    ``loop_closed``) are true only on the tick the event occurs; predicates
+    (``at_well``, ``outbound_used_stem``) describe the current tick / current lap;
+    aggregates (``same_side_run``, ``left_loops``, ``right_loops``) accumulate
+    across laps. ``rat_state`` is the source state, passed through so consumers can
+    reach raw fields if needed.
+
+    ``choice_committed`` is the single **once-per-outbound-excursion** choice-commit
+    edge (see docs/decisions/0055, FW-0020): it fires the side of the FIRST
+    choice-arm entry since the animal last left the HUB - regardless of route (a
+    consumer applies its own ``outbound_used_stem`` check) - and re-arms on HUB
+    presence. It is the shared source of truth the reward rule, the Phase 3 scorer,
+    and the behavior readout all consume instead of each re-deriving the latch.
+    ``trip_id`` bumps on each commit so consumers can tell excursions apart.
     """
     now: float
     valid: bool
@@ -62,6 +71,7 @@ class TaskEventFrame:
     # ---- edges (true only on the tick they occur) ----
     well_arrived: bool                  # entered the well (in_well) this tick
     choice_entered: Optional[str]       # "left"/"right" if a choice arm entered this tick
+    choice_committed: Optional[str]     # "left"/"right" on the FIRST choice entry per outbound trip
     loop_closed: Optional[str]          # "left"/"right" if a lap closed at the HUB this tick
     loop_clean: bool                    # that closed lap was clean (stem out + matching return)
     # ---- aggregates (across laps) ----
@@ -69,6 +79,7 @@ class TaskEventFrame:
     same_side_choice_run: int           # consecutive same-side STEM-GATED choice entries
     left_loops: int
     right_loops: int
+    trip_id: int                        # id of the current outbound excursion (bumps per commit)
     rat_state: RatState
 
 
@@ -94,12 +105,35 @@ class TaskEvents:
         # the closed-loop run because 2b credits at choice entry, not loop close.
         self._last_choice_side: Optional[str] = None
         self._same_side_choice_run = 0
+        # Once-per-outbound-excursion choice-commit latch (docs/decisions/0055,
+        # FW-0020): True while the current hub->...->hub trip has not yet committed
+        # a choice. Re-armed on HUB presence, consumed on the FIRST choice-arm
+        # entry of the trip (any route). Starts True so a first choice commits even
+        # without a prior HUB tick. Mirrors the per-excursion latch ADR-0038 added
+        # to the reward rule, hoisted here as the single source. ``_trip_id`` bumps
+        # on each commit so consumers can tell excursions apart.
+        self._excursion_open = True
+        self._trip_id = 0
 
     def update(self, s: RatState) -> TaskEventFrame:
         at_well = bool(s.valid and s.zone == HUB and s.substate == IN_WELL)
         well_arrived = at_well and not self._prev_at_well
 
         choice_entered = _SIDE_OF_CHOICE.get(s.entered) if s.entered else None
+
+        # Once-per-outbound-excursion choice-commit edge (docs/decisions/0055,
+        # FW-0020). Re-arm on HUB presence (persistent, so a dropped loop-close
+        # edge cannot strand the latch - see docs/decisions/0038), consume on the
+        # FIRST choice-arm entry of the trip regardless of route. The stem gate is
+        # deliberately NOT applied here; a consumer that cares reads
+        # outbound_used_stem on this same frame.
+        if s.valid and s.zone == HUB:
+            self._excursion_open = True
+        choice_committed: Optional[str] = None
+        if choice_entered is not None and self._excursion_open and s.valid:
+            self._excursion_open = False
+            self._trip_id += 1
+            choice_committed = choice_entered
 
         # "This lap the outbound leg used the stem" == the stem was entered since
         # the animal last left the HUB (the canonical visited_since query).
@@ -147,8 +181,9 @@ class TaskEvents:
             now=s.now, valid=s.valid,
             at_well=at_well, outbound_used_stem=outbound_used_stem,
             well_arrived=well_arrived, choice_entered=choice_entered,
+            choice_committed=choice_committed,
             loop_closed=loop_closed, loop_clean=loop_clean,
             same_side_run=self._same_side_run,
             same_side_choice_run=self._same_side_choice_run,
             left_loops=self._left_loops, right_loops=self._right_loops,
-            rat_state=s)
+            trip_id=self._trip_id, rat_state=s)
