@@ -11,6 +11,10 @@ The broker is fully transparent. Every line the Due prints is fanned out
 verbatim to every connected client; every line a client sends is forwarded
 verbatim to the Due. Lines are newline-terminated ASCII in both directions.
 
+The one line the broker sends on its own behalf is a periodic STATUS while the
+port is quiet - a liveness probe, so a wedged Due is noticed in seconds instead
+of going unnoticed for the rest of a session (see docs/decisions/0062).
+
 Run from os_code_t_maze/host/:
     python rig_broker.py
 
@@ -29,6 +33,8 @@ from typing import List, Optional
 
 import serial
 
+from serial_liveness import DEAD, PROBE, LivenessMonitor
+
 # ================= DEFAULTS =================
 DEFAULT_PORT = "COM4"          # Arduino Due native USB
 DEFAULT_BAUD = 115200
@@ -40,6 +46,9 @@ STATS_INTERVAL_S = 10.0
 # wedged Due froze every client's commands indefinitely - and silently, because
 # the blocked write held serial_lock. see docs/decisions/0062
 WRITE_TIMEOUT_S = 1.0
+# The liveness probe. STATUS (not PING) keeps PONG reserved as the session-start
+# fiducial. see docs/decisions/0062
+LIVENESS_PROBE_CMD = "STATUS"
 
 
 # ================= STATE =================
@@ -56,9 +65,13 @@ ser: Optional[serial.Serial] = None
 # serial_lock from a writer that already holds it. see docs/decisions/0062
 reopen_request = threading.Event()
 
+# Decides when a quiet port gets probed and when it counts as dead. Touched only
+# by serial_reader_thread, so it needs no lock. see docs/decisions/0062
+liveness = LivenessMonitor()
+
 # Lightweight throughput counters for the periodic stats line.
 stats_lock = threading.Lock()
-stats = {"from_due": 0, "to_due": 0}
+stats = {"from_due": 0, "to_due": 0, "probes": 0}
 
 
 def log(msg: str) -> None:
@@ -86,14 +99,15 @@ def serial_reader_thread(port: str, baud: int) -> None:
                 log(f"opening serial {port} @ {baud} ...")
                 ser = open_serial(port, baud)
                 reopen_request.clear()
+                liveness.reset(time.monotonic())
                 log("serial open")
             except Exception as e:
                 log(f"serial open failed: {e}; retry in {SERIAL_REOPEN_DELAY_S:.0f}s")
                 _sleep_until_stop(SERIAL_REOPEN_DELAY_S)
                 continue
 
-        # A failed write asks this thread to cycle the port, since it is the only
-        # one allowed to open/close it.
+        # A failed write or a dead-port verdict asks this thread to cycle the
+        # port, since it is the only one allowed to open/close it.
         if reopen_request.is_set():
             reopen_request.clear()
             log(f"reopening serial (requested); retry in {SERIAL_REOPEN_DELAY_S:.0f}s")
@@ -112,7 +126,12 @@ def serial_reader_thread(port: str, baud: int) -> None:
             continue
 
         if not raw:
+            # A wedged Due returns empty rather than raising, so silence is the
+            # only symptom. Legitimate quiet is common (a resting rat breaks no
+            # beams), hence an active probe instead of a plain timeout.
+            _check_liveness()
             continue
+        liveness.note_rx(time.monotonic())
         try:
             # Verbatim line relay: no reframing/metadata. see docs/decisions/0002
             line = raw.decode("utf-8", errors="ignore").rstrip("\r\n")
@@ -124,6 +143,25 @@ def serial_reader_thread(port: str, baud: int) -> None:
         with stats_lock:
             stats["from_due"] += 1
         broadcast(line)
+
+
+def _check_liveness() -> None:
+    """Probe a quiet port, and ask for a reopen if it has stopped answering.
+
+    Called from serial_reader_thread on every empty read, which the 0.1 s read
+    timeout makes about 10x a second - so no extra thread is needed.
+    """
+    now = time.monotonic()
+    verdict = liveness.step(now)
+    if verdict == PROBE:
+        if _write_to_due(LIVENESS_PROBE_CMD, "liveness probe"):
+            with stats_lock:
+                stats["probes"] += 1
+    elif verdict == DEAD:
+        log(f"DUE NOT RESPONDING: no serial data for "
+            f"{liveness.quiet_for(now):.0f}s despite probes; will reopen. "
+            f"If reopening fails, press RESET on the Due.")
+        reopen_request.set()
 
 
 def _close_serial() -> None:
@@ -196,24 +234,34 @@ def client_reader_thread(client_sock: socket.socket, addr) -> None:
         log(f"client disconnected: {peer}")
 
 
-def _forward_to_due(cmd: str, peer: str) -> None:
+def _write_to_due(cmd: str, source: str) -> bool:
+    """Write one command to the Due; return True if it went out.
+
+    The only place the port is written, so client commands and liveness probes get
+    the same bounded, serialized treatment.
+    """
     payload = (cmd + "\n").encode("utf-8", errors="ignore")
     with serial_lock:
         s = ser
         if s is None:
-            log(f"command from {peer} dropped (serial not open): {cmd!r}")
-            return
+            log(f"command from {source} dropped (serial not open): {cmd!r}")
+            return False
         try:
             s.write(payload)
         except Exception as e:
             # Bounded by WRITE_TIMEOUT_S, so this now returns instead of hanging.
             # Hand the port back to the reader thread rather than closing it here:
             # we hold serial_lock, and _close_serial() wants it too.
-            log(f"serial write failed forwarding {cmd!r} from {peer}: {e}")
+            log(f"serial write failed forwarding {cmd!r} from {source}: {e}")
             reopen_request.set()
-            return
-    with stats_lock:
-        stats["to_due"] += 1
+            return False
+    return True
+
+
+def _forward_to_due(cmd: str, peer: str) -> None:
+    if _write_to_due(cmd, peer):
+        with stats_lock:
+            stats["to_due"] += 1
 
 
 def _peer_str(sock: socket.socket) -> str:
@@ -232,12 +280,17 @@ def stats_thread() -> None:
         with stats_lock:
             from_due = stats["from_due"]
             to_due = stats["to_due"]
+            probes = stats["probes"]
             stats["from_due"] = 0
             stats["to_due"] = 0
+            stats["probes"] = 0
         with clients_lock:
             n = len(clients)
+        # Probes only appear once the port has gone quiet, so a non-zero count in
+        # the log is the timestamp of when trouble started.
+        probe_note = f"  probes={probes}" if probes else ""
         log(f"stats: clients={n}  from_due={from_due}/{STATS_INTERVAL_S:.0f}s  "
-            f"to_due={to_due}/{STATS_INTERVAL_S:.0f}s")
+            f"to_due={to_due}/{STATS_INTERVAL_S:.0f}s{probe_note}")
 
 
 def _sleep_until_stop(seconds: float) -> bool:

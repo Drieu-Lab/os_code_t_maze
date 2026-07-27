@@ -77,6 +77,7 @@ criteria).
 | [FW-0020](#fw-0020-shared-choice-commit-edge-in-the-task-event-layer) | Shared choice-commit edge in the task-event layer | Task-event layer + task controllers | Done |
 | [FW-0023](#fw-0023-shared-preview-producer-loop-helper) | Shared preview *producer* loop helper | Preview helpers + tab modules | Done |
 | [FW-0024](#fw-0024-config-driven-phase-3-taskreward-parameters-parity-with-rules) | Config-driven Phase 3 task/reward parameters (parity with Rules) | Phase 3 host + config | Proposed |
+| [FW-0025](#fw-0025-surface-the-brokers-link-health-in-the-gui) | Surface the broker's link health in the GUI | Broker + GUI status | Proposed |
 
 ## Entries
 
@@ -1098,6 +1099,56 @@ remain ADR-gated? Flat now and profiles later, or profiles from the start?
 
 **ADR needed?** Yes — it changes how Phase 3 is configured and persisted (a small
 follow-up to ADR-0046, mirroring ADR-0031).
+
+### FW-0025: Surface the broker's link health in the GUI
+
+- **Status:** Proposed
+- **Date added:** 2026-07-27
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** `host/rig_broker.py` (would need a way to tell clients),
+  `host/rig_io.py` (`RigClient`), a status indicator in `host/experiment_control.py` (Rig
+  view bottom strip, near the Session panel)
+- **Related ADRs:** [ADR-0062](decisions/0062-broker-bounded-writes-and-liveness-probe.md)
+  (the detection this would display),
+  [ADR-0002](decisions/0002-transparent-line-passthrough.md) (the passthrough rule
+  any broker->client status message has to work around)
+
+**Motivation / context.** ADR-0062 makes the broker notice a wedged Arduino within
+~25 s, but it only says so in the **broker's own console window**. From the GUI a
+dead rig still looks like a quiet one: the readouts simply stop updating. During
+the 2026-07-27 lockouts (`#260727_SerialLockout`) the operator kept clicking
+manual-feed buttons and only learned something was wrong on closing the GUI. An
+on-screen indicator would have said so immediately.
+
+**Sketch of approach.** The awkward part is that the broker is a verbatim line
+passthrough (ADR-0002), so it has no channel for talking *about* the link. Options
+worth weighing: a distinguishable out-of-band line (e.g. a `#`-prefixed
+`#LINK,DEAD` that `protocol.parse` already rejects, at the cost of denting the
+passthrough guarantee); a small side channel on a second TCP port; or keeping the
+broker silent and having each client run its own `LivenessMonitor` over the lines
+it receives — which needs no broker change at all, since `serial_liveness.py` is
+already a reusable pure core, but duplicates the probe decision per client and
+would have several clients writing `STATUS`. The client-side variant probably wins
+if the client only *watches* (never probes) and treats the broker's probe traffic
+as the stimulus.
+
+**Evaluation / acceptance.** With the Due wedged on the bench (or its cable
+pulled), a Rig-view indicator turns red within ~30 s and names the RESET remedy;
+it stays green across a 10-minute healthy session with a resting rat (no false
+alarms during legitimate quiet); and no extra `STATUS` traffic appears per
+connected client.
+
+**Effort / risk.** Small-to-medium. Main risk is eroding ADR-0002's passthrough
+guarantee for a cosmetic gain — hence the preference for a watch-only client-side
+monitor.
+
+**Open questions.** Watch-only per client, or one authoritative verdict from the
+broker? Where does the indicator belong (Rig view strip, Session panel, or the
+window title)? Should a dead link also block/grey the manual actuation buttons, or
+just warn?
+
+**ADR needed?** Yes if the broker gains an out-of-band message (it narrows
+ADR-0002); no if clients only watch the existing stream.
 
 ## Completed
 

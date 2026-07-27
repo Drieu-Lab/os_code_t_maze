@@ -106,6 +106,14 @@ multiplies by the frame rate, so it is kept as lean as possible.
 The delay between a cause and its effect — e.g. between the rat entering a zone
 and the reward firing. A lot of the design exists to reduce actuation latency.
 
+### Liveness probe
+A message sent *just to check the other side is still alive*, when silence alone
+would be ambiguous. The [broker](#broker) sends the firmware a `STATUS` after ten
+seconds of quiet: a healthy board answers, so no answer means it has stopped
+running. Needed because silence is normal here — a resting rat breaks no beams,
+so the rig can legitimately say nothing for minutes. See ADR-0062 and
+[watchdog](#watchdog).
+
 ### Lock
 A concurrency tool that lets only **one [thread](#thread) at a time** into a
 section of code that touches shared data. Other threads must wait. Locks make
@@ -160,3 +168,11 @@ them is the reason [locks](#lock), [queues](#queue), and
 Python's built-in GUI toolkit, used for all the on-screen windows and tabs. "The
 Tk thread" is the thread that owns the GUI; GUI objects must only be touched from
 it, which is why cross-thread hand-offs use [snapshots](#snapshot).
+
+### Watchdog
+Code whose only job is to notice that something has stopped working and raise the
+alarm. The [broker](#broker)'s watchdog uses a
+[liveness probe](#liveness-probe) to spot a frozen Arduino within ~25 seconds,
+where previously a dead rig looked identical to a quiet one and went unnoticed for
+17 minutes. It reports; it cannot revive the board (only the RESET button does
+that). See ADR-0062.
