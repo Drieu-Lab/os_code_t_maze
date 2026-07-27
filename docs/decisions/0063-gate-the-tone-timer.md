@@ -100,6 +100,16 @@ host-visible behaviour changes.
   `docs/notes/Bugs.md` `#260727_SerialLockout`. Occurrence 2 in particular — an
   idle board, no tones since boot, no serial traffic in either direction, dead
   somewhere in a 19-minute window.
-- Bench check after reflashing: 4 kHz and 8 kHz from the Rig view's audio-cue
-  test bar, both clean with no click at onset or offset, then a normal Phase 3
-  cue still fires.
+- Bench check, 2026-07-27 (Celine, on the rig, after reflashing): 4 kHz and
+  8 kHz from the Rig view's audio-cue test bar both sounded clean with no click
+  at onset or offset, and a Phase 3 cue fired normally. So gating the timer costs
+  nothing audible and breaks no cue path.
+- **Soak test, 2026-07-27 — the hypothesis is EXCLUDED.** On the reflashed
+  firmware, with the timer gated and no tone played for the preceding ~16
+  minutes, the board wedged anyway: port opened 15:53:12, the liveness probe's
+  write failed at 16:10:23 (~17 min), reopen failed with error 31 as expected.
+  The always-on 80 kHz interrupt was therefore **not** the cause of the lockup
+  (`docs/notes/Bugs.md` `#260727_SerialLockout`, occurrence 3). This ADR's
+  decision still stands on its own merit — the interrupt has no reason to run
+  when silent — but it buys no reliability, and the remaining candidates in
+  "Consequences" above now move up.
