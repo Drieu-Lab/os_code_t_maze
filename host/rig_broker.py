@@ -36,6 +36,10 @@ DEFAULT_HOST = "127.0.0.1"     # localhost only; safe default
 DEFAULT_TCP_PORT = 5555
 SERIAL_REOPEN_DELAY_S = 2.0
 STATS_INTERVAL_S = 10.0
+# Cap on a single serial write. pyserial's default (None) blocks forever, so a
+# wedged Due froze every client's commands indefinitely - and silently, because
+# the blocked write held serial_lock. see docs/decisions/0062
+WRITE_TIMEOUT_S = 1.0
 
 
 # ================= STATE =================
@@ -46,6 +50,11 @@ clients: List[socket.socket] = []
 
 serial_lock = threading.Lock()  # serializes writes to the Due
 ser: Optional[serial.Serial] = None
+
+# Set by any thread that finds the port unusable; only serial_reader_thread acts
+# on it. Keeping the close/reopen in that one thread avoids re-entering
+# serial_lock from a writer that already holds it. see docs/decisions/0062
+reopen_request = threading.Event()
 
 # Lightweight throughput counters for the periodic stats line.
 stats_lock = threading.Lock()
@@ -59,7 +68,7 @@ def log(msg: str) -> None:
 
 # ================= SERIAL =================
 def open_serial(port: str, baud: int) -> serial.Serial:
-    s = serial.Serial(port, baud, timeout=0.1)
+    s = serial.Serial(port, baud, timeout=0.1, write_timeout=WRITE_TIMEOUT_S)
     time.sleep(2.0)  # let the Due settle (matches existing GUIs)
     try:
         s.reset_input_buffer()
@@ -76,11 +85,21 @@ def serial_reader_thread(port: str, baud: int) -> None:
             try:
                 log(f"opening serial {port} @ {baud} ...")
                 ser = open_serial(port, baud)
+                reopen_request.clear()
                 log("serial open")
             except Exception as e:
                 log(f"serial open failed: {e}; retry in {SERIAL_REOPEN_DELAY_S:.0f}s")
                 _sleep_until_stop(SERIAL_REOPEN_DELAY_S)
                 continue
+
+        # A failed write asks this thread to cycle the port, since it is the only
+        # one allowed to open/close it.
+        if reopen_request.is_set():
+            reopen_request.clear()
+            log(f"reopening serial (requested); retry in {SERIAL_REOPEN_DELAY_S:.0f}s")
+            _close_serial()
+            _sleep_until_stop(SERIAL_REOPEN_DELAY_S)
+            continue
 
         try:
             raw = ser.readline()
@@ -187,7 +206,11 @@ def _forward_to_due(cmd: str, peer: str) -> None:
         try:
             s.write(payload)
         except Exception as e:
+            # Bounded by WRITE_TIMEOUT_S, so this now returns instead of hanging.
+            # Hand the port back to the reader thread rather than closing it here:
+            # we hold serial_lock, and _close_serial() wants it too.
             log(f"serial write failed forwarding {cmd!r} from {peer}: {e}")
+            reopen_request.set()
             return
     with stats_lock:
         stats["to_due"] += 1
