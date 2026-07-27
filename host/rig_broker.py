@@ -49,6 +49,11 @@ WRITE_TIMEOUT_S = 1.0
 # The liveness probe. STATUS (not PING) keeps PONG reserved as the session-start
 # fiducial. see docs/decisions/0062
 LIVENESS_PROBE_CMD = "STATUS"
+# How often to repeat an unchanged "serial open failed" line. A wedged Due
+# refuses every reopen until someone presses RESET, so the retry loop can run for
+# hours; at one line per retry it buries the history the log is kept for.
+# see docs/decisions/0062
+OPEN_FAIL_SUMMARY_S = 60.0
 
 
 # ================= STATE =================
@@ -93,16 +98,38 @@ def open_serial(port: str, baud: int) -> serial.Serial:
 def serial_reader_thread(port: str, baud: int) -> None:
     """Read lines from the Due and broadcast them to every connected client."""
     global ser
+    # State for throttling a repeating open failure (see OPEN_FAIL_SUMMARY_S). The
+    # retry interval itself is deliberately NOT backed off: after the operator
+    # presses RESET the board must come back within a couple of seconds.
+    fail_count = 0
+    fail_msg = ""
+    fail_logged_at = 0.0
     while not stop_event.is_set():
         if ser is None:
             try:
-                log(f"opening serial {port} @ {baud} ...")
+                if not fail_count:
+                    log(f"opening serial {port} @ {baud} ...")
                 ser = open_serial(port, baud)
+                if fail_count:
+                    log(f"serial recovered after {fail_count} failed attempts")
+                    fail_count, fail_msg = 0, ""
                 reopen_request.clear()
                 liveness.reset(time.monotonic())
                 log("serial open")
             except Exception as e:
-                log(f"serial open failed: {e}; retry in {SERIAL_REOPEN_DELAY_S:.0f}s")
+                fail_count += 1
+                changed = str(e) != fail_msg
+                # A changed message is news; an unchanged one is a heartbeat.
+                if changed or time.monotonic() - fail_logged_at >= OPEN_FAIL_SUMMARY_S:
+                    if changed:
+                        log(f"serial open failed: {e}; retrying every "
+                            f"{SERIAL_REOPEN_DELAY_S:.0f}s, repeats summarized "
+                            f"every {OPEN_FAIL_SUMMARY_S:.0f}s")
+                    else:
+                        log(f"serial open still failing after {fail_count} "
+                            f"attempts: {e}")
+                    fail_msg = str(e)
+                    fail_logged_at = time.monotonic()
                 _sleep_until_stop(SERIAL_REOPEN_DELAY_S)
                 continue
 
