@@ -56,7 +56,10 @@ void setupSound() {
   analogWrite(DAC_PIN, DAC_CENTER);     // initialise DACC + channel/pin, park mid-rail (silent)
   dacc_set_channel_selection(DACC, 0);  // DAC0 == DACC channel 0; fix selection for direct writes
 
-  // Configure Timer0, channel 0 once and leave running.
+  // Configure Timer0, channel 0 but leave it STOPPED: the tone functions start
+  // and stop it, so the ISR fires only while a tone sounds. It used to run from
+  // boot to power-off - 80,000 interrupts a second spent returning immediately,
+  // for the ~1% of the time a cue is playing. see docs/decisions/0063
   pmc_set_writeprotect(false);
   pmc_enable_periph_clk(ID_TC0);
   TC_Configure(TC0, 0,
@@ -65,7 +68,6 @@ void setupSound() {
   TC0->TC_CHANNEL[0].TC_IER = TC_IER_CPCS;     // interrupt on RC compare
   TC0->TC_CHANNEL[0].TC_IDR = ~TC_IER_CPCS;
   NVIC_EnableIRQ(TC0_IRQn);
-  TC_Start(TC0, 0);
 }
 
 // --- Start a constant tone asynchronously ---
@@ -77,6 +79,10 @@ void startToneAsync(float freq) {
   phaseInc = (uint32_t)(((uint64_t)((double)freq * 4294967296.0)) / (uint32_t)SAMPLE_RATE);
   phaseAcc = 0;
   tonePlaying = true;
+  // Start the timer only after the state above is set, so the first interrupt
+  // never samples a half-written tone. Onset costs one sample period (~12.5 us),
+  // far below audibility and negligible beside the TONE_ON TTL fired just below.
+  TC_Start(TC0, 0);
 
   ttlToneOn.startTime = millis();
   ttlToneOn.active = true;
@@ -86,6 +92,7 @@ void startToneAsync(float freq) {
 // --- Stop the tone ---
 void stopToneAsync() {
   tonePlaying = false;
+  TC_Stop(TC0, 0);                               // silence the ISR before parking
   dacc_write_conversion_data(DACC, DAC_CENTER);  // park mid-rail (silent)
 
   ttlToneOff.startTime = millis();
@@ -94,6 +101,9 @@ void stopToneAsync() {
 }
 
 // --- Timer interrupt: emit one DAC sample. Integer-only: add + shift + write. ---
+// The timer only runs while a tone sounds (see docs/decisions/0063), so this
+// normally fires only for real samples; the tonePlaying guard stays to swallow
+// any interrupt already pending when the tone stops.
 void TC0_Handler() {
   TC_GetStatus(TC0, 0);            // clear interrupt flag
   if (!tonePlaying) return;

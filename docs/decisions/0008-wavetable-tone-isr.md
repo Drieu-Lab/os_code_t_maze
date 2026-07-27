@@ -4,7 +4,10 @@
 - **Date:** 2026-06-03
 - **Author / Agent:** Agent (Cursor) on behalf of Celine
 - **Affects:** `firmware/cue-guided-task/sound.h`, `firmware/common/rig_config.h`
-- **Supersedes / Superseded by:** —
+- **Supersedes / Superseded by:** Partially superseded by
+  [ADR-0063](0063-gate-the-tone-timer.md) (the timer is no longer left running
+  between tones); the wavetable, phase accumulator, direct DAC write, and 80 kHz
+  sample rate below all stand.
 
 ## Context
 
