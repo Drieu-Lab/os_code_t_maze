@@ -33,7 +33,7 @@ from typing import List, Optional
 
 import serial
 
-from serial_liveness import DEAD, PROBE, LivenessMonitor
+from serial_liveness import DEAD, PROBE, LivenessMonitor, LivenessParams
 
 # ================= DEFAULTS =================
 DEFAULT_PORT = "COM4"          # Arduino Due native USB
@@ -71,7 +71,8 @@ ser: Optional[serial.Serial] = None
 reopen_request = threading.Event()
 
 # Decides when a quiet port gets probed and when it counts as dead. Touched only
-# by serial_reader_thread, so it needs no lock. see docs/decisions/0062
+# by serial_reader_thread, so it needs no lock. main() replaces it with the
+# CLI-configured schedule before that thread starts. see docs/decisions/0062
 liveness = LivenessMonitor()
 
 # Lightweight throughput counters for the periodic stats line.
@@ -333,6 +334,22 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--host", default=DEFAULT_HOST, help="TCP bind host (default %(default)s)")
     p.add_argument("--tcp-port", type=int, default=DEFAULT_TCP_PORT,
                    help="TCP listen port (default %(default)s)")
+    # Liveness-probe schedule (see docs/decisions/0062). Defaults suit a normal
+    # run; a faster probe is a diagnostic tool - it pins the moment of a lockup
+    # more tightly, and separates a time-triggered failure from a
+    # message-count-triggered one.
+    d = LivenessParams()
+    p.add_argument("--probe-quiet", type=float, default=d.quiet_probe_s,
+                   metavar="S",
+                   help="seconds of silence before the first STATUS probe "
+                        "(default %(default)s)")
+    p.add_argument("--probe-interval", type=float, default=d.probe_interval_s,
+                   metavar="S",
+                   help="seconds between repeat probes (default %(default)s)")
+    p.add_argument("--probe-dead", type=float, default=d.dead_after_s,
+                   metavar="S",
+                   help="seconds of unbroken silence before the port is called "
+                        "dead (default %(default)s)")
     return p.parse_args()
 
 
@@ -349,11 +366,25 @@ def install_signal_handlers() -> None:
 
 
 def main() -> int:
+    global liveness
     args = parse_args()
     install_signal_handlers()
 
+    try:
+        params = LivenessParams(quiet_probe_s=args.probe_quiet,
+                                probe_interval_s=args.probe_interval,
+                                dead_after_s=args.probe_dead)
+    except ValueError as e:
+        log(f"bad probe schedule: {e}")
+        return 2
+    liveness = LivenessMonitor(params)
+
     log(f"rig_broker starting (serial={args.port}@{args.baud}, "
         f"tcp={args.host}:{args.tcp_port})")
+    # Logged every run, not just when overridden: a log pasted into a bug report
+    # has to say which schedule produced it.
+    log(f"liveness probe: after {params.quiet_probe_s:g}s quiet, "
+        f"every {params.probe_interval_s:g}s, dead at {params.dead_after_s:g}s")
 
     reader = threading.Thread(target=serial_reader_thread,
                               args=(args.port, args.baud),

@@ -123,6 +123,21 @@ class TestParams(unittest.TestCase):
         self.assertEqual((p.quiet_probe_s, p.probe_interval_s, p.dead_after_s),
                          (10.0, 5.0, 25.0))
 
+    def test_death_before_the_first_probe_is_rejected(self):
+        # A typo on the command line must not silently condemn a healthy port
+        # without ever asking it anything.
+        with self.assertRaises(ValueError):
+            LivenessParams(quiet_probe_s=10.0, dead_after_s=10.0)
+        with self.assertRaises(ValueError):
+            LivenessParams(quiet_probe_s=30.0, dead_after_s=25.0)
+
+    def test_nonpositive_intervals_are_rejected(self):
+        for bad in ({"quiet_probe_s": 0.0}, {"quiet_probe_s": -1.0},
+                    {"probe_interval_s": 0.0}, {"probe_interval_s": -1.0}):
+            with self.subTest(**bad):
+                with self.assertRaises(ValueError):
+                    LivenessParams(**bad)
+
 
 def _tenth_second_ticks(start, end):
     """The reader thread's ~10 Hz wakeups, without float drift."""

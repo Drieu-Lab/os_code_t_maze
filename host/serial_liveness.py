@@ -44,12 +44,23 @@ class LivenessParams:
     or a momentarily busy host must not condemn a working port, while 25 s is
     still far shorter than the minutes-long freezes this replaces.
 
-    Sane values keep ``quiet_probe_s`` < ``dead_after_s`` and
-    ``probe_interval_s`` > 0.
+    The schedule is tunable because the probe rate doubles as a diagnostic knob:
+    a faster probe both pins the moment of death more tightly and separates a
+    time-triggered failure from a message-count-triggered one. Nonsense
+    combinations are rejected rather than quietly disabling detection.
     """
     quiet_probe_s: float = 10.0
     probe_interval_s: float = 5.0
     dead_after_s: float = 25.0
+
+    def __post_init__(self) -> None:
+        if self.quiet_probe_s <= 0 or self.probe_interval_s <= 0:
+            raise ValueError("quiet_probe_s and probe_interval_s must be > 0")
+        if self.dead_after_s <= self.quiet_probe_s:
+            # Otherwise the port is condemned before it is ever asked anything.
+            raise ValueError(
+                f"dead_after_s ({self.dead_after_s}) must exceed quiet_probe_s "
+                f"({self.quiet_probe_s}), or no probe is ever sent")
 
 
 class LivenessMonitor:
