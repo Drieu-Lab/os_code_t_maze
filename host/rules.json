@@ -37,7 +37,7 @@
     }
   },
   "version": 2,
-  "active_profile": "phase1",
+  "active_profile": "phase2a",
   "defaults": {
     "min_confidence": 0.5,
     "topup_cooldown_ms": 500,
@@ -75,7 +75,7 @@
           "prime_on": "credential",
           "port": 2,
           "pulse_ms": 300,
-          "max_topups": 2,
+          "max_topups": 1,
           "lick_debounce_ms": 150,
           "topup_cooldown_ms": 500,
           "min_confidence": 0.5
@@ -97,7 +97,11 @@
           "lick_debounce_ms": 150,
           "topup_cooldown_ms": 500,
           "min_confidence": 0.5,
-          "debias": { "mode": "uniform", "min": 3, "max": 5 }
+          "debias": {
+            "mode": "uniform",
+            "min": 3,
+            "max": 5
+          }
         }
       ]
     }
