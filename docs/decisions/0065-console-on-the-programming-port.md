@@ -110,13 +110,38 @@ is being chased.
   would need a `availableForWrite()` guard.
 - **`COM4` disappears.** `SerialUSB.begin()` is never called, so the Native CDC
   device stops enumerating entirely. Anything still pointing at COM4 will fail to
-  open rather than fail mysteriously.
+  open rather than fail mysteriously. (**Wrong - see the correction below.**)
 - **The watchdog still earns its keep.** ADR-0062's bounded writes and liveness
   probe and ADR-0064's clock logging are port-agnostic; they now guard the UART
   path, and they are how we will notice if this port has a deadline of its own.
 - **Revisit if:** the Programming port ever wedges, throughput approaches the
   UART ceiling, or the native-stack root cause is found and fixed (in which case
   flip the flag back and keep everything else).
+
+## Correction (2026-07-29, same day)
+
+The decision stands, but one consequence above is wrong and is recorded here
+rather than edited away. **`COM4` does not disappear.** The Arduino SAM core's
+`main()` calls `USBDevice.attach()` unconditionally, before `setup()` runs and
+regardless of whether the sketch ever touches `SerialUSB`, so a Due always
+enumerates its Native CDC device. Verified on the rig: with this firmware
+running, `Arduino Due (COM4)` was present and healthy. What the earlier text
+mistook for the port vanishing was a *wedged* board at 12:31, which really had
+dropped off the bus.
+
+Two consequences of the correction:
+
+- The native USB stack is still attached, merely unused. It appears harmless
+  that way - the 43-minute soak ran with COM4 enumerated but never opened, and
+  run 8 established that the countdown needs a host *open* - but the suspect
+  hardware is still on the bus. `USBDevice.detach()` in `setup()` would remove
+  it outright; deferred rather than done, since it is untested and the port is
+  useful as an instrument (next point).
+- **The board-versus-link experiment now needs no firmware change.** A watcher can
+  open COM4 to start its countdown while the console streams on COM3. If COM4
+  wedges at ~1030 s while COM3 keeps answering, the failure is confined to the
+  native USB path and does not hang `loop()` - which is what the Programming-port
+  heartbeat build was going to be written for.
 
 ## Evidence / links
 
@@ -131,9 +156,11 @@ is being chased.
 - While the board sat wedged at 12:31, the Native port was **absent** from the
   device tree and a phantom `Unknown USB Device (Device Descriptor Request
   Failed)` sat at its hub location (`USB\VID_0000&PID_0002\5&30741CDD&0&9`, the
-  location shared by `Arduino Due (COM4)`), which is what error 31 looks like
-  from the driver's side. Windows reports every absent device as "Unknown", so
-  that node cannot be dated with confidence.
+  location shared by `Arduino Due (COM4)`). Windows reports every absent device as
+  "Unknown", so that node cannot be dated - and a later wedge (14:03) left COM4
+  **still enumerated**, matching the original reports. So the usual failure is a
+  device that answers enumeration but can no longer be configured, and the
+  descriptor-failure node most likely came from a different event.
 - The console has been a compile-time switch since the sketch was written
   (`DUE_USE_NATIVE_USB`, mirroring `firmware/tests/tmaze_test`), so this change
   is one digit plus the host defaults.

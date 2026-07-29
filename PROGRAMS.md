@@ -104,7 +104,9 @@ start_rig.bat COM5       REM override the serial port
 
 Flashed onto the Due with the Arduino IDE rather than run from the PC: open the
 `.ino`, select the board entry **Arduino Due (Programming Port)** and that COM
-port (the Native port no longer enumerates; see ADR-0065), then upload.
+port, then upload. Matching the board entry to the socket the cable is in matters
+- picking the Native entry runs a 1200-bps touch that the Programming port does
+not answer. The console lives on the Programming port (ADR-0065).
 
 | Sketch | Description |
 |--------|-------------|
