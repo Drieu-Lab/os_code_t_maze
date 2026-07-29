@@ -291,8 +291,10 @@ TIPS: Dict[str, Entry] = {
                      "never cuts a playing tone.",
     "phase3.up_stem": "Only start the choice tone while the rat is heading UP the "
                       "stem (toward the junction), not on the way back down.",
-    "phase3.return": "Play the return-arm tone on every return run "
-                     "(CUE_ON,RETURN,<hz>). Identity is a balanced hi/lo schedule "
+    "phase3.return": "Play the return-arm tone when the rat comes back via a "
+                     "return arm AFTER running out via the stem (CUE_ON,RETURN,"
+                     "<hz>); a run that starts up a return arm from the hub gets "
+                     "no cue (ADR-0061). Identity is a balanced hi/lo schedule "
                      "pre-generated per physical arm from the seed and looked up "
                      "by the arm the rat enters (ADR-0047). Fails SAFE on dropout.",
     "phase3.reward_incorrect": "Shaping aid: dispense reward at the central well "

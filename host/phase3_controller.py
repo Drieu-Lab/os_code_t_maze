@@ -532,8 +532,12 @@ class Phase3ControlView(VisionActuator):
             self._prev_zone = st.zone
 
         # WHEN: the positional cue gate. Host supplies identity via ,<hz> (v6).
+        # The RETURN cue additionally requires the shared outbound_used_stem
+        # credential (stem-out excursion) so it fires only on a genuine return,
+        # not when a run starts up a return arm (see docs/decisions/0061).
         self._gate.set_params(snap.params)
-        d = self._gate.step(st.zone, st.direction, st.confidence, st.valid)
+        outbound = task_frame.outbound_used_stem if task_frame is not None else False
+        d = self._gate.step(st.zone, st.direction, st.confidence, st.valid, outbound)
         if d.started == CHOICE:
             freq = self._task.current_choice_freq()
             self._send_cmd(f"CUE_ON,CHOICE,{freq}" if freq is not None

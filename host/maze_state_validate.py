@@ -195,7 +195,11 @@ def cue_onset_events(rows: List[Tuple[float, object]], zone_map: ZoneMap,
     out: List[Tuple[float, str]] = []
     for t, result in rows:
         s = est.update(result, t)
-        d = gate.step(s.zone, s.direction, s.confidence, s.valid)
+        # Mirror the live path's RETURN gate: pass the same canonical outbound
+        # credential task_events derives (see docs/decisions/0061) so the offline
+        # onset latency matches the rig.
+        outbound = s.visited_since(CENTRAL_STEM, HUB)
+        d = gate.step(s.zone, s.direction, s.confidence, s.valid, outbound)
         if d.started is not None:
             out.append((t, s.zone))
     return out

@@ -15,8 +15,10 @@ from maze_state import (CENTRAL_STEM, DOWN_STEM, HUB, JUNCTION, LEFT_RETURN,
                         RIGHT_RETURN, UNKNOWN, UP_STEM)
 
 
-def _valid(gate, zone, direction=None, conf=1.0):
-    return gate.step(zone, direction, conf, True)
+def _valid(gate, zone, direction=None, conf=1.0, outbound=True):
+    # outbound == the shared outbound_used_stem credential the RETURN cue needs
+    # (docs/decisions/0061); defaults True so choice-cue tests are unaffected.
+    return gate.step(zone, direction, conf, True, outbound)
 
 
 def _invalid(gate):
@@ -123,6 +125,33 @@ class TestReturnCue(unittest.TestCase):
     def test_return_disabled(self):
         g = CueGate(CueParams(return_enabled=False))
         self.assertIsNone(_valid(g, LEFT_RETURN).desired)
+
+    def test_no_fire_without_outbound_excursion(self):
+        # A run that STARTS up a return arm from the hub (no stem-out) must not
+        # trigger the return cue (docs/decisions/0061). It is not a fail-safe
+        # skip - it is simply not a genuine return.
+        for zone in (LEFT_RETURN, RIGHT_RETURN):
+            g = CueGate()
+            d = _valid(g, zone, outbound=False)
+            self.assertIsNone(d.desired)
+            self.assertIsNone(d.started)
+            self.assertFalse(d.skipped_return)
+            # Latched for the whole visit: a later frame this visit still silent.
+            self.assertIsNone(_valid(g, zone, outbound=False).desired)
+
+    def test_fires_when_outbound_excursion_used_stem(self):
+        g = CueGate()
+        d = _valid(g, LEFT_RETURN, outbound=True)
+        self.assertEqual(d.desired, RETURN)
+        self.assertEqual(d.started, RETURN)
+
+    def test_direct_return_suppressed_then_real_lap_fires(self):
+        # Visit 1: entered a return arm straight from the hub -> suppressed.
+        g = CueGate()
+        self.assertIsNone(_valid(g, LEFT_RETURN, outbound=False).desired)
+        # Back to the hub, then a proper stem-out lap ends in the return arm.
+        _valid(g, HUB)
+        self.assertEqual(_valid(g, LEFT_RETURN, outbound=True).desired, RETURN)
 
 
 class TestReset(unittest.TestCase):

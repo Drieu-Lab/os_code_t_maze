@@ -22,6 +22,13 @@ Design (see docs/decisions/0045):
     fires). RETURN fails SAFE: the onset is a one-shot decision taken when the
     rat enters the return zone - if vision is not confident THEN, that return's
     cue is skipped for the whole visit (a missed cue beats a mis-placed one).
+  - RETURN also requires an OUTWARD EXCURSION first: the tone only fires if the
+    rat reached the return arm AFTER running out via the stem, not if it started
+    a run by heading up a return arm from the hub. The caller passes the shared
+    ``outbound_used_stem`` credential (task_events: visited_since(CENTRAL_STEM,
+    HUB)) - the SAME predicate that gates a clean loop and the reward - so the
+    return cue keys off the same task-phase vocabulary as the choice cue's
+    up-stem direction gate rather than a bespoke latch (see docs/decisions/0061).
 
 This module is a stateful PURE core (stdlib only, no Tk/OpenCV/serial), like
 maze_state.py / task_events.py / rules_engine.py: it takes RatState fields and
@@ -116,13 +123,21 @@ class CueGate:
 
     # --------------------------------------------------------------- tick
     def step(self, zone: str, direction: Optional[str],
-             confidence: float, valid: bool) -> CueDecision:
+             confidence: float, valid: bool,
+             outbound_used_stem: bool = True) -> CueDecision:
         """Fold one RatState into the desired cue state.
 
         Invalid frames (no trustworthy zone) HOLD the current tone and change no
         edges - a dropout must not chop a playing cue nor be mistaken for the rat
         leaving/re-entering a window. All edge logic therefore runs only on valid
         frames.
+
+        ``outbound_used_stem`` is the shared task-phase credential the caller
+        passes for the RETURN onset (task_events: visited_since(CENTRAL_STEM,
+        HUB)) - the same predicate that gates a clean loop / the reward. The
+        return tone fires only when it is True, so a rat that starts a run by
+        heading up a return arm from the hub (no stem-out) gets no return cue
+        (see docs/decisions/0061). It does not affect the CHOICE cue.
         """
         if not valid:
             return CueDecision(desired=self._active)
@@ -155,10 +170,16 @@ class CueGate:
         # --- ON: only when nothing is sounding. ---
         if self._active is None:
             if in_return and p.return_enabled:
-                # Fail-SAFE: decide exactly once per visit. Confident -> fire;
-                # otherwise skip this whole return's cue (no later retry).
+                # One-shot decision per visit. The return cue requires an OUTWARD
+                # EXCURSION first (outbound_used_stem; see docs/decisions/0061) -
+                # the same credential the reward/clean-loop use - so a run that
+                # starts up a return arm from the hub gets no cue. Among genuine
+                # returns it fails SAFE: confident -> fire; otherwise skip this
+                # whole return's cue (no later retry).
                 if not self._return_visit_decided:
-                    if confident:
+                    if not outbound_used_stem:
+                        pass  # not a genuine return (no stem-out); no cue
+                    elif confident:
                         self._active = RETURN
                         started = RETURN
                         return_arm = _SIDE_OF_RETURN.get(zone)
