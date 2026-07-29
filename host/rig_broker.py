@@ -33,6 +33,7 @@ from typing import List, Optional
 
 import serial
 
+from protocol import leading_ms
 from serial_liveness import DEAD, PROBE, LivenessMonitor, LivenessParams
 
 # ================= DEFAULTS =================
@@ -75,6 +76,14 @@ reopen_request = threading.Event()
 # CLI-configured schedule before that thread starts. see docs/decisions/0062
 liveness = LivenessMonitor()
 
+# The Due's own clock, read off the "<ms>," prefix of the last line it sent. A
+# lockup leaves no other trace of how long the board had been up, and the host's
+# wall clock cannot supply it. Written only by serial_reader_thread; a failure
+# logged from a client thread may read a value a moment stale, which costs
+# nothing but a slightly old number in a log line. see docs/decisions/0064
+last_ms: Optional[int] = None
+last_ms_at = 0.0
+
 # Lightweight throughput counters for the periodic stats line.
 stats_lock = threading.Lock()
 stats = {"from_due": 0, "to_due": 0, "probes": 0}
@@ -98,7 +107,7 @@ def open_serial(port: str, baud: int) -> serial.Serial:
 
 def serial_reader_thread(port: str, baud: int) -> None:
     """Read lines from the Due and broadcast them to every connected client."""
-    global ser
+    global ser, last_ms, last_ms_at
     # State for throttling a repeating open failure (see OPEN_FAIL_SUMMARY_S). The
     # retry interval itself is deliberately NOT backed off: after the operator
     # presses RESET the board must come back within a couple of seconds.
@@ -116,6 +125,7 @@ def serial_reader_thread(port: str, baud: int) -> None:
                     fail_count, fail_msg = 0, ""
                 reopen_request.clear()
                 liveness.reset(time.monotonic())
+                last_ms = None  # the next line reports this board's uptime
                 log("serial open")
             except Exception as e:
                 fail_count += 1
@@ -168,6 +178,17 @@ def serial_reader_thread(port: str, baud: int) -> None:
         if not line:
             continue
 
+        ms = leading_ms(line)
+        if ms is not None:
+            if last_ms is None:
+                # The firmware waits for the host to open the port before it
+                # runs at all, so this says how much of the board's uptime we
+                # were absent for - the one number that separates "dead at N ms
+                # of uptime" from "dead N s after the host attached".
+                log(f"firmware uptime at connect: {ms} ms")
+            last_ms = ms
+            last_ms_at = time.monotonic()
+
         with stats_lock:
             stats["from_due"] += 1
         broadcast(line)
@@ -187,9 +208,18 @@ def _check_liveness() -> None:
                 stats["probes"] += 1
     elif verdict == DEAD:
         log(f"DUE NOT RESPONDING: no serial data for "
-            f"{liveness.quiet_for(now):.0f}s despite probes; will reopen. "
-            f"If reopening fails, press RESET on the Due.")
+            f"{liveness.quiet_for(now):.0f}s despite probes{_last_line_note()}; "
+            f"will reopen. If reopening fails, press RESET on the Due.")
         reopen_request.set()
+
+
+def _last_line_note() -> str:
+    """The Due's clock at its last word, for a failure log line (or "")."""
+    ms = last_ms
+    if ms is None:
+        return ""
+    return (f"; last firmware line: ms={ms} (board up {ms / 1000.0:.1f} s), "
+            f"{time.monotonic() - last_ms_at:.1f} s ago")
 
 
 def _close_serial() -> None:
@@ -280,7 +310,8 @@ def _write_to_due(cmd: str, source: str) -> bool:
             # Bounded by WRITE_TIMEOUT_S, so this now returns instead of hanging.
             # Hand the port back to the reader thread rather than closing it here:
             # we hold serial_lock, and _close_serial() wants it too.
-            log(f"serial write failed forwarding {cmd!r} from {source}: {e}")
+            log(f"serial write failed forwarding {cmd!r} from {source}: "
+                f"{e}{_last_line_note()}")
             reopen_request.set()
             return False
     return True

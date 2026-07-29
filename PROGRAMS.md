@@ -26,7 +26,7 @@ running. Run each in its own terminal (or use the launcher below).
 
 | Program | Description | Command (from `host/`) |
 |---------|-------------|------------------------|
-| `rig_broker.py` | Owns the Arduino Due's COM port and fans its serial stream out over TCP `localhost:5555`. Run this first. Watch its console during a run: it bounds every write and probes a quiet port with `STATUS`, so a frozen Due is reported as `DUE NOT RESPONDING` within ~25 s (press RESET on the Due; see ADR-0062). `--probe-quiet/--probe-interval/--probe-dead` (seconds) tighten that schedule when chasing a lockup. | `python rig_broker.py --port COM4` |
+| `rig_broker.py` | Owns the Arduino Due's COM port and fans its serial stream out over TCP `localhost:5555`. Run this first. Watch its console during a run: it bounds every write and probes a quiet port with `STATUS`, so a frozen Due is reported as `DUE NOT RESPONDING` within ~25 s (press RESET on the Due; see ADR-0062). `--probe-quiet/--probe-interval/--probe-dead` (seconds) tighten that schedule when chasing a lockup. It also logs the Due's own clock - firmware uptime when the port opens, and the last line's `ms` when a write fails - so a lockup is timestamped on the board's clock without a logger attached (ADR-0064). | `python rig_broker.py --port COM4` |
 | `rig_logger.py` | Headless broker client that records every firmware line to `host/data/<animal>_<time>.csv` (wall-clock-stamped). | `python rig_logger.py` |
 | `maze_gui.py` | Live monitor for body sensors, lick sensors, and solenoid flush buttons. | `python maze_gui.py` |
 | `lick_tuner.py` | Real-time lick-edge traces for tuning the lick-detector amplifiers. | `python lick_tuner.py` |

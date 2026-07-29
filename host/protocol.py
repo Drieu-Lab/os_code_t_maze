@@ -13,6 +13,9 @@ Two layers:
   - parse(line) -> ParsedLine | None
         The generic "<ms>,<TYPE>,fields..." split, validating the uniform
         prefix. Use this when dispatching on several types.
+  - leading_ms(line) -> int | None
+        Just the "<ms>," prefix, for a caller that wants the firmware clock
+        without a full split.
   - Per-type helpers (lick_edge, sensor_edge, sol_pulse, mode_name, animal_id,
         reward_info, cue_info)
         Each returns the decoded payload for exactly one line type, or None if
@@ -64,6 +67,23 @@ def parse(line: str) -> Optional[ParsedLine]:
     if not typ:
         return None
     return ParsedLine(ms=int(parts[0]), type=typ, fields=tuple(parts[2:]))
+
+
+def leading_ms(line: str) -> Optional[int]:
+    """The firmware clock from a line's "<ms>," prefix, or None.
+
+    A cheaper cousin of parse() for the one caller that wants nothing but the
+    timestamp: the broker relays lines verbatim and must not pay for a full
+    split on every line just to remember when the Due last spoke.
+    see docs/decisions/0064
+
+    isascii() guards the isdigit() fast path, which is also true of unicode
+    digits that int() then rejects - and this module never raises.
+    """
+    head, sep, _ = line.partition(",")
+    if not sep or not head.isascii() or not head.isdigit():
+        return None
+    return int(head)
 
 
 # ------------------------------ edge lines (S / L) ------------------------------

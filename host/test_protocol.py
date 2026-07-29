@@ -13,9 +13,9 @@ import unittest
 import dataclasses
 
 import protocol
-from protocol import (animal_id, classify, cue_info, lick_edge, mode_name,
-                      parse, reward_info, sanitize_animal_id, sensor_edge,
-                      sol_pulse)
+from protocol import (animal_id, classify, cue_info, leading_ms, lick_edge,
+                      mode_name, parse, reward_info, sanitize_animal_id,
+                      sensor_edge, sol_pulse)
 
 
 class TestParse(unittest.TestCase):
@@ -36,10 +36,38 @@ class TestParse(unittest.TestCase):
             self.assertIsNone(parse(bad), bad)
 
     def test_never_raises(self):
-        for helper in (parse, lick_edge, sensor_edge, sol_pulse, mode_name,
-                       animal_id, reward_info, cue_info):
+        for helper in (parse, leading_ms, lick_edge, sensor_edge, sol_pulse,
+                       mode_name, animal_id, reward_info, cue_info):
             for bad in ("", ",,,,", "garbage", "1,2,3", "\x00,\x00"):
                 helper(bad)  # must not raise
+
+
+class TestLeadingMs(unittest.TestCase):
+    """The broker reads this off every line to timestamp a lockout (ADR-0064)."""
+
+    def test_reads_the_prefix(self):
+        self.assertEqual(leading_ms("123,TRIAL,4,LEFT"), 123)
+        self.assertEqual(leading_ms("1030418,STATUS,0,0,0"), 1030418)
+        self.assertEqual(leading_ms("0,SEQ_END"), 0)
+
+    def test_full_unsigned_long_range(self):
+        # The Due's millis() is a 32-bit unsigned long, so it reaches 4.29e9
+        # (~49 days) before wrapping - well past anything int32 would hold.
+        self.assertEqual(leading_ms("4294967295,S,1,1"), 4294967295)
+
+    def test_rejects_lines_without_a_numeric_prefix(self):
+        for bad in ("", "hello,S,1,1", "-5,MODE,FREEROAM", "1.5,S,1,1",
+                    " 12,S,1,1", ",S,1,1"):
+            self.assertIsNone(leading_ms(bad), bad)
+
+    def test_rejects_a_bare_number(self):
+        # No comma is not a firmware line, however numeric it looks.
+        self.assertIsNone(leading_ms("12"))
+
+    def test_rejects_unicode_digits_int_would_not_take(self):
+        # isdigit() alone says yes to these; int() then raises. Line noise on a
+        # half-open port must not take the broker down.
+        self.assertIsNone(leading_ms("\u00b2,S,1,1"))  # superscript two
 
 
 class TestEdges(unittest.TestCase):

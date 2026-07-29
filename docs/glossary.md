@@ -169,6 +169,15 @@ Python's built-in GUI toolkit, used for all the on-screen windows and tabs. "The
 Tk thread" is the thread that owns the GUI; GUI objects must only be touched from
 it, which is why cross-thread hand-offs use [snapshots](#snapshot).
 
+### USB CDC
+The USB standard that lets a device pretend to be an old-style serial port. The
+Arduino Due's Native USB port is a CDC device, so `COM4` on the PC is a *virtual*
+port: data travels in USB packets at USB speed, and the 115200 baud both sides
+quote is carried along and ignored (no wire is clocked at that rate). It matters
+here because the board services its CDC endpoints from the firmware's main loop —
+so a hung loop stops the "serial" link while the board still looks perfectly
+plugged in. See ADR-0062 and ADR-0064.
+
 ### Watchdog
 Code whose only job is to notice that something has stopped working and raise the
 alarm. The [broker](#broker)'s watchdog uses a
