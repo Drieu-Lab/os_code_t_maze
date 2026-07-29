@@ -37,8 +37,8 @@ from protocol import leading_ms
 from serial_liveness import DEAD, PROBE, LivenessMonitor, LivenessParams
 
 # ================= DEFAULTS =================
-DEFAULT_PORT = "COM4"          # Arduino Due native USB
-DEFAULT_BAUD = 115200
+DEFAULT_PORT = "COM3"          # Due Programming port; see docs/decisions/0065
+DEFAULT_BAUD = 115200          # a real UART rate on this port, not a formality
 DEFAULT_HOST = "127.0.0.1"     # localhost only; safe default
 DEFAULT_TCP_PORT = 5555
 SERIAL_REOPEN_DELAY_S = 2.0
@@ -76,9 +76,11 @@ reopen_request = threading.Event()
 # CLI-configured schedule before that thread starts. see docs/decisions/0062
 liveness = LivenessMonitor()
 
-# The Due's own clock, read off the "<ms>," prefix of the last line it sent. A
-# lockup leaves no other trace of how long the board had been up, and the host's
-# wall clock cannot supply it. Written only by serial_reader_thread; a failure
+# The Due's own clock, read off the "<ms>," prefix of the last line it sent.
+# NOTE it is the firmware's SESSION clock (millis() - session.startMs), not
+# uptime: it starts when setup() stops waiting for a host and restarts on a MODE
+# switch. A lockup otherwise leaves no board-side timestamp at all, and the
+# host's wall clock cannot supply one. Written only by serial_reader_thread; a failure
 # logged from a client thread may read a value a moment stale, which costs
 # nothing but a slightly old number in a log line. see docs/decisions/0064
 last_ms: Optional[int] = None
@@ -97,6 +99,8 @@ def log(msg: str) -> None:
 # ================= SERIAL =================
 def open_serial(port: str, baud: int) -> serial.Serial:
     s = serial.Serial(port, baud, timeout=0.1, write_timeout=WRITE_TIMEOUT_S)
+    # Opening the Programming port asserts DTR, which the ATmega16U2 turns into a
+    # reset of the SAM3X, so this also waits out a reboot. see docs/decisions/0065
     time.sleep(2.0)  # let the Due settle (matches existing GUIs)
     try:
         s.reset_input_buffer()
@@ -181,11 +185,11 @@ def serial_reader_thread(port: str, baud: int) -> None:
         ms = leading_ms(line)
         if ms is not None:
             if last_ms is None:
-                # The firmware waits for the host to open the port before it
-                # runs at all, so this says how much of the board's uptime we
-                # were absent for - the one number that separates "dead at N ms
-                # of uptime" from "dead N s after the host attached".
-                log(f"firmware uptime at connect: {ms} ms")
+                # A few seconds on the Programming port, whose open resets the
+                # board. A large value means we joined a session that was already
+                # running - which is how the two clocks get separated, and what
+                # the Native USB port used to do. see docs/decisions/0065
+                log(f"firmware session clock at connect: {ms} ms")
             last_ms = ms
             last_ms_at = time.monotonic()
 
@@ -218,8 +222,8 @@ def _last_line_note() -> str:
     ms = last_ms
     if ms is None:
         return ""
-    return (f"; last firmware line: ms={ms} (board up {ms / 1000.0:.1f} s), "
-            f"{time.monotonic() - last_ms_at:.1f} s ago")
+    return (f"; last firmware line: ms={ms} (session clock {ms / 1000.0:.1f} s)"
+            f", {time.monotonic() - last_ms_at:.1f} s ago")
 
 
 def _close_serial() -> None:

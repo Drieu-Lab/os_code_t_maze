@@ -164,19 +164,34 @@ dedicated **actuation thread** (makes reward/tone decisions). Concurrency betwee
 them is the reason [locks](#lock), [queues](#queue), and
 [snapshots](#snapshot) exist. See ADR-0043.
 
+### Session clock
+The number at the start of every firmware line (`<ms>,<TYPE>,...`). It counts
+milliseconds since the *session* began — `millis() - session.startMs` — which is
+not the same as how long the board has been powered: it starts when the firmware
+stops waiting for the PC to open the port, and **restarts on a MODE switch**. The
+board's true uptime is never sent. Worth remembering when comparing timestamps
+across a reconnect or a mode change. See ADR-0064.
+
 ### Tk / tkinter
 Python's built-in GUI toolkit, used for all the on-screen windows and tabs. "The
 Tk thread" is the thread that owns the GUI; GUI objects must only be touched from
 it, which is why cross-thread hand-offs use [snapshots](#snapshot).
 
 ### USB CDC
-The USB standard that lets a device pretend to be an old-style serial port. The
-Arduino Due's Native USB port is a CDC device, so `COM4` on the PC is a *virtual*
-port: data travels in USB packets at USB speed, and the 115200 baud both sides
-quote is carried along and ignored (no wire is clocked at that rate). It matters
-here because the board services its CDC endpoints from the firmware's main loop —
-so a hung loop stops the "serial" link while the board still looks perfectly
-plugged in. See ADR-0062 and ADR-0064.
+The USB standard that lets a device pretend to be an old-style serial port, so
+`COM3` on the PC is a *virtual* port rather than a wire. The Due has two, and the
+difference matters:
+
+- **Native USB** — the SAM3X chip is itself the USB device, servicing its CDC
+  endpoints from the firmware's main loop. Data moves at USB speed and the 115200
+  baud both sides quote is ignored (nothing is clocked at that rate). A hung loop
+  therefore stops the link while the board still looks plugged in. This is the
+  port that wedges ~1030 s after the host opens it, which is why we left it.
+- **Programming port** (what the rig uses now) — the SAM3X's real UART goes to a
+  separate ATmega16U2 chip, which does the USB talking. 115200 is a genuine wire
+  rate here, and opening the port resets the board.
+
+See ADR-0062, ADR-0064 and ADR-0065.
 
 ### Watchdog
 Code whose only job is to notice that something has stopped working and raise the

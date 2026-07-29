@@ -10,7 +10,8 @@ REM                 The three windows it spawns inherit this shell's PATH, so
 REM                 they all use the env's python.exe (with pyserial, matplotlib,
 REM                 etc. already installed).
 REM
-REM   - The broker owns COM4 and exposes it on TCP localhost:5555.
+REM   - The broker owns COM3 (the Due's Programming port; see docs/decisions/0065)
+REM     and exposes it on TCP localhost:5555.
 REM   - The two GUIs are TCP clients of the broker, so both can run at once.
 REM
 REM   Override the serial port from the command line if needed, e.g.
@@ -23,7 +24,7 @@ setlocal
 cd /d "%~dp0"
 
 set "RIG_PORT=%~1"
-if "%RIG_PORT%"=="" set "RIG_PORT=COM4"
+if "%RIG_PORT%"=="" set "RIG_PORT=COM3"
 
 REM ---- Tag every program we launch with one shared session id ----------------
 REM Each python process below is started with "-X rigsid=%RIG_SID%". That option

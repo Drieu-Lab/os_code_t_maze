@@ -105,6 +105,32 @@ uptime rather than carrying a stale board's clock forward.
 - If the firmware ever stopped prefixing `ms`, the notes would quietly vanish
   rather than break; the tests guard the parser, not the firmware's format.
 
+## Correction (2026-07-29, same day)
+
+The decision stands but one premise above is wrong, and it is recorded here
+rather than edited away. **The `<ms>,` prefix is the firmware's session clock,
+not the board's uptime**: every emit site computes `millis() - session.startMs`,
+and `session.startMs` is set by `startFreeRoam` / `startFullTask` at the end of
+`setup()` — after the wait for a host — and again on every MODE switch. The
+board's true `millis()` is never transmitted.
+
+Consequences of the correction:
+
+- The log lines now say "firmware session clock", not "uptime".
+- **E1b as described in Consequences cannot work.** The first line after a
+  delayed connect reads a few seconds, not ~300000 ms, because the session
+  starts at attach. Confirmed on the rig: after a RESET plus a five-minute
+  wait, `firmware session clock at connect: 3986 ms`.
+- Earlier readings quoted as uptime were session time — including occurrence 1's
+  972401 ms (ADR-0062's evidence) and occurrence 4's arithmetic in
+  `docs/notes/Bugs.md`. They coincided with time-since-attach in those runs, so
+  the intervals derived from them still hold; only the label was wrong.
+- What the field is still good for: it timestamps death on the board's own clock
+  to within one probe interval, and because the session clock survives a
+  disconnect (only a MODE switch resets it), reconnecting to an already-running
+  board reads a large value — which is what separates a board-side countdown
+  from one that restarts with the USB session (E1c in `docs/notes/Bugs.md`).
+
 ## Evidence / links
 
 - Run 5 (2026-07-28, fast probe): RESET pressed with the broker running at

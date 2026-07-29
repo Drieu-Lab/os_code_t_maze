@@ -17,12 +17,15 @@
 
 #include <string.h>
 
-// Arduino Due console: Native USB (SerialUSB) by default, matching tmaze_test so
-// the broker/GUIs use the same port. To use the Programming port instead, set
-// DUE_USE_NATIVE_USB 0 below (or -D it). CONSOLE replaces Serial throughout.
+// Arduino Due console: the Programming port (Serial -> UART0 -> ATmega16U2).
+// CONSOLE replaces Serial throughout. Set DUE_USE_NATIVE_USB 1 for the Native USB
+// port (SerialUSB) instead - but note that path wedges ~1030 s after the host
+// opens it and only a RESET clears it, which is why the console lives here.
+// Upload with the "Arduino Due (Programming Port)" board entry.
+// see docs/decisions/0065
 #if defined(__SAM3X8E__)
 #ifndef DUE_USE_NATIVE_USB
-#define DUE_USE_NATIVE_USB 1
+#define DUE_USE_NATIVE_USB 0
 #endif
 #if DUE_USE_NATIVE_USB
 #define CONSOLE SerialUSB

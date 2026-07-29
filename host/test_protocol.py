@@ -51,7 +51,7 @@ class TestLeadingMs(unittest.TestCase):
         self.assertEqual(leading_ms("0,SEQ_END"), 0)
 
     def test_full_unsigned_long_range(self):
-        # The Due's millis() is a 32-bit unsigned long, so it reaches 4.29e9
+        # The firmware clock is a 32-bit unsigned long, so it reaches 4.29e9
         # (~49 days) before wrapping - well past anything int32 would hold.
         self.assertEqual(leading_ms("4294967295,S,1,1"), 4294967295)
 

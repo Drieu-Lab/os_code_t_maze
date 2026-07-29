@@ -72,6 +72,10 @@ def parse(line: str) -> Optional[ParsedLine]:
 def leading_ms(line: str) -> Optional[int]:
     """The firmware clock from a line's "<ms>," prefix, or None.
 
+    That clock is the firmware's session time (``millis() - session.startMs``),
+    not the board's uptime: it starts when the host attaches and restarts on a
+    MODE switch.
+
     A cheaper cousin of parse() for the one caller that wants nothing but the
     timestamp: the broker relays lines verbatim and must not pay for a full
     split on every line just to remember when the Due last spoke.

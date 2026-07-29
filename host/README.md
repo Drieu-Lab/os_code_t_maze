@@ -44,14 +44,20 @@ The simplest path on Windows is the launcher, which starts the broker and both
 GUIs (run it from an Anaconda Prompt with the rig's conda env activated):
 
 ```
-start_rig.bat            REM defaults to COM4
+start_rig.bat            REM defaults to COM3, the Due's Programming port
 start_rig.bat COM5       REM override the serial port
 ```
+
+The console lives on the Programming port because the Native USB port wedges
+~1030 s after the host opens it (see [ADR-0065](../docs/decisions/0065-console-on-the-programming-port.md)).
+Two consequences worth knowing at the bench: opening the port **resets the board**,
+so starting the broker begins a fresh firmware session with a new trial sequence,
+and firmware uploads need the "Arduino Due (Programming Port)" board entry.
 
 Or start the pieces manually:
 
 ```
-python rig_broker.py --port COM4      # terminal 1
+python rig_broker.py --port COM3      # terminal 1
 python maze_gui.py                    # terminal 2
 python lick_tuner.py                  # terminal 3
 python experiment_control.py          # terminal 4 (maze illustration)
