@@ -62,7 +62,7 @@ class TrialConfig:
     """
     max_trials: int = 200
     block_size: int = 20
-    max_same_run: int = 3
+    max_same_run: int = 4
     high_tone_is_left: bool = True
     high_tone_hz: int = 8000
     low_tone_hz: int = 4000

@@ -11,14 +11,16 @@ from __future__ import annotations
 import unittest
 
 from cue_gate import CHOICE, RETURN, CueGate, CueParams
-from maze_state import (CENTRAL_STEM, DOWN_STEM, HUB, JUNCTION, LEFT_RETURN,
-                        RIGHT_RETURN, UNKNOWN, UP_STEM)
+from maze_state import (CENTRAL_STEM, DOWN_STEM, HUB, JUNCTION, LEFT_CHOICE,
+                        LEFT_RETURN, RIGHT_RETURN, UNKNOWN, UP_STEM)
 
 
-def _valid(gate, zone, direction=None, conf=1.0, outbound=True):
+def _valid(gate, zone, direction=None, conf=1.0, outbound=True, on_leg=True):
     # outbound == the shared outbound_used_stem credential the RETURN cue needs
-    # (docs/decisions/0061); defaults True so choice-cue tests are unaffected.
-    return gate.step(zone, direction, conf, True, outbound)
+    # (docs/decisions/0061); on_leg == the left_hub_via_stem credential the CHOICE
+    # cue needs (docs/decisions/0067). Both default True so the tests that are
+    # about the OTHER cue read unchanged.
+    return gate.step(zone, direction, conf, True, outbound, on_leg)
 
 
 def _invalid(gate):
@@ -81,6 +83,79 @@ class TestChoiceCue(unittest.TestCase):
     def test_choice_disabled(self):
         g = CueGate(CueParams(choice_enabled=False))
         self.assertIsNone(_valid(g, CENTRAL_STEM, UP_STEM).desired)
+
+
+class TestChoiceCueOutboundLeg(unittest.TestCase):
+    """The hub-departure credential (docs/decisions/0067).
+
+    These run with ``require_up_stem=False``, which is how the rig is operated:
+    the direction gate is off, so the credential is the ONLY thing distinguishing
+    an outbound trial leg from a lap being run backwards.
+    """
+
+    def setUp(self):
+        self.gate = CueGate(CueParams(require_up_stem=False))
+
+    def test_backwards_lap_is_silent_through_the_stem(self):
+        # Out along a return arm, round through the choice arm, home down the
+        # stem. The credentials are the values task_events really reports along
+        # that route: no stem-out excursion until the stem itself is reached (so
+        # the return cue is correctly suppressed on the way out), and the trip
+        # never departed up the stem, so the choice cue stays silent throughout -
+        # including on the descent, where outbound_used_stem has become true.
+        g = self.gate
+        lap = ((HUB, False), (LEFT_RETURN, False), (LEFT_CHOICE, False),
+               (JUNCTION, False), (CENTRAL_STEM, True))
+        for zone, outbound in lap:
+            d = _valid(g, zone, DOWN_STEM, outbound=outbound, on_leg=False)
+            self.assertIsNone(d.desired, zone)
+            self.assertIsNone(d.started, zone)
+
+    def test_next_hub_departure_fires_normally(self):
+        # The suppression above must not linger: the next proper run is cued.
+        g = self.gate
+        self.assertIsNone(_valid(g, CENTRAL_STEM, DOWN_STEM, on_leg=False).desired)
+        _valid(g, HUB, on_leg=False)
+        self.assertEqual(_valid(g, CENTRAL_STEM, UP_STEM, on_leg=True).desired,
+                         CHOICE)
+
+    def test_reversal_after_the_choice_still_plays(self):
+        # The credential is held for the whole trip, so a rat that commits a
+        # choice and then backs into the stem hears the tone again. Deliberate:
+        # the cue is a function of position within the trip (ADR-0067).
+        g = self.gate
+        self.assertEqual(_valid(g, CENTRAL_STEM, UP_STEM).desired, CHOICE)
+        self.assertTrue(_valid(g, JUNCTION, UP_STEM).stopped)
+        _valid(g, LEFT_CHOICE, None)
+        d = _valid(g, CENTRAL_STEM, DOWN_STEM)
+        self.assertEqual(d.desired, CHOICE)
+        self.assertEqual(d.started, CHOICE)
+
+    def test_retreat_down_the_stem_still_plays(self):
+        # With the direction gate off, a partial retreat toward the hub does not
+        # cut the tone. Accepted trade-off of running require_up_stem off; pinned
+        # here so it is not "fixed" by accident.
+        g = self.gate
+        self.assertEqual(_valid(g, CENTRAL_STEM, UP_STEM).desired, CHOICE)
+        d = _valid(g, CENTRAL_STEM, DOWN_STEM)
+        self.assertEqual(d.desired, CHOICE)
+        self.assertFalse(d.stopped)
+
+    def test_credential_cuts_a_playing_tone(self):
+        # Belt and braces: the gate's ON/OFF state stays coherent if the
+        # credential ever clears while the rat is still in the window.
+        g = self.gate
+        self.assertEqual(_valid(g, CENTRAL_STEM, UP_STEM).desired, CHOICE)
+        d = _valid(g, CENTRAL_STEM, UP_STEM, on_leg=False)
+        self.assertIsNone(d.desired)
+        self.assertTrue(d.stopped)
+
+    def test_credential_does_not_gate_the_return_cue(self):
+        # The two credentials are independent: a return cue on a genuine inbound
+        # leg fires even though that trip's choice credential has been cleared.
+        g = self.gate
+        d = _valid(g, LEFT_RETURN, outbound=True, on_leg=False)
+        self.assertEqual(d.desired, RETURN)
 
 
 class TestReturnCue(unittest.TestCase):

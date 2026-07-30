@@ -45,6 +45,15 @@ the thin layer around a core that wires it to the screen, camera, or serial port
 (the `*_view.py` files). Keep logic in cores, not shells. See
 [`CONTRIBUTING.md`](../CONTRIBUTING.md).
 
+### Credential
+A fact about *where the animal is in the current trip* that something must have
+earned before it is allowed to happen — "this trip left the hub up the stem"
+(`left_hub_via_stem`), or "this trip has run out via the stem" (`outbound_used_stem`).
+Distinct from a [gate](#gate), which is about the rig being ready; a credential is
+about the animal's route. They all come from one place, the task-event layer
+(`host/task_events.py`), so the two tones and the reward cannot disagree about
+what a trip is. See ADR-0026, ADR-0061, ADR-0067.
+
 ### DAC
 Digital-to-Analog Converter — the hardware that turns a digital number into an
 analog voltage. Here it drives audio-tone output. "Host owns the DAC" means the

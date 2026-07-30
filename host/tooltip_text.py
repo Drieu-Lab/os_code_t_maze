@@ -286,11 +286,17 @@ TIPS: Dict[str, Entry] = {
                   "Open Ephys TTLs. Disarming cuts the tone and restores firmware "
                   "autonomy (CUE,BEAM). See docs/decisions/0046.",
     "phase3.choice": "Play the CHOICE tone while the rat is in the central-stem "
-                     "zone. The host supplies the tone identity for the current "
-                     "trial (CUE_ON,CHOICE,<hz>). Fails OPEN: a confidence dropout "
+                     "zone, on a trip that set OFF up the stem from the hub "
+                     "(ADR-0067) - a lap run backwards, out along a return arm, "
+                     "stays silent crossing the stem on its way home. The host "
+                     "supplies the tone identity for the current trial "
+                     "(CUE_ON,CHOICE,<hz>). Fails OPEN: a confidence dropout "
                      "never cuts a playing tone.",
     "phase3.up_stem": "Only start the choice tone while the rat is heading UP the "
-                      "stem (toward the junction), not on the way back down.",
+                      "stem (toward the junction), not on the way back down. With "
+                      "this OFF the tone plays in either direction for the whole "
+                      "trip, including a reversal back into the stem after the "
+                      "choice; the hub-departure requirement above still applies.",
     "phase3.return": "Play the return-arm tone when the rat comes back via a "
                      "return arm AFTER running out via the stem (CUE_ON,RETURN,"
                      "<hz>); a run that starts up a return arm from the hub gets "

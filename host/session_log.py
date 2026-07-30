@@ -10,8 +10,10 @@ firmware ``ms`` <-> wall via the serial log), but nothing records WHICH files
 belong to one session or anchors them to a shared instant.
 
 This core builds that index: a ``SessionManifest`` holding a ``session_id``, the
-animal, a start/end clock anchor, and a map of the session's stream files. The
-thin ``session_controller.py`` shell mints it, fills the stream paths as they
+animal, a start/end clock anchor, and a map of the session's stream files, plus
+``path_within_session`` - the rule for whether a resolved path actually belongs to
+this session's folder tree (see docs/decisions/0066). The thin
+``session_controller.py`` shell mints the manifest, fills the stream paths as they
 resolve, and writes it to disk; this module only builds and renders it (no file
 I/O, no Tk/serial), so it is headlessly testable like the other pure cores.
 
@@ -33,6 +35,7 @@ Headless tests: python -m unittest test_session_log.
 from __future__ import annotations
 
 import json
+import os.path
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -59,6 +62,33 @@ def clock_snapshot() -> Dict[str, Any]:
         "mono": time.monotonic(),
         "iso": datetime.now().isoformat(timespec="milliseconds"),
     }
+
+
+def path_within_session(path: str, session_dir: str) -> bool:
+    """Whether ``path`` lies inside ``session_dir``'s folder tree.
+
+    The test behind the manifest's "a stream file belongs to this session" rule
+    (see docs/decisions/0049, 0066): a recorder can hand back a path it bound
+    before this session existed, and the manifest must refuse it rather than point
+    at another session's data.
+
+    Pure path-*string* logic (``os.path`` normalisation only - no filesystem
+    access, no current directory), so it stays headlessly testable like the rest of
+    this core. Case- and separator-insensitive, as Windows paths require. A path on
+    a different drive (the ``host/data`` fallback vs a recordings drive) or the
+    folder itself is not "within".
+    """
+    if not path or not session_dir:
+        return False
+    base = os.path.normcase(os.path.normpath(session_dir))
+    target = os.path.normcase(os.path.normpath(path))
+    if target == base:
+        return False
+    try:
+        return os.path.commonpath([base, target]) == base
+    except ValueError:
+        # Different drives, or one path relative and the other absolute.
+        return False
 
 
 def _default_fiducial() -> Dict[str, Any]:

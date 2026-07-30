@@ -8,9 +8,10 @@ host/:
     python -m unittest test_task_events
 
 Covers (see docs/decisions/0026): the well-arrival edge; the choice-entered edge
-(left/right); outbound_used_stem (stem vs return-arm approach); clean vs unclean
-loop detection; and the same-side run aggregate (counts every closed loop,
-rewarded or not; resets on a side switch).
+(left/right); outbound_used_stem (stem vs return-arm approach); left_hub_via_stem
+(how the trip DEPARTED, docs/decisions/0067); clean vs unclean loop detection; and
+the same-side run aggregate (counts every closed loop, rewarded or not; resets on
+a side switch).
 """
 
 from __future__ import annotations
@@ -125,6 +126,51 @@ class TestOutboundStem(unittest.TestCase):
         f = h.run([P_HUB, P_LRETURN, P_LCHOICE])
         self.assertEqual(f.choice_entered, LEFT)
         self.assertFalse(f.outbound_used_stem)
+
+
+class TestLeftHubViaStem(unittest.TestCase):
+    """How the trip DEPARTED the hub (docs/decisions/0067) - the credential the
+    Phase 3 choice cue needs. Distinct from outbound_used_stem, which only says
+    the stem has been visited at some point since the hub and is therefore true
+    on a backwards lap too, once the animal walks into the stem from the junction.
+    """
+
+    def test_armed_by_the_departure_and_held_for_the_whole_trip(self):
+        h = _Harness()
+        self.assertFalse(h.step(P_HUB).left_hub_via_stem)
+        self.assertTrue(h.step(P_STEM).left_hub_via_stem)
+        for pt in (P_JUNCTION, P_LCHOICE, P_LRETURN):
+            self.assertTrue(h.step(pt).left_hub_via_stem, pt)
+        # Home again -> cleared, ready for the next trip's departure to decide.
+        self.assertFalse(h.step(P_HUB).left_hub_via_stem)
+
+    def test_survives_a_reversal_back_into_the_stem(self):
+        # The case the choice cue is built around: after committing a choice the
+        # animal backs into the stem, and the credential must still hold so the
+        # tone plays again.
+        h = _Harness()
+        f = h.run([P_HUB, P_STEM, P_JUNCTION, P_LCHOICE, P_JUNCTION, P_STEM])
+        self.assertTrue(f.left_hub_via_stem)
+
+    def test_backwards_lap_never_arms_it(self):
+        # Out along the return arm and home down the stem: the trip did not set
+        # off up the stem, so the credential stays False the whole way - even
+        # though outbound_used_stem turns true once the stem is reached.
+        h = _Harness()
+        for pt in (P_HUB, P_LRETURN, P_LCHOICE, P_JUNCTION):
+            self.assertFalse(h.step(pt).left_hub_via_stem, pt)
+        f = h.step(P_STEM)
+        self.assertFalse(f.left_hub_via_stem)
+        self.assertTrue(f.outbound_used_stem)   # the two really do differ here
+
+    def test_starts_false_before_the_animal_has_been_home(self):
+        # A session that starts with the animal already in the stem is silent
+        # until it has visited the hub and set off again (a missed cue, not a
+        # spurious one).
+        h = _Harness()
+        self.assertFalse(h.step(P_STEM).left_hub_via_stem)
+        self.assertFalse(h.step(P_JUNCTION).left_hub_via_stem)
+        self.assertTrue(h.run([P_STEM, P_HUB, P_STEM]).left_hub_via_stem)
 
 
 class TestLoopClean(unittest.TestCase):

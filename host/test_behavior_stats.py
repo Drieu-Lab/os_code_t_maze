@@ -30,11 +30,15 @@ def frame(now, *, valid=True, choice=None, stem=False, zone=UNKNOWN,
     choice_committed edge (docs/decisions/0055) BehaviorStats now counts off, and
     defaults to ``choice`` so a choice frame commits by default. Pass
     ``committed=None`` to model a same-trip re-entry that does NOT re-commit (the
-    shared edge already fired this trip)."""
+    shared edge already fired this trip). ``stem`` sets both stem predicates -
+    BehaviorStats reads only ``outbound_used_stem``, but a frame where the trip
+    used the stem is one where it departed up it, so keeping them consistent
+    avoids a nonsensical synthetic frame."""
     committed_side = choice if committed is _UNSET else committed
     return TaskEventFrame(
         now=now, valid=valid,
         at_well=False, outbound_used_stem=stem,
+        left_hub_via_stem=stem,
         well_arrived=False, choice_entered=choice,
         choice_committed=committed_side,
         loop_closed=None, loop_clean=False,

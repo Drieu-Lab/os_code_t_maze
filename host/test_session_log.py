@@ -2,8 +2,9 @@
 test_session_log.py - headless tests for the session manifest pure core.
 
 Covers the clock anchor (three host clocks captured together), the manifest
-structure (valid JSON, required keys, the default fiducial), and the live
-mutators (stream paths added/updated, the end anchor set). Pure stdlib; no
+structure (valid JSON, required keys, the default fiducial), the live mutators
+(stream paths added/updated, the end anchor set), and the "does this stream file
+belong to this session" path test (docs/decisions/0066). Pure stdlib; no
 hardware/Tk. See docs/decisions/0048.
 
 Run from host/:  python -m unittest test_session_log
@@ -16,6 +17,7 @@ import unittest
 
 from session_log import (
     FIDUCIAL_METHOD, SCHEMA_VERSION, SessionManifest, clock_snapshot,
+    path_within_session,
 )
 
 
@@ -74,6 +76,45 @@ class TestManifest(unittest.TestCase):
         m.set_end(clock_snapshot())
         obj = json.loads(m.render())
         self.assertEqual(set(obj["t_end"]), {"wall", "mono", "iso"})
+
+
+class TestPathWithinSession(unittest.TestCase):
+    """The guard that keeps another session's file out of the manifest (ADR-0066)."""
+
+    SESSION = r"C:\rec\phase3_recordings\600_20260727_134317"
+
+    def test_file_in_a_subfolder_belongs(self):
+        self.assertTrue(path_within_session(
+            self.SESSION + r"\task\phase3_600_20260727_134317.csv", self.SESSION))
+
+    def test_previous_sessions_file_does_not_belong(self):
+        # The exact 2026-07-27 corruption: a sibling session's task file.
+        self.assertFalse(path_within_session(
+            r"C:\rec\phase3_recordings\000_20260727_132752\task"
+            r"\phase3_000_20260727_132752.csv", self.SESSION))
+
+    def test_host_data_fallback_on_another_drive_does_not_belong(self):
+        self.assertFalse(path_within_session(
+            r"D:\git_repos\os_code_t_maze\host\data\phase3_600_x.csv",
+            self.SESSION))
+
+    def test_sibling_with_a_shared_name_prefix_does_not_belong(self):
+        # A plain string startswith() would wrongly accept this one.
+        self.assertFalse(path_within_session(
+            r"C:\rec\phase3_recordings\600_20260727_134317_old\task\x.csv",
+            self.SESSION))
+
+    def test_separator_and_case_differences_still_belong(self):
+        self.assertTrue(path_within_session(
+            "c:/REC/phase3_recordings/600_20260727_134317/task/x.csv",
+            self.SESSION))
+
+    def test_the_session_folder_itself_is_not_a_stream_file(self):
+        self.assertFalse(path_within_session(self.SESSION, self.SESSION))
+
+    def test_empty_inputs_are_not_within(self):
+        self.assertFalse(path_within_session("", self.SESSION))
+        self.assertFalse(path_within_session(self.SESSION + r"\task\x.csv", ""))
 
 
 if __name__ == "__main__":

@@ -29,6 +29,13 @@ Design (see docs/decisions/0045):
     HUB)) - the SAME predicate that gates a clean loop and the reward - so the
     return cue keys off the same task-phase vocabulary as the choice cue's
     up-stem direction gate rather than a bespoke latch (see docs/decisions/0061).
+  - CHOICE likewise requires that the trip DEPARTED the hub up the stem, via the
+    shared ``on_outbound_leg`` credential (task_events: left_hub_via_stem; see
+    docs/decisions/0067). Without it a rat running the lap backwards - out along a
+    return arm, then home down the stem - heard the trial tone all the way down,
+    since the direction gate is off in practice. The credential is held for the
+    whole trip and cleared at the hub, so a rat that reverses back into the stem
+    after committing its choice deliberately hears the tone again.
 
 This module is a stateful PURE core (stdlib only, no Tk/OpenCV/serial), like
 maze_state.py / task_events.py / rules_engine.py: it takes RatState fields and
@@ -124,7 +131,8 @@ class CueGate:
     # --------------------------------------------------------------- tick
     def step(self, zone: str, direction: Optional[str],
              confidence: float, valid: bool,
-             outbound_used_stem: bool = True) -> CueDecision:
+             outbound_used_stem: bool = True,
+             on_outbound_leg: bool = True) -> CueDecision:
         """Fold one RatState into the desired cue state.
 
         Invalid frames (no trustworthy zone) HOLD the current tone and change no
@@ -132,19 +140,28 @@ class CueGate:
         leaving/re-entering a window. All edge logic therefore runs only on valid
         frames.
 
-        ``outbound_used_stem`` is the shared task-phase credential the caller
-        passes for the RETURN onset (task_events: visited_since(CENTRAL_STEM,
-        HUB)) - the same predicate that gates a clean loop / the reward. The
-        return tone fires only when it is True, so a rat that starts a run by
-        heading up a return arm from the hub (no stem-out) gets no return cue
-        (see docs/decisions/0061). It does not affect the CHOICE cue.
+        The two credentials are the caller's shared task-phase facts (task_events),
+        one per cue, and they carve the lap between them:
+
+        ``outbound_used_stem`` (RETURN; docs/decisions/0061) - the stem was visited
+        since the hub, the same predicate that gates a clean loop / the reward. A
+        rat that starts a run by heading up a return arm gets no return cue.
+
+        ``on_outbound_leg`` (CHOICE; docs/decisions/0067) - this trip DEPARTED the
+        hub up the stem (task_events.left_hub_via_stem). A trip that set off up a
+        return arm gets no choice cue even while crossing the stem on its way home.
+        It is held for the whole trip, so a rat that reverses back into the stem
+        after its choice hears the tone again - deliberately.
         """
         if not valid:
             return CueDecision(desired=self._active)
 
         p = self._p
         confident = confidence >= p.min_confidence
+        # The credential sits OUTSIDE the direction clause so it still gates the
+        # cue when require_up_stem is off, which is how the rig runs (ADR-0067).
         in_choice = (zone == CENTRAL_STEM
+                     and on_outbound_leg
                      and (not p.require_up_stem or direction == UP_STEM))
         in_return = zone in _RETURN_ZONES
 

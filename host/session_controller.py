@@ -32,7 +32,9 @@ On Start (once Phase 3 is confirmed armed) it:
   - starts the camera recording into ``video/`` (``camera.start_recording(id, out_dir)``)
     and hands Phase 3 the session id + ``task/`` folder so its data file correlates
     with the video + manifest (``phase3.set_session_context(id, out_dir)`` - it does
-    NOT arm Phase 3, which the operator has already done; docs/decisions/0060);
+    NOT arm Phase 3, which the operator has already done; docs/decisions/0060).
+    Phase 3 re-points an already-open data file into that folder, since its gate
+    opened before this moment and so cannot bind it (docs/decisions/0066);
   - opens a per-session **filtered** raw-serial file in ``serial/``: while the
     session is active it appends the SENSOR + CENTRAL-PORT lines it already sees
     via ``apply()`` (body-beam edges + the central well's lick/reward/solenoid; the
@@ -48,8 +50,13 @@ On Start (once Phase 3 is confirmed armed) it:
   - writes the manifest atomically and keeps it updated as each stream's file path
     resolves and again on Stop (with the end anchor).
 
-On Stop it stops the camera, stamps the manifest end anchor, and closes the
-filtered serial file - but leaves Phase 3 armed and running (docs/decisions/0060).
+On Stop it stops the camera, stamps the manifest end anchor, closes the filtered
+serial file, and releases Phase 3's session context - but leaves Phase 3 armed and
+running (docs/decisions/0060), so the task and its live stats persist. Releasing
+the context matters because Phase 3 binds its data-file path on the gate's rising
+edge: without it, a re-arm between animals would write into this closed session's
+folder, and the next session's manifest would then point there
+(docs/decisions/0066).
 
 The animal id is no longer entered here: it comes from the Task tab's single
 shared Animal ID field via the injected ``animal_id`` getter (docs/decisions/
@@ -77,7 +84,7 @@ from typing import Callable, Optional
 
 import protocol
 from rig_config import load_rig_config
-from session_log import SessionManifest, clock_snapshot
+from session_log import SessionManifest, clock_snapshot, path_within_session
 from session_serial import is_sensor_or_central
 from session_timer import SessionTimer
 
@@ -322,6 +329,12 @@ class SessionControlView:
             self._manifest.set_end(clock_snapshot())
             self._write_manifest()
         self._close_serial()
+        # Release Phase 3's session context (it stays armed and running - ADR-0060).
+        # Otherwise a re-arm between animals - the gate closing and reopening when
+        # tracking is toggled - would mint its data file inside this now-closed
+        # session's task/ folder (docs/decisions/0066).
+        if self._phase3 is not None and hasattr(self._phase3, "set_session_context"):
+            self._phase3.set_session_context()
 
         self._active = False
         try:
@@ -364,6 +377,13 @@ class SessionControlView:
             changed = True
 
         p3 = self._phase3_path()
+        # Only ever record a task file from THIS session's tree. Phase 3 binds its
+        # path on the gate's rising edge, which (per ADR-0060) happens before Start,
+        # so until its rebind lands the path can still name the previous session or
+        # the host/data fallback - recording that made the manifest point at another
+        # session's data (docs/decisions/0066).
+        if p3 is not None and not path_within_session(p3, self._session_dir or ""):
+            p3 = None
         if p3 and self._manifest.streams.get("phase3_task") != p3:
             self._manifest.set_stream("phase3_task", p3)
             changed = True

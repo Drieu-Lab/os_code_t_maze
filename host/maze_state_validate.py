@@ -53,10 +53,11 @@ from typing import Dict, List, Optional, Tuple
 import protocol
 from cue_gate import CueGate, CueParams
 from maze_state import (
-    HUB, CENTRAL_STEM, JUNCTION, LEFT_CHOICE, RIGHT_CHOICE, LEFT_RETURN,
+    CENTRAL_STEM, JUNCTION, LEFT_CHOICE, RIGHT_CHOICE, LEFT_RETURN,
     RIGHT_RETURN, ZONES_PATH, MazeStateEstimator, MazeStateParams, ZoneMap,
     load_zone_map,
 )
+from task_events import TaskEvents
 
 # Beam index (firmware Beam order) -> the zone whose ENTRY that beam marks.
 BEAM_TO_ZONE = {
@@ -183,7 +184,9 @@ def cue_onset_events(rows: List[Tuple[float, object]], zone_map: ZoneMap,
     """(unix_seconds, zone) for every CueGate ONSET over the track.
 
     Replays the exact host actuation path offline: the FAST-view estimator
-    (low ``min_dwell``) feeding the pure CueGate (cue_gate.py). The onset zone is
+    (low ``min_dwell``) feeding the task-event layer feeding the pure CueGate
+    (cue_gate.py) - the same three stages, in the same order, as the rig's
+    actuation thread. The onset zone is
     the RatState zone at the tick CUE_ON would fire (CENTRAL_STEM for the choice
     cue, LEFT/RIGHT_RETURN for the return cue), so onsets align against the same
     beams as the zone-entry check. Aligning these to the beam crossings measures
@@ -191,15 +194,19 @@ def cue_onset_events(rows: List[Tuple[float, object]], zone_map: ZoneMap,
     the direction gate on the choice cue makes this later than the raw zone commit.
     """
     est = MazeStateEstimator(zone_map, params or MazeStateParams())
+    events = TaskEvents()
     gate = CueGate(cue_params or CueParams())
     out: List[Tuple[float, str]] = []
     for t, result in rows:
         s = est.update(result, t)
-        # Mirror the live path's RETURN gate: pass the same canonical outbound
-        # credential task_events derives (see docs/decisions/0061) so the offline
-        # onset latency matches the rig.
-        outbound = s.visited_since(CENTRAL_STEM, HUB)
-        d = gate.step(s.zone, s.direction, s.confidence, s.valid, outbound)
+        # Mirror the live path's cue credentials by folding the SAME task-event
+        # layer the rig folds (docs/decisions/0061 for the return cue's stem-out
+        # excursion, 0067 for the choice cue's hub departure), rather than
+        # re-deriving them here - the offline onset latency then matches the rig
+        # by construction.
+        f = events.update(s)
+        d = gate.step(s.zone, s.direction, s.confidence, s.valid,
+                      f.outbound_used_stem, f.left_hub_via_stem)
         if d.started is not None:
             out.append((t, s.zone))
     return out

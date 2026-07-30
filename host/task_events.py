@@ -62,12 +62,23 @@ class TaskEventFrame:
     presence. It is the shared source of truth the reward rule, the Phase 3 scorer,
     and the behavior readout all consume instead of each re-deriving the latch.
     ``trip_id`` bumps on each commit so consumers can tell excursions apart.
+
+    ``left_hub_via_stem`` and ``outbound_used_stem`` sound alike but answer
+    different questions, and the difference matters to the cues (see
+    docs/decisions/0067). ``outbound_used_stem`` asks whether the stem has been
+    visited AT ALL since the HUB, so it is true on a backwards lap too, once the
+    animal has walked into the stem from the junction; the RETURN cue can use it
+    because a return arm is a different zone. ``left_hub_via_stem`` asks how the
+    trip BEGAN - the animal stepped from the HUB into the stem - so it stays false
+    for a trip that set off up a return arm. That is what the CHOICE cue needs,
+    since its own window IS the stem.
     """
     now: float
     valid: bool
     # ---- predicates (this tick / this lap) ----
     at_well: bool                       # zone == HUB and substate == in_well
     outbound_used_stem: bool            # stem visited since last leaving the HUB
+    left_hub_via_stem: bool             # this trip DEPARTED the HUB up the stem
     # ---- edges (true only on the tick they occur) ----
     well_arrived: bool                  # entered the well (in_well) this tick
     choice_entered: Optional[str]       # "left"/"right" if a choice arm entered this tick
@@ -88,7 +99,8 @@ class TaskEvents:
 
     Pure and single-threaded. Holds only the small aggregate state the raw
     RatState does not: the previous ``at_well`` (to detect the arrival edge), the
-    last closed-loop side, the same-side run length, and per-side loop counts.
+    last closed-loop side, the same-side run length, per-side loop counts, and the
+    two per-trip latches (the choice-commit re-arm and ``left_hub_via_stem``).
     """
 
     def __init__(self) -> None:
@@ -114,6 +126,11 @@ class TaskEvents:
         # on each commit so consumers can tell excursions apart.
         self._excursion_open = True
         self._trip_id = 0
+        # "This trip set off up the stem" (docs/decisions/0067): armed on the
+        # HUB->CENTRAL_STEM departure, cleared while the animal is at the HUB.
+        # Starts False, so a session that begins mid-maze stays uncredentialed
+        # until the animal has been home once - a missed cue, not a spurious one.
+        self._left_hub_via_stem = False
 
     def update(self, s: RatState) -> TaskEventFrame:
         at_well = bool(s.valid and s.zone == HUB and s.substate == IN_WELL)
@@ -138,6 +155,16 @@ class TaskEvents:
         # "This lap the outbound leg used the stem" == the stem was entered since
         # the animal last left the HUB (the canonical visited_since query).
         outbound_used_stem = bool(s.valid and s.visited_since(CENTRAL_STEM, HUB))
+
+        # "This trip set off up the stem" (docs/decisions/0067). Cleared on HUB
+        # PRESENCE rather than the HUB-entry edge, so a dropped edge cannot strand
+        # a stale credential (the same robustness argument as the choice-commit
+        # re-arm above, docs/decisions/0038). Armed on the departure edge itself,
+        # read off the estimator's entered/exited fields.
+        if s.valid and s.zone == HUB:
+            self._left_hub_via_stem = False
+        elif s.valid and s.entered == CENTRAL_STEM and s.exited == HUB:
+            self._left_hub_via_stem = True
 
         # Same-side run over STEM-GATED choice entries (Phase 2b anti-bias). Only a
         # stem-gated entry counts (a non-stem entry is not a valid trial and does
@@ -180,6 +207,7 @@ class TaskEvents:
         return TaskEventFrame(
             now=s.now, valid=s.valid,
             at_well=at_well, outbound_used_stem=outbound_used_stem,
+            left_hub_via_stem=self._left_hub_via_stem,
             well_arrived=well_arrived, choice_entered=choice_entered,
             choice_committed=choice_committed,
             loop_closed=loop_closed, loop_clean=loop_clean,

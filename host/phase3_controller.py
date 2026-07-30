@@ -274,15 +274,28 @@ class Phase3ControlView(VisionActuator):
         """Record the coordinated session's id + output folder WITHOUT arming.
 
         The Session controller calls this on Start once it has confirmed Phase 3 is
-        already armed (docs/decisions/0060). The ``session_id`` is threaded into the
-        data-file name + header so it correlates with the video + manifest, and
-        ``out_dir`` is the session's ``task/`` folder the data file is written into
-        (docs/decisions/0049). Unlike the old ``arm()`` this does NOT flip the Arm
-        checkbox. No-op if the tab is unavailable (no pipeline)."""
+        already armed (docs/decisions/0060), and again with no arguments on Stop to
+        RELEASE the context. The ``session_id`` is threaded into the data-file name
+        + header so it correlates with the video + manifest, and ``out_dir`` is the
+        session's ``task/`` folder the data file is written into (docs/decisions/
+        0049). Unlike the old ``arm()`` this does NOT flip the Arm checkbox.
+
+        Because the gate is already open by now, no rising edge will re-run
+        ``_arm_session``, so this also asks the actuation thread to re-point an
+        already-open data file at the new session (docs/decisions/0066). No-op if
+        the tab is unavailable (no pipeline)."""
         if not hasattr(self, "_enable_var"):
             return
         self._session_id = session_id or ""
         self._session_out_dir = out_dir or ""
+        # Publish the new context BEFORE asking for the rebind: the Tk poll would
+        # otherwise be up to POLL_INTERVAL_MS behind, and the thread would rebind
+        # using the PREVIOUS session's snapshot.
+        try:
+            self._publish_snapshot()
+        except tk.TclError:
+            return
+        self._enqueue_act(("cmd", "rebind"))
 
     def arm(self, session_id: str = "", out_dir: str = "") -> None:
         """Arm Phase 3, recording an optional coordinated ``session_id`` / ``out_dir``
@@ -437,6 +450,9 @@ class Phase3ControlView(VisionActuator):
         if name == "restart":
             self._restart_session(snap)
             return
+        if name == "rebind":
+            self._rebind_session_output(snap)
+            return
         if self._task is None or self._seq is None or self._log is None:
             return
         idx = self._task.index
@@ -472,6 +488,38 @@ class Phase3ControlView(VisionActuator):
             return
         self._seq.extend()                   # one block_size block
         self._log.extend_to(self._seq)
+        self._write_log()
+        self._publish_state(armed=snap.gate_open)
+
+    def _rebind_session_output(self, snap: _Phase3Snapshot) -> None:
+        """Re-point an already-open data file at the session that now owns it.
+
+        ADR-0060 has the operator arm Phase 3 *before* Start Session, so the gate is
+        already open when the session mints its folder and no rising edge fires to
+        re-run ``_arm_session``. Without this, ``_log_path`` keeps whatever the last
+        arm chose - the ``host/data/`` fallback on the first arm, or a previous
+        (already stopped) session's ``task/`` folder - so the session's own ``task/``
+        stayed empty and its manifest recorded another session's file. Start now
+        re-points the path and the header's session id; since ``_write_log`` renders
+        the WHOLE table, the session's file is complete from its first write,
+        including any trials run between arming and Start. See docs/decisions/0066.
+
+        No-op before the first arm (the gate then binds the right folder itself) and
+        on the Stop release, which clears the context rather than moving the file.
+        """
+        if self._log is None or not snap.session_id or not snap.session_out_dir:
+            return
+        # The session's task/ folder starts empty, so this run takes the plain name
+        # and the restart counter restarts with it: a later Restart appends _r1
+        # without clobbering this file, exactly as ADR-0058 intends.
+        new_path = os.path.join(
+            snap.session_out_dir,
+            f"phase3_{protocol.sanitize_animal_id(snap.session_id)}.csv")
+        if new_path == self._log_path:
+            return
+        self._restart_count = 0
+        self._log.session_id = snap.session_id   # the header's correlation id
+        self._log_path = new_path
         self._write_log()
         self._publish_state(armed=snap.gate_open)
 
@@ -532,12 +580,16 @@ class Phase3ControlView(VisionActuator):
             self._prev_zone = st.zone
 
         # WHEN: the positional cue gate. Host supplies identity via ,<hz> (v6).
-        # The RETURN cue additionally requires the shared outbound_used_stem
-        # credential (stem-out excursion) so it fires only on a genuine return,
-        # not when a run starts up a return arm (see docs/decisions/0061).
+        # Each cue carries a shared task-event credential describing where in the
+        # lap the animal is: RETURN needs a stem-out excursion so it marks only a
+        # genuine inbound leg (docs/decisions/0061), and CHOICE needs this trip to
+        # have DEPARTED the hub up the stem, so a lap run backwards is silent
+        # crossing the stem on its way home (docs/decisions/0067).
         self._gate.set_params(snap.params)
         outbound = task_frame.outbound_used_stem if task_frame is not None else False
-        d = self._gate.step(st.zone, st.direction, st.confidence, st.valid, outbound)
+        on_leg = task_frame.left_hub_via_stem if task_frame is not None else False
+        d = self._gate.step(st.zone, st.direction, st.confidence, st.valid,
+                            outbound, on_leg)
         if d.started == CHOICE:
             freq = self._task.current_choice_freq()
             self._send_cmd(f"CUE_ON,CHOICE,{freq}" if freq is not None
