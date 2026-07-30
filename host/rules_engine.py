@@ -46,21 +46,23 @@ from __future__ import annotations
 
 import json
 import math
-import random
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 import protocol  # shared serial-line parser (pure stdlib; see docs/decisions/0024)
+# The well-reward "how" (WellDispenser) and "why" (RewardTrigger) live in the
+# pure reward_dispenser core (see docs/decisions/0068, FW-0009). The shared
+# reward primitives (FireReward / LogEvent / LickAt / CONJUNCTION_FRESH_S) are
+# defined there too and re-exported here so ``from rules_engine import
+# FireReward`` and the landmark rule below keep working. The dependency runs one
+# way: rules_engine -> reward_dispenser (that core imports nothing from here).
+from reward_dispenser import (  # noqa: F401  (LickAt/CONJUNCTION_FRESH_S re-export)
+    CONJUNCTION_FRESH_S, FireReward, LickAt, LogEvent, RewardTrigger, WellDispenser,
+)
 
 # Tracker state string that means "confirmed lock" (kept local so this core does
 # not import tracker.py / opencv). Must match tracker.STATE_TRACKING.
 STATE_TRACKING = "TRACKING"
-
-# How stale the last tick may be (seconds) for a lick to still count as "within
-# the zone at lick time". Ticks arrive at the GUI poll rate (~150 ms); this
-# tolerates a couple of missed ticks without letting a long-past position gate a
-# lick.
-CONJUNCTION_FRESH_S = 0.5
 
 RULES_VERSION = 1
 SCALE_VERSION = 1
@@ -194,31 +196,9 @@ class TrackConfident:
         return frame.state == STATE_TRACKING and frame.confidence >= self.min_conf
 
 
-@dataclass
-class LickAt:
-    """Marker condition: a lick at ``port``. Routed by the engine's event()."""
-    port: int
-
-    def matches(self, port: int) -> bool:
-        return int(port) == int(self.port)
-
-
-# ================================ action intents =============================
-@dataclass
-class FireReward:
-    """Intent: pulse the reward spout at ``port`` for ``ms`` ms."""
-    port: int
-    ms: int
-    rule_id: str
-    reason: str               # "prime" | "topup"
-
-
-@dataclass
-class LogEvent:
-    """Intent: record a rule event (no hardware effect)."""
-    name: str
-    rule_id: str
-    detail: dict = field(default_factory=dict)
+# ``LickAt`` (marker condition) and the action intents ``FireReward`` /
+# ``LogEvent`` now live in reward_dispenser.py and are imported at the top of this
+# module (re-exported for back-compat). See docs/decisions/0068.
 
 
 # ================================ rule templates =============================
@@ -444,180 +424,45 @@ class WellRewardWithExcursionRule:
     TEMPLATE = "well_reward_with_excursion"
     needs_scale = False   # zone/loop based; no cm scale required
     needs_task = True     # requires the task-event context (zone map + estimator)
-    _CREDENTIALS = ("choice", "choice_via_stem", "clean_loop")
-    # Credentials that EARN at choice-arm entry (as opposed to loop close). Only
-    # these are gated by the shared once-per-excursion choice-commit edge
-    # (task_events.choice_committed; docs/decisions/0055, FW-0020); clean_loop
-    # earns at the HUB when the lap closes and needs no latch. See docs/decisions/
-    # 0038 (the per-excursion latch this edge replaces).
-    _CHOICE_CREDENTIALS = ("choice", "choice_via_stem")
+    # Canonical tuples live on RewardTrigger; kept as class attributes here
+    # because the Rules-tab editor reads them (RULE_FIELD_CHOICES / validation).
+    # Only the choice-family credentials are gated on the shared once-per-
+    # excursion choice-commit edge (task_events.choice_committed; docs/decisions/
+    # 0055, FW-0020); clean_loop earns at loop close and needs no latch.
+    _CREDENTIALS = RewardTrigger.CREDENTIALS
+    _CHOICE_CREDENTIALS = RewardTrigger.CHOICE_CREDENTIALS
 
     def __init__(self, params: dict, defaults: EngineDefaults):
         self.id = str(params.get("id", "well_reward_with_excursion"))
         self.enabled = bool(params.get("enabled", True))
-        self.port = int(params.get("port", 2))
-        self.pulse_ms = int(params.get("pulse_ms", 300))
-        self.max_topups = int(params.get("max_topups", 3))
-        self.lick_debounce_ms = int(params.get("lick_debounce_ms", 150))
-        legacy = params.get("cooldown_ms")
-        self.topup_cooldown_ms = int(params.get(
-            "topup_cooldown_ms",
-            legacy if legacy is not None else defaults.topup_cooldown_ms))
-        # Where/when the prime fires (see docs/decisions/0030):
-        #   "well_arrival" - on reaching the well while armed (default; Phase 1),
-        #   "well_lick"    - first lick at the well while armed (lick-gated),
-        #   "credential"   - the instant the credential arms, out at the choice
-        #                    zone, so the central-spout solenoid becomes the
-        #                    correct-choice signal (Phase 2a/2b).
-        # Back-compat: the older boolean prime_on_arrival maps True->well_arrival,
-        # False->well_lick.
-        prime_on = params.get("prime_on")
-        if prime_on is None:
-            prime_on = ("well_arrival"
-                        if bool(params.get("prime_on_arrival", True))
-                        else "well_lick")
-        self.prime_on = str(prime_on)
-        if self.prime_on not in ("well_arrival", "well_lick", "credential"):
-            raise ValueError(
-                f"unknown prime_on {self.prime_on!r}; "
-                "known: well_arrival, well_lick, credential")
-        self.credential = str(params.get("credential", "choice"))
-        if self.credential not in self._CREDENTIALS:
-            raise ValueError(
-                f"unknown credential {self.credential!r}; "
-                f"known: {list(self._CREDENTIALS)}")
+        # Compose the two pure cores (docs/decisions/0068): the Trigger owns the
+        # credential "why/when" (and the single pending-credit flag ``armed``);
+        # the Dispenser owns the well "how" (port/pulse, the visit lifecycle,
+        # prime delivery, lick top-ups). This rule is now just their wiring - the
+        # only place that knows both, so ``prime_on`` (which credit edge the
+        # dispenser spends) is applied here.
+        self._trigger = RewardTrigger(params, self.id)
+        self._dispenser = WellDispenser(
+            params, default_topup_cooldown_ms=defaults.topup_cooldown_ms,
+            rule_id=self.id)
+        # Read-only mirrors used by the wiring below and status().
+        self.credential = self._trigger.credential
+        self.prime_on = self._dispenser.prime_on
 
-        # Probabilistic fade (choice credential only): a NON-stem excursion earns
-        # a credit only with probability nonstem_reward_prob, while a stem
-        # excursion always credits. p = 1.0 is Phase 1 (any choice credits); p =
-        # 0.0 is exactly Phase 2a (stem-only). Fading p 1->0 across sessions
-        # morphs P1 into 2a without an extinction cliff. See docs/decisions/0028.
-        self.nonstem_reward_prob = float(params.get("nonstem_reward_prob", 1.0))
+    # The credit (``armed``) is owned by the Trigger; expose it as this rule's own
+    # attribute so existing callers (status(), the Rules tab) and the direct-drive
+    # credential tests keep working unchanged.
+    @property
+    def armed(self) -> bool:
+        return self._trigger.armed
 
-        # Anti-bias debias: caps consecutive same-side runs. For clean_loop it
-        # caps closed loops (same_side_run); for choice_via_stem it caps stem-
-        # gated choice entries (same_side_choice_run). See docs/decisions/0030.
-        db = params.get("debias") or {}
-        self._debias_enabled = bool(db) and self.credential in (
-            "clean_loop", "choice_via_stem")
-        self._debias_mode = str(db.get("mode", "fixed"))
-        self._debias_n = int(db.get("n", 3))
-        self._debias_min = int(db.get("min", 3))
-        self._debias_max = int(db.get("max", 5))
-        # One seeded RNG for both the fade roll and the debias cap draw, so a
-        # session is reproducible from ``seed`` (falls back to the debias seed).
-        self._rng = random.Random(params.get("seed", db.get("seed")))
-        self._cap = self._draw_cap()
+    @armed.setter
+    def armed(self, value: bool) -> None:
+        self._trigger.armed = bool(value)
 
-        self._lick = LickAt(self.port)
-
-        # Mutable state.
-        self.state = "OUTSIDE"
-        self.armed = False
-        self.topups = 0
-        self.fires = 0
-        self._primed_this_visit = False
-        # A prime fired at credential time (prime_on == "credential") that is
-        # awaiting the well visit to open its lick-top-up window.
-        self._credit_primed = False
-        self._at_well = False
-        self._last_tick_now: Optional[float] = None
-        self._last_fire_now: Optional[float] = None
-        self._last_lick_now: Optional[float] = None
-
-    # --------------------------------------------------------------- helpers
-    def _draw_cap(self) -> int:
-        if not self._debias_enabled:
-            return 1 << 30           # effectively no cap
-        if self._debias_mode == "fixed":
-            return self._debias_n
-        return self._rng.randint(self._debias_min, self._debias_max)
-
-    def _topup_ok(self, now: float) -> bool:
-        if self._last_fire_now is None:
-            return True
-        return (now - self._last_fire_now) * 1000.0 >= self.topup_cooldown_ms
-
-    def _fire(self, now: float, reason: str) -> FireReward:
-        self._last_fire_now = now
-        self.fires += 1
-        return FireReward(self.port, self.pulse_ms, self.id, reason)
-
-    # ---------------------------------------------------- credential earning
     def _earn_credential(self, task) -> List:
-        out: List = []
-        if self.credential == "choice":
-            if task.choice_entered is not None and not self.armed:
-                if task.outbound_used_stem or self.nonstem_reward_prob >= 1.0:
-                    self.armed = True
-                    out.append(LogEvent("armed", self.id,
-                                        {"credential": "choice",
-                                         "side": task.choice_entered,
-                                         "route": ("stem" if task.outbound_used_stem
-                                                   else "nonstem")}))
-                else:
-                    # Non-stem excursion: credit only with the (fading) probability.
-                    p = max(0.0, min(1.0, self.nonstem_reward_prob))
-                    roll = self._rng.random()
-                    if roll < p:
-                        self.armed = True
-                        out.append(LogEvent("armed", self.id,
-                                            {"credential": "choice",
-                                             "side": task.choice_entered,
-                                             "route": "nonstem",
-                                             "p": round(p, 3),
-                                             "roll": round(roll, 3)}))
-                    else:
-                        out.append(LogEvent("credit_denied", self.id,
-                                            {"reason": "nonstem_faded",
-                                             "side": task.choice_entered,
-                                             "p": round(p, 3),
-                                             "roll": round(roll, 3)}))
-        elif self.credential == "choice_via_stem":
-            if task.choice_entered is not None:
-                side = task.choice_entered
-                if task.outbound_used_stem:
-                    # Optional choice-side anti-bias (Phase 2b): redraw the cap on
-                    # a side switch, then withhold a stem-gated choice that runs
-                    # the same side past the cap. See docs/decisions/0030.
-                    if self._debias_enabled and task.same_side_choice_run == 1:
-                        self._cap = self._draw_cap()
-                    if self._debias_enabled and task.same_side_choice_run > self._cap:
-                        out.append(LogEvent("debias_withhold", self.id,
-                                            {"side": side,
-                                             "run": task.same_side_choice_run,
-                                             "cap": self._cap}))
-                    elif not self.armed:
-                        self.armed = True
-                        out.append(LogEvent("armed", self.id,
-                                            {"credential": "choice_via_stem",
-                                             "side": side,
-                                             "run": task.same_side_choice_run,
-                                             "cap": (None if not self._debias_enabled
-                                                     else self._cap)}))
-                else:
-                    out.append(LogEvent("credit_denied", self.id,
-                                        {"reason": "no_stem", "side": side}))
-        elif self.credential == "clean_loop":
-            if task.loop_closed is not None:
-                side = task.loop_closed
-                if task.same_side_run == 1:     # side switch (or first) -> redraw
-                    self._cap = self._draw_cap()
-                if not task.loop_clean:
-                    out.append(LogEvent("credit_denied", self.id,
-                                        {"reason": "unclean", "side": side}))
-                elif self._debias_enabled and task.same_side_run > self._cap:
-                    out.append(LogEvent("debias_withhold", self.id,
-                                        {"side": side, "run": task.same_side_run,
-                                         "cap": self._cap}))
-                else:
-                    self.armed = True
-                    out.append(LogEvent("armed", self.id,
-                                        {"credential": "clean_loop", "side": side,
-                                         "run": task.same_side_run,
-                                         "cap": (None if not self._debias_enabled
-                                                 else self._cap)}))
-        return out
+        """Delegate to the Trigger (kept for direct-drive tests of the fade)."""
+        return self._trigger._earn_credential(task)
 
     # ------------------------------------------------------------------ tick
     def tick(self, frame: Frame) -> List:
@@ -626,89 +471,43 @@ class WellRewardWithExcursionRule:
             return []
         actions: List = []
         if task.valid:
-            # Gate the choice-family credentials on the SHARED once-per-excursion
-            # choice-commit edge (task_events.choice_committed; docs/decisions/0055,
-            # FW-0020), rather than a private latch. It fires the FIRST choice-arm
-            # entry per outbound trip (re-armed at the HUB, robust to a dropped
-            # loop-close edge - see docs/decisions/0038), so a figure-8 that
-            # re-enters the OTHER arm on the way back cannot re-credit. On the
-            # commit tick task.choice_entered == the committed side, so
-            # _earn_credential is unchanged. clean_loop earns at loop close and is
-            # not gated.
-            earn = True
-            if self.credential in self._CHOICE_CREDENTIALS:
-                earn = task.choice_committed is not None
-            if earn:
-                actions.extend(self._earn_credential(task))
-            # Prime the instant the credential arms (Phase 2a/2b): fire out at
-            # the choice zone so the central spout signals the correct choice.
-            # See docs/decisions/0030.
-            if self.prime_on == "credential" and self.armed:
-                actions.append(self._fire(task.now, "prime"))
-                self.armed = False
-                self._credit_primed = True
+            # The Trigger folds the frame, gating the choice-family credentials on
+            # the shared once-per-excursion commit edge and arming a credit when
+            # earned (docs/decisions/0026, 0028, 0030, 0055).
+            actions.extend(self._trigger.earn(task))
+            # Prime the instant the credential arms (Phase 2a/2b): the dispenser
+            # fires out at the choice zone so the central spout signals the correct
+            # choice, and the credit is spent. See docs/decisions/0030.
+            if self.prime_on == "credential" and self._trigger.armed:
+                actions.append(self._dispenser.prime_at_credential(task.now))
+                self._trigger.armed = False
 
-        at_well = bool(task.at_well)   # already implies task.valid
-        if at_well and self.state == "OUTSIDE":
-            self.state = "AT_WELL"
-            self.topups = 0
-            if self.prime_on == "credential":
-                # The prime already fired at the choice; carry it into the visit
-                # so licks here can top up.
-                self._primed_this_visit = self._credit_primed
-                self._credit_primed = False
-            else:
-                self._primed_this_visit = False
-                if self.prime_on == "well_arrival" and self.armed:
-                    actions.append(self._fire(task.now, "prime"))
-                    self._primed_this_visit = True
-                    self.armed = False
-        elif not at_well and self.state == "AT_WELL" and task.valid:
-            # Exit the visit only on a CONFIDENT outside reading, so a brief
-            # track loss (task.valid False) neither drops the visit nor lets a
-            # re-prime happen when the lock returns.
-            self.state = "OUTSIDE"
-            self._primed_this_visit = False
-            self.topups = 0
-
-        self._at_well = at_well
-        self._last_tick_now = task.now
+        # The dispenser advances the well-visit lifecycle and, for the arrival/lick
+        # modes, spends the pending credit; it reports back so we clear the Trigger.
+        res = self._dispenser.visit_tick(task, credit_pending=self._trigger.armed)
+        actions.extend(res.actions)
+        if res.consumed_credit:
+            self._trigger.armed = False
         return actions
 
     # ------------------------------------------------------------- lick edge
     def on_lick(self, port: int, now: float) -> List:
-        if not self._lick.matches(port):
-            return []
-        if self.state != "AT_WELL" or not self._at_well:
-            return []
-        if self._last_tick_now is None or \
-                (now - self._last_tick_now) > CONJUNCTION_FRESH_S:
-            return []
-        if self._last_lick_now is not None and \
-                (now - self._last_lick_now) * 1000.0 < self.lick_debounce_ms:
-            return []
-        self._last_lick_now = now
-        if not self._primed_this_visit:
-            # Lick-gated prime (well_lick): the first lick while credited fires it.
-            if self.prime_on == "well_lick" and self.armed:
-                self._primed_this_visit = True
-                self.armed = False
-                return [self._fire(now, "prime")]
-            return []
-        if self.topups >= self.max_topups:
-            return []
-        if not self._topup_ok(now):
-            return []
-        self.topups += 1
-        return [self._fire(now, "topup")]
+        res = self._dispenser.on_lick(port, now,
+                                      credit_pending=self._trigger.armed)
+        if res.consumed_credit:
+            self._trigger.armed = False
+        return res.actions
 
     # ---------------------------------------------------------------- status
     def status(self) -> dict:
-        return {"id": self.id, "state": self.state, "armed": self.armed,
-                "credential": self.credential, "prime_on": self.prime_on,
-                "topups": self.topups, "max_topups": self.max_topups,
-                "fires": self.fires,
-                "nonstem_reward_prob": self.nonstem_reward_prob}
+        return {"id": self.id, "state": self._dispenser.state,
+                "armed": self._trigger.armed,
+                "credential": self._trigger.credential,
+                "prime_on": self._dispenser.prime_on,
+                "topups": self._dispenser.topups,
+                "max_topups": self._dispenser.max_topups,
+                "fires": self._dispenser.fires,
+                "nonstem_reward_prob": self._trigger.nonstem_reward_prob}
 
 
 TEMPLATES = {

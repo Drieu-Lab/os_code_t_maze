@@ -64,7 +64,7 @@ criteria).
 | [FW-0005](#fw-0005-in-gui-rat-id-entry-firmware-animal-command--logger-file-roll) | In-GUI rat id entry (firmware `ANIMAL` command + logger file-roll) | Firmware + protocol + logger + GUI | Deferred |
 | [FW-0006](#fw-0006-shared-base-class-for-still-frame-editors) | Shared base class for still-frame editors | Tracker tab UI | Done |
 | [FW-0008](#fw-0008-phase-3-transition---firmware-correction-trials--spatially-gated-cue) | Phase 3 transition - correction trials + spatially-gated cue | Firmware + protocol | Deferred |
-| [FW-0009](#fw-0009-triggerdispenser-decomposition-of-the-well-reward-rule) | Trigger/Dispenser decomposition of the well-reward rule | Rules engine | Deferred |
+| [FW-0009](#fw-0009-triggerdispenser-decomposition-of-the-well-reward-rule) | Trigger/Dispenser decomposition of the well-reward rule | Rules engine | Done (ADR-0068) |
 | [FW-0010](#fw-0010-deeplabcut-live-pose-estimation-for-body-part-tracking) | DeepLabCut-Live pose estimation for body-part tracking | Markerless tracker | Proposed |
 | [FW-0011](#fw-0011-richer-colour-model-for-clustered-fragments-multimodalper-part) | Richer colour model for clustered fragments (multimodal/per-part) | Markerless tracker | Proposed |
 | [FW-0013](#fw-0013-free-cpu-cores-during-recording-nvenc-or-encode-thread-cap) | Free CPU cores during recording (NVENC or encode-thread cap) | Camera recording | Proposed |
@@ -385,7 +385,11 @@ behavioral-design decisions.
 
 ### FW-0009: Trigger/Dispenser decomposition of the well-reward rule
 
-- **Status:** Deferred
+- **Status:** Done — implemented in [ADR-0068](decisions/0068-trigger-dispenser-well-reward-split.md)
+  (2026-07-30): `RewardTrigger` + `WellDispenser` extracted into the pure
+  `host/reward_dispenser.py`; `WellRewardWithExcursionRule` is now wiring, with
+  `test_well_reward.py` passing unchanged and new `test_reward_dispenser.py`
+  isolation tests. The notes below are kept for the record.
 - **Date added:** 2026-07-08
 - **Author / Agent:** Agent (Cursor) on behalf of Celine
 - **Area / modules:** `host/rules_engine.py` (`WellRewardWithExcursionRule`),
