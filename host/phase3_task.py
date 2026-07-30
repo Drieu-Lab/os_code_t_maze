@@ -57,7 +57,7 @@ class Phase3Config:
     """
     reward_incorrect: bool = False
     reward_port: int = 2
-    reward_pulse_ms: int = 300
+    reward_pulse_ms: int = 500
 
 
 @dataclass(frozen=True)

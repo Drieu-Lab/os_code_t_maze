@@ -305,6 +305,21 @@ class WellDispenser:
         self._last_lick_now: Optional[float] = None
 
     # --------------------------------------------------------------- helpers
+    def reset(self) -> None:
+        """Clear the per-visit state (visit lifecycle, pending credential prime,
+        top-up counter + timing) WITHOUT changing the configured knobs or the
+        lifetime ``fires`` tally. A composing caller uses this at a clean boundary
+        (e.g. Phase 3 re-arm / operator Skip) so a prime that never reached the
+        well cannot carry a stale top-up window into the next visit."""
+        self.state = "OUTSIDE"
+        self.topups = 0
+        self._primed_this_visit = False
+        self._credit_primed = False
+        self._at_well = False
+        self._last_tick_now = None
+        self._last_fire_now = None
+        self._last_lick_now = None
+
     def _topup_ok(self, now: float) -> bool:
         if self._last_fire_now is None:
             return True

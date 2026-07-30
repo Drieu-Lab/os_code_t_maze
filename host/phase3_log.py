@@ -49,7 +49,8 @@ _ARM_LABEL = {LEFT: "LEFT", RIGHT: "RIGHT", "left": "LEFT", "right": "RIGHT"}
 # return arms) plus the explicit correct_arm; the rest is filled live.
 COLUMNS = (
     "trial", "correct_arm", "choice_cue", "return_cue_left", "return_cue_right",
-    "chosen_arm", "outcome", "rewarded", "return_arm_used", "return_cue_played",
+    "chosen_arm", "outcome", "rewarded", "topups", "return_arm_used",
+    "return_cue_played",
     "trial_start_iso", "choice_cue_on_iso", "choice_cue_off_iso",
     "choice_time_iso", "reward_cmd_iso", "return_cue_on_iso",
     "return_cue_off_iso", "trial_end_iso", "lick_time_iso", "lick_fw_ms",
@@ -70,6 +71,10 @@ class _Row:
     chosen_arm: Optional[str] = None
     outcome: Optional[str] = None
     rewarded: Optional[str] = None
+    # Count of lick-triggered TOP-UP pulses delivered at the well AFTER the prime
+    # (the credential prime is the ``rewarded`` 1; top-ups are extras). None until
+    # the first top-up, then a stringified count. See docs/decisions/0069.
+    topups: Optional[str] = None
     return_arm_used: Optional[str] = None
     return_cue_played: Optional[str] = None
     trial_start_iso: Optional[str] = None
@@ -99,6 +104,7 @@ class Phase3RowView:
     chosen_arm: Optional[str]
     outcome: Optional[str]
     rewarded: Optional[str]
+    topups: Optional[str]
     return_arm_used: Optional[str]
     return_cue_played: Optional[str]
     trial_start_iso: Optional[str]
@@ -202,6 +208,16 @@ class Phase3Log:
         r.rewarded = "1"
         r.reward_cmd_iso = iso
         self._pending_lick_index = index      # this trial now awaits its lick
+
+    def topup_fired(self, index: int) -> None:
+        """Record one lick-triggered top-up pulse at the well for ``index`` (an
+        extra beyond the prime; docs/decisions/0069). Increments the trial's
+        running top-up count."""
+        r = self._row(index)
+        if r is None:
+            return
+        cur = int(r.topups) if r.topups is not None else 0
+        r.topups = str(cur + 1)
 
     def return_cue_started(self, index: int, arm: str, cue: Optional[str],
                            iso: str) -> None:

@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import os
 import random
+import time
 import tkinter as tk
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -64,6 +65,8 @@ from cue_gate import CHOICE, RETURN, CueGate, CueParams
 from maze_state import CENTRAL_STEM, HUB
 from phase3_log import Phase3Log, Phase3StateSnapshot
 from phase3_task import ABANDONED, CORRECT, INCORRECT, Phase3Config, Phase3Task
+from reward_dispenser import WellDispenser
+from reward_volume import format_volume, reward_volume_ul
 from rig_config import load_rig_config
 from trial_ribbon_view import (
     _ARM_SHORT, _CELL_CURRENT_BG, _CUE_SHORT, _UNSET, TrialRibbonView,
@@ -89,6 +92,16 @@ FREEROAM_TOKENS = ("FREEROAM", "FREE")
 
 POLL_INTERVAL_MS = 100          # snapshot publish + status refresh (Tk)
 SEED_MASK = 0xFFFFFFFF          # the sequence PRNG is 32-bit (trial_sequence.lcg)
+
+# Reward top-ups at the central well after the correct-choice prime (ADR-0069),
+# delivered via the SAME shared WellDispenser the reward-shaping phases use
+# (ADR-0068). Default max top-ups the tab starts with; the operator adjusts it.
+DEFAULT_MAX_TOPUPS = 3
+# Within-visit lick spacing for a top-up (ms). 0 leans on the lick debounce + the
+# shared dispatcher's global rate backstop (ADR-0054) to space fires; the debounce
+# rejects electrical bounce / bursts on the lick line.
+PHASE3_TOPUP_COOLDOWN_MS = 0
+PHASE3_LICK_DEBOUNCE_MS = 150
 
 # Per-session data files live under host/data/ (same tree as rig_logger.py).
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
@@ -121,6 +134,12 @@ class _Phase3Snapshot:
     params: CueParams = field(default_factory=CueParams)
     seed: int = 0
     reward_incorrect: bool = False
+    # Reward dispensing (ADR-0069): the correct-choice prime pulse width and the
+    # number of lick-triggered top-ups allowed at the well after it. Applied on
+    # arm (like the seed / reward_incorrect), so a mid-session edit takes effect on
+    # the next arm.
+    reward_pulse_ms: int = 500
+    max_topups: int = DEFAULT_MAX_TOPUPS
     animal: str = ""
     session_id: str = ""
     session_out_dir: str = ""
@@ -188,10 +207,21 @@ class Phase3ControlView(VisionActuator):
         # The center-well lick channel (reward-collection lick), from the shared
         # rig-config pin map (ADR-0021/0022); None if unavailable -> no lick times.
         self._center_lick = load_rig_config().lick_index_by_role.get("center")
+        # Shared reward dispenser (ADR-0068): owns the correct-choice prime + the
+        # lick top-up mechanics at the central well, driven with prime_on=
+        # "credential" so the pulse fires the instant a choice is scored (out at
+        # the choice arm, as today) and licks at the well top up. Built on arm from
+        # the snapshot's reward knobs; None until then. Its FireReward intents are
+        # routed through the shared dispatcher (rate backstop + volume record).
+        self._well: Optional[WellDispenser] = None
+        # The trial the current prime was logged against, so a later top-up lick
+        # (which lands after the trial has advanced) is attributed to the right row.
+        self._reward_trial_index: Optional[int] = None
         # Live tallies (thread-written, Tk-read for status).
         self._correct = 0
         self._incorrect = 0
         self._reward_count = 0
+        self._reward_ul = 0.0            # session dispensed volume (prime + top-ups)
         self._active_seed = 0
         # Latest immutable table snapshot for cross-tab readers (the stats panel +
         # trial ribbon; docs/decisions/0050). Published by the actuation thread via
@@ -245,7 +275,10 @@ class Phase3ControlView(VisionActuator):
             index, rising = lick
             if rising and index == self._center_lick:
                 fw_ms = info.parsed.ms if info.parsed is not None else None
-                self._enqueue_act(("lick", _now_iso(), fw_ms))
+                # Carry a monotonic stamp (same clock as the fast-view frames,
+                # ADR-0069) so the dispenser's lick freshness/top-up timing lines
+                # up with visit_tick; the ISO string stays for the data log.
+                self._enqueue_act(("lick", _now_iso(), fw_ms, time.monotonic()))
 
     def close(self) -> None:
         self._closed = True
@@ -387,7 +420,7 @@ class Phase3ControlView(VisionActuator):
         self._send (ADR-0043). Called by the shared VisionActuator loop with the
         atomic snapshot; splits frames from routed center-well lick edges."""
         if item[0] == "lick":
-            self._process_lick(item[1], item[2])
+            self._process_lick(item[1], item[2], item[3])
         elif item[0] == "cmd":
             self._process_command(item[1], snap)
         else:
@@ -405,10 +438,22 @@ class Phase3ControlView(VisionActuator):
         if self._task_events is not None:
             self._task_events.reset()
         self._seq = TrialSequence(TrialConfig(), seed=snap.seed)
-        self._task = Phase3Task(
-            self._seq, Phase3Config(reward_incorrect=snap.reward_incorrect))
+        cfg = Phase3Config(reward_incorrect=snap.reward_incorrect,
+                           reward_pulse_ms=snap.reward_pulse_ms)
+        self._task = Phase3Task(self._seq, cfg)
+        # Fresh dispenser for this run: prime fires at the scored choice
+        # (prime_on="credential") and licks at the central well top up, up to
+        # snap.max_topups (ADR-0068/0069). The port is the central reward port,
+        # which is also the center-well lick index (ADR-0022), so on_lick matches.
+        self._well = WellDispenser(
+            {"port": cfg.reward_port, "pulse_ms": cfg.reward_pulse_ms,
+             "max_topups": snap.max_topups,
+             "lick_debounce_ms": PHASE3_LICK_DEBOUNCE_MS, "prime_on": "credential"},
+            default_topup_cooldown_ms=PHASE3_TOPUP_COOLDOWN_MS, rule_id="phase3")
+        self._reward_trial_index = None
         self._active_seed = snap.seed
         self._correct = self._incorrect = self._reward_count = 0
+        self._reward_ul = 0.0
         self._active_cue = None
         self._prev_zone = None
         # Start a fresh session data file: the planned matrix is written now, then
@@ -479,6 +524,11 @@ class Phase3ControlView(VisionActuator):
         self._active_cue = None
         self._prev_zone = None
         self._gate.reset()
+        # Drop any pending credential prime + open well visit, so an interrupted
+        # trial can't carry a stale top-up window into the next one (ADR-0069).
+        if self._well is not None:
+            self._well.reset()
+        self._reward_trial_index = None
 
     def _extend_trials(self, snap: _Phase3Snapshot) -> None:
         """Append one balanced block of trials to the live plan (docs/decisions/
@@ -626,12 +676,22 @@ class Phase3ControlView(VisionActuator):
                 self._log_call(lambda: self._log.choice_scored(
                     dec.trial_index, dec.choice_side, dec.outcome, iso))
                 changed = True
-            if dec.reward and self._fire_reward():
-                # Only count + log the reward when it actually fired: the shared
+            if dec.reward:
+                # Prime the correct-choice pulse at the well via the shared
+                # dispenser (fires here, out at the choice, as before; ADR-0068/
+                # 0069). Only count + log when it actually fired: the shared
                 # backstop may drop one too soon after the last (ADR-0054).
-                self._reward_count += 1
-                self._log_call(lambda: self._log.reward_fired(dec.trial_index, iso))
-                changed = True
+                fired = self._well.prime_at_credential(task_frame.now) \
+                    if self._well is not None else None
+                if fired is not None and self._dispatch_fire(fired):
+                    self._reward_count += 1
+                    self._reward_trial_index = dec.trial_index
+                    self._log_call(lambda: self._log.reward_fired(dec.trial_index, iso))
+                    changed = True
+            # Advance the well-visit lifecycle every tick so licks can top up on
+            # arrival (credential mode fires nothing here; ADR-0068).
+            if self._well is not None:
+                self._well.visit_tick(task_frame, credit_pending=False)
             if dec.advanced:
                 self._log_call(lambda: self._log.trial_ended(dec.trial_index, iso))
                 changed = True
@@ -645,10 +705,23 @@ class Phase3ControlView(VisionActuator):
             self._publish_state(armed=True)
         self._publish_status(snap)
 
-    def _process_lick(self, iso: str, fw_ms) -> None:
-        """A center-well lick from the serial thread: attribute it to the trial
-        awaiting its reward-collection lick and persist (ADR-0047)."""
+    def _process_lick(self, iso: str, fw_ms, mono: float) -> None:
+        """A center-well lick from the serial thread: record its time in the data
+        log (ADR-0047) AND feed the shared dispenser so a lick while camping at
+        the well tops up the reward, up to max_topups (ADR-0068/0069)."""
+        changed = False
         if self._log is not None and self._log.lick(iso, fw_ms):
+            changed = True
+        if self._well is not None and self._center_lick is not None:
+            res = self._well.on_lick(self._center_lick, mono, credit_pending=False)
+            for fire in res.actions:
+                if self._dispatch_fire(fire):
+                    self._reward_count += 1
+                    if self._reward_trial_index is not None:
+                        ti = self._reward_trial_index
+                        self._log_call(lambda: self._log.topup_fired(ti))
+                    changed = True
+        if changed:
             self._write_log()
             self._publish_state(armed=True)
 
@@ -699,7 +772,8 @@ class Phase3ControlView(VisionActuator):
         self._status_text = (
             f"ARMED  seed:{self._active_seed}  trial:{min(idx + 1, n)}/{n}  "
             f"correct:{self._correct}/{done} ({acc:.0f}%)  "
-            f"rewards:{self._reward_count}  {self._last_fw_cue}{extra}")
+            f"rewards:{self._reward_count} ({format_volume(self._reward_ul)})  "
+            f"{self._last_fw_cue}{extra}")
 
     def _send_cmd(self, cmd: str) -> None:
         if self._send is None:
@@ -709,17 +783,20 @@ class Phase3ControlView(VisionActuator):
         except Exception:
             pass
 
-    def _fire_reward(self) -> bool:
-        """Dispense the trial reward through the shared dispatcher; return whether
-        it actually fired (the global backstop may suppress it). Falls back to a
-        direct R<port> send (no backstop) if no dispatcher is wired. ADR-0054."""
-        port = self._task.cfg.reward_port
-        pulse = self._task.cfg.reward_pulse_ms
+    def _dispatch_fire(self, fire) -> bool:
+        """Route a dispenser ``FireReward`` (prime or top-up) through the shared
+        dispatcher; return whether it actually fired (the global backstop may
+        suppress it) and accumulate the dispensed volume. Falls back to a direct
+        R<port> send (no backstop, assumed fired) if no dispatcher is wired.
+        ADR-0054/0068."""
         if self._dispatcher is None:
-            self._send_cmd(f"R{port}1,{pulse}")
+            self._send_cmd(f"R{fire.port}1,{fire.ms}")
+            self._reward_ul += reward_volume_ul(fire.ms)
             return True
-        rec = self._dispatcher.fire(port, pulse, reason="phase3_reward",
-                                    rule_id="phase3")
+        rec = self._dispatcher.fire(fire.port, fire.ms,
+                                    reason=f"phase3_{fire.reason}", rule_id="phase3")
+        if rec.fired:
+            self._reward_ul += rec.volume_ul
         return rec.fired
 
     # ---------------------------------------------------------------- gating
@@ -770,6 +847,21 @@ class Phase3ControlView(VisionActuator):
         """Draw a fresh random seed into the field (takes effect on next arm)."""
         self._seed_var.set(str(random.randint(1, SEED_MASK)))
 
+    def _current_pulse_ms(self) -> int:
+        """Reward prime pulse width (ms) from the field; falls back to the default
+        on a blank/malformed entry, and is floored at 1 ms."""
+        try:
+            return max(1, int(float(self._pulse_var.get())))
+        except (tk.TclError, ValueError):
+            return Phase3Config().reward_pulse_ms
+
+    def _current_max_topups(self) -> int:
+        """Max lick top-ups from the field; 0 (no top-ups) on a blank/bad entry."""
+        try:
+            return max(0, int(float(self._topups_var.get())))
+        except (tk.TclError, ValueError):
+            return 0
+
     # -------------------------------------------------------------------- UI
     def _build_ui(self) -> None:
         pad = {"padx": 6, "pady": 3}
@@ -807,21 +899,23 @@ class Phase3ControlView(VisionActuator):
         ri.grid(row=4, column=0, columnspan=2, sticky="w", **pad)
         tip(ri, "phase3.reward_incorrect")
 
+        self._build_reward_ui(root, row=5)
+
         ttk.Label(root, text="Min confidence:").grid(
-            row=5, column=0, sticky="w", **pad)
+            row=6, column=0, sticky="w", **pad)
         self._conf_var = tk.StringVar(value="0.0")
         conf = ttk.Spinbox(root, from_=0.0, to=1.0, increment=0.05, width=6,
                            textvariable=self._conf_var)
-        conf.grid(row=5, column=1, sticky="w", **pad)
+        conf.grid(row=6, column=1, sticky="w", **pad)
         tip(conf, "phase3.min_confidence")
 
         # NOTE: the animal id is no longer entered here - it comes from the Task
         # tab's single shared Animal ID field via the injected ``animal_id``
         # provider (docs/decisions/0053, FW-0005).
         ttk.Label(root, text="Sequence seed:").grid(
-            row=6, column=0, sticky="w", **pad)
+            row=7, column=0, sticky="w", **pad)
         seed_row = ttk.Frame(root)
-        seed_row.grid(row=6, column=1, sticky="w", **pad)
+        seed_row.grid(row=7, column=1, sticky="w", **pad)
         self._seed_var = tk.StringVar(value=str(random.randint(1, SEED_MASK)))
         seed = ttk.Entry(seed_row, width=12, textvariable=self._seed_var)
         seed.pack(side=tk.LEFT)
@@ -830,21 +924,61 @@ class Phase3ControlView(VisionActuator):
         newb.pack(side=tk.LEFT, padx=(4, 0))
         tip(newb, "phase3.new_seed")
         ttk.Label(root, text="(applied when you arm)").grid(
-            row=7, column=1, sticky="w", padx=6)
+            row=8, column=1, sticky="w", padx=6)
 
         ttk.Separator(root, orient="horizontal").grid(
-            row=8, column=0, columnspan=2, sticky="ew", pady=(8, 4))
+            row=9, column=0, columnspan=2, sticky="ew", pady=(8, 4))
 
         self._status_var = tk.StringVar(value="phase 3: off")
         ttk.Label(root, textvariable=self._status_var, anchor="w",
                   wraplength=460, justify="left").grid(
-            row=9, column=0, columnspan=2, sticky="w", **pad)
+            row=10, column=0, columnspan=2, sticky="w", **pad)
 
         # In-tab progress visualization (docs/decisions/0051): a compact ribbon of
         # the current trial + neighbours, and a scrollable list of all N planned
         # trials with the current one highlighted. Both are read-only views of the
         # published table snapshot (self._state), refreshed on the Tk poll.
-        self._build_progress_ui(root, row=10)
+        self._build_progress_ui(root, row=11)
+
+    def _build_reward_ui(self, root: ttk.Frame, *, row: int) -> None:
+        """Reward controls: the correct-choice prime pulse width, the number of
+        lick top-ups at the well, and a live dispensed-volume estimate (ADR-0069).
+        Pulse width + top-ups apply on the next arm (like the seed)."""
+        box = ttk.LabelFrame(root, text="Reward (central well)")
+        box.grid(row=row, column=0, columnspan=2, sticky="ew", padx=6, pady=3)
+
+        ttk.Label(box, text="Pulse (ms):").grid(
+            row=0, column=0, sticky="w", padx=6, pady=3)
+        self._pulse_var = tk.StringVar(value=str(Phase3Config().reward_pulse_ms))
+        pulse = ttk.Spinbox(box, from_=10, to=2000, increment=10, width=7,
+                            textvariable=self._pulse_var,
+                            command=self._refresh_reward_readout)
+        pulse.grid(row=0, column=1, sticky="w", padx=6, pady=3)
+        tip(pulse, "phase3.reward_pulse_ms")
+
+        ttk.Label(box, text="Max top-ups (licks):").grid(
+            row=0, column=2, sticky="w", padx=6, pady=3)
+        self._topups_var = tk.StringVar(value=str(DEFAULT_MAX_TOPUPS))
+        topups = ttk.Spinbox(box, from_=0, to=20, increment=1, width=5,
+                             textvariable=self._topups_var,
+                             command=self._refresh_reward_readout)
+        topups.grid(row=0, column=3, sticky="w", padx=6, pady=3)
+        tip(topups, "phase3.max_topups")
+
+        self._reward_vol_var = tk.StringVar(value="")
+        ttk.Label(box, textvariable=self._reward_vol_var, foreground="#555").grid(
+            row=1, column=0, columnspan=4, sticky="w", padx=6, pady=(0, 3))
+        self._refresh_reward_readout()
+
+    def _refresh_reward_readout(self) -> None:
+        """Update the calibrated per-trial reward-volume estimate from the pulse +
+        top-up fields (ADR-0019/0069). Runs on the Tk thread (spinbox command +
+        poll), so it never touches the actuation thread's tallies."""
+        per = reward_volume_ul(self._current_pulse_ms())
+        pulses = 1 + self._current_max_topups()
+        self._reward_vol_var.set(
+            f"\u2248 {format_volume(per)}/pulse  \u00b7  up to {pulses} pulses/trial "
+            f"= {format_volume(per * pulses)}")
 
     def _build_progress_ui(self, root: ttk.Frame, *, row: int) -> None:
         """Build the trial ribbon + scrollable planned-trial list (ADR-0051).
@@ -880,6 +1014,7 @@ class Phase3ControlView(VisionActuator):
         try:
             self._publish_snapshot()
             self._status_var.set(self._status_text)
+            self._refresh_reward_readout()
             self._refresh_progress()
         except tk.TclError:
             return
@@ -896,6 +1031,8 @@ class Phase3ControlView(VisionActuator):
             params=self._current_params(),
             seed=self._current_seed(),
             reward_incorrect=bool(self._reward_incorrect_var.get()),
+            reward_pulse_ms=self._current_pulse_ms(),
+            max_topups=self._current_max_topups(),
             animal=self._current_animal(),
             session_id=self._session_id,
             session_out_dir=self._session_out_dir,

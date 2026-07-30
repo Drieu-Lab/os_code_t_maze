@@ -306,6 +306,14 @@ TIPS: Dict[str, Entry] = {
     "phase3.reward_incorrect": "Shaping aid: dispense reward at the central well "
                                "even on an INCORRECT choice (otherwise only "
                                "correct choices are rewarded).",
+    "phase3.reward_pulse_ms": "Reward valve open time (ms) for the correct-choice "
+                              "prime pulse at the central well; the calibrated "
+                              "dispensed volume is shown below (ADR-0019). Applied "
+                              "when you arm.",
+    "phase3.max_topups": "How many extra reward pulses the rat can earn by licking "
+                         "at the central well after the prime (0 = none). Uses the "
+                         "same shared dispenser as the reward-shaping phases "
+                         "(ADR-0068); applied when you arm.",
     "phase3.min_confidence": "Extra track-confidence floor for a cue onset, on top "
                              "of the estimator's own validity threshold (0..1; 0 "
                              "defers entirely to the estimator).",

@@ -1077,10 +1077,13 @@ ephemeral Tk vars (seed, cue params) that reset every launch, whereas Rules is
 fully driven by a versioned `rules.json` with a GUI editor, validation, and
 write-back (ADR-0031). So Phase 3 parameters can't be changed without editing
 code, aren't reproducible, and the operator's mental model differs between the two
-task tabs.
+task tabs. Update: [ADR-0069](decisions/0069-phase3-reward-topups-via-shared-dispenser.md)
+added editable reward `pulse_ms` + `max_topups` Tk vars (applied on arm), but like
+the other Phase 3 knobs they still reset every launch and aren't recorded in a
+config file — so the persistence/reproducibility gap this item closes remains.
 
 **Sketch of approach.** Add a versioned `host/phase3.json` with `reward` (port,
-pulse_ms, reward_incorrect), `sequence` (max_trials, block_size, max_same_run,
+pulse_ms, max_topups, reward_incorrect), `sequence` (max_trials, block_size, max_same_run,
 tone Hz, seed policy), and `cue` (choice/return enabled, require_up_stem,
 min_confidence) sections, loaded into `Phase3Config`/`TrialConfig`/`CueParams`
 with defaults matching today's behavior. Put loading/coercion/validation in a pure

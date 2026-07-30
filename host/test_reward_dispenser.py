@@ -168,6 +168,19 @@ class TestDispenserVisitLifecycle(unittest.TestCase):
         self.assertEqual(self._disp(prime_on_arrival=True).prime_on, "well_arrival")
         self.assertEqual(self._disp(prime_on_arrival=False).prime_on, "well_lick")
 
+    def test_reset_clears_visit_and_credential(self):
+        # A credential prime that never reached the well must not carry a top-up
+        # window past a reset (ADR-0069): reset() drops the pending prime + visit,
+        # so the next arrival opens UNprimed and a lick tops up nothing.
+        d = self._disp(prime_on="credential", max_topups=2)
+        d.prime_at_credential(0.5)
+        d.reset()
+        res = d.visit_tick(frame(at_well=True, now=1.0), credit_pending=False)
+        self.assertEqual(d.state, "AT_WELL")
+        self.assertEqual(len(fires(res.actions)), 0)
+        lr = d.on_lick(2, 1.01, credit_pending=False)
+        self.assertEqual(len(fires(lr.actions)), 0)   # unprimed visit -> no top-up
+
     def test_topup_cooldown_default_seeded_from_engine(self):
         # No topup_cooldown_ms / cooldown_ms in params -> uses the passed engine
         # default; a legacy cooldown_ms overrides it.

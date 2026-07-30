@@ -87,6 +87,23 @@ class TestLifecycle(unittest.TestCase):
         self.assertEqual(r.rewarded, "0")
         self.assertIsNone(r.lick_time_iso)
 
+    def test_topups_count_increments(self):
+        # Lick top-ups at the well after the prime accumulate on the trial's
+        # running count (ADR-0069); blank until the first top-up.
+        log = _log()
+        log.reward_fired(0, "t_reward")
+        self.assertIsNone(log._rows[0].topups)
+        log.topup_fired(0)
+        log.topup_fired(0)
+        self.assertEqual(log._rows[0].topups, "2")
+
+    def test_reset_trial_clears_topups(self):
+        log = _log()
+        log.reward_fired(0, "t_reward")
+        log.topup_fired(0)
+        log.reset_trial(0)               # Repeat/Back clears live fields
+        self.assertIsNone(log._rows[0].topups)
+
     def test_trial_start_keeps_first(self):
         log = _log()
         log.trial_started(0, "first")
