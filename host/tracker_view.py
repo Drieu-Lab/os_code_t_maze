@@ -126,6 +126,10 @@ class TrackerControlView:
         self._log_idx = 0
         self._sliders = {}            # param-name -> (tk var, scale-factor)
         self._slider_labels = {}      # param-name -> value Label (for refresh)
+        # Path of the appearance model last loaded/saved (None if the live model
+        # came from Register rat and was never saved). Read by the Session panel
+        # to snapshot the active model into the session config (docs/decisions/0072).
+        self._model_path: Optional[str] = None
         self._closed = False
 
         missing = self._missing_dependency()
@@ -502,6 +506,7 @@ class TrackerControlView:
             return
         try:
             self._tracker.save_model(path)
+            self._model_path = path
             self._model_status.set(f"model: saved {os.path.basename(path)}")
         except Exception as e:
             messagebox.showerror("Save model", f"{type(e).__name__}: {e}")
@@ -515,6 +520,7 @@ class TrackerControlView:
         try:
             before = self._tracker.get_params()
             self._tracker.load_model(path)
+            self._model_path = path
             m = self._tracker.get_model()
             self._model_status.set(
                 f"model: {os.path.basename(path)} (n={m.n}, "
@@ -559,7 +565,15 @@ class TrackerControlView:
 
     def _clear_model(self) -> None:
         self._tracker.clear_model()
+        self._model_path = None
         self._model_status.set("model: none")
+
+    def active_model_path(self) -> Optional[str]:
+        """Path of the appearance model currently loaded/saved (``.npz``), or None.
+
+        Read by the Session panel to copy the active model into the session's
+        config snapshot (docs/decisions/0072)."""
+        return self._model_path
 
     # ----------------------------------------------------------- blocker I/O
     def _capture_blocker(self) -> None:

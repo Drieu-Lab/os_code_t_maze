@@ -1,0 +1,68 @@
+{
+  "version": 1,
+  "landmarks": [
+    {
+      "kind": "well",
+      "index": 0,
+      "label": "Left reward (L0)",
+      "x": 0.321875,
+      "y": 0.23046875
+    },
+    {
+      "kind": "well",
+      "index": 1,
+      "label": "Right reward (L1)",
+      "x": 0.6645833333333333,
+      "y": 0.21354166666666666
+    },
+    {
+      "kind": "well",
+      "index": 2,
+      "label": "Center/start (L2)",
+      "x": 0.4979166666666667,
+      "y": 0.8268229166666666
+    },
+    {
+      "kind": "sensor",
+      "index": 0,
+      "label": "ENTRY (S0)",
+      "x": 0.5114583333333333,
+      "y": 0.58984375
+    },
+    {
+      "kind": "sensor",
+      "index": 1,
+      "label": "EXIT (S1)",
+      "x": 0.5052083333333334,
+      "y": 0.3450520833333333
+    },
+    {
+      "kind": "sensor",
+      "index": 2,
+      "label": "L_CHOICE (S2)",
+      "x": 0.39895833333333336,
+      "y": 0.2578125
+    },
+    {
+      "kind": "sensor",
+      "index": 3,
+      "label": "R_CHOICE (S3)",
+      "x": 0.5802083333333333,
+      "y": 0.2513020833333333
+    },
+    {
+      "kind": "sensor",
+      "index": 4,
+      "label": "L_RETURN (S4)",
+      "x": 0.440625,
+      "y": 0.59375
+    },
+    {
+      "kind": "sensor",
+      "index": 5,
+      "label": "R_RETURN (S5)",
+      "x": 0.5510416666666667,
+      "y": 0.59375
+    }
+  ]
+}

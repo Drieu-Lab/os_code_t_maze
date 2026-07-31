@@ -40,6 +40,7 @@ Run from os_code_t_maze/host/:
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import sys
 import tkinter as tk
@@ -48,7 +49,8 @@ from tkinter import messagebox, ttk
 import protocol
 from rig_io import RigClient
 from rig_view import RigView
-from camera_view import CameraView, DEFAULT_OUTPUT_DIR
+from camera_view import (CameraView, DEFAULT_OUTPUT_DIR, ORIENTATION,
+                         UNDISTORT_ALPHA, CALIBRATION_PATH)
 from reward_volume import (reward_volume_ul, format_volume,
                            DEFAULT_REWARD_PULSE_MS)
 from rig_config import load_rig_config, RigConfig
@@ -577,9 +579,16 @@ def main() -> int:
     # top-level tab (an inner ttk.Notebook), grouping the two still-frame-editing
     # workflows together. Only the sub-views whose deps are present are added.
     setup_subtabs = []
+    # The Tracking view is captured (like camera/task) so the Session panel can
+    # read the active appearance-model path for the config snapshot (ADR-0072).
+    tracker_view_ref = {}
     if tracker is not None and TrackerControlView is not None:
-        setup_subtabs.append(("Tracking", lambda parent: TrackerControlView(
-            parent, tracker=tracker, camera=camera_ref.get("cam"))))
+        def make_tracking(parent):
+            tvw = TrackerControlView(
+                parent, tracker=tracker, camera=camera_ref.get("cam"))
+            tracker_view_ref["tv"] = tvw
+            return tvw
+        setup_subtabs.append(("Tracking", make_tracking))
     # Maze state: reduces the tracker centroid to a discrete per-tick maze state
     # (zone + direction + loops) and hosts the zone editor. Read-only consumer of
     # the shared tracker; needs the camera for still-frame editing + preview.
@@ -842,11 +851,45 @@ def main() -> int:
         def behavior_summary():
             b = behavior_ref.get("behavior")
             return b.behavior_summary() if b is not None else None
+        # Runtime bits for the per-session config snapshot (ADR-0072) that don't
+        # live in a host/*.json: extra files to copy (the lens calibration JSON,
+        # the active tracker model) + live scalars (camera transform, tracker /
+        # maze params). session_config finds the host/*.json itself. All reads
+        # are guarded so a snapshot never breaks Session Start.
+        def config_inputs():
+            files = {}
+            params = {}
+            try:
+                params["camera"] = {"orientation": ORIENTATION,
+                                    "undistort_alpha": UNDISTORT_ALPHA}
+                if CALIBRATION_PATH:
+                    files["camera_calibration.json"] = CALIBRATION_PATH
+            except Exception:
+                pass
+            if tracker is not None:
+                try:
+                    params["tracker"] = dataclasses.asdict(tracker.get_params())
+                except Exception:
+                    pass
+            if pipeline is not None:
+                try:
+                    params["maze_state"] = dataclasses.asdict(pipeline.params)
+                except Exception:
+                    pass
+            tvw = tracker_view_ref.get("tv")
+            if tvw is not None:
+                try:
+                    mp = tvw.active_model_path()
+                    if mp and os.path.isfile(mp):
+                        files["model_" + os.path.basename(mp)] = mp
+                except Exception:
+                    pass
+            return {"files": files, "params": params}
         session = SessionControlView(
             session_parent, camera=camera_ref.get("cam"),
             phase3=phase3_ref.get("p3"), send=lambda cmd: client.send(cmd),
             recordings_root=recordings_root, animal_id=task_animal_id,
-            behavior_summary=behavior_summary)
+            behavior_summary=behavior_summary, config_inputs=config_inputs)
         session.widget().pack(side=tk.BOTTOM, fill=tk.X, padx=4, pady=4)
         add_module(session)
         # Expose the session clock to the behavior panel's Phase 3 line (ADR-0060).

@@ -18,6 +18,11 @@ On Start it creates a per-session folder tree under the recordings root
         video/   <session_id>.<mkv|mp4> + sidecar .csv (+ _background.png)
         task/    phase3_<session_id>.csv
         serial/  sensors_<session_id>.csv   (filtered raw serial - see below)
+        config/  the definitions that shaped the run (zones/ROI/landmarks/scale,
+                 phase3.json/rules.json, lens calibration, active model) + a
+                 runtime_params.json + config_snapshot.json index - so the
+                 session is reproducible even after the live host/*.json are
+                 re-drawn (docs/decisions/0072)
         summary/ session_summary_<session_id>.{json,txt}  (behavioral summary,
                  written on Stop - docs/decisions/0071)
 
@@ -86,6 +91,7 @@ from typing import Any, Callable, Optional
 
 import phase3_stats
 import protocol
+import session_config
 import session_summary
 from rig_config import load_rig_config
 from session_log import SessionManifest, clock_snapshot, path_within_session
@@ -103,6 +109,9 @@ TASK_SUBDIR = "task"
 SERIAL_SUBDIR = "serial"
 # End-of-session behavioral summary (JSON + text) folder (docs/decisions/0071).
 SUMMARY_SUBDIR = "summary"
+# Per-session config snapshot (geometry/task/calibration + runtime params) folder
+# so the run is reproducible after the live host/*.json change (docs/decisions/0072).
+CONFIG_SUBDIR = "config"
 
 # The central reward well's solenoid port ("Center / start"; docs/decisions/0007,
 # 0022) - used to keep only that port's valve acks in the filtered serial file.
@@ -124,12 +133,19 @@ class SessionControlView:
     def __init__(self, parent: tk.Misc, camera=None, phase3=None, send=None,
                  recordings_root: Optional[str] = None,
                  animal_id: Optional[Callable[[], str]] = None,
-                 behavior_summary: Optional[Callable[[], Any]] = None):
+                 behavior_summary: Optional[Callable[[], Any]] = None,
+                 config_inputs: Optional[Callable[[], dict]] = None):
         self._parent = parent
         self._camera = camera
         self._phase3 = phase3
         self._send = send                 # callable(str) -> None (RigClient.send)
         self._recordings_root = recordings_root or DEFAULT_RECORDINGS_ROOT
+        # Provider of the runtime bits the config snapshot can't read from a file:
+        # ``{"files": {name: path}, "params": {...}}`` - extra files to copy (lens
+        # calibration, active model) + live scalars (camera transform, tracker /
+        # maze params). None -> the snapshot captures only the host/*.json files
+        # (docs/decisions/0072).
+        self._config_inputs = config_inputs
         # Provider of the behavior panel's Phase 3 locomotor/compliance snapshot
         # (behavior_stats.BehaviorSnapshot) for the end-of-session summary written
         # on Stop (docs/decisions/0071); None -> the summary omits that group.
@@ -273,7 +289,8 @@ class SessionControlView:
         task_dir = os.path.join(self._session_dir, TASK_SUBDIR)
         serial_dir = os.path.join(self._session_dir, SERIAL_SUBDIR)
         summary_dir = os.path.join(self._session_dir, SUMMARY_SUBDIR)
-        for d in (self._video_dir, task_dir, serial_dir, summary_dir):
+        config_dir = os.path.join(self._session_dir, CONFIG_SUBDIR)
+        for d in (self._video_dir, task_dir, serial_dir, summary_dir, config_dir):
             try:
                 os.makedirs(d, exist_ok=True)
             except OSError:
@@ -309,6 +326,11 @@ class SessionControlView:
             self._phase3.set_session_context(self._session_id, out_dir=task_dir)
         else:
             notes.append("Phase 3 unavailable")
+
+        # Snapshot the definitions/config that shaped this run into config/ so it
+        # stays reproducible after the live host/*.json are re-drawn (ADR-0072).
+        if not self._write_config_snapshot(config_dir):
+            notes.append("config snapshot incomplete")
 
         self._mark_session_start(self._manifest.t0)
         self._write_manifest()
@@ -474,6 +496,39 @@ class SessionControlView:
             except OSError:
                 pass
             self._serial_file = None
+
+    # ------------------------------------------------------ config snapshot
+    def _write_config_snapshot(self, config_dir: str) -> bool:
+        """Copy the reproducibility-critical config into ``config/`` and record it
+        in the manifest (docs/decisions/0072).
+
+        The host-local files (zones/ROI/landmarks/scale, phase3.json, rules.json)
+        are found by session_config itself; the injected ``config_inputs``
+        provider supplies the extras that aren't plain host files (the lens
+        calibration JSON, the active tracker model) and the live scalars
+        (camera transform, tracker/maze params). Best-effort: any failure just
+        leaves the snapshot partial and returns False - never breaks Start.
+        Returns True when every expected source was captured.
+        """
+        extra_sources = None
+        runtime_params = None
+        if self._config_inputs is not None:
+            try:
+                inputs = self._config_inputs() or {}
+                extra_sources = inputs.get("files") or None
+                runtime_params = inputs.get("params") or None
+            except Exception:
+                pass
+        try:
+            result = session_config.write_config_snapshot(
+                config_dir, session_id=self._session_id,
+                extra_sources=extra_sources, runtime_params=runtime_params)
+        except Exception:
+            return False
+        if self._manifest is not None:
+            self._manifest.set_stream("config_dir", result["config_dir"])
+            self._manifest.set_stream("config_snapshot", result["snapshot_path"])
+        return not result["missing"]
 
     # ---------------------------------------------------- end-of-session summary
     def _write_session_summary(self) -> None:

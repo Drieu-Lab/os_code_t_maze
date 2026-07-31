@@ -18,20 +18,11 @@ host/data/
 # Camera recordings + sidecars (experiment_control.py / camera_view.py output)
 host/recordings/
 
-# Tracker artifacts (learned appearance models + saved ROI + landmark points;
-# per-rig, regenerated)
+# Learned appearance models (per-animal .npz; binary, kept in external backup).
+# The per-rig GEOMETRY files (roi_polygon/landmarks/zones/rig_scale) are now
+# VERSIONED as fixed rig parameters - see docs/decisions/0072 (supersedes the
+# gitignore in ADR-0014/0018/0023/0025).
 host/ratmodels/
-host/roi_polygon.json
-host/landmarks.json
-
-# Maze-state zone map (per-rig maze geometry, drawn in the Maze state tab).
-# see docs/decisions/0025
-host/zones.json
-
-# Rules-engine per-rig scale calibration (cm/px + homography), regenerated in
-# the Rules tab. rules.json IS versioned (the documented example config).
-# see docs/decisions/0023
-host/rig_scale.json
 
 # Compiled unit-test binaries (firmware/.../test)
 test_task_core

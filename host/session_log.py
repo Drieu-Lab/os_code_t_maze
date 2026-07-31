@@ -42,7 +42,8 @@ from datetime import datetime
 from typing import Any, Dict, Optional
 
 # Bump when the manifest layout changes so an offline reader can branch on it.
-SCHEMA_VERSION = 1
+# v2 adds the ``config_dir`` / ``config_snapshot`` streams (docs/decisions/0072).
+SCHEMA_VERSION = 2
 
 # How the session is anchored today, and the deferred hardware upgrade that would
 # attach at the same session-start seam (see docs/future-work.md FW-0018).
