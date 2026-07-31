@@ -475,6 +475,9 @@ def main() -> int:
     # The Session panel is captured too, so the behavior panel can read its
     # Start/Stop session clock for the Phase 3 session line (ADR-0060).
     session_ref = {}
+    # The behavior panel is captured so the Session panel can read its Phase 3
+    # locomotor/compliance snapshot for the end-of-session summary (ADR-0071).
+    behavior_ref = {}
 
     # One shared maze-state pipeline (a single estimator on the camera tracking
     # worker), consumed by the Maze state / Rules / Behavior tabs instead of a
@@ -765,6 +768,9 @@ def main() -> int:
                                 session_timing=session_timing)
         behavior.widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
         add_module(behavior)
+        # Expose the behavior panel's Phase 3 locomotor snapshot to the Session
+        # panel for the end-of-session summary (ADR-0071).
+        behavior_ref["behavior"] = behavior
         # Operator trial-control buttons on the RIGHT, wired to the live Phase 3
         # controller through the shared holder (each call null-safe if the Phase 3
         # tab is absent). Restart confirms first (it discards the current run's
@@ -830,10 +836,17 @@ def main() -> int:
         def task_animal_id():
             tv = task_ref.get("task")
             return tv.animal_id() if tv is not None else ""
+        # The behavior panel's Phase 3 locomotor snapshot for the end-of-session
+        # summary (ADR-0071); resolved through the shared holder, null-safe if the
+        # behavior panel wasn't built (no tracker).
+        def behavior_summary():
+            b = behavior_ref.get("behavior")
+            return b.behavior_summary() if b is not None else None
         session = SessionControlView(
             session_parent, camera=camera_ref.get("cam"),
             phase3=phase3_ref.get("p3"), send=lambda cmd: client.send(cmd),
-            recordings_root=recordings_root, animal_id=task_animal_id)
+            recordings_root=recordings_root, animal_id=task_animal_id,
+            behavior_summary=behavior_summary)
         session.widget().pack(side=tk.BOTTOM, fill=tk.X, padx=4, pady=4)
         add_module(session)
         # Expose the session clock to the behavior panel's Phase 3 line (ADR-0060).

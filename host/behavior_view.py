@@ -103,6 +103,13 @@ class BehaviorView:
         self._sub = pipeline.register()
         self._events = TaskEvents()
         self._stats = BehaviorStats()
+        # A second accumulator for the SAME locomotor/compliance measures during a
+        # Phase 3 session (docs/decisions/0071): driven automatically whenever a
+        # Phase 3 session is armed (not this panel's local Start button) and reset
+        # on each Phase 3 arm, so behavior_summary() reports the current session.
+        # It is what the end-of-session summary reads for the "excursions" group.
+        self._p3_stats = BehaviorStats()
+        self._p3_active = False
         self._timer = SessionTimer()
         self._scale = Scale() if Scale is not None else None
 
@@ -140,6 +147,15 @@ class BehaviorView:
         self._stats.mark_gap()
         self._timer.reset()
         self._refresh()
+
+    def behavior_summary(self):
+        """The Phase 3 session's locomotor/compliance snapshot
+        (behavior_stats.BehaviorSnapshot) for the end-of-session summary
+        (docs/decisions/0071), or None if this panel has no accumulator (the
+        tracker was unavailable). Read on the Tk thread like the rest of the panel,
+        so no locking is needed."""
+        p3 = getattr(self, "_p3_stats", None)
+        return p3.snapshot() if p3 is not None else None
 
     def close(self) -> None:
         self._closed = True
@@ -222,9 +238,11 @@ class BehaviorView:
 
     def _sync_window(self) -> None:
         try:
-            self._stats.set_window(int(self._window.get()))
+            n = int(self._window.get())
         except (tk.TclError, ValueError):
             return
+        self._stats.set_window(n)
+        self._p3_stats.set_window(n)   # keep the Phase 3 accumulator in step
         self._refresh()
 
     def _reload(self) -> None:
@@ -266,7 +284,13 @@ class BehaviorView:
             safe_after(self.frame, POLL_INTERVAL_MS, self._schedule_poll)
 
     def _poll(self) -> None:
-        if self._running and self._tracking_running() and self._has_zones():
+        # A Phase 3 session drives the second accumulator automatically (no local
+        # Start needed; docs/decisions/0071); detect its arm/disarm edges so the
+        # accumulator stays scoped to the current session.
+        p3_active = self._phase3_snapshot() is not None
+        self._track_phase3_lifecycle(p3_active)
+        measuring = self._tracking_running() and self._has_zones()
+        if measuring and (self._running or p3_active):
             # Drain EVERY RatState the shared worker produced since last poll and
             # fold each in order: the choice/loop edges are one-frame flags, so
             # sampling only the latest would drop trials landing between polls.
@@ -279,14 +303,33 @@ class BehaviorView:
                     smoothed = getattr(r, "smoothed", None)
                     pos = smoothed if smoothed is not None \
                         else getattr(r, "centroid", None)
-                self._stats.update(te, pos_px=pos, scale=self._scale)
-        elif self._running:
-            # Running but not measuring (tracking off / no zones): break
-            # continuity so the idle stretch is not counted as active time.
+                # Feed whichever accumulator(s) are live: the Phase 2a readout
+                # (this panel's Start) and/or the Phase 3 session accumulator.
+                if self._running:
+                    self._stats.update(te, pos_px=pos, scale=self._scale)
+                if p3_active:
+                    self._p3_stats.update(te, pos_px=pos, scale=self._scale)
+        elif self._running or p3_active:
+            # Live but not measuring (tracking off / no zones): break continuity
+            # so the idle stretch is counted as neither active time nor distance.
             if self._sub is not None:
                 self._sub.drain()   # discard stale bundles so we don't fold a backlog
-            self._stats.mark_gap()
+            if self._running:
+                self._stats.mark_gap()
+            if p3_active:
+                self._p3_stats.mark_gap()
         self._refresh()
+
+    def _track_phase3_lifecycle(self, active: bool) -> None:
+        """Reset the Phase 3 locomotor accumulator on each arm edge so its counts
+        cover the current session and not a prior one (docs/decisions/0071). A
+        rising edge (no session -> armed) starts fresh; the falling edge just
+        breaks continuity."""
+        if active and not self._p3_active:
+            self._p3_stats.reset()
+        elif not active and self._p3_active:
+            self._p3_stats.mark_gap()
+        self._p3_active = active
 
     # --------------------------------------------------------------- render
     def _status_text(self) -> str:

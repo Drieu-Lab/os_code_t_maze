@@ -18,6 +18,8 @@ On Start it creates a per-session folder tree under the recordings root
         video/   <session_id>.<mkv|mp4> + sidecar .csv (+ _background.png)
         task/    phase3_<session_id>.csv
         serial/  sensors_<session_id>.csv   (filtered raw serial - see below)
+        summary/ session_summary_<session_id>.{json,txt}  (behavioral summary,
+                 written on Stop - docs/decisions/0071)
 
 Start REQUIRES Phase 3 to already be armed (the "Arm Phase 3" checkbox on); if it
 is not, Start refuses and does nothing. The button no longer arms Phase 3 itself,
@@ -80,9 +82,11 @@ import time
 import tkinter as tk
 from datetime import datetime
 from tkinter import messagebox, ttk
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
+import phase3_stats
 import protocol
+import session_summary
 from rig_config import load_rig_config
 from session_log import SessionManifest, clock_snapshot, path_within_session
 from session_serial import is_sensor_or_central
@@ -97,6 +101,8 @@ DEFAULT_RECORDINGS_ROOT = os.path.join(DATA_DIR, "phase3_recordings")
 VIDEO_SUBDIR = "video"
 TASK_SUBDIR = "task"
 SERIAL_SUBDIR = "serial"
+# End-of-session behavioral summary (JSON + text) folder (docs/decisions/0071).
+SUMMARY_SUBDIR = "summary"
 
 # The central reward well's solenoid port ("Center / start"; docs/decisions/0007,
 # 0022) - used to keep only that port's valve acks in the filtered serial file.
@@ -117,12 +123,17 @@ class SessionControlView:
 
     def __init__(self, parent: tk.Misc, camera=None, phase3=None, send=None,
                  recordings_root: Optional[str] = None,
-                 animal_id: Optional[Callable[[], str]] = None):
+                 animal_id: Optional[Callable[[], str]] = None,
+                 behavior_summary: Optional[Callable[[], Any]] = None):
         self._parent = parent
         self._camera = camera
         self._phase3 = phase3
         self._send = send                 # callable(str) -> None (RigClient.send)
         self._recordings_root = recordings_root or DEFAULT_RECORDINGS_ROOT
+        # Provider of the behavior panel's Phase 3 locomotor/compliance snapshot
+        # (behavior_stats.BehaviorSnapshot) for the end-of-session summary written
+        # on Stop (docs/decisions/0071); None -> the summary omits that group.
+        self._behavior_summary = behavior_summary
         # The single host-side animal-id source (the Task tab's shared field;
         # docs/decisions/0053). None -> rely on the ANIMAL-handshake fallback.
         self._animal_id = animal_id
@@ -261,7 +272,8 @@ class SessionControlView:
         self._video_dir = os.path.join(self._session_dir, VIDEO_SUBDIR)
         task_dir = os.path.join(self._session_dir, TASK_SUBDIR)
         serial_dir = os.path.join(self._session_dir, SERIAL_SUBDIR)
-        for d in (self._video_dir, task_dir, serial_dir):
+        summary_dir = os.path.join(self._session_dir, SUMMARY_SUBDIR)
+        for d in (self._video_dir, task_dir, serial_dir, summary_dir):
             try:
                 os.makedirs(d, exist_ok=True)
             except OSError:
@@ -327,6 +339,9 @@ class SessionControlView:
         self._resolve_paths(reschedule=False)
         if self._manifest is not None:
             self._manifest.set_end(clock_snapshot())
+            # Build + write the behavioral summary first, so the manifest it writes
+            # next carries the summary file pointers (docs/decisions/0071).
+            self._write_session_summary()
             self._write_manifest()
         self._close_serial()
         # Release Phase 3's session context (it stays armed and running - ADR-0060).
@@ -459,6 +474,77 @@ class SessionControlView:
             except OSError:
                 pass
             self._serial_file = None
+
+    # ---------------------------------------------------- end-of-session summary
+    def _write_session_summary(self) -> None:
+        """Build the per-session behavioral summary and write it as JSON + text
+        into the session's summary/ folder, recording both paths in the manifest
+        (docs/decisions/0071).
+
+        The measures come from the same pure cores the live behavior panel uses -
+        the Phase 3 cued stats over the published table (phase3_stats.compute) plus
+        the panel's Phase 3 locomotor snapshot (via the injected provider) - so
+        nothing is recomputed here. Best-effort: any failure must not break a clean
+        Stop, so the whole build/write is guarded.
+        """
+        if self._manifest is None or self._session_dir is None:
+            return
+        try:
+            cued, seed, tones = self._phase3_summary_inputs()
+            locomotor = self._locomotor_snapshot()
+            summary = session_summary.build_summary(
+                session_id=self._session_id, animal=self._manifest.animal,
+                t0=self._manifest.t0, t_end=self._manifest.t_end,
+                cued=cued, locomotor=locomotor, seed=seed, tones=tones)
+            summary_dir = os.path.join(self._session_dir, SUMMARY_SUBDIR)
+            json_path = os.path.join(
+                summary_dir, f"session_summary_{self._session_id}.json")
+            text_path = os.path.join(
+                summary_dir, f"session_summary_{self._session_id}.txt")
+            self._atomic_write(json_path, summary.render_json())
+            self._atomic_write(text_path, summary.render_text())
+            self._manifest.set_stream("summary_json", json_path)
+            self._manifest.set_stream("summary_text", text_path)
+        except Exception:
+            pass
+
+    def _phase3_summary_inputs(self):
+        """``(Phase3Stats, seed, tones)`` for the summary from the published Phase
+        3 table, or ``(None, None, {})`` when no Phase 3 controller / snapshot is
+        available. ``tones`` is the cue->side mapping recorded in the snapshot."""
+        if self._phase3 is None or not hasattr(self._phase3, "published_state"):
+            return None, None, {}
+        try:
+            snap = self._phase3.published_state()
+        except Exception:
+            snap = None
+        if snap is None:
+            return None, None, {}
+        tones = {
+            "high_tone_is_left": snap.high_tone_is_left,
+            "high_tone_hz": snap.high_tone_hz,
+            "low_tone_hz": snap.low_tone_hz,
+        }
+        return phase3_stats.compute(snap), snap.seed, tones
+
+    def _locomotor_snapshot(self):
+        """The behavior panel's Phase 3 locomotor snapshot via the injected
+        provider, or None if unavailable/erroring."""
+        if self._behavior_summary is None:
+            return None
+        try:
+            return self._behavior_summary()
+        except Exception:
+            return None
+
+    def _atomic_write(self, path: str, text: str) -> None:
+        """Write ``text`` to ``path`` atomically (temp file + os.replace), like the
+        manifest writer, so a crash mid-write never leaves a half-written file."""
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8", newline="") as fh:
+            fh.write(text)
+        os.replace(tmp, path)
 
     # ------------------------------------------------------------- manifest I/O
     def _write_manifest(self) -> None:
