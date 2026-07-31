@@ -48,9 +48,10 @@ _RETURN_OF_SIDE = {LEFT: LEFT_RETURN, RIGHT: RIGHT_RETURN}
 class TaskEventFrame:
     """Per-tick task-semantic context derived from one ``RatState``.
 
-    Edges (``well_arrived``, ``choice_entered``, ``choice_committed``,
-    ``loop_closed``) are true only on the tick the event occurs; predicates
-    (``at_well``, ``outbound_used_stem``) describe the current tick / current lap;
+    Edges (``well_arrived``, ``departed_hub_via_stem``, ``choice_entered``,
+    ``choice_committed``, ``loop_closed``) are true only on the tick the event
+    occurs; predicates (``at_well``, ``outbound_used_stem``) describe the current
+    tick / current lap;
     aggregates (``same_side_run``, ``left_loops``, ``right_loops``) accumulate
     across laps. ``rat_state`` is the source state, passed through so consumers can
     reach raw fields if needed.
@@ -71,7 +72,9 @@ class TaskEventFrame:
     because a return arm is a different zone. ``left_hub_via_stem`` asks how the
     trip BEGAN - the animal stepped from the HUB into the stem - so it stays false
     for a trip that set off up a return arm. That is what the CHOICE cue needs,
-    since its own window IS the stem.
+    since its own window IS the stem. ``departed_hub_via_stem`` is the rising edge
+    of that level - true only on the single tick the departure happens - which the
+    Phase 3 controller uses to stamp a trial start once per outbound run.
     """
     now: float
     valid: bool
@@ -81,6 +84,7 @@ class TaskEventFrame:
     left_hub_via_stem: bool             # this trip DEPARTED the HUB up the stem
     # ---- edges (true only on the tick they occur) ----
     well_arrived: bool                  # entered the well (in_well) this tick
+    departed_hub_via_stem: bool         # departed the HUB up the stem this tick (rising edge of left_hub_via_stem)
     choice_entered: Optional[str]       # "left"/"right" if a choice arm entered this tick
     choice_committed: Optional[str]     # "left"/"right" on the FIRST choice entry per outbound trip
     loop_closed: Optional[str]          # "left"/"right" if a lap closed at the HUB this tick
@@ -131,6 +135,9 @@ class TaskEvents:
         # Starts False, so a session that begins mid-maze stays uncredentialed
         # until the animal has been home once - a missed cue, not a spurious one.
         self._left_hub_via_stem = False
+        # Previous tick's level, to derive the ``departed_hub_via_stem`` rising
+        # edge (mirrors ``_prev_at_well`` for ``well_arrived``).
+        self._prev_left_hub_via_stem = False
 
     def update(self, s: RatState) -> TaskEventFrame:
         at_well = bool(s.valid and s.zone == HUB and s.substate == IN_WELL)
@@ -165,6 +172,11 @@ class TaskEvents:
             self._left_hub_via_stem = False
         elif s.valid and s.entered == CENTRAL_STEM and s.exited == HUB:
             self._left_hub_via_stem = True
+        # The single-tick rising edge of that level (the level only changes on
+        # valid frames, so the edge is never fabricated during a dropout).
+        departed_hub_via_stem = bool(
+            self._left_hub_via_stem and not self._prev_left_hub_via_stem)
+        self._prev_left_hub_via_stem = self._left_hub_via_stem
 
         # Same-side run over STEM-GATED choice entries (Phase 2b anti-bias). Only a
         # stem-gated entry counts (a non-stem entry is not a valid trial and does
@@ -208,7 +220,9 @@ class TaskEvents:
             now=s.now, valid=s.valid,
             at_well=at_well, outbound_used_stem=outbound_used_stem,
             left_hub_via_stem=self._left_hub_via_stem,
-            well_arrived=well_arrived, choice_entered=choice_entered,
+            well_arrived=well_arrived,
+            departed_hub_via_stem=departed_hub_via_stem,
+            choice_entered=choice_entered,
             choice_committed=choice_committed,
             loop_closed=loop_closed, loop_clean=loop_clean,
             same_side_run=self._same_side_run,

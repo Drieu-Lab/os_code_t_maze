@@ -9,9 +9,10 @@ host/:
 
 Covers (see docs/decisions/0026): the well-arrival edge; the choice-entered edge
 (left/right); outbound_used_stem (stem vs return-arm approach); left_hub_via_stem
-(how the trip DEPARTED, docs/decisions/0067); clean vs unclean loop detection; and
-the same-side run aggregate (counts every closed loop, rewarded or not; resets on
-a side switch).
+(how the trip DEPARTED, docs/decisions/0067) and its rising edge
+departed_hub_via_stem (the Phase 3 trial-start edge, FW-0027); clean vs unclean
+loop detection; and the same-side run aggregate (counts every closed loop,
+rewarded or not; resets on a side switch).
 """
 
 from __future__ import annotations
@@ -171,6 +172,42 @@ class TestLeftHubViaStem(unittest.TestCase):
         self.assertFalse(h.step(P_STEM).left_hub_via_stem)
         self.assertFalse(h.step(P_JUNCTION).left_hub_via_stem)
         self.assertTrue(h.run([P_STEM, P_HUB, P_STEM]).left_hub_via_stem)
+
+
+class TestDepartedHubViaStem(unittest.TestCase):
+    """The single-tick rising edge of left_hub_via_stem - the trial-start edge the
+    Phase 3 controller stamps off (FW-0027). Mirrors well_arrived: true only on the
+    tick the departure happens, not while the credential is held afterwards."""
+
+    def test_fires_once_on_the_hub_to_stem_departure(self):
+        h = _Harness()
+        self.assertFalse(h.step(P_HUB).departed_hub_via_stem)   # at the hub: no edge
+        self.assertTrue(h.step(P_STEM).departed_hub_via_stem)   # the departure tick
+        # Level is held for the trip, but the edge is spent.
+        for pt in (P_JUNCTION, P_LCHOICE, P_LRETURN):
+            self.assertFalse(h.step(pt).departed_hub_via_stem, pt)
+
+    def test_refires_after_returning_home_and_departing_again(self):
+        h = _Harness()
+        self.assertTrue(h.run([P_HUB, P_STEM]).departed_hub_via_stem)
+        # Finish the lap home, then set off up the stem again -> a fresh edge.
+        h.run([P_JUNCTION, P_LCHOICE, P_LRETURN, P_HUB])
+        self.assertTrue(h.step(P_STEM).departed_hub_via_stem)
+
+    def test_reversal_back_into_the_stem_does_not_refire(self):
+        # After committing a choice the animal backs into the stem; the level is
+        # held True, so re-entering the stem is NOT a fresh hub departure.
+        h = _Harness()
+        h.run([P_HUB, P_STEM, P_JUNCTION, P_LCHOICE, P_JUNCTION])
+        self.assertFalse(h.step(P_STEM).departed_hub_via_stem)
+
+    def test_backwards_lap_never_fires(self):
+        # Out along the return arm and home down the stem: the level never arms
+        # (the stem was entered from the junction, not the hub), so no edge - no
+        # spurious trial start on a reverse stem crossing.
+        h = _Harness()
+        for pt in (P_HUB, P_LRETURN, P_LCHOICE, P_JUNCTION, P_STEM):
+            self.assertFalse(h.step(pt).departed_hub_via_stem, pt)
 
 
 class TestLoopClean(unittest.TestCase):

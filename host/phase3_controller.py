@@ -62,7 +62,6 @@ from typing import Callable, Optional
 
 import protocol
 from cue_gate import CHOICE, RETURN, CueGate, CueParams
-from maze_state import CENTRAL_STEM, HUB
 from phase3_config import (
     DEFAULT_MAX_TOPUPS, default_config, load_phase3_config, resolve_seed,
     save_phase3_config, to_trial_config, validate_phase3_config)
@@ -197,9 +196,10 @@ class Phase3ControlView(VisionActuator):
         self._gate_was_open = False
         self._last_fw_cue = ""            # last firmware CUE echo (for status)
         # Session data log (plan matrix + live outcomes; ADR-0047), and the state
-        # needed to fill it: which cue is sounding (to route the CUE_OFF edge), the
-        # previous zone (to detect the HUB->stem trial-start edge), and the file
-        # path. All touched only by the actuation thread.
+        # needed to fill it: which cue is sounding (to route the CUE_OFF edge) and
+        # the file path. All touched only by the actuation thread. The trial-start
+        # edge is no longer tracked here - it reads task_events.departed_hub_via_stem
+        # (FW-0027), so the HUB->stem departure is computed once, in the pure core.
         self._log: Optional[Phase3Log] = None
         self._log_path: Optional[str] = None
         # Shared session id when armed via the Session controller (docs/decisions/
@@ -209,7 +209,6 @@ class Phase3ControlView(VisionActuator):
         # -> the default host/data/ location for a manual arm.
         self._session_out_dir = ""
         self._active_cue: Optional[str] = None
-        self._prev_zone: Optional[str] = None
         # Operator controls (Rig-view buttons; docs/decisions/0058). ``_paused`` is
         # a plain Tk-thread bool (button + poll both run on the Tk thread) folded
         # into the atomic snapshot for the actuation thread. ``_restart_count``
@@ -479,7 +478,6 @@ class Phase3ControlView(VisionActuator):
         self._correct = self._incorrect = self._reward_count = 0
         self._reward_ul = 0.0
         self._active_cue = None
-        self._prev_zone = None
         # Start a fresh session data file: the planned matrix is written now, then
         # each trial's outcome is filled in as it resolves (ADR-0047). When armed
         # via the Session controller the shared session_id names the file (so the
@@ -548,7 +546,6 @@ class Phase3ControlView(VisionActuator):
         trial's cue waits for a fresh up-the-stem excursion from the hub."""
         self._send_cmd("CUE_OFF")
         self._active_cue = None
-        self._prev_zone = None
         self._gate.reset()
         # Drop any pending credential prime + open well visit, so an interrupted
         # trial can't carry a stale top-up window into the next one (ADR-0069).
@@ -626,14 +623,15 @@ class Phase3ControlView(VisionActuator):
             return
 
         # Operator "pause cues" (docs/decisions/0058): silence any tone and freeze
-        # trial progress without disarming. Resetting the gate/prev-zone each tick
-        # means that on resume the next cue re-arms only from a fresh hub->stem run.
+        # trial progress without disarming. The early return skips folding frames
+        # into task_events, so the next trial-start edge (departed_hub_via_stem)
+        # and cue only fire from a fresh hub->stem run after resume; resetting the
+        # gate keeps the cue re-arm consistent with that.
         if snap.paused:
             if self._active_cue is not None:
                 self._send_cmd("CUE_OFF")
                 self._active_cue = None
             self._gate.reset()
-            self._prev_zone = None
             self._publish_status(snap)
             return
 
@@ -647,13 +645,14 @@ class Phase3ControlView(VisionActuator):
         iso = _now_iso()
         changed = False
 
-        # Trial start = the first HUB->stem transition of a trial (the log keeps
-        # only the first; a poke-and-retreat re-entry is ignored). ADR-0047.
-        if st.valid:
-            if self._prev_zone == HUB and st.zone == CENTRAL_STEM:
-                self._log_call(lambda: self._log.trial_started(idx, iso))
-                changed = True
-            self._prev_zone = st.zone
+        # Trial start = the rat's first hub->stem departure of a trial, taken from
+        # the shared task-event edge (task_events.departed_hub_via_stem) so the
+        # HUB->CENTRAL_STEM departure is computed once, in the pure core (FW-0027).
+        # The edge is true only on a valid tick, and the log keeps only the first
+        # stamp per trial, so a poke-and-retreat re-entry is ignored. ADR-0047.
+        if task_frame is not None and task_frame.departed_hub_via_stem:
+            self._log_call(lambda: self._log.trial_started(idx, iso))
+            changed = True
 
         # WHEN: the positional cue gate. Host supplies identity via ,<hz> (v6).
         # Each cue carries a shared task-event credential describing where in the

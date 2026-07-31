@@ -80,6 +80,7 @@ criteria).
 | [FW-0025](#fw-0025-surface-the-brokers-link-health-in-the-gui) | Surface the broker's link health in the GUI | Broker + GUI status | Proposed |
 | [FW-0026](#fw-0026-a-mid-session-gate-reopen-should-not-restart-the-session-and-overwrite-its-file) | A mid-session gate reopen should not restart the session and overwrite its file | Phase 3 host | Proposed |
 | [FW-0027](#fw-0027-one-triggereffect-framework-behind-phases-1-2a-and-3) | One trigger/effect framework behind Phases 1, 2a and 3 | Rules engine + task-event layer + Phase 3 host | Proposed |
+| [FW-0028](#fw-0028-scope-the-session-summary-to-the-startstop-window) | Scope the session summary to the Start/Stop window | Session controller + summary + stats cores | Proposed |
 
 ## Entries
 
@@ -1286,8 +1287,11 @@ Sequence matters more than the destination here. FW-0024 (config-driven Phase 3)
 comes first, since a phase cannot be *described* until its parameters are data.
 FW-0009 (Trigger/Dispenser) is the same seam approached from the rules side and
 should be reconciled with this rather than done independently. The cheap first
-step, worth doing on its own: retire the `_prev_zone` duplication above by
-stamping `trial_started` off the shared predicate.
+step is **done** (2026-07-31): the `_prev_zone` duplication above is retired - the
+`HUB -> CENTRAL_STEM` departure now lives once as the `task_events.departed_hub_via_stem`
+edge (the rising edge of `left_hub_via_stem`, mirroring `well_arrived`), which the
+Phase 3 controller consumes to stamp `trial_started` instead of re-deriving the
+edge with a private `_prev_zone`.
 
 **Evaluation / acceptance.** The shipped Phase 1/2a/2b profiles behave
 identically (the existing `test_well_reward.py` / `test_task_events.py` suites
@@ -1297,25 +1301,86 @@ replaying a recorded session through both and diffing the outputs. The win is
 measured in what disappears: no predicate computed in two places, and a new phase
 addable without a new controller.
 
-**Effort / risk.** High, and the risk is the interesting part: this is exactly the
-kind of framework that can cost more comprehension than the duplication it
-removes (CONTRIBUTING #6 - no abstraction until there are 2-3 real callers). A
-generic rules engine that no one can read is worse than three readable
-controllers. Mitigation: let the shared pieces keep accumulating one ADR at a
-time (as they have been) and only extract the binding layer when a *fourth* phase
-or a second Phase 3 stage (FW-0008 correction trials) makes the pattern
-undeniable.
+**Effort / risk.** The revised CONTRIBUTING #6 splits this item cleanly, and the
+two halves have opposite risk. Naming a shared concept - growing a predicate in
+`task_events.py`, extracting an effect into a tested pure core - is **encouraged at
+any caller count** (it gives a concept one clear home and *reduces* what a reader
+holds in their head), so the predicate and effect layers are pulled-forward,
+incremental work, done one small ADR/step at a time (as they have been). The
+deferred half is the **bindings layer**: a generic, data-driven predicate->effect
+engine / phase-config interpreter is an *indirection layer* - the exact
+speculative-generality #6 says to defer until 2-3 real callers need it. A generic
+rules engine that no one can read is worse than three readable controllers, so the
+binding layer waits until a *fourth* phase or a second Phase 3 stage (FW-0008
+correction trials) makes the pattern undeniable. The overall item stays Proposed
+because only that binding engine is deferred; the incremental naming/extraction
+steps (the `_prev_zone` retirement was the first) are ordinary work.
 
-**Open questions.** Is Phase 3's trial sequencing genuinely expressible as
-bindings, or is a trial state machine a fundamentally different thing that should
-stay code and merely *consume* shared predicates? Does the cue become an effect in
-the same table as reward, or does `CueGate`'s fail-open/fail-safe behaviour
-(ADR-0045) argue for keeping it separate? One config file per phase or one table
-with a phase column? And the scoping question underneath all of it: how much of
-this is real unification versus renaming the parts that are already shared?
+**Open questions.** The revised-#6 split gives a single test for each - "is this
+naming a concept, or building an interpreter?" - which tips the answers toward
+keeping code and only sharing vocabulary: (1) Phase 3's trial sequencing is
+probably a state machine that should stay a named pure core (`phase3_task.py`) and
+*consume* shared predicates, not be re-encoded as binding data (that would be the
+interpreter). (2) The cue likely stays its own named effect - `CueGate`'s
+fail-open/fail-safe onset behaviour (ADR-0045) is not a simple edge->impulse and
+resists folding into the same table as reward. (3) One config file per phase vs one
+table with a phase column is a property of the *deferred* binding layer, so it need
+not be answered until that layer is warranted. The scoping question underneath all
+of it: how much of this is real unification versus renaming the parts that are
+already shared - and #6 answers that the renaming/naming part is worth doing on its
+own merits, independent of the engine.
 
 **ADR needed?** Yes - it would redefine how every phase is specified, and the
 scoping decision (what stays code) is the substance of it.
+
+### FW-0028: Scope the session summary to the Start/Stop window
+
+- **Status:** Proposed
+- **Date added:** 2026-07-31
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** `host/session_summary.py`, `host/session_controller.py`
+  (`_write_session_summary`), `host/phase3_stats.py` / `host/behavior_stats.py`
+  (the stats cores the summary folds)
+- **Related ADRs:** [ADR-0071](decisions/0071-session-behavioral-summary.md) (the
+  end-of-session summary this refines), [ADR-0052](decisions/0052-phase-aware-behavior-readout-and-phase3-stats.md)
+  / [ADR-0032](decisions/0032-live-behavior-readout.md) (the two stats cores),
+  [ADR-0060](decisions/0060-session-button-owns-phase3-session.md) (Session Start/Stop
+  vs Phase 3 arm), [ADR-0066](decisions/0066-rebind-phase3-output-on-session-start.md)
+  (the file rebind at Start)
+
+**Motivation / context.** The ADR-0071 summary is measured **"since Phase 3
+arm"**, not "since Session Start": `published_state()` reflects the whole Phase 3
+table since arm, and the locomotor accumulator resets on the Phase 3 arm edge. In
+the normal arm-then-Start-then-Stop workflow that equals the session, but it
+over-counts if the operator ran trials before pressing Start, or ran several
+Start/Stop cycles on a single arm. The summary records its `scope` so a reader
+isn't misled, but a summary that covered *exactly* the recording window would be
+more faithful, especially for multi-block or paused sessions.
+
+**Sketch of approach.** Two halves, matching the two data sources: (a) **cued
+stats** - have `phase3_stats.compute` accept an optional `[t0, t_end]` wall-clock
+window (from the manifest anchors) and count only trials whose `choice_time_iso`
+(or `trial_start_iso`) falls inside it, so the cued group is Start/Stop-scoped;
+(b) **locomotor stats** - reset the `BehaviorView._p3_stats` accumulator on
+**Session Start** (a new reset seam driven by the Session panel) rather than on
+Phase 3 arm, so its window is the recording. Keep the "since arm" behavior as a
+fallback when no session window is available.
+
+**Evaluation / acceptance.** With trials run before Start and after Stop, the
+summary's completed/accuracy/compliance counts match only the in-window trials
+(cross-checked against the CSV rows filtered by `t0`/`t_end`); the normal
+workflow's numbers are unchanged; a paused/multi-block session sums correctly.
+
+**Effort / risk.** Low-medium. Main risk is timestamp edge cases (a trial
+straddling Start/Stop, missing stamps) and adding a Session->BehaviorView reset
+seam without muddying the ADR-0052 phase-aware drive.
+
+**Open questions.** Window a trial by choice time or by trial-start? How to treat
+a trial straddling the boundary? Should the JSON carry both the windowed and the
+since-arm totals for transparency?
+
+**ADR needed?** Yes - it changes what window a session's reported behavior covers
+(a small follow-up to ADR-0071).
 
 ## Completed
 
