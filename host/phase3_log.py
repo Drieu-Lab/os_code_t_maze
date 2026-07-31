@@ -141,12 +141,18 @@ class Phase3Log:
 
     def __init__(self, sequence: TrialSequence, *, animal: str,
                  session_start_iso: str, reward_incorrect: bool = False,
+                 reward_pulse_ms: int = 500, max_topups: int = 0,
                  session_id: str = "") -> None:
         self.animal = animal
         self.seed = sequence.seed
         self.cfg = sequence.cfg
         self.session_start_iso = session_start_iso
         self.reward_incorrect = reward_incorrect
+        # Reward dispensing params used this run (ADR-0069), recorded in the header
+        # for reproducibility (FW-0024): the correct-choice prime pulse width and
+        # the max lick top-ups allowed at the well.
+        self.reward_pulse_ms = reward_pulse_ms
+        self.max_topups = max_topups
         # Shared session id when armed via the Session controller (docs/decisions/
         # 0048); links this file to the video + manifest. Empty on a manual arm.
         self.session_id = session_id
@@ -324,7 +330,8 @@ class Phase3Log:
             f"high_tone_hz={c.high_tone_hz} low_tone_hz={c.low_tone_hz}",
             f"# block_size={c.block_size} max_same_run={c.max_same_run} "
             f"max_trials={c.max_trials} planned_trials={len(self._rows)} "
-            f"reward_incorrect={self.reward_incorrect}",
+            f"reward_incorrect={self.reward_incorrect} "
+            f"reward_pulse_ms={self.reward_pulse_ms} max_topups={self.max_topups}",
             f"# session_start_iso={self.session_start_iso}",
             "# note: *_iso are host actuation-decision times (serial latency ~ms); "
             "lick_fw_ms is the firmware hardware clock. see docs/decisions/0047",

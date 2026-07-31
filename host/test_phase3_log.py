@@ -212,6 +212,15 @@ class TestExtendAndAbandon(unittest.TestCase):
         header = [ln for ln in log.render_csv().split("\n") if ln.startswith("#")]
         self.assertTrue(any("planned_trials=40" in ln for ln in header))
 
+    def test_header_records_reward_params(self):
+        # The reward pulse width + max top-ups used this run are stamped in the
+        # header for reproducibility (FW-0024/ADR-0069).
+        log = Phase3Log(_seq(), animal="R", session_start_iso="t",
+                        reward_pulse_ms=250, max_topups=4)
+        header = [ln for ln in log.render_csv().split("\n") if ln.startswith("#")]
+        self.assertTrue(any("reward_pulse_ms=250" in ln for ln in header))
+        self.assertTrue(any("max_topups=4" in ln for ln in header))
+
 
 class TestSnapshot(unittest.TestCase):
     def test_rowview_fields_align(self):

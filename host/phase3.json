@@ -1,0 +1,26 @@
+{
+  "_schema": {
+    "note": "Host-owned Phase 3 config (FW-0024, ADR-0070). Delete this file to reset to built-in defaults. 'reward' + 'cue' are editable from the Phase 3 tab (Save settings); 'sequence' holds scientific schedule params - hand-edit here only. seed: null = fresh random each launch, an integer pins the schedule."
+  },
+  "reward": {
+    "port": 2,
+    "pulse_ms": 500,
+    "max_topups": 3,
+    "reward_incorrect": false
+  },
+  "cue": {
+    "choice_enabled": true,
+    "return_enabled": true,
+    "require_up_stem": true,
+    "min_confidence": 0.0
+  },
+  "sequence": {
+    "max_trials": 200,
+    "block_size": 20,
+    "max_same_run": 4,
+    "high_tone_is_left": true,
+    "high_tone_hz": 8000,
+    "low_tone_hz": 4000,
+    "seed": null
+  }
+}

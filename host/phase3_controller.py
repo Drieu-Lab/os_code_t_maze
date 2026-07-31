@@ -57,12 +57,15 @@ import time
 import tkinter as tk
 from dataclasses import dataclass, field
 from datetime import datetime
-from tkinter import ttk
+from tkinter import messagebox, ttk
 from typing import Callable, Optional
 
 import protocol
 from cue_gate import CHOICE, RETURN, CueGate, CueParams
 from maze_state import CENTRAL_STEM, HUB
+from phase3_config import (
+    DEFAULT_MAX_TOPUPS, default_config, load_phase3_config, resolve_seed,
+    save_phase3_config, to_trial_config, validate_phase3_config)
 from phase3_log import Phase3Log, Phase3StateSnapshot
 from phase3_task import ABANDONED, CORRECT, INCORRECT, Phase3Config, Phase3Task
 from reward_dispenser import WellDispenser
@@ -95,13 +98,18 @@ SEED_MASK = 0xFFFFFFFF          # the sequence PRNG is 32-bit (trial_sequence.lc
 
 # Reward top-ups at the central well after the correct-choice prime (ADR-0069),
 # delivered via the SAME shared WellDispenser the reward-shaping phases use
-# (ADR-0068). Default max top-ups the tab starts with; the operator adjusts it.
-DEFAULT_MAX_TOPUPS = 3
+# (ADR-0068). The default top-up count is owned by phase3_config
+# (DEFAULT_MAX_TOPUPS), the single source the config file + the tab start from.
 # Within-visit lick spacing for a top-up (ms). 0 leans on the lick debounce + the
 # shared dispatcher's global rate backstop (ADR-0054) to space fires; the debounce
 # rejects electrical bounce / bursts on the lick line.
 PHASE3_TOPUP_COOLDOWN_MS = 0
 PHASE3_LICK_DEBOUNCE_MS = 150
+
+# Versioned config file for the config-driven Phase 3 reward/cue/sequence params
+# (FW-0024, ADR-0070); absent -> built-in defaults. Same host/ location + pattern
+# as rules.json (docs/decisions/0031).
+PHASE3_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "phase3.json")
 
 # Per-session data files live under host/data/ (same tree as rig_logger.py).
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
@@ -140,6 +148,10 @@ class _Phase3Snapshot:
     # the next arm.
     reward_pulse_ms: int = 500
     max_topups: int = DEFAULT_MAX_TOPUPS
+    reward_port: int = 2
+    # Resolved schedule/tone config from phase3.json (FW-0024/ADR-0070); the
+    # sequence is built from this on arm instead of the hardcoded default.
+    trial_config: TrialConfig = field(default_factory=TrialConfig)
     animal: str = ""
     session_id: str = ""
     session_out_dir: str = ""
@@ -228,6 +240,15 @@ class Phase3ControlView(VisionActuator):
         # atomic reference assignment, read by published_state(); no lock needed
         # (mirrors the _snapshot Tk<->thread hand-off, ADR-0043). None until armed.
         self._state: Optional[Phase3StateSnapshot] = None
+
+        # Config-driven reward/cue/sequence params from host/phase3.json (FW-0024,
+        # ADR-0070): loaded once here to seed the tab, re-loadable via the Reload
+        # button, and persisted (reward + cue) by the Save button. On a malformed
+        # file we fall back to built-in defaults and surface the error in status.
+        self._config_path = PHASE3_PATH
+        self._config = default_config()
+        self._config_error = ""
+        self._load_config()
 
         # --- actuation thread (ADR-0043 skeleton, shared via VisionActuator) ---
         self._init_actuator(thread_name="phase3-actuation")
@@ -437,8 +458,11 @@ class Phase3ControlView(VisionActuator):
         self._gate.reset()
         if self._task_events is not None:
             self._task_events.reset()
-        self._seq = TrialSequence(TrialConfig(), seed=snap.seed)
+        # Sequence + tones come from phase3.json (resolved into the snapshot;
+        # FW-0024/ADR-0070) instead of the hardcoded default.
+        self._seq = TrialSequence(snap.trial_config, seed=snap.seed)
         cfg = Phase3Config(reward_incorrect=snap.reward_incorrect,
+                           reward_port=snap.reward_port,
                            reward_pulse_ms=snap.reward_pulse_ms)
         self._task = Phase3Task(self._seq, cfg)
         # Fresh dispenser for this run: prime fires at the scored choice
@@ -471,6 +495,8 @@ class Phase3ControlView(VisionActuator):
             base = f"{base}_r{restart_index}"
         self._log = Phase3Log(self._seq, animal=animal, session_start_iso=_now_iso(),
                               reward_incorrect=snap.reward_incorrect,
+                              reward_pulse_ms=snap.reward_pulse_ms,
+                              max_topups=snap.max_topups,
                               session_id=snap.session_id)
         # Write into the session's task/ folder when armed via a session, else the
         # default host/data/ tree (docs/decisions/0049). _write_log makes the dir.
@@ -862,6 +888,100 @@ class Phase3ControlView(VisionActuator):
         except (tk.TclError, ValueError):
             return 0
 
+    # -------------------------------------------------- phase3.json config
+    def _load_config(self) -> None:
+        """(Re)load host/phase3.json into ``self._config``, validating it. A
+        missing file yields built-in defaults; a malformed one falls back to
+        defaults and records the error in ``self._config_error`` (surfaced in
+        status) rather than crashing the tab. Pure read - the caller re-seeds the
+        Tk vars (see :meth:`_apply_config_to_vars`)."""
+        try:
+            cfg = load_phase3_config(self._config_path)
+            validate_phase3_config(cfg)
+            self._config = cfg
+            self._config_error = ""
+        except Exception as e:                # malformed JSON or bad value
+            self._config = default_config()
+            self._config_error = f"{type(e).__name__}: {e}"
+
+    def _apply_config_to_vars(self) -> None:
+        """Push the loaded config into the tab's Tk vars (reward + cue + seed).
+
+        Used on Reload. The seed follows the optional-seed policy: a pinned
+        integer is shown; ``null`` draws a fresh random seed (as at launch)."""
+        r, c = self._config["reward"], self._config["cue"]
+        self._pulse_var.set(str(r["pulse_ms"]))
+        self._topups_var.set(str(r["max_topups"]))
+        self._reward_incorrect_var.set(bool(r["reward_incorrect"]))
+        self._choice_var.set(bool(c["choice_enabled"]))
+        self._return_var.set(bool(c["return_enabled"]))
+        self._up_stem_var.set(bool(c["require_up_stem"]))
+        self._conf_var.set(str(c["min_confidence"]))
+        seed = resolve_seed(self._config)
+        self._seed_var.set(str(seed) if seed is not None
+                           else str(random.randint(1, SEED_MASK)))
+
+    def _save_settings(self) -> None:
+        """Persist the tab's reward + cue fields to phase3.json (Save button).
+
+        Mutates only the operator-editable keys in place (so the ``sequence``
+        section, its ``seed``, and ``_schema`` are preserved), validates the whole
+        config, then writes it. Nothing is written if validation fails. The
+        scientific ``sequence`` params are edited in the file, not here."""
+        cfg = self._config
+        p = self._current_params()
+        cfg["reward"]["pulse_ms"] = self._current_pulse_ms()
+        cfg["reward"]["max_topups"] = self._current_max_topups()
+        cfg["reward"]["reward_incorrect"] = bool(self._reward_incorrect_var.get())
+        cfg["cue"]["choice_enabled"] = p.choice_enabled
+        cfg["cue"]["return_enabled"] = p.return_enabled
+        cfg["cue"]["require_up_stem"] = p.require_up_stem
+        cfg["cue"]["min_confidence"] = p.min_confidence
+        try:
+            validate_phase3_config(cfg)
+        except Exception as e:
+            messagebox.showerror("Save Phase 3 settings",
+                                 f"Edits are invalid, nothing saved:\n"
+                                 f"{type(e).__name__}: {e}")
+            return
+        try:
+            save_phase3_config(self._config_path, cfg)
+        except OSError as e:
+            messagebox.showerror("Save Phase 3 settings", f"{type(e).__name__}: {e}")
+            return
+        self._config_error = ""
+        self._refresh_seq_info()
+        messagebox.showinfo(
+            "Save Phase 3 settings",
+            "Saved reward + cue settings to phase3.json. (Sequence & tones are "
+            "edited in the file.) New settings apply on the next arm.")
+
+    def _reload_settings(self) -> None:
+        """Re-read phase3.json from disk into the tab (Reload button), e.g. after
+        hand-editing the sequence/tones. Re-seeds the reward/cue/seed vars and the
+        read-only sequence readout; applies on the next arm."""
+        self._load_config()
+        self._apply_config_to_vars()
+        self._refresh_seq_info()
+        if self._config_error:
+            messagebox.showerror("Reload phase3.json", self._config_error)
+        else:
+            messagebox.showinfo(
+                "Reload phase3.json",
+                "Reloaded reward/cue/sequence from phase3.json. Applies on the "
+                "next arm.")
+
+    def _refresh_seq_info(self) -> None:
+        """Update the read-only sequence/tones readout from the current config."""
+        s = self._config["sequence"]
+        left = "L" if s["high_tone_is_left"] else "R"
+        seed = s.get("seed")
+        seed_txt = "random each launch" if seed is None else str(seed)
+        self._seq_info_var.set(
+            f"trials {s['max_trials']} \u00b7 block {s['block_size']} \u00b7 "
+            f"max-run {s['max_same_run']} \u00b7 tones {s['high_tone_hz']}/"
+            f"{s['low_tone_hz']} Hz (HIGH={left}) \u00b7 seed {seed_txt}")
+
     # -------------------------------------------------------------------- UI
     def _build_ui(self) -> None:
         pad = {"padx": 6, "pady": 3}
@@ -875,25 +995,27 @@ class Phase3ControlView(VisionActuator):
         arm.grid(row=0, column=0, columnspan=2, sticky="w", **pad)
         tip(arm, "phase3.arm")
 
-        self._choice_var = tk.BooleanVar(value=True)
+        self._choice_var = tk.BooleanVar(value=self._config["cue"]["choice_enabled"])
         c = ttk.Checkbutton(root, text="Choice cue (central stem, up-stem)",
                             variable=self._choice_var)
         c.grid(row=1, column=0, columnspan=2, sticky="w", **pad)
         tip(c, "phase3.choice")
 
-        self._up_stem_var = tk.BooleanVar(value=True)
+        self._up_stem_var = tk.BooleanVar(
+            value=self._config["cue"]["require_up_stem"])
         u = ttk.Checkbutton(root, text="   require up-stem direction",
                             variable=self._up_stem_var)
         u.grid(row=2, column=0, columnspan=2, sticky="w", **pad)
         tip(u, "phase3.up_stem")
 
-        self._return_var = tk.BooleanVar(value=True)
+        self._return_var = tk.BooleanVar(value=self._config["cue"]["return_enabled"])
         r = ttk.Checkbutton(root, text="Return cue (return arm, fail-safe)",
                             variable=self._return_var)
         r.grid(row=3, column=0, columnspan=2, sticky="w", **pad)
         tip(r, "phase3.return")
 
-        self._reward_incorrect_var = tk.BooleanVar(value=False)
+        self._reward_incorrect_var = tk.BooleanVar(
+            value=self._config["reward"]["reward_incorrect"])
         ri = ttk.Checkbutton(root, text="Reward incorrect choices (shaping)",
                              variable=self._reward_incorrect_var)
         ri.grid(row=4, column=0, columnspan=2, sticky="w", **pad)
@@ -903,7 +1025,7 @@ class Phase3ControlView(VisionActuator):
 
         ttk.Label(root, text="Min confidence:").grid(
             row=6, column=0, sticky="w", **pad)
-        self._conf_var = tk.StringVar(value="0.0")
+        self._conf_var = tk.StringVar(value=str(self._config["cue"]["min_confidence"]))
         conf = ttk.Spinbox(root, from_=0.0, to=1.0, increment=0.05, width=6,
                            textvariable=self._conf_var)
         conf.grid(row=6, column=1, sticky="w", **pad)
@@ -916,7 +1038,12 @@ class Phase3ControlView(VisionActuator):
             row=7, column=0, sticky="w", **pad)
         seed_row = ttk.Frame(root)
         seed_row.grid(row=7, column=1, sticky="w", **pad)
-        self._seed_var = tk.StringVar(value=str(random.randint(1, SEED_MASK)))
+        # Optional pinned seed from phase3.json; null -> a fresh random seed each
+        # launch (FW-0024/ADR-0070). The "New" button still overrides it live.
+        init_seed = resolve_seed(self._config)
+        self._seed_var = tk.StringVar(
+            value=str(init_seed) if init_seed is not None
+            else str(random.randint(1, SEED_MASK)))
         seed = ttk.Entry(seed_row, width=12, textvariable=self._seed_var)
         seed.pack(side=tk.LEFT)
         tip(seed, "phase3.seed")
@@ -926,19 +1053,45 @@ class Phase3ControlView(VisionActuator):
         ttk.Label(root, text="(applied when you arm)").grid(
             row=8, column=1, sticky="w", padx=6)
 
+        self._build_settings_ui(root, row=9)
+
         ttk.Separator(root, orient="horizontal").grid(
-            row=9, column=0, columnspan=2, sticky="ew", pady=(8, 4))
+            row=11, column=0, columnspan=2, sticky="ew", pady=(8, 4))
 
         self._status_var = tk.StringVar(value="phase 3: off")
         ttk.Label(root, textvariable=self._status_var, anchor="w",
                   wraplength=460, justify="left").grid(
-            row=10, column=0, columnspan=2, sticky="w", **pad)
+            row=12, column=0, columnspan=2, sticky="w", **pad)
 
         # In-tab progress visualization (docs/decisions/0051): a compact ribbon of
         # the current trial + neighbours, and a scrollable list of all N planned
         # trials with the current one highlighted. Both are read-only views of the
         # published table snapshot (self._state), refreshed on the Tk poll.
-        self._build_progress_ui(root, row=11)
+        self._build_progress_ui(root, row=13)
+
+    def _build_settings_ui(self, root: ttk.Frame, *, row: int) -> None:
+        """Read-only sequence/tones readout (edited by hand in phase3.json) plus
+        Save/Reload buttons for the operator reward + cue settings (FW-0024,
+        ADR-0070). Scientific schedule params stay file-only so they aren't
+        fat-fingered mid-session."""
+        box = ttk.LabelFrame(root, text="Sequence & tones (edit phase3.json)")
+        box.grid(row=row, column=0, columnspan=2, sticky="ew", padx=6, pady=3)
+        self._seq_info_var = tk.StringVar(value="")
+        ttk.Label(box, textvariable=self._seq_info_var, foreground="#555",
+                  wraplength=440, justify="left").grid(
+            row=0, column=0, sticky="w", padx=6, pady=3)
+        tip(box, "phase3.sequence_config")
+        self._refresh_seq_info()
+
+        btns = ttk.Frame(root)
+        btns.grid(row=row + 1, column=0, columnspan=2, sticky="w", padx=6, pady=3)
+        save = ttk.Button(btns, text="Save settings", command=self._save_settings)
+        save.pack(side=tk.LEFT)
+        tip(save, "phase3.save_settings")
+        reload_btn = ttk.Button(btns, text="Reload phase3.json",
+                                command=self._reload_settings)
+        reload_btn.pack(side=tk.LEFT, padx=(6, 0))
+        tip(reload_btn, "phase3.reload_config")
 
     def _build_reward_ui(self, root: ttk.Frame, *, row: int) -> None:
         """Reward controls: the correct-choice prime pulse width, the number of
@@ -949,7 +1102,7 @@ class Phase3ControlView(VisionActuator):
 
         ttk.Label(box, text="Pulse (ms):").grid(
             row=0, column=0, sticky="w", padx=6, pady=3)
-        self._pulse_var = tk.StringVar(value=str(Phase3Config().reward_pulse_ms))
+        self._pulse_var = tk.StringVar(value=str(self._config["reward"]["pulse_ms"]))
         pulse = ttk.Spinbox(box, from_=10, to=2000, increment=10, width=7,
                             textvariable=self._pulse_var,
                             command=self._refresh_reward_readout)
@@ -958,7 +1111,7 @@ class Phase3ControlView(VisionActuator):
 
         ttk.Label(box, text="Max top-ups (licks):").grid(
             row=0, column=2, sticky="w", padx=6, pady=3)
-        self._topups_var = tk.StringVar(value=str(DEFAULT_MAX_TOPUPS))
+        self._topups_var = tk.StringVar(value=str(self._config["reward"]["max_topups"]))
         topups = ttk.Spinbox(box, from_=0, to=20, increment=1, width=5,
                              textvariable=self._topups_var,
                              command=self._refresh_reward_readout)
@@ -1033,6 +1186,8 @@ class Phase3ControlView(VisionActuator):
             reward_incorrect=bool(self._reward_incorrect_var.get()),
             reward_pulse_ms=self._current_pulse_ms(),
             max_topups=self._current_max_topups(),
+            reward_port=int(self._config["reward"]["port"]),
+            trial_config=to_trial_config(self._config),
             animal=self._current_animal(),
             session_id=self._session_id,
             session_out_dir=self._session_out_dir,

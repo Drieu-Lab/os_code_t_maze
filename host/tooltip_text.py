@@ -314,6 +314,19 @@ TIPS: Dict[str, Entry] = {
                          "at the central well after the prime (0 = none). Uses the "
                          "same shared dispenser as the reward-shaping phases "
                          "(ADR-0068); applied when you arm.",
+    "phase3.sequence_config": "The scientific schedule + tone parameters (trial "
+                              "count, block balancing, tone frequencies, and the "
+                              "optional pinned seed) read from phase3.json. These "
+                              "are edited in the file - not here - so they aren't "
+                              "changed by accident mid-session (FW-0024/ADR-0070); "
+                              "use Reload after editing.",
+    "phase3.save_settings": "Write the current reward + cue settings back to "
+                            "phase3.json (validated first; nothing is saved if a "
+                            "value is invalid). They then reload automatically on "
+                            "the next launch. Sequence/tones are edited in the file.",
+    "phase3.reload_config": "Re-read phase3.json from disk into the tab (e.g. after "
+                            "hand-editing the sequence/tones or pinning a seed). "
+                            "Applies on the next arm.",
     "phase3.min_confidence": "Extra track-confidence floor for a cue onset, on top "
                              "of the estimator's own validity threshold (0..1; 0 "
                              "defers entirely to the estimator).",

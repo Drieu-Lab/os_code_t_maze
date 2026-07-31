@@ -76,7 +76,7 @@ criteria).
 | [FW-0019](#fw-0019-one-reward-seam--rate-backstop-across-the-task-controllers) | One reward seam + rate backstop across the task controllers | Rules engine + Phase 3 host | Done |
 | [FW-0020](#fw-0020-shared-choice-commit-edge-in-the-task-event-layer) | Shared choice-commit edge in the task-event layer | Task-event layer + task controllers | Done |
 | [FW-0023](#fw-0023-shared-preview-producer-loop-helper) | Shared preview *producer* loop helper | Preview helpers + tab modules | Done |
-| [FW-0024](#fw-0024-config-driven-phase-3-taskreward-parameters-parity-with-rules) | Config-driven Phase 3 task/reward parameters (parity with Rules) | Phase 3 host + config | Proposed |
+| [FW-0024](#fw-0024-config-driven-phase-3-taskreward-parameters-parity-with-rules) | Config-driven Phase 3 task/reward parameters (parity with Rules) | Phase 3 host + config | Done (ADR-0070) |
 | [FW-0025](#fw-0025-surface-the-brokers-link-health-in-the-gui) | Surface the broker's link health in the GUI | Broker + GUI status | Proposed |
 | [FW-0026](#fw-0026-a-mid-session-gate-reopen-should-not-restart-the-session-and-overwrite-its-file) | A mid-session gate reopen should not restart the session and overwrite its file | Phase 3 host | Proposed |
 | [FW-0027](#fw-0027-one-triggereffect-framework-behind-phases-1-2a-and-3) | One trigger/effect framework behind Phases 1, 2a and 3 | Rules engine + task-event layer + Phase 3 host | Proposed |
@@ -1051,7 +1051,11 @@ stay separate?
 
 ### FW-0024: Config-driven Phase 3 task/reward parameters (parity with Rules)
 
-- **Status:** Proposed
+- **Status:** Done — implemented in
+  [ADR-0070](decisions/0070-config-driven-phase3-parameters.md) (versioned
+  `host/phase3.json` + pure `host/phase3_config.py`; reward/cue editable with Save,
+  scientific sequence/tones file-only + Reload, optional pinned seed). Started flat
+  (no profiles), as recommended below.
 - **Date added:** 2026-07-24
 - **Author / Agent:** Agent (Cursor) on behalf of Celine
 - **Area / modules:** `host/phase3_task.py` (`Phase3Config`), `host/trial_sequence.py`
