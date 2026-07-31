@@ -119,9 +119,12 @@ class BehaviorView:
         # Phase 3 stat lines (filled from phase3_stats.compute while a Phase 3
         # session is armed); the key doubles as the tooltip-key suffix. "session"
         # is the Session-button-driven clock line at the top (docs/decisions/0060).
+        # The left column holds the cued-task lines; the right column shows the
+        # live locomotor/compliance group from self._p3_stats (docs/decisions/0071).
         self._p3_vars = {k: tk.StringVar(value="-") for k in (
             "session", "trials", "accuracy", "bycue", "bias", "reward",
-            "strategy", "rt")}
+            "strategy", "rt",
+            "compliance", "nonstem", "run", "throughput", "distance")}
         self._window = tk.IntVar(value=self._stats.snapshot().window_n)
 
         self._build_ui()
@@ -209,14 +212,37 @@ class BehaviorView:
             lbl.pack(side=tk.TOP, anchor="w", **pad)
             tip(lbl, f"behavior.{_TIP_KEY.get(key, key)}")
 
-        # Phase 3 stat lines (filled by _refresh_phase3 from phase3_stats.compute);
-        # the "session" line at the top mirrors the Phase 2a session clock.
-        for key in ("session", "trials", "accuracy", "bycue", "bias", "reward",
-                    "strategy", "rt"):
+        # Phase 3 stat lines (filled by _refresh_phase3). Two columns so the
+        # panel uses the empty right-hand space without adding height: the
+        # cued-task lines on the left, the live locomotor/compliance group
+        # (docs/decisions/0071) on the right. The "session" clock spans the top.
+        session3_lbl = ttk.Label(self._p3_box, textvariable=self._p3_vars["session"],
+                                 anchor="w", font=("TkDefaultFont", 10))
+        session3_lbl.grid(row=0, column=0, columnspan=3, sticky="w", **pad)
+        tip(session3_lbl, "behavior.phase3.session")
+
+        for r, key in enumerate(("trials", "accuracy", "bycue", "bias", "reward",
+                                 "strategy", "rt"), start=1):
             lbl = ttk.Label(self._p3_box, textvariable=self._p3_vars[key], anchor="w",
                             font=("TkDefaultFont", 10))
-            lbl.pack(side=tk.TOP, anchor="w", **pad)
+            lbl.grid(row=r, column=0, sticky="w", **pad)
             tip(lbl, f"behavior.phase3.{key}")
+
+        ttk.Separator(self._p3_box, orient="vertical").grid(
+            row=1, column=1, rowspan=7, sticky="ns", padx=8, pady=1)
+
+        # Right column: the locomotor/compliance "excursions" group. A static
+        # heading distinguishes these all-excursion counts from the cued trials.
+        excursions_lbl = ttk.Label(self._p3_box, text="Excursions",
+                                   foreground="#666666", anchor="w")
+        excursions_lbl.grid(row=1, column=2, sticky="w", **pad)
+        for r, key in enumerate(("compliance", "nonstem", "run", "throughput",
+                                 "distance"), start=2):
+            lbl = ttk.Label(self._p3_box, textvariable=self._p3_vars[key], anchor="w",
+                            font=("TkDefaultFont", 10))
+            lbl.grid(row=r, column=2, sticky="w", **pad)
+            tip(lbl, f"behavior.phase3.{key}")
+        self._p3_box.grid_columnconfigure(2, weight=1)
 
     # ------------------------------------------------------------- controls
     def _toggle_run(self) -> None:
@@ -412,27 +438,51 @@ class BehaviorView:
         self._p3_vars["strategy"].set(
             f"Win-stay: {_pct(st.win_stay)}   Lose-shift: {_pct(st.lose_shift)}")
         self._p3_vars["rt"].set(f"Choice RT: {_rt(st.mean_rt_s)}   [n={st.rt_n}]")
+        # Right column: the live locomotor/compliance group over ALL excursions
+        # during the Phase 3 session (denied non-stem trips included), from the
+        # session-scoped accumulator (docs/decisions/0071). Same formatting as
+        # the Phase 2a panel, via the shared helpers below.
+        loco = self._p3_stats.snapshot()
+        n_loco = self._window_n()
+        self._p3_vars["compliance"].set(self._compliance_text(loco, n_loco))
+        self._p3_vars["nonstem"].set(self._nonstem_text(loco))
+        self._p3_vars["run"].set(self._run_text(loco))
+        self._p3_vars["throughput"].set(self._throughput_text(loco))
+        self._p3_vars["distance"].set(self._distance_text(loco))
 
     def _refresh_phase2a(self) -> None:
         snap = self._stats.snapshot()
         n = snap.window_n
         self._vars["status"].set(self._status_text())
         self._vars["session"].set(self._session_text(self._timer.snapshot(time.time())))
-        self._vars["compliance"].set(
-            f"Stem-gated: {_pct(snap.compliance_cum)}  "
-            f"(last {n}: {_pct(snap.compliance_win)})   "
-            f"[{snap.stem_choices}/{snap.total_choices}]")
+        self._vars["compliance"].set(self._compliance_text(snap, n))
         self._vars["lr"].set(
             f"L/R choice: {_lr(snap.lr_cum)}  (last {n}: {_lr(snap.lr_win)})")
-        self._vars["nonstem"].set(
-            f"Non-stem (denied): {snap.nonstem_choices}")
-        self._vars["run"].set(
-            f"Same-side run: {snap.same_side_run_cur}{_side(snap.same_side_run_side)}  "
-            f"(max {snap.same_side_run_max}{_side(snap.same_side_run_max_side)})")
-        self._vars["throughput"].set(
-            f"Trials: {snap.stem_choices}   "
-            f"{_rate(snap.trials_per_min)}/min")
+        self._vars["nonstem"].set(self._nonstem_text(snap))
+        self._vars["run"].set(self._run_text(snap))
+        self._vars["throughput"].set(self._throughput_text(snap))
         self._vars["distance"].set(self._distance_text(snap))
+
+    @staticmethod
+    def _compliance_text(snap, n) -> str:
+        return (f"Stem-gated: {_pct(snap.compliance_cum)}  "
+                f"(last {n}: {_pct(snap.compliance_win)})   "
+                f"[{snap.stem_choices}/{snap.total_choices}]")
+
+    @staticmethod
+    def _nonstem_text(snap) -> str:
+        return f"Non-stem (denied): {snap.nonstem_choices}"
+
+    @staticmethod
+    def _run_text(snap) -> str:
+        return (f"Same-side run: {snap.same_side_run_cur}"
+                f"{_side(snap.same_side_run_side)}  "
+                f"(max {snap.same_side_run_max}"
+                f"{_side(snap.same_side_run_max_side)})")
+
+    @staticmethod
+    def _throughput_text(snap) -> str:
+        return f"Trials: {snap.stem_choices}   {_rate(snap.trials_per_min)}/min"
 
     def _distance_text(self, snap) -> str:
         scale_ok = self._scale is not None and self._scale.valid()

@@ -481,6 +481,41 @@ TIPS: Dict[str, Entry] = {
                           "serial/actuation latency), so it is an approximate "
                           "latency, not a hardware-precise reaction time.",
 
+    # ---- behavior_view.py: Phase 3 'Excursions' column - the same live
+    #      locomotor/compliance group as Phase 2a, but over ALL excursions during
+    #      the Phase 3 session (denied non-stem trips included), from the
+    #      session-scoped accumulator (docs/decisions/0071). Distinct from the
+    #      cued-trial counts in the left column above. ----
+    "behavior.phase3.compliance": "Stem-compliance during the Phase 3 session: "
+                                  "fraction of outbound choices that went out via "
+                                  "the central stem, cumulative and over the last "
+                                  "N. Counted per outbound trip, over ALL "
+                                  "excursions (not just scored cued trials), so it "
+                                  "surfaces the non-stem trips the cued-task rows "
+                                  "above never see. Range 0-100% (-- until the "
+                                  "first choice).",
+    "behavior.phase3.nonstem": "Count of non-stem choices this session (an outbound "
+                               "trip that reached a choice arm without using the "
+                               "stem; credit denied). Counted once per trip. These "
+                               "are the compliant-but-invisible excursions that "
+                               "don't appear in the cued-trial counts. Integer >= 0.",
+    "behavior.phase3.run": "Consecutive same-side stem-gated choices during the "
+                           "session: current run and session max, each with the "
+                           "side (L/R) it is on (e.g. 3L / max 4R). Integers "
+                           "(0 before any stem-gated trip). A large max flags a "
+                           "side-perseverating rat.",
+    "behavior.phase3.throughput": "Stem-gated trips this session (integer >= 0) and "
+                                  "the rate per minute of active (running) time "
+                                  "(>= 0, shown as -- until ~1 s of active time). "
+                                  "Counts all stem excursions, so it can exceed the "
+                                  "scored-trial count in the left column.",
+    "behavior.phase3.distance": "Total distance the rat has run this session (from "
+                                "the smoothed centroid via the rig px->cm scale) and "
+                                "the rate per minute. Both >= 0 (rate -- until ~1 s "
+                                "of active time). Untracked stretches are not "
+                                "counted; shows -- (needs scale) without the "
+                                "Rules-tab scale.",
+
     # ---- tracker_view.py: tuning sliders (keyed by param name) ----
     "tracker.thresh": "Foreground threshold on the background difference (0-255).",
     "tracker.min_area": "Minimum blob area (px) to be considered the rat.",
