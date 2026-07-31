@@ -61,11 +61,19 @@ map and tunables live in `firmware/common/rig_config.h`) or it carries a
 value is a deliberate choice, it needs an ADR (see `AGENTS.md`).
 
 ### 6. Boring over clever
-Prefer explicit, obvious code over general, clever code. Do not add an
-abstraction (a base class, a factory, a config layer) until there are two or
-three real callers that need it — premature indirection is comprehension debt
-because every hop is something a reader must hold in their head. Match the flat,
-direct style of the pure cores.
+Prefer explicit, obvious code over general, clever code. The abstraction to
+defer is **speculative generality** — a base class, a factory, a config layer
+added *before* it's needed. Don't add one until there are two or three real
+callers that need it; premature indirection is comprehension debt because every
+hop is something a reader must hold in their head. Match the flat, direct style
+of the pure cores.
+
+This is *not* a rule against naming things. Extracting a chunk of logic into a
+named function or a tested pure core, so a concept has one clear home, is
+encouraged at any caller count — that's guidelines #1 and #2, and it *reduces*
+what a reader must hold in their head. The line: extract to give an existing
+concept a name (anytime); don't add an indirection layer to serve callers that
+don't exist yet (wait for the callers).
 
 ### 7. One canonical way to do each thing
 New code uses the shared utilities rather than re-inventing them: parse firmware
