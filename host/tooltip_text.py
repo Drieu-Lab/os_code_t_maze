@@ -150,6 +150,12 @@ TIPS: Dict[str, Entry] = {
     "camera.status": "Live acquisition health: grab rate (fps), frames saved, "
                      "source drops, incomplete grabs, encode-queue drops, and "
                      "queue fill.",
+    "camera.show_zones": "Overlay the maze zone outlines on the live preview "
+                         "(the current zone is drawn bold while tracking runs). "
+                         "Display only - does not affect recording or tracking.",
+    "camera.show_landmarks": "Overlay the reward-well / body-sensor landmark "
+                             "markers on the live preview. Display only; shown "
+                             "whether or not tracking is enabled.",
 
     # ---- tracker_view.py: controls ----
     "tracker.enable": "Run the markerless tracker on each camera frame (off by "

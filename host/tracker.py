@@ -265,22 +265,18 @@ MODEL_REAPPLY_FIELDS = tuple(
 )
 
 
-def draw_overlay(img_bgr, scale: float, tracker, result) -> None:
-    """Draw the tracking overlay on a (preview-scaled) BGR image, in place.
+def draw_landmarks_overlay(img_bgr, tracker) -> None:
+    """Draw just the landmark diamonds + labels on a BGR image, in place.
 
-    Shared by every preview (camera tab + tracking tab) so they look identical.
-    `scale` maps full-frame px -> the image's px (path/centroids are full-frame);
-    the ROI polygon is normalized and maps to the image size. `result` may be None
-    (e.g. tracking off) - then only the ROI outline + any path are drawn.
+    Split out of draw_overlay so a preview can toggle landmarks independently of
+    the rest of the tracking overlay (the Rig view tab does this). Landmarks are
+    stored normalized (0..1), so no full-frame scale is needed - they map to the
+    image's own size.
     """
     if cv2 is None or np is None or img_bgr is None:
         return
     try:
         dh, dw = img_bgr.shape[:2]
-        roi = tracker.get_roi_polygon() if tracker is not None else None
-        if roi:
-            pts = np.array([[int(x * dw), int(y * dh)] for x, y in roi], np.int32)
-            cv2.polylines(img_bgr, [pts], True, (255, 180, 0), 1)
         landmarks = tracker.get_landmarks() if tracker is not None else []
         for lm in landmarks:
             lx, ly = int(lm["x"] * dw), int(lm["y"] * dh)
@@ -292,6 +288,31 @@ def draw_overlay(img_bgr, scale: float, tracker, result) -> None:
             if label:
                 cv2.putText(img_bgr, label, (lx + 7, ly - 6),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.35, color, 1, cv2.LINE_AA)
+    except Exception:
+        pass
+
+
+def draw_overlay(img_bgr, scale: float, tracker, result,
+                 draw_landmarks: bool = True) -> None:
+    """Draw the tracking overlay on a (preview-scaled) BGR image, in place.
+
+    Shared by every preview (camera tab + tracking tab) so they look identical.
+    `scale` maps full-frame px -> the image's px (path/centroids are full-frame);
+    the ROI polygon is normalized and maps to the image size. `result` may be None
+    (e.g. tracking off) - then only the ROI outline + any path are drawn.
+    `draw_landmarks` lets a caller suppress the landmark diamonds so they can be
+    toggled separately (the Rig view tab draws them via draw_landmarks_overlay).
+    """
+    if cv2 is None or np is None or img_bgr is None:
+        return
+    try:
+        dh, dw = img_bgr.shape[:2]
+        roi = tracker.get_roi_polygon() if tracker is not None else None
+        if roi:
+            pts = np.array([[int(x * dw), int(y * dh)] for x, y in roi], np.int32)
+            cv2.polylines(img_bgr, [pts], True, (255, 180, 0), 1)
+        if draw_landmarks:
+            draw_landmarks_overlay(img_bgr, tracker)
         path = tracker.get_path() if tracker is not None else []
         for i in range(1, len(path)):
             cv2.line(img_bgr,

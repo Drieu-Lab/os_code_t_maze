@@ -48,6 +48,7 @@ from gui_deps import (  # noqa: E402
 )
 from calibration import Undistorter, load_calibration  # noqa: E402
 import protocol  # noqa: E402  (shared serial-line parser; see docs/decisions/0024)
+from maze_state import IN_WELL as _IN_WELL  # noqa: E402  (HUB well substate label)
 from preview import render_bgr_to_label, safe_after  # noqa: E402
 from tooltips import tip  # noqa: E402
 from tracker import TRACK_COLUMNS, track_row  # noqa: E402
@@ -55,10 +56,20 @@ from track_worker import LatestFrameSlot, TrackPublisher  # noqa: E402
 
 # Shared tracking-overlay drawing (also used by the Tracking tab so previews
 # match). Guarded: tracking deps may be absent without breaking the camera tab.
+# draw_landmarks_overlay lets the Rig view toggle landmarks on their own; the
+# zone overlay + colours are shared with the Maze state tab.
 try:
-    from tracker import draw_overlay as _draw_track_overlay_shared  # noqa: E402
+    from tracker import (  # noqa: E402
+        draw_overlay as _draw_track_overlay_shared,
+        draw_landmarks_overlay as _draw_landmarks_shared,
+    )
 except Exception:  # pragma: no cover
     _draw_track_overlay_shared = None  # type: ignore
+    _draw_landmarks_shared = None  # type: ignore
+try:
+    from zone_overlay import draw_zone_overlay as _draw_zone_overlay_shared  # noqa: E402
+except Exception:  # pragma: no cover
+    _draw_zone_overlay_shared = None  # type: ignore
 
 
 # ================================== CONFIG ===================================
@@ -235,9 +246,14 @@ class CameraView:
     (optionally) close().
     """
 
-    def __init__(self, parent: tk.Misc, tracker=None):
+    def __init__(self, parent: tk.Misc, tracker=None, pipeline=None):
         self._parent = parent
         self.frame = ttk.Frame(parent)
+
+        # Shared maze-state pipeline (display-only here): supplies the zone map for
+        # the optional zone overlay and the current zone for the persistent
+        # readout. May be None (no tracker / deps); the overlay code guards for it.
+        self._pipeline = pipeline
 
         # ---- shared state across threads ----
         self._stop = threading.Event()
@@ -521,6 +537,27 @@ class CameraView:
         # tracking, and recording when a valid calibration is loaded.
         calib_row = ttk.Frame(self.frame)
         calib_row.pack(side=tk.TOP, fill=tk.X, padx=4, pady=(0, 4))
+
+        # Optional preview overlays (drawn on the live preview only). Placed
+        # INLINE on this existing row - not a new row - so they add no vertical
+        # height (the Rig view window is at the monitor's vertical limit). Read
+        # each frame by the draw callback, so no command is needed. Zones need the
+        # pipeline; landmarks need the tracker. Zones default ON (the request),
+        # landmarks default OFF. The persistent "Zone: <name>" readout is separate
+        # (always shown while tracking is on, regardless of the Zones checkbox).
+        self._show_zones_var = tk.BooleanVar(value=True)
+        self._show_landmarks_var = tk.BooleanVar(value=False)
+        if self._pipeline is not None:
+            zones_cb = ttk.Checkbutton(calib_row, text="Zones",
+                                       variable=self._show_zones_var)
+            zones_cb.pack(side=tk.LEFT, padx=(2, 0))
+            tip(zones_cb, "camera.show_zones")
+        if self._tracker is not None:
+            landmarks_cb = ttk.Checkbutton(calib_row, text="Landmarks",
+                                           variable=self._show_landmarks_var)
+            landmarks_cb.pack(side=tk.LEFT, padx=(2, 10))
+            tip(landmarks_cb, "camera.show_landmarks")
+
         self._undistort_var = tk.BooleanVar(value=self._undistort_enabled)
         undistort_cb = ttk.Checkbutton(
             calib_row, text="Undistort", variable=self._undistort_var,
@@ -651,8 +688,23 @@ class CameraView:
 
     def _render_preview(self, frame_bgr) -> None:
         def draw(disp, scale: float) -> None:
+            # Current zone + substate from the shared pipeline (display-only), used
+            # for the persistent readout and to bold the occupied zone / well. The
+            # well is a HUB substate (in_well), not a zone, so it is signalled via
+            # its own bold outline rather than a distinct zone name.
+            zone, substate = self._current_zone_substate()
+            in_well = substate == _IN_WELL
             if self.tracking_enabled():
+                # ROI/path/centroid + the tracker's state text (landmarks are
+                # drawn separately below so they can be toggled on their own).
                 self._draw_track_overlay(disp, scale)
+                self._draw_zone_readout(disp, zone, substate)
+            if self._show_landmarks_var.get() and _draw_landmarks_shared is not None:
+                _draw_landmarks_shared(disp, self._tracker)
+            if (self._show_zones_var.get() and self._pipeline is not None
+                    and _draw_zone_overlay_shared is not None):
+                _draw_zone_overlay_shared(disp, self._pipeline.zone_map, zone,
+                                          in_well=in_well)
 
         photo = render_bgr_to_label(
             self._preview, frame_bgr, PREVIEW_MAX_W, draw=draw,
@@ -660,13 +712,48 @@ class CameraView:
         if photo is not None:
             self._photo = photo
 
+    def _current_zone_substate(self) -> Tuple[Optional[str], Optional[str]]:
+        """The (zone, substate) the rat is presently in per the shared pipeline.
+
+        Both None when there's no pipeline or no snapshot yet (e.g. tracking off).
+        ``substate`` is in_well/outside_well while in the HUB, else None.
+        """
+        if self._pipeline is None:
+            return None, None
+        bundle = self._pipeline.snapshot()
+        if bundle is None:
+            return None, None
+        return bundle.state.zone, bundle.state.substate
+
+    def _draw_zone_readout(self, disp, zone: Optional[str],
+                           substate: Optional[str]) -> None:
+        """Draw the persistent "Zone: <name>" line under the tracker state text.
+
+        Shown whenever tracking is on (independent of the Zones overlay toggle);
+        falls back to UNKNOWN when the animal is outside all zones / no zone map.
+        The HUB substate (in_well/outside_well) is appended so the well - a HUB
+        sub-region, not its own zone - is visible in the readout.
+        """
+        if cv2 is None:
+            return
+        text = f"Zone: {zone or 'UNKNOWN'}"
+        if substate:
+            text += f" ({substate})"
+        cv2.putText(disp, text, (6, 34), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                    (255, 255, 255), 1, cv2.LINE_AA)
+
     def _draw_track_overlay(self, disp, scale: float) -> None:
-        """Draw the (shared) tracking overlay on the preview."""
+        """Draw the (shared) tracking overlay on the preview.
+
+        Landmarks are suppressed here (draw_landmarks=False) so the Rig view can
+        toggle them independently via the "Landmarks" checkbox (no double-draw).
+        """
         if _draw_track_overlay_shared is None:
             return
         snap = self._track_pub.snapshot()
         result = snap[0] if snap is not None else None
-        _draw_track_overlay_shared(disp, scale, self._tracker, result)
+        _draw_track_overlay_shared(disp, scale, self._tracker, result,
+                                   draw_landmarks=False)
 
     def _measure_fps(self, grabbed: int) -> float:
         """Estimate the live grab rate (frames/s) from the cumulative grab count.

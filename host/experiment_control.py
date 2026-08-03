@@ -496,7 +496,9 @@ def main() -> int:
         pipeline = MazeStatePipeline(zone_map, MazeStateParams())
 
     def make_camera(parent):
-        cam = CameraView(parent, tracker=tracker)
+        # Pass the shared maze pipeline so the Rig view preview can draw zones +
+        # the current-zone readout (display-only; the Maze state tab owns editing).
+        cam = CameraView(parent, tracker=tracker, pipeline=pipeline)
         camera_ref["cam"] = cam
         # Drive the shared pipeline from the camera's off-thread track worker so
         # estimation runs once, at frame rate, off the Tk poll (ADR-0040/0041).

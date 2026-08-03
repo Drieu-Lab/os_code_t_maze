@@ -30,14 +30,15 @@ from dataclasses import replace
 from tkinter import filedialog, messagebox, ttk
 from typing import Optional
 
-from gui_deps import cv2, missing_dependency, np
+from gui_deps import missing_dependency
 from preview import PreviewLoop, safe_after
 from still_frame_editor import _StillFrameEditorBase
 from tooltips import tip
+from zone_overlay import ZONE_HEX, WELL_HEX, AXIS_HEX, draw_zone_overlay
 
 import protocol
 from maze_state import (
-    EDITABLE_ZONES, ZONES_PATH, MazeStateParams, Zone,
+    EDITABLE_ZONES, IN_WELL, ZONES_PATH, MazeStateParams, Zone,
     ZoneMap, load_zone_map, save_zone_map, state_row, state_timeline_header,
 )
 
@@ -69,24 +70,9 @@ PREVIEW_INTERVAL_MS = 66     # ~15 fps live preview (only while the tab is visib
 PREVIEW_MAX_W = 640          # live preview width
 # EDITOR_MAX_W (still-frame editor display width) is shared via still_frame_editor.
 
-# Per-zone draw colours (hex for Tk canvas; converted to BGR for OpenCV overlay).
-ZONE_HEX = {
-    "HUB": "#ff4d4d",
-    "CENTRAL_STEM": "#33cc33",
-    "JUNCTION": "#e6c300",
-    "LEFT_CHOICE": "#3399ff",
-    "RIGHT_CHOICE": "#ff6699",
-    "LEFT_RETURN": "#9966ff",
-    "RIGHT_RETURN": "#ff9933",
-}
-WELL_HEX = "#00e5e5"
-AXIS_HEX = "#ffffff"
-
-
-def _hex_to_bgr(h: str):
-    h = h.lstrip("#")
-    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
-    return (b, g, r)
+# Per-zone draw colours + the OpenCV zone-overlay drawing live in zone_overlay.py
+# (shared with the Rig view camera preview); imported above. ZONE_HEX/WELL_HEX/
+# AXIS_HEX double as Tk-canvas colours for the zone editor below.
 
 
 def _bgr_to_hex(bgr) -> str:
@@ -418,34 +404,10 @@ class MazeStateControlView:
 
     def _draw_zones(self, disp) -> None:
         """Draw the zone polygons + well + stem axis on the (scaled) preview."""
-        if cv2 is None or np is None:
-            return
-        try:
-            dh, dw = disp.shape[:2]
-            zm = self._pipeline.zone_map
-            cur = self._last_state.zone if self._last_state is not None else None
-            for z in zm.zones:
-                if len(z.polygon) < 3:
-                    continue
-                pts = np.array([[int(x * dw), int(y * dh)] for x, y in z.polygon],
-                               np.int32)
-                color = _hex_to_bgr(ZONE_HEX.get(z.name, "#ffffff"))
-                thick = 3 if z.name == cur else 1
-                cv2.polylines(disp, [pts], True, color, thick)
-                cx = int(sum(p[0] for p in z.polygon) / len(z.polygon) * dw)
-                cy = int(sum(p[1] for p in z.polygon) / len(z.polygon) * dh)
-                cv2.putText(disp, z.name, (cx - 30, cy),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.35, color, 1, cv2.LINE_AA)
-            if zm.well is not None and len(zm.well) >= 3:
-                pts = np.array([[int(x * dw), int(y * dh)] for x, y in zm.well],
-                               np.int32)
-                cv2.polylines(disp, [pts], True, _hex_to_bgr(WELL_HEX), 1)
-            if zm.stem_base is not None and zm.stem_tip is not None:
-                a = (int(zm.stem_base[0] * dw), int(zm.stem_base[1] * dh))
-                b = (int(zm.stem_tip[0] * dw), int(zm.stem_tip[1] * dh))
-                cv2.arrowedLine(disp, a, b, _hex_to_bgr(AXIS_HEX), 2, tipLength=0.08)
-        except Exception:
-            pass
+        s = self._last_state
+        cur = s.zone if s is not None else None
+        in_well = s.substate == IN_WELL if s is not None else False
+        draw_zone_overlay(disp, self._pipeline.zone_map, cur, in_well=in_well)
 
 
 class _ZoneEditor(_StillFrameEditorBase):
