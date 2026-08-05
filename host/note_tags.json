@@ -1,0 +1,15 @@
+{
+  "_schema": {
+    "note": "User-defined note-tag vocabulary (ADR-0074). Each tag is {name, counter}; counter=true means presses accumulate (+N). Edited from the notes popup's 'Manage tags' dialog."
+  },
+  "tags": [
+    {
+      "name": "non-stem dissuasion",
+      "counter": false
+    },
+    {
+      "name": "lift-backs",
+      "counter": true
+    }
+  ]
+}

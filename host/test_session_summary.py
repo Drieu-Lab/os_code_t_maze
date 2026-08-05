@@ -18,6 +18,7 @@ import unittest
 from types import SimpleNamespace
 
 import phase3_stats
+import reward_volume
 import session_summary
 from behavior_stats import BehaviorStats
 from phase3_log import Phase3Log
@@ -39,8 +40,12 @@ def _side_for(log, index, correct):
     return "left" if want_left else "right"
 
 
-def _cued_stats():
-    """A small scored table -> a Phase3Stats with a mix of correct/incorrect."""
+def _cued_stats(topups=0):
+    """A small scored table -> a Phase3Stats with a mix of correct/incorrect.
+
+    Three of four trials are rewarded (the correct ones); ``topups`` extra lick
+    top-up pulses are recorded on the first rewarded trial to exercise the water
+    estimate's pulse count."""
     log = Phase3Log(_seq(n=6), animal="RAT600",
                     session_start_iso="2026-07-31T12:00:00")
     outcomes = [CORRECT, CORRECT, INCORRECT, CORRECT]
@@ -49,7 +54,17 @@ def _cued_stats():
                           f"t_choice{i}")
         if oc == CORRECT:
             log.reward_fired(i, f"t_reward{i}")
+    for _ in range(topups):
+        log.topup_fired(0)
     return phase3_stats.compute(log.snapshot(len(outcomes), armed=True)), log
+
+
+# The Phase 3 shaping params the controller folds from config/phase3.json.
+_PARAMS = {
+    "max_same_run": 4, "block_size": 20, "reward_incorrect": False,
+    "reward_pulse_ms": 250, "max_topups": 1, "require_up_stem": False,
+    "min_confidence": 0.0,
+}
 
 
 # ---- deterministic locomotor snapshot (via the real BehaviorStats core) ----
@@ -122,6 +137,117 @@ class TestRenderJson(unittest.TestCase):
         data = json.loads(summ.render_json())
         self.assertIsNone(data["cued_task"])
         self.assertIsNone(data["locomotion"])
+        # Later additions default to empty / None when nothing was provided.
+        self.assertEqual(data["schema_version"], 3)
+        self.assertEqual(data["task_params"], {})
+        self.assertIsNone(data["estimated_water"])
+        self.assertEqual(data["notes"], [])
+
+
+class TestTaskParams(unittest.TestCase):
+    def test_params_folded_into_json_and_text(self):
+        cued, _ = _cued_stats()
+        summ = session_summary.build_summary(
+            session_id="s1", animal="RAT600", t0=_T0, t_end=_T_END,
+            cued=cued, params=_PARAMS)
+        data = json.loads(summ.render_json())
+        self.assertEqual(data["task_params"]["block_size"], 20)
+        self.assertEqual(data["task_params"]["max_same_run"], 4)
+        self.assertEqual(data["task_params"]["reward_pulse_ms"], 250)
+        text = summ.render_text()
+        self.assertIn("Task params", text)
+        self.assertIn("block 20", text)
+        self.assertIn("max-run 4", text)
+        self.assertIn("pulse 250 ms", text)
+
+    def test_missing_params_placeholder(self):
+        summ = session_summary.build_summary(
+            session_id="s", animal="a", t0=_T0, t_end=_T_END)
+        self.assertIn("(no task params)", summ.render_text())
+
+
+class TestEstimatedWater(unittest.TestCase):
+    def test_water_from_rewarded_pulses(self):
+        cued, _ = _cued_stats()                       # 3 rewarded, 0 top-ups
+        summ = session_summary.build_summary(
+            session_id="s1", animal="RAT600", t0=_T0, t_end=_T_END,
+            cued=cued, params=_PARAMS)
+        water = summ.estimated_water
+        # 3 prime pulses at 250 ms; 60 uL/300 ms -> 50 uL each -> 150 uL.
+        self.assertEqual(water["pulses"], 3)
+        self.assertEqual(water["rewarded"], 3)
+        self.assertEqual(water["topups"], 0)
+        self.assertAlmostEqual(water["ul"], reward_volume.reward_volume_ul(250) * 3)
+        data = json.loads(summ.render_json())
+        self.assertEqual(data["estimated_water"]["pulses"], 3)
+        self.assertIn("Water (est):", summ.render_text())
+
+    def test_water_counts_topups(self):
+        cued, _ = _cued_stats(topups=2)               # 3 rewarded + 2 top-ups
+        summ = session_summary.build_summary(
+            session_id="s1", animal="RAT600", t0=_T0, t_end=_T_END,
+            cued=cued, params=_PARAMS)
+        water = summ.estimated_water
+        self.assertEqual(water["topups"], 2)
+        self.assertEqual(water["pulses"], 5)          # 3 primes + 2 top-ups
+        self.assertAlmostEqual(water["ul"], reward_volume.reward_volume_ul(250) * 5)
+
+    def test_water_none_without_cued_or_pulse(self):
+        # No cued stats -> no estimate.
+        summ = session_summary.build_summary(
+            session_id="s", animal="a", t0=_T0, t_end=_T_END, params=_PARAMS)
+        self.assertIsNone(summ.estimated_water)
+        # Cued present but no pulse param -> no estimate.
+        cued, _ = _cued_stats()
+        summ2 = session_summary.build_summary(
+            session_id="s", animal="a", t0=_T0, t_end=_T_END, cued=cued)
+        self.assertIsNone(summ2.estimated_water)
+        self.assertIn("Water (est): --", summ2.render_text())
+
+
+def _note_entries():
+    """A small ordered list of timestamped note entries (as session_notes would
+    render them): a plain note, an edited note, and a tag press."""
+    return [
+        {"id": 0, "iso": "2026-07-31T12:00:05.000", "text": "dissuaded non-stem",
+         "mono": 5.0, "trial_index": 3, "tag": None, "count": 1,
+         "edited_iso": None},
+        {"id": 1, "iso": "2026-07-31T12:00:20.000", "text": "hand-guided (fixed)",
+         "mono": 20.0, "trial_index": 4, "tag": None, "count": 1,
+         "edited_iso": "2026-07-31T12:05:00.000"},
+        {"id": 2, "iso": "2026-07-31T12:00:30.000", "text": "lift-backs",
+         "mono": 30.0, "trial_index": 4, "tag": "lift-backs", "count": 1,
+         "edited_iso": None},
+    ]
+
+
+class TestNotes(unittest.TestCase):
+    def test_notes_are_structured_list_in_json(self):
+        entries = _note_entries()
+        summ = session_summary.build_summary(
+            session_id="s", animal="a", t0=_T0, t_end=_T_END, notes=entries)
+        data = json.loads(summ.render_json())
+        self.assertEqual(data["schema_version"], 3)
+        self.assertEqual(data["notes"], entries)          # verbatim list
+
+    def test_notes_render_timestamped_list(self):
+        summ = session_summary.build_summary(
+            session_id="s", animal="a", t0=_T0, t_end=_T_END,
+            notes=_note_entries())
+        text = summ.render_text()
+        self.assertIn("Notes", text)
+        # Time-of-day + trial index rendered per entry.
+        self.assertIn("12:00:05  trial 3  dissuaded non-stem", text)
+        # Edited entry flagged, original stamp preserved.
+        self.assertIn("(edited)", text)
+        # Tag rendered on its entry + summarised in the tally.
+        self.assertIn("#lift-backs", text)
+        self.assertIn("Tags: lift-backs x1", text)
+
+    def test_notes_placeholder_when_blank(self):
+        summ = session_summary.build_summary(
+            session_id="s", animal="a", t0=_T0, t_end=_T_END)
+        self.assertIn("(none)", summ.render_text())
 
 
 class TestRenderText(unittest.TestCase):

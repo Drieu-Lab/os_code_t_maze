@@ -14,8 +14,21 @@ docs/decisions/0052) and the live locomotor/compliance stats
 (``behavior_stats.BehaviorSnapshot``, docs/decisions/0032) - plus a little session
 metadata into one ``SessionSummary``, which renders to (a) machine-readable JSON
 for reanalysis and (b) a compact human-readable text block. It does NOT recompute
-any measure: the two stats cores stay the single source of truth, this only
+the stats cores' measures: those cores stay the single source of truth, this only
 selects, labels, and serialises their fields (see docs/decisions/0071).
+
+Additions widen the summary to be self-contained:
+  - it carries the operator's ``notes`` for the session - now an ordered list of
+    TIMESTAMPED entries (``session_notes.NoteEntry`` dicts: iso/mono/trial_index/
+    text/tag/count/edited_iso), not the single free-text string of ADR-0073, so
+    each note is an event on the shared timeline (docs/decisions/0074), and
+  - it folds a copy of the Phase 3 task params that shape interpretation
+    (``params``: sequence/cue/reward knobs, saved per session in
+    ``config/phase3.json``) and derives an ESTIMATED task-reward water volume
+    from the rewarded + top-up pulse counts at the configured pulse width via the
+    shared ``reward_volume`` calibration (docs/decisions/0019). Like the existing
+    ``duration_s``, the water figure is a session-level scalar this formatter
+    derives from its inputs; it is not one of the two stats cores' measures.
 
 The thin ``session_controller.py`` shell calls :func:`build_summary` on Session
 Stop and writes the two files into the session's ``summary/`` folder; this module
@@ -38,14 +51,19 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, Optional, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
+
+import reward_volume
 
 if TYPE_CHECKING:  # type-only imports - no runtime coupling to the stats cores
     from behavior_stats import BehaviorSnapshot
     from phase3_stats import Phase3Stats
 
 # Bump when the summary JSON layout changes so an offline reader can branch on it.
-SCHEMA_VERSION = 1
+# v2 adds the operator ``notes``, the folded ``task_params``, and the estimated
+# water block (docs/decisions/0073). v3 changes ``notes`` from a single string to
+# an ordered list of timestamped entry objects (docs/decisions/0074).
+SCHEMA_VERSION = 3
 
 # Both inputs are measured from the Phase 3 arm edge, not Session Start (see the
 # module docstring + docs/future-work.md FW-0028); recorded so a reader knows what
@@ -71,6 +89,14 @@ class SessionSummary:
     locomotor: Optional["BehaviorSnapshot"] = None
     seed: Optional[int] = None
     tones: Dict[str, Any] = field(default_factory=dict)
+    # The Phase 3 task params that shape interpretation (sequence/cue/reward
+    # knobs), folded as a copy from the session's config/phase3.json so the
+    # summary is self-contained (docs/decisions/0073); {} when unavailable.
+    params: Dict[str, Any] = field(default_factory=dict)
+    # Operator notes / interventions for the session as an ordered list of
+    # timestamped entries (session_notes.NoteEntry dicts; docs/decisions/0074);
+    # [] when none were recorded.
+    notes: List[Dict[str, Any]] = field(default_factory=list)
     generated_iso: Optional[str] = None
     schema_version: int = SCHEMA_VERSION
     scope: str = SCOPE
@@ -89,6 +115,40 @@ class SessionSummary:
             return None
         return max(0.0, end - start)
 
+    @property
+    def estimated_water(self) -> Optional[Dict[str, Any]]:
+        """Estimated water delivered by TASK rewards this session, or None if the
+        cued stats or the reward pulse width aren't available.
+
+        Counts the correct-choice prime pulses (``cued.rewarded``) plus the lick
+        top-up pulses (``cued.topups``) - both from the Phase 3 stats core, not
+        recomputed here - each at the configured reward pulse width, converted to
+        microliters via the shared ``reward_volume`` bench calibration
+        (docs/decisions/0019). This is an ESTIMATE of task-delivered reward only:
+        operator/manual pulses are not counted (docs/decisions/0073), so it can
+        undercount the day's true intake."""
+        if self.cued is None:
+            return None
+        pulse_raw = self.params.get("reward_pulse_ms")
+        try:
+            pulse_ms = float(pulse_raw)
+        except (TypeError, ValueError):
+            return None
+        if pulse_ms <= 0:
+            return None
+        rewarded = int(getattr(self.cued, "rewarded", 0) or 0)
+        topups = int(getattr(self.cued, "topups", 0) or 0)
+        pulses = rewarded + topups
+        per_pulse = reward_volume.reward_volume_ul(pulse_ms)
+        return {
+            "ul": round(per_pulse * pulses, 1),
+            "pulses": pulses,
+            "rewarded": rewarded,
+            "topups": topups,
+            "pulse_ms": pulse_raw,
+            "per_pulse_ul": round(per_pulse, 1),
+        }
+
     # -------------------------------------------------------------- JSON
     def as_dict(self) -> Dict[str, Any]:
         """The machine-readable summary as a plain dict (JSON-ready).
@@ -102,13 +162,16 @@ class SessionSummary:
             "animal": self.animal,
             "seed": self.seed,
             "tones": self.tones,
+            "task_params": self.params,
             "scope": self.scope,
             "t0": self.t0,
             "t_end": self.t_end,
             "duration_s": self.duration_s,
             "generated_iso": self.generated_iso,
             "cued_task": _stats_dict(self.cued),
+            "estimated_water": self.estimated_water,
             "locomotion": _stats_dict(self.locomotor),
+            "notes": self.notes,
         }
 
     def render_json(self) -> str:
@@ -136,14 +199,25 @@ class SessionSummary:
         lines.append(f"Scope:    {self.scope}")
 
         lines.append("")
+        lines.append("Task params")
+        lines.append("-" * 40)
+        lines.extend(_params_lines(self.params))
+
+        lines.append("")
         lines.append("Cued task")
         lines.append("-" * 40)
         lines.extend(_cued_lines(self.cued))
+        lines.append(f"  Water (est): {_water_str(self.estimated_water)}")
 
         lines.append("")
         lines.append("Excursions / locomotion")
         lines.append("-" * 40)
         lines.extend(_locomotor_lines(self.locomotor))
+
+        lines.append("")
+        lines.append("Notes")
+        lines.append("-" * 40)
+        lines.extend(_notes_lines(self.notes))
 
         return "\n".join(lines) + "\n"
 
@@ -154,14 +228,22 @@ def build_summary(*, session_id: str, animal: str,
                   locomotor: Optional["BehaviorSnapshot"] = None,
                   seed: Optional[int] = None,
                   tones: Optional[Dict[str, Any]] = None,
+                  params: Optional[Dict[str, Any]] = None,
+                  notes: Optional[List[Dict[str, Any]]] = None,
                   generated_iso: Optional[str] = None) -> SessionSummary:
     """Build a :class:`SessionSummary` from the session metadata + the two frozen
-    stat readouts. Pure: it stores and formats the inputs, recomputing nothing.
-    ``generated_iso`` defaults to now (the moment the summary was built)."""
+    stat readouts, plus the folded task ``params`` and the operator ``notes``
+    (an ordered list of timestamped entry dicts; docs/decisions/0074). Pure: it
+    stores and formats the inputs (deriving only the session-level scalars
+    ``duration_s`` / ``estimated_water``); it recomputes none of the stats cores'
+    measures. ``generated_iso`` defaults to now (the moment the summary was
+    built)."""
     return SessionSummary(
         session_id=session_id, animal=animal, t0=t0, t_end=t_end,
         cued=cued, locomotor=locomotor, seed=seed,
         tones=dict(tones) if tones else {},
+        params=dict(params) if params else {},
+        notes=list(notes) if notes else [],
         generated_iso=generated_iso or datetime.now().isoformat(
             timespec="seconds"))
 
@@ -175,6 +257,108 @@ def _stats_dict(stats: Any) -> Optional[Dict[str, Any]]:
     if stats is None:
         return None
     return {k: v for k, v in vars(stats).items()}
+
+
+def _params_lines(params: Dict[str, Any]) -> list:
+    """Human-readable Phase 3 task-param lines (the copy folded from the session's
+    config/phase3.json; docs/decisions/0073)."""
+    if not params:
+        return ["  (no task params)"]
+
+    def g(key: str) -> Any:
+        return params.get(key)
+
+    return [
+        f"  Sequence:    block {g('block_size')}   max-run {g('max_same_run')}",
+        f"  Cue:         require up-stem {g('require_up_stem')}   "
+        f"min-conf {_conf(g('min_confidence'))}",
+        f"  Reward:      pulse {g('reward_pulse_ms')} ms   "
+        f"max top-ups {g('max_topups')}   "
+        f"reward-incorrect {g('reward_incorrect')}",
+    ]
+
+
+def _water_str(water: Optional[Dict[str, Any]]) -> str:
+    """The estimated task-reward water as a one-line string, or ``--`` when it
+    couldn't be estimated (no cued stats / no pulse width)."""
+    if not water:
+        return "--"
+    return (f"{reward_volume.format_volume(water['ul'])}   "
+            f"[{water['pulses']} pulses @ {water['pulse_ms']} ms; excl. manual]")
+
+
+def _notes_lines(notes: List[Dict[str, Any]]) -> list:
+    """The operator notes as a timestamped list (docs/decisions/0074), or a
+    ``(none)`` placeholder when empty.
+
+    Each entry renders as ``HH:MM:SS  [trial N]  #tag  text (edited)``; a leading
+    tally line summarises tag usage (event tags as ``xN``, counter tags as their
+    ``+N`` total) - an aggregation of the given entries, not a stats-core
+    measure."""
+    if not notes:
+        return ["  (none)"]
+    lines: list = []
+    tally = _tag_tally(notes)
+    if tally:
+        lines.append(f"  Tags: {tally}")
+    for e in notes:
+        lines.append("  " + _note_entry_line(e))
+    return lines
+
+
+def _note_entry_line(e: Dict[str, Any]) -> str:
+    """One timestamped note-entry line for the text summary."""
+    parts = [_hms(e.get("iso"))]
+    trial = e.get("trial_index")
+    if trial is not None:
+        parts.append(f"trial {trial}")
+    tag = e.get("tag")
+    if tag:
+        parts.append(f"#{tag}")
+    head = "  ".join(parts)
+    text = (e.get("text") or "").strip()
+    body = text if text else "(no text)"
+    if e.get("edited_iso"):
+        body += " (edited)"
+    return f"{head}  {body}"
+
+
+def _tag_tally(notes: List[Dict[str, Any]]) -> str:
+    """A compact per-tag usage tally (``non-stem x3, lift-backs x5``), or "" when
+    no entry carries a tag. Sums each tagged entry's ``count`` so a counter tag
+    reads as its running total; first-seen order is preserved."""
+    totals: Dict[str, int] = {}
+    order: List[str] = []
+    for e in notes:
+        tag = e.get("tag")
+        if not tag:
+            continue
+        if tag not in totals:
+            totals[tag] = 0
+            order.append(tag)
+        totals[tag] += int(e.get("count", 1) or 1)
+    if not order:
+        return ""
+    return ", ".join(f"{t} x{totals[t]}" for t in order)
+
+
+def _hms(iso: Optional[str]) -> str:
+    """The time-of-day (``HH:MM:SS``) from an ISO stamp, or the raw value if it
+    can't be parsed / is absent."""
+    if not iso:
+        return "--:--:--"
+    try:
+        return datetime.fromisoformat(iso).strftime("%H:%M:%S")
+    except (TypeError, ValueError):
+        return str(iso)
+
+
+def _conf(x: Any) -> str:
+    """A min-confidence value as a 2-decimal string, or ``--`` if unparseable."""
+    try:
+        return f"{float(x):.2f}"
+    except (TypeError, ValueError):
+        return "--"
 
 
 def _pct(x: Optional[float]) -> str:
