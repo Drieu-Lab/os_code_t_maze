@@ -4,7 +4,7 @@
 - **Date:** 2026-07-31
 - **Author / Agent:** Agent (Cursor) on behalf of Celine
 - **Affects:** `host/session_summary.py` (new pure core) + `host/test_session_summary.py`; `host/session_controller.py` (`_stop_session` hook, `summary/` folder, manifest pointers); `host/behavior_view.py` (`behavior_summary()` + a session-scoped Phase 3 locomotor accumulator); `host/experiment_control.py` (provider wiring)
-- **Supersedes / Superseded by:** —
+- **Supersedes / Superseded by:** Extended by ADR-0073 (summary layout -> schema v2: operator notes, folded task params, estimated water)
 
 ## Context
 

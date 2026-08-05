@@ -111,6 +111,15 @@ The code that runs *most often* — here, the work done on **every camera frame*
 tens of times per second. Anything added to the hot path (even a tiny delay)
 multiplies by the frame rate, so it is kept as lean as possible.
 
+### Intervention tag
+A short, reusable label the operator applies to a [stamped note
+entry](#stamped-note-entry) to mark a recurring human action during a session —
+e.g. "non-stem dissuasion" or "lift-backs". The set of tags is *user-defined*
+(you create/rename/delete them) and persists across sessions in
+`host/note_tags.json`, so the same interventions are recorded consistently and
+can be compared across sessions later. A tag can be a *counter* (each press
+records a `+1`). See ADR-0074.
+
 ### Latency
 The delay between a cause and its effect — e.g. between the rat entering a zone
 and the reward firing. A lot of the design exists to reduce actuation latency.
@@ -159,6 +168,17 @@ An immutable (unchangeable) copy of some state, taken at one instant and handed
 off whole. The Tk [poll](#poll--poll-loop) publishes a "gate snapshot" that the
 actuation [thread](#thread) reads all at once, so the thread never sees a
 half-updated mix of GUI values. See ADR-0043.
+
+### Stamped note entry
+One operator observation recorded as a *timestamped event* rather than a line in
+a free-text blob: it carries when it happened (wall-clock time + the steady
+[monotonic](#session-clock) clock the other streams use) and which Phase 3 trial
+was in progress, plus the note text and an optional [intervention
+tag](#intervention-tag). Entries are saved to `summary/notes_<id>.jsonl` as they
+are added/edited/deleted (so they survive a crash) and folded into the session
+summary. Storing notes as timed events — not a paragraph — lets them line up with
+the behavior/video/neural data on the one shared timeline. See ADR-0074 (timeline
+rationale: ADR-0048).
 
 ### TCP client / TCP
 TCP is a standard way for programs to talk over a network connection. A "TCP

@@ -89,9 +89,12 @@ from datetime import datetime
 from tkinter import messagebox, ttk
 from typing import Any, Callable, Optional
 
+import note_tags
+import phase3_config
 import phase3_stats
 import protocol
 import session_config
+import session_notes
 import session_summary
 from rig_config import load_rig_config
 from session_log import SessionManifest, clock_snapshot, path_within_session
@@ -117,6 +120,13 @@ CONFIG_SUBDIR = "config"
 # 0022) - used to keep only that port's valve acks in the filtered serial file.
 CENTER_SOL_PORT = 2
 
+# Operator note streams (docs/decisions/0074). The per-session note log lives in
+# the summary/ folder as JSON Lines and is registered under this manifest key;
+# the user-defined tag vocabulary persists next to the other host/*.json config.
+NOTES_STREAM_KEY = "notes_events"
+NOTE_TAGS_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "note_tags.json")
+
 # How often (ms) to re-check each recorder for its resolved output path while a
 # session is active. The camera path resolves immediately; the Phase 3 file only
 # once its gate opens (Free Roam + tracking + a zone map), so we poll for it.
@@ -124,6 +134,17 @@ RESOLVE_INTERVAL_MS = 500
 
 # Map a recorded video extension to the codec label recorded in the manifest.
 _CODEC_BY_EXT = {".mkv": "ffv1", ".mp4": "h264"}
+
+
+def _hms(iso: Optional[str]) -> str:
+    """Time-of-day (HH:MM:SS) from an ISO stamp for the notes list; the raw value
+    if it can't be parsed."""
+    if not iso:
+        return "--:--:--"
+    try:
+        return datetime.fromisoformat(iso).strftime("%H:%M:%S")
+    except (TypeError, ValueError):
+        return str(iso)
 
 
 class SessionControlView:
@@ -179,6 +200,19 @@ class SessionControlView:
         # Open handle for the per-session filtered serial file (None when idle).
         self._serial_file = None
         self._serial_path: Optional[str] = None
+        # Operator notes for the current session as timestamped, editable entries
+        # (docs/decisions/0074). The log buffers entries even before Start (so a
+        # note jotted while setting up is not lost); on Start it is bound to a
+        # summary/notes_<id>.jsonl file, rewritten atomically on every change, and
+        # folded from disk into the summary on Stop.
+        self._notelog = session_notes.NoteLog()
+        self._notes_path: Optional[str] = None
+        # User-defined intervention-tag vocabulary, persisted across sessions in
+        # host/note_tags.json (docs/decisions/0074).
+        self._tag_vocab = note_tags.load_tags(NOTE_TAGS_PATH)
+        # The open notes popup (Toplevel), if any, so a second click focuses the
+        # existing one instead of stacking duplicates.
+        self._notes_win: Optional[tk.Toplevel] = None
 
         self._build_ui()
 
@@ -234,11 +268,385 @@ class SessionControlView:
         ttk.Label(root, text="(animal id from the Task tab)",
                   font=("TkDefaultFont", 8)).grid(
             row=0, column=1, sticky="w", padx=(4, 6), pady=4)
+        # A popup for operator notes rather than an inline box: the Rig view is
+        # already at the monitor's full height, so the notes UI must add no rows
+        # (docs/decisions/0073/0074). Notes are timestamped entries folded into
+        # the summary on Stop; the button label shows the running count.
+        self._notes_btn = ttk.Button(root, text="Notes...", width=10,
+                                     command=self._open_notes_dialog)
+        self._notes_btn.grid(row=0, column=2, sticky="e", padx=(4, 6), pady=4)
 
         self._status_var = tk.StringVar(value="session: off")
         ttk.Label(root, textvariable=self._status_var, anchor="w",
                   wraplength=360, justify="left").grid(
-            row=1, column=0, columnspan=2, sticky="w", padx=6, pady=(0, 4))
+            row=1, column=0, columnspan=3, sticky="w", padx=6, pady=(0, 4))
+
+        # Quick-stamp hotkey: mark the moment on the shared timeline without
+        # opening the dialog (text can be filled in later). Bound on the toplevel
+        # so it fires from anywhere in the app, matching the *_view.py shells'
+        # bind() usage (docs/decisions/0074).
+        try:
+            self.frame.winfo_toplevel().bind(
+                "<Control-Shift-N>", self._on_quick_stamp)
+        except tk.TclError:
+            pass
+        self._refresh_notes_button()
+
+    # ------------------------------------------------------------- notes
+    # The note log + tag vocabulary are pure cores (session_notes / note_tags,
+    # docs/decisions/0074); this shell owns the Tk popup, the timestamps, and the
+    # atomic file write. Entries survive an unclean end because every change is
+    # flushed to disk immediately (see _persist_notes) and the summary re-reads
+    # from disk on Stop (see _write_session_summary).
+
+    def _now_iso(self) -> str:
+        return datetime.now().isoformat(timespec="milliseconds")
+
+    def _current_trial_index(self) -> Optional[int]:
+        """The 0-based Phase 3 trial in progress right now, or None when no Phase
+        3 controller/snapshot is available - stamped onto a new note so it lands
+        on the shared behavior/video/neural timeline (docs/decisions/0048/0074)."""
+        if self._phase3 is None or not hasattr(self._phase3, "published_state"):
+            return None
+        try:
+            snap = self._phase3.published_state()
+        except Exception:
+            snap = None
+        return snap.current_index if snap is not None else None
+
+    def _add_note(self, text: str, *, tag: Optional[str] = None,
+                  count: int = 1):
+        """Stamp and append one note entry (iso + monotonic clock + current trial
+        index), persist the log to disk, and refresh the button/list. Returns the
+        entry. ``text`` may be empty for a bare quick-stamp."""
+        entry = self._notelog.add(
+            text, iso=self._now_iso(), mono=time.monotonic(),
+            trial_index=self._current_trial_index(), tag=tag, count=count)
+        self._persist_notes()
+        self._refresh_notes_button()
+        return entry
+
+    def _persist_notes(self) -> None:
+        """Atomically rewrite the whole notes JSONL file (docs/decisions/0074).
+
+        No-op until the log is bound to a session file on Start; entries jotted
+        before then stay buffered in memory and are flushed at bind time. A whole-
+        file rewrite (over append-only ops) keeps the record consistent under
+        edits/deletes. Best-effort: a write failure must never break note-taking."""
+        if self._notes_path is None:
+            return
+        try:
+            self._atomic_write(self._notes_path, self._notelog.render_jsonl())
+        except OSError:
+            pass
+
+    def _refresh_notes_button(self) -> None:
+        """Show the running entry count on the Notes button (quiet feedback that
+        a stamp landed, without stealing the session status line)."""
+        try:
+            n = len(self._notelog)
+            self._notes_btn.configure(
+                text=f"Notes ({n})..." if n else "Notes...")
+        except tk.TclError:
+            pass
+
+    def _on_quick_stamp(self, _event=None) -> str:
+        """Ctrl+Shift+N: append an immediately-timestamped, empty entry (fill in
+        the text later) and flash the count. Returns "break" so the key isn't
+        also handled elsewhere."""
+        self._add_note("")
+        if self._notes_win is not None:
+            self._refresh_notes_list()
+        return "break"
+
+    def _open_notes_dialog(self) -> None:
+        """Open (or re-focus) the session-notes popup (docs/decisions/0074).
+
+        Keeps the notes UI off the full-height Rig view. The popup has: a compose
+        box + "Stamp note" (append a timestamped entry), one-click tag buttons
+        from the user vocabulary (+ "Manage tags..."), and a list of the entries
+        so far with Edit / Delete. Closing with non-empty compose text autosaves
+        it (no silent discard). Notes can be jotted any time - before or during a
+        session - and are folded into the summary on Stop."""
+        if self._notes_win is not None:
+            try:
+                self._notes_win.deiconify()
+                self._notes_win.lift()
+                self._notes_win.focus_set()
+                self._refresh_notes_list()
+                return
+            except tk.TclError:
+                self._notes_win = None
+
+        win = tk.Toplevel(self.frame)
+        win.title("Session notes / interventions")
+        win.transient(self.frame.winfo_toplevel())
+        self._notes_win = win
+
+        ttk.Label(win, text="Note (Ctrl+Shift+N stamps one from anywhere):").pack(
+            anchor="w", padx=8, pady=(8, 2))
+        compose = tk.Text(win, width=64, height=3, wrap="word")
+        compose.pack(fill=tk.X, padx=8, pady=2)
+        compose.focus_set()
+        self._notes_compose = compose
+
+        def _stamp() -> None:
+            txt = compose.get("1.0", "end-1c").strip()
+            self._add_note(txt)
+            compose.delete("1.0", "end")
+            self._refresh_notes_list()
+            compose.focus_set()
+
+        ttk.Button(win, text="Stamp note", command=_stamp).pack(
+            anchor="w", padx=8, pady=(0, 4))
+
+        # One-click tag row (event tag -> stamped entry; counter tag -> stamped
+        # +1 entry) + the vocabulary manager.
+        tagbar = ttk.Frame(win)
+        tagbar.pack(fill=tk.X, padx=8, pady=(0, 4))
+        self._notes_tagbar = tagbar
+        self._build_tag_buttons()
+
+        ttk.Separator(win, orient="horizontal").pack(fill=tk.X, padx=8, pady=4)
+        ttk.Label(win, text="Entries this session:").pack(
+            anchor="w", padx=8, pady=(0, 2))
+
+        listwrap = ttk.Frame(win)
+        listwrap.pack(fill=tk.BOTH, expand=True, padx=8, pady=2)
+        cols = ("time", "trial", "tag", "text")
+        tree = ttk.Treeview(listwrap, columns=cols, show="headings", height=8)
+        for col, head, width in (("time", "Time", 90), ("trial", "Trial", 50),
+                                 ("tag", "Tag", 120), ("text", "Text", 320)):
+            tree.heading(col, text=head)
+            tree.column(col, width=width,
+                        anchor="w" if col == "text" else "center")
+        vsb = ttk.Scrollbar(listwrap, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=vsb.set)
+        tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        listwrap.rowconfigure(0, weight=1)
+        listwrap.columnconfigure(0, weight=1)
+        self._notes_tree = tree
+
+        rowbtns = ttk.Frame(win)
+        rowbtns.pack(fill=tk.X, padx=8, pady=(2, 8))
+        ttk.Button(rowbtns, text="Edit...",
+                   command=self._edit_selected_note).pack(side=tk.LEFT)
+        ttk.Button(rowbtns, text="Delete",
+                   command=self._delete_selected_note).pack(
+            side=tk.LEFT, padx=(6, 0))
+        ttk.Button(rowbtns, text="Manage tags...",
+                   command=self._open_tag_manager).pack(side=tk.RIGHT)
+        tree.bind("<Double-1>", lambda _e: self._edit_selected_note())
+
+        def _close() -> None:
+            # Footgun fix (docs/decisions/0074): don't silently discard typed-but-
+            # unstamped text - autosave it as a final entry.
+            try:
+                leftover = compose.get("1.0", "end-1c").strip()
+            except tk.TclError:
+                leftover = ""
+            if leftover:
+                self._add_note(leftover)
+            self._notes_win = None
+            self._notes_tree = None
+            self._notes_compose = None
+            self._notes_tagbar = None
+            try:
+                win.destroy()
+            except tk.TclError:
+                pass
+
+        win.protocol("WM_DELETE_WINDOW", _close)
+        self._refresh_notes_list()
+
+    def _build_tag_buttons(self) -> None:
+        """(Re)build the one-click tag buttons from the current vocabulary."""
+        bar = getattr(self, "_notes_tagbar", None)
+        if bar is None:
+            return
+        for child in bar.winfo_children():
+            child.destroy()
+        names = self._tag_vocab.names()
+        if not names:
+            ttk.Label(bar, text="(no tags yet - use Manage tags...)",
+                      font=("TkDefaultFont", 8)).pack(side=tk.LEFT)
+            return
+        ttk.Label(bar, text="Tags:").pack(side=tk.LEFT, padx=(0, 4))
+        for name in names:
+            counter = self._tag_vocab.is_counter(name)
+            label = f"{name} +1" if counter else name
+            ttk.Button(bar, text=label, width=max(6, len(label) + 2),
+                       command=lambda n=name: self._apply_tag(n)).pack(
+                side=tk.LEFT, padx=2)
+
+    def _apply_tag(self, name: str) -> None:
+        """Append a stamped entry labeled with ``name`` (a counter tag records a
+        +1 event; the summary tallies presses per tag). Refreshes the list."""
+        self._add_note("", tag=name, count=1)
+        if self._notes_win is not None:
+            self._refresh_notes_list()
+
+    def _refresh_notes_list(self) -> None:
+        """Repopulate the entry Treeview from the log (ids kept in the item id)."""
+        tree = getattr(self, "_notes_tree", None)
+        if tree is None:
+            return
+        try:
+            tree.delete(*tree.get_children())
+        except tk.TclError:
+            return
+        for e in self._notelog.entries():
+            trial = "" if e.trial_index is None else str(e.trial_index)
+            tag = e.tag or ""
+            txt = e.text or ("(stamp)" if not e.tag else "")
+            if e.edited_iso:
+                txt += "  (edited)"
+            tree.insert("", "end", iid=str(e.id),
+                        values=(_hms(e.iso), trial, tag, txt))
+
+    def _selected_note_id(self) -> Optional[int]:
+        tree = getattr(self, "_notes_tree", None)
+        if tree is None:
+            return None
+        sel = tree.selection()
+        if not sel:
+            return None
+        try:
+            return int(sel[0])
+        except ValueError:
+            return None
+
+    def _edit_selected_note(self) -> None:
+        """Edit the selected entry's text in a small dialog, preserving its
+        original timestamps and flagging it edited (docs/decisions/0074)."""
+        entry_id = self._selected_note_id()
+        if entry_id is None:
+            return
+        entry = next((e for e in self._notelog.entries() if e.id == entry_id),
+                     None)
+        if entry is None:
+            return
+
+        dlg = tk.Toplevel(self._notes_win or self.frame)
+        dlg.title("Edit note")
+        dlg.transient(self._notes_win or self.frame.winfo_toplevel())
+        ttk.Label(dlg, text="Note text (original timestamp is kept):").pack(
+            anchor="w", padx=8, pady=(8, 2))
+        box = tk.Text(dlg, width=60, height=4, wrap="word")
+        box.insert("1.0", entry.text)
+        box.pack(fill=tk.BOTH, expand=True, padx=8, pady=2)
+        box.focus_set()
+
+        def _apply() -> None:
+            self._notelog.edit(entry_id, box.get("1.0", "end-1c").strip(),
+                               edited_iso=self._now_iso())
+            self._persist_notes()
+            self._refresh_notes_list()
+            try:
+                dlg.destroy()
+            except tk.TclError:
+                pass
+
+        btns = ttk.Frame(dlg)
+        btns.pack(fill=tk.X, padx=8, pady=(2, 8))
+        ttk.Button(btns, text="Save", command=_apply).pack(side=tk.LEFT)
+        ttk.Button(btns, text="Cancel", command=dlg.destroy).pack(
+            side=tk.LEFT, padx=(6, 0))
+
+    def _delete_selected_note(self) -> None:
+        entry_id = self._selected_note_id()
+        if entry_id is None:
+            return
+        if self._notelog.delete(entry_id):
+            self._persist_notes()
+            self._refresh_notes_button()
+            self._refresh_notes_list()
+
+    def _open_tag_manager(self) -> None:
+        """Add / rename / delete the user-defined tag vocabulary, persisted across
+        sessions to host/note_tags.json (docs/decisions/0074)."""
+        dlg = tk.Toplevel(self._notes_win or self.frame)
+        dlg.title("Manage note tags")
+        dlg.transient(self._notes_win or self.frame.winfo_toplevel())
+
+        lst = tk.Listbox(dlg, width=40, height=8)
+        lst.grid(row=0, column=0, columnspan=3, sticky="nsew", padx=8, pady=8)
+
+        def _reload_list() -> None:
+            lst.delete(0, "end")
+            for name in self._tag_vocab.names():
+                suffix = "  (counter)" if self._tag_vocab.is_counter(name) else ""
+                lst.insert("end", f"{name}{suffix}")
+
+        def _selected_name() -> Optional[str]:
+            sel = lst.curselection()
+            if not sel:
+                return None
+            return self._tag_vocab.names()[sel[0]]
+
+        def _save_vocab() -> None:
+            try:
+                note_tags.save_tags(NOTE_TAGS_PATH, self._tag_vocab)
+            except OSError:
+                pass
+            self._build_tag_buttons()
+
+        name_var = tk.StringVar()
+        counter_var = tk.BooleanVar(value=False)
+        ttk.Entry(dlg, textvariable=name_var, width=28).grid(
+            row=1, column=0, sticky="w", padx=8, pady=2)
+        ttk.Checkbutton(dlg, text="counter (+N)", variable=counter_var).grid(
+            row=1, column=1, sticky="w", padx=2)
+
+        def _add() -> None:
+            try:
+                self._tag_vocab.add(name_var.get(), counter=counter_var.get())
+            except ValueError as exc:
+                messagebox.showwarning("Tag", str(exc), parent=dlg)
+                return
+            name_var.set("")
+            counter_var.set(False)
+            _save_vocab()
+            _reload_list()
+
+        def _rename() -> None:
+            old = _selected_name()
+            if old is None:
+                return
+            new = name_var.get().strip()
+            if not new:
+                return
+            try:
+                self._tag_vocab.rename(old, new)
+            except (KeyError, ValueError) as exc:
+                messagebox.showwarning("Tag", str(exc), parent=dlg)
+                return
+            name_var.set("")
+            _save_vocab()
+            _reload_list()
+
+        def _delete() -> None:
+            name = _selected_name()
+            if name is None:
+                return
+            self._tag_vocab.delete(name)
+            _save_vocab()
+            _reload_list()
+
+        ttk.Button(dlg, text="Add", command=_add).grid(
+            row=1, column=2, sticky="w", padx=2)
+        btns = ttk.Frame(dlg)
+        btns.grid(row=2, column=0, columnspan=3, sticky="w", padx=8, pady=(2, 8))
+        ttk.Button(btns, text="Rename to entry", command=_rename).pack(
+            side=tk.LEFT)
+        ttk.Button(btns, text="Delete selected", command=_delete).pack(
+            side=tk.LEFT, padx=(6, 0))
+        ttk.Button(btns, text="Close", command=dlg.destroy).pack(
+            side=tk.LEFT, padx=(6, 0))
+        dlg.columnconfigure(0, weight=1)
+        dlg.rowconfigure(0, weight=1)
+        _reload_list()
 
     # ------------------------------------------------------- start/stop
     def _animal_text(self) -> str:
@@ -300,6 +708,16 @@ class SessionControlView:
             session_id=self._session_id, animal=animal, t0=clock_snapshot())
         self._manifest_path = os.path.join(
             self._session_dir, f"session_{self._session_id}.json")
+
+        # Bind the note log to this session's on-disk file and flush whatever the
+        # operator jotted before Start (footgun fix: do NOT wipe pre-Start notes;
+        # docs/decisions/0074). Registered as a first-class manifest stream so it
+        # is discoverable alongside serial/video/task and survives an unclean end.
+        self._notes_path = os.path.join(
+            summary_dir, f"notes_{self._session_id}.jsonl")
+        self._persist_notes()
+        if path_within_session(self._notes_path, self._session_dir):
+            self._manifest.set_stream(NOTES_STREAM_KEY, self._notes_path)
 
         notes = []
         # Open the per-session filtered serial file (sensors + central port). Its
@@ -372,6 +790,15 @@ class SessionControlView:
         # session's task/ folder (docs/decisions/0066).
         if self._phase3 is not None and hasattr(self._phase3, "set_session_context"):
             self._phase3.set_session_context()
+
+        # Reset the note log for the next session: the just-ended session's notes
+        # are already folded into its summary + persisted to its own file, so start
+        # fresh (notes jotted in the idle gap before the next Start are then carried
+        # in by the bind-and-flush there; docs/decisions/0074).
+        self._notelog = session_notes.NoteLog()
+        self._notes_path = None
+        self._refresh_notes_button()
+        self._refresh_notes_list()
 
         self._active = False
         try:
@@ -547,10 +974,13 @@ class SessionControlView:
         try:
             cued, seed, tones = self._phase3_summary_inputs()
             locomotor = self._locomotor_snapshot()
+            params = self._task_params()
+            notes = self._load_notes_entries()
             summary = session_summary.build_summary(
                 session_id=self._session_id, animal=self._manifest.animal,
                 t0=self._manifest.t0, t_end=self._manifest.t_end,
-                cued=cued, locomotor=locomotor, seed=seed, tones=tones)
+                cued=cued, locomotor=locomotor, seed=seed, tones=tones,
+                params=params, notes=notes)
             summary_dir = os.path.join(self._session_dir, SUMMARY_SUBDIR)
             json_path = os.path.join(
                 summary_dir, f"session_summary_{self._session_id}.json")
@@ -581,6 +1011,48 @@ class SessionControlView:
             "low_tone_hz": snap.low_tone_hz,
         }
         return phase3_stats.compute(snap), snap.seed, tones
+
+    def _task_params(self) -> dict:
+        """The Phase 3 shaping params to fold into the summary, read as a COPY from
+        this session's ``config/phase3.json`` snapshot (docs/decisions/0072/0073).
+
+        Reading the per-session copy - not the live tab state - keeps the summary
+        self-contained and consistent with the archived config; the same caveat as
+        the config snapshot applies (a value edited in the tab but not Saved to
+        phase3.json won't be reflected). ``{}`` if the snapshot is missing/
+        unreadable, so the summary just omits the section."""
+        if self._session_dir is None:
+            return {}
+        path = os.path.join(self._session_dir, CONFIG_SUBDIR, "phase3.json")
+        try:
+            cfg = phase3_config.load_phase3_config(path)
+        except Exception:
+            return {}
+        seq = cfg.get("sequence", {})
+        reward = cfg.get("reward", {})
+        cue = cfg.get("cue", {})
+        return {
+            "max_same_run": seq.get("max_same_run"),
+            "block_size": seq.get("block_size"),
+            "reward_incorrect": reward.get("reward_incorrect"),
+            "reward_pulse_ms": reward.get("pulse_ms"),
+            "max_topups": reward.get("max_topups"),
+            "require_up_stem": cue.get("require_up_stem"),
+            "min_confidence": cue.get("min_confidence"),
+        }
+
+    def _load_notes_entries(self) -> list:
+        """The session's note entries for the summary, folded from the on-disk
+        JSONL record (docs/decisions/0074) so an edit/delete made in the popup and
+        any notes that survived an unclean end are reflected. Falls back to the
+        in-memory log if the file is missing/unreadable."""
+        if self._notes_path and os.path.isfile(self._notes_path):
+            try:
+                with open(self._notes_path, "r", encoding="utf-8") as fh:
+                    return session_notes.parse_jsonl(fh.read()).as_list()
+            except OSError:
+                pass
+        return self._notelog.as_list()
 
     def _locomotor_snapshot(self):
         """The behavior panel's Phase 3 locomotor snapshot via the injected
