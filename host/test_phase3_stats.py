@@ -82,6 +82,7 @@ class TestEmpty(unittest.TestCase):
         self.assertIsNone(s.win_stay)
         self.assertIsNone(s.lose_shift)
         self.assertIsNone(s.mean_rt_s)
+        self.assertEqual(s.topups, 0)
         self.assertEqual(s.window_n, DEFAULT_WINDOW)
 
     def test_freshly_armed_has_total_but_no_completions(self):
@@ -201,6 +202,29 @@ class TestRewardRate(unittest.TestCase):
         s = compute(log.snapshot(3, armed=True))
         self.assertEqual(s.rewarded, 2)
         self.assertAlmostEqual(s.reward_rate, 2 / 3)
+
+
+class TestTopups(unittest.TestCase):
+    def test_topups_sum_over_completed_trials(self):
+        # The prime is the ``rewarded`` 1; top-ups are extra lick-triggered pulses
+        # counted per row (docs/decisions/0069). compute() totals them so the water
+        # estimate has the full pulse count (docs/decisions/0073).
+        log = _log(n=20)
+        _resolve(log, 0, "left", CORRECT)          # rewarded, no top-ups
+        log.topup_fired(0)
+        log.topup_fired(0)                          # 2 top-ups on trial 0
+        _resolve(log, 1, "left", CORRECT)          # rewarded
+        log.topup_fired(1)                          # 1 top-up on trial 1
+        _resolve(log, 2, "right", INCORRECT, rewarded=False)
+        s = compute(log.snapshot(3, armed=True))
+        self.assertEqual(s.rewarded, 2)
+        self.assertEqual(s.topups, 3)
+
+    def test_topups_zero_without_any(self):
+        log = _log(n=20)
+        _resolve(log, 0, "left", CORRECT)
+        s = compute(log.snapshot(1, armed=True))
+        self.assertEqual(s.topups, 0)
 
 
 class TestWinStayLoseShift(unittest.TestCase):

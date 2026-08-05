@@ -96,6 +96,10 @@ class Phase3Stats:
     # ---- reward ----
     rewarded: int
     reward_rate: Optional[float]               # rewarded / completed
+    # Total lick-triggered TOP-UP pulses over the completed trials (extras beyond
+    # each ``rewarded`` prime; docs/decisions/0069). Summed here so the per-session
+    # water estimate has a single source for the pulse count (docs/decisions/0073).
+    topups: int
     # ---- naive strategy (outcome-based; see module docstring) ----
     win_stay: Optional[float]
     lose_shift: Optional[float]
@@ -112,6 +116,15 @@ def _parse_iso(iso: Optional[str]) -> Optional[datetime]:
         return datetime.fromisoformat(iso)
     except ValueError:
         return None
+
+
+def _int_or_zero(x: Optional[str]) -> int:
+    """A row's stringified count (e.g. ``topups``) as an int; 0 when absent/blank
+    or unparseable (a cell is None until its first increment, per phase3_log)."""
+    try:
+        return int(x) if x else 0
+    except (TypeError, ValueError):
+        return 0
 
 
 def _accuracy(rows: List[Phase3RowView]) -> Optional[float]:
@@ -159,6 +172,7 @@ def compute(snapshot: Optional[Phase3StateSnapshot], *,
 
     rewarded = sum(1 for r in completed if r.rewarded == "1")
     reward_rate = (rewarded / ncomp) if ncomp else None
+    topups = sum(_int_or_zero(r.topups) for r in completed)
 
     win_stay, lose_shift = _win_stay_lose_shift(completed)
     mean_rt_s, rt_n = _mean_reaction_time(completed)
@@ -170,7 +184,7 @@ def compute(snapshot: Optional[Phase3StateSnapshot], *,
         high_accuracy=_accuracy(high), high_completed=len(high),
         low_accuracy=_accuracy(low), low_completed=len(low),
         lr_bias=lr_bias, left_choices=left, right_choices=right,
-        rewarded=rewarded, reward_rate=reward_rate,
+        rewarded=rewarded, reward_rate=reward_rate, topups=topups,
         win_stay=win_stay, lose_shift=lose_shift,
         mean_rt_s=mean_rt_s, rt_n=rt_n)
 
