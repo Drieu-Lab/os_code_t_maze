@@ -138,9 +138,11 @@ class TestRenderJson(unittest.TestCase):
         self.assertIsNone(data["cued_task"])
         self.assertIsNone(data["locomotion"])
         # Later additions default to empty / None when nothing was provided.
-        self.assertEqual(data["schema_version"], 3)
+        self.assertEqual(data["schema_version"], 4)
         self.assertEqual(data["task_params"], {})
         self.assertIsNone(data["estimated_water"])
+        # manual_water is always a definite figure (0 when no manual dispenses).
+        self.assertEqual(data["manual_water"], {"ul": 0.0, "pulses": 0})
         self.assertEqual(data["notes"], [])
 
 
@@ -205,6 +207,43 @@ class TestEstimatedWater(unittest.TestCase):
         self.assertIn("Water (est): --", summ2.render_text())
 
 
+class TestManualWater(unittest.TestCase):
+    def test_none_when_no_manual_pulses(self):
+        # A session with no manual dispenses still reports a definite zero (so
+        # the day's intake reconciles), unlike estimated_water's None.
+        summ = session_summary.build_summary(
+            session_id="s", animal="a", t0=_T0, t_end=_T_END)
+        self.assertEqual(summ.manual_water, {"ul": 0.0, "pulses": 0})
+        # No manual line clutters the text when there were no manual pulses.
+        self.assertNotIn("Water (man):", summ.render_text())
+
+    def test_totals_manual_pulses_at_their_widths(self):
+        # Two operator-fired pulses (250 ms + 300 ms) summed at their own widths.
+        summ = session_summary.build_summary(
+            session_id="s1", animal="RAT600", t0=_T0, t_end=_T_END,
+            manual_pulses_ms=[250.0, 300.0])
+        expected = (reward_volume.reward_volume_ul(250)
+                    + reward_volume.reward_volume_ul(300))
+        self.assertEqual(summ.manual_water["pulses"], 2)
+        self.assertAlmostEqual(summ.manual_water["ul"], round(expected, 1))
+        data = json.loads(summ.render_json())
+        self.assertEqual(data["manual_water"]["pulses"], 2)
+        self.assertIn("Water (man):", summ.render_text())
+
+    def test_manual_is_independent_of_task_estimate(self):
+        # Manual water is a separate channel: the task estimate does not change,
+        # and both appear side by side (docs/decisions/0078).
+        cued, _ = _cued_stats()
+        summ = session_summary.build_summary(
+            session_id="s1", animal="RAT600", t0=_T0, t_end=_T_END,
+            cued=cued, params=_PARAMS, manual_pulses_ms=[300.0])
+        self.assertEqual(summ.estimated_water["pulses"], 3)   # unchanged
+        self.assertEqual(summ.manual_water["pulses"], 1)
+        text = summ.render_text()
+        self.assertIn("Water (est):", text)
+        self.assertIn("Water (man):", text)
+
+
 def _note_entries():
     """A small ordered list of timestamped note entries (as session_notes would
     render them): a plain note, an edited note, and a tag press."""
@@ -227,7 +266,7 @@ class TestNotes(unittest.TestCase):
         summ = session_summary.build_summary(
             session_id="s", animal="a", t0=_T0, t_end=_T_END, notes=entries)
         data = json.loads(summ.render_json())
-        self.assertEqual(data["schema_version"], 3)
+        self.assertEqual(data["schema_version"], 4)
         self.assertEqual(data["notes"], entries)          # verbatim list
 
     def test_notes_render_timestamped_list(self):

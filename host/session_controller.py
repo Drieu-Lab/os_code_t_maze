@@ -96,6 +96,7 @@ import note_tags
 import phase3_config
 import phase3_stats
 import protocol
+import reward_volume
 import session_config
 import session_notes
 import session_summary
@@ -213,6 +214,10 @@ class SessionControlView:
         # Open handle for the per-session filtered serial file (None when idle).
         self._serial_file = None
         self._serial_path: Optional[str] = None
+        # Pulse widths (ms) of the rare in-task MANUAL reward dispenses seen while
+        # a session is active; totalled into the summary's manual_water on Stop
+        # (docs/decisions/0078). Reset at each Start.
+        self._manual_pulses_ms: list = []
         # Operator notes for the current session as timestamped, editable entries
         # (docs/decisions/0074). The log buffers entries even before Start (so a
         # note jotted while setting up is not lost); on Start it is bound to a
@@ -249,6 +254,15 @@ class SessionControlView:
         file), so no locking is needed."""
         if info.animal:
             self._learned_animal = info.animal
+        if self._active and info.reward is not None:
+            manual, dur_ms = info.reward
+            if manual:
+                # A pre-v4 line without a trailing duration falls back to the
+                # configured reward pulse width, mirroring estimated_water's
+                # fallback so the two channels stay comparable (ADR-0019/0078).
+                width = (dur_ms if dur_ms is not None
+                         else reward_volume.DEFAULT_REWARD_PULSE_MS)
+                self._manual_pulses_ms.append(float(width))
         if (self._active and self._serial_file is not None
                 and is_sensor_or_central(
                     info, center_lick_index=self._center_lick,
@@ -849,6 +863,10 @@ class SessionControlView:
         self._mark_session_start(self._manifest.t0)
         self._write_manifest()
 
+        # Fresh accounting of the rare in-task manual reward dispenses for this
+        # session; apply() accumulates their pulse widths off the wire and the
+        # summary totals them into manual_water on Stop (docs/decisions/0078).
+        self._manual_pulses_ms = []
         self._active = True
         self._start_btn.configure(text="Stop session")
         self._resolve_paths()   # first pass + schedules the poll
@@ -1076,7 +1094,8 @@ class SessionControlView:
                 session_id=self._session_id, animal=self._manifest.animal,
                 t0=self._manifest.t0, t_end=self._manifest.t_end,
                 cued=cued, locomotor=locomotor, seed=seed, tones=tones,
-                params=params, notes=notes)
+                params=params, notes=notes,
+                manual_pulses_ms=self._manual_pulses_ms)
             summary_dir = os.path.join(self._session_dir, SUMMARY_SUBDIR)
             json_path = os.path.join(
                 summary_dir, f"session_summary_{self._session_id}.json")

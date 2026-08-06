@@ -62,8 +62,11 @@ if TYPE_CHECKING:  # type-only imports - no runtime coupling to the stats cores
 # Bump when the summary JSON layout changes so an offline reader can branch on it.
 # v2 adds the operator ``notes``, the folded ``task_params``, and the estimated
 # water block (docs/decisions/0073). v3 changes ``notes`` from a single string to
-# an ordered list of timestamped entry objects (docs/decisions/0074).
-SCHEMA_VERSION = 3
+# an ordered list of timestamped entry objects (docs/decisions/0074). v4 adds the
+# ``manual_water`` figure - a sibling to ``estimated_water`` totalling the rare
+# in-task MANUAL reward pulses that the task estimate deliberately excludes
+# (docs/decisions/0078).
+SCHEMA_VERSION = 4
 
 # Both inputs are measured from the Phase 3 arm edge, not Session Start (see the
 # module docstring + docs/future-work.md FW-0028); recorded so a reader knows what
@@ -97,6 +100,11 @@ class SessionSummary:
     # timestamped entries (session_notes.NoteEntry dicts; docs/decisions/0074);
     # [] when none were recorded.
     notes: List[Dict[str, Any]] = field(default_factory=list)
+    # Pulse widths (ms) of the rare in-task MANUAL reward dispenses the session
+    # saw on the wire (REWARD,<port>,MANUAL,<dur_ms>; docs/decisions/0019). The
+    # shell collects these during the session; this core totals them into the
+    # ``manual_water`` figure (docs/decisions/0078). [] when none occurred.
+    manual_pulses_ms: List[float] = field(default_factory=list)
     generated_iso: Optional[str] = None
     schema_version: int = SCHEMA_VERSION
     scope: str = SCOPE
@@ -149,6 +157,24 @@ class SessionSummary:
             "per_pulse_ul": round(per_pulse, 1),
         }
 
+    @property
+    def manual_water(self) -> Dict[str, Any]:
+        """Water delivered by rare in-task MANUAL reward pulses this session.
+
+        Totals the operator-fired ``REWARD,<port>,MANUAL,<dur_ms>`` pulses the
+        shell collected off the wire (docs/decisions/0019), each converted to
+        microliters at its own pulse width via the shared ``reward_volume``
+        calibration. This is the channel the task estimate (``estimated_water``)
+        deliberately excludes, surfaced separately so the two never conflate and
+        the day's true task+manual intake can be reconciled (docs/decisions/0078).
+        Always returns a definite figure (``0`` pulses / ``0.0`` uL when no manual
+        dispenses occurred), unlike ``estimated_water`` which is None when it
+        can't be computed."""
+        total = 0.0
+        for ms in self.manual_pulses_ms:
+            total += reward_volume.reward_volume_ul(ms)
+        return {"ul": round(total, 1), "pulses": len(self.manual_pulses_ms)}
+
     # -------------------------------------------------------------- JSON
     def as_dict(self) -> Dict[str, Any]:
         """The machine-readable summary as a plain dict (JSON-ready).
@@ -170,6 +196,7 @@ class SessionSummary:
             "generated_iso": self.generated_iso,
             "cued_task": _stats_dict(self.cued),
             "estimated_water": self.estimated_water,
+            "manual_water": self.manual_water,
             "locomotion": _stats_dict(self.locomotor),
             "notes": self.notes,
         }
@@ -208,6 +235,9 @@ class SessionSummary:
         lines.append("-" * 40)
         lines.extend(_cued_lines(self.cued))
         lines.append(f"  Water (est): {_water_str(self.estimated_water)}")
+        manual = self.manual_water
+        if manual["pulses"]:
+            lines.append(f"  Water (man): {_manual_water_str(manual)}")
 
         lines.append("")
         lines.append("Excursions / locomotion")
@@ -230,20 +260,23 @@ def build_summary(*, session_id: str, animal: str,
                   tones: Optional[Dict[str, Any]] = None,
                   params: Optional[Dict[str, Any]] = None,
                   notes: Optional[List[Dict[str, Any]]] = None,
+                  manual_pulses_ms: Optional[List[float]] = None,
                   generated_iso: Optional[str] = None) -> SessionSummary:
     """Build a :class:`SessionSummary` from the session metadata + the two frozen
-    stat readouts, plus the folded task ``params`` and the operator ``notes``
-    (an ordered list of timestamped entry dicts; docs/decisions/0074). Pure: it
-    stores and formats the inputs (deriving only the session-level scalars
-    ``duration_s`` / ``estimated_water``); it recomputes none of the stats cores'
-    measures. ``generated_iso`` defaults to now (the moment the summary was
-    built)."""
+    stat readouts, plus the folded task ``params``, the operator ``notes``
+    (an ordered list of timestamped entry dicts; docs/decisions/0074), and the
+    ``manual_pulses_ms`` widths of any in-task manual reward dispenses the shell
+    collected (docs/decisions/0078). Pure: it stores and formats the inputs
+    (deriving only the session-level scalars ``duration_s`` / ``estimated_water``
+    / ``manual_water``); it recomputes none of the stats cores' measures.
+    ``generated_iso`` defaults to now (the moment the summary was built)."""
     return SessionSummary(
         session_id=session_id, animal=animal, t0=t0, t_end=t_end,
         cued=cued, locomotor=locomotor, seed=seed,
         tones=dict(tones) if tones else {},
         params=dict(params) if params else {},
         notes=list(notes) if notes else [],
+        manual_pulses_ms=list(manual_pulses_ms) if manual_pulses_ms else [],
         generated_iso=generated_iso or datetime.now().isoformat(
             timespec="seconds"))
 
@@ -285,6 +318,12 @@ def _water_str(water: Optional[Dict[str, Any]]) -> str:
         return "--"
     return (f"{reward_volume.format_volume(water['ul'])}   "
             f"[{water['pulses']} pulses @ {water['pulse_ms']} ms; excl. manual]")
+
+
+def _manual_water_str(water: Dict[str, Any]) -> str:
+    """The manual in-task water as a one-line string (docs/decisions/0078)."""
+    return (f"{reward_volume.format_volume(water['ul'])}   "
+            f"[{water['pulses']} manual pulses]")
 
 
 def _notes_lines(notes: List[Dict[str, Any]]) -> list:
