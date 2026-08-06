@@ -111,6 +111,14 @@ The code that runs *most often* — here, the work done on **every camera frame*
 tens of times per second. Anything added to the hot path (even a tiny delay)
 multiplies by the frame rate, so it is kept as lean as possible.
 
+### Idempotent rebuild
+A regeneration step you can run any number of times and always get the same
+result — because it *re-derives everything from scratch* rather than adding to
+what's already there. The session registry (`build_session_registry.py`) re-scans
+every bundle each run, so re-running it after another session (or twice by
+mistake) never double-counts. Contrast an "append" step, whose output depends on
+how many times it ran. See ADR-0081.
+
 ### Intervention tag
 A short, reusable label the operator applies to a [stamped note
 entry](#stamped-note-entry) to mark a recurring human action during a session —
@@ -200,6 +208,26 @@ not the same as how long the board has been powered: it starts when the firmware
 stops waiting for the PC to open the port, and **restarts on a MODE switch**. The
 board's true uptime is never sent. Worth remembering when comparing timestamps
 across a reconnect or a mode change. See ADR-0064.
+
+### Session registry
+One table that folds *every* recording into rows so sessions can be compared and
+filtered at a glance — one row per session with its husbandry context (weight,
+% baseline), behaviour (accuracy, side bias, excursions), the four water figures,
+and per-[tag](#intervention-tag) counts. Built by an [idempotent
+rebuild](#idempotent-rebuild) (`build_session_registry.py`) that reads each
+bundle's already-captured files and writes `session_registry.csv` (+ the
+[tidy](#tidy-long-format) `session_registry_tags.csv`) under the recordings root.
+It is the analysis entry point; see [docs/records-schema.md](records-schema.md)
+for the columns and ADR-0081.
+
+### Tidy (long) format
+A table shaped so each row is one observation with its labels, rather than
+spreading values across many columns ("wide"). The tag tallies ship in a tidy
+`session_registry_tags.csv` (`session_id, tag, count` — one row per tag press
+total) because the [tag](#intervention-tag) vocabulary is user-editable, so a
+fixed set of wide `tag_*` columns would change shape every time someone adds a
+tag. The registry still *also* offers wide `tag_*` columns as a convenience,
+derived from the current vocabulary at build time. See ADR-0081.
 
 ### Tk / tkinter
 Python's built-in GUI toolkit, used for all the on-screen windows and tabs. "The
