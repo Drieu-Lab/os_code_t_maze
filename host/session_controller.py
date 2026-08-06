@@ -86,10 +86,12 @@ import os
 import time
 import tkinter as tk
 from datetime import datetime
-from tkinter import messagebox, ttk
+from tkinter import messagebox, simpledialog, ttk
 from typing import Any, Callable, Optional
 
+import animal_state
 import animals
+import daily_log
 import note_tags
 import phase3_config
 import phase3_stats
@@ -127,6 +129,12 @@ CENTER_SOL_PORT = 2
 NOTES_STREAM_KEY = "notes_events"
 NOTE_TAGS_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "note_tags.json")
+
+# Pre-session animal-state stream (docs/decisions/0077). Written into the bundle's
+# config/ folder at Start as its OWN manifest stream (not via config_snapshot),
+# following the notes-stream precedent.
+ANIMAL_STATE_STREAM_KEY = "animal_state"
+ANIMAL_STATE_FILENAME = "animal_state.json"
 
 # How often (ms) to re-check each recorder for its resolved output path while a
 # session is active. The camera path resolves immediately; the Phase 3 file only
@@ -689,6 +697,57 @@ class SessionControlView:
             return slug, f"animal id {raw!r} not in registry (using {slug!r})"
         return slug, None
 
+    def _write_animal_state(self, config_dir: str, animal: str,
+                            date: str) -> Optional[str]:
+        """Freeze the pre-session animal state into config/animal_state.json and
+        register it as its own manifest stream (docs/decisions/0077).
+
+        Prefill order: today's daily-table row (source=daily_table) -> a weight
+        typed into a small Start dialog, with the baseline recovered from the
+        animal's most recent daily row (source=start_dialog) -> a minimal record
+        (source=manual) if the operator skips. The stream is always written so a
+        bundle uniformly carries it. Returns a short status note, or None.
+        """
+        table = daily_log.load()          # best-effort; empty if resources absent
+        row = table.for_date(animal, date)
+        if row is not None:
+            state = animal_state.from_daily_row(self._session_id, animal, date, row)
+            note = None
+        else:
+            recent = table.latest_for(animal, on_or_before=date)
+            baseline = recent.get("baseline_g") if recent else None
+            weight = self._ask_pre_session_weight(animal)
+            if weight is not None:
+                state = animal_state.from_weight(
+                    self._session_id, animal, date, weight, baseline_g=baseline)
+                note = "animal state: weight entered at Start"
+            else:
+                state = animal_state.unknown(self._session_id, animal, date)
+                note = "animal state: no husbandry data (manual)"
+
+        path = os.path.join(config_dir, ANIMAL_STATE_FILENAME)
+        try:
+            self._atomic_write(path, state.render())
+        except OSError:
+            return "animal state: write failed"
+        if (self._manifest is not None
+                and path_within_session(path, self._session_dir)):
+            self._manifest.set_stream(ANIMAL_STATE_STREAM_KEY, path)
+        return note
+
+    def _ask_pre_session_weight(self, animal: str) -> Optional[float]:
+        """Prompt for the pre-session weight (g) when the daily table has no row
+        for today. Cancel/blank returns None (the operator can skip). Best-effort:
+        any Tk error (e.g. headless) just skips the dialog."""
+        try:
+            return simpledialog.askfloat(
+                "Pre-session weight",
+                f"Pre-session weight (g) for {animal}?\n"
+                "(No daily-log row for today - Cancel to skip.)",
+                parent=self.frame, minvalue=0.0)
+        except tk.TclError:
+            return None
+
     def _start_session(self) -> None:
         # The Session button no longer arms Phase 3; it REQUIRES the operator to
         # have armed it first, so a recording is never started without the task
@@ -707,6 +766,7 @@ class SessionControlView:
         raw_animal = (self._animal_text() or self._learned_animal or "").strip()
         animal, id_warning = self._resolve_animal_id(raw_animal)
         stamp = time.strftime("%Y%m%d_%H%M%S")
+        session_date = time.strftime("%Y-%m-%d")   # husbandry-join key (docs/decisions/0077)
         self._session_id = f"{animal}_{stamp}"
         # Start the session clock now that the session is committed; its span
         # drives the Phase 3 stats panel's session line (docs/decisions/0060).
@@ -750,6 +810,12 @@ class SessionControlView:
         # (docs/decisions/0075).
         if id_warning:
             notes.append(id_warning)
+        # Freeze the pre-session animal state into the bundle as its own manifest
+        # stream: prefill from the daily husbandry table, else prompt for a weight,
+        # else write a minimal record so the stream always exists (ADR-0077).
+        state_note = self._write_animal_state(config_dir, animal, session_date)
+        if state_note:
+            notes.append(state_note)
         # Open the per-session filtered serial file (sensors + central port). Its
         # path is recorded even if the open fails (it just stays empty).
         self._serial_path = os.path.join(serial_dir, f"sensors_{self._session_id}.csv")

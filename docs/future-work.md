@@ -81,6 +81,7 @@ criteria).
 | [FW-0026](#fw-0026-a-mid-session-gate-reopen-should-not-restart-the-session-and-overwrite-its-file) | A mid-session gate reopen should not restart the session and overwrite its file | Phase 3 host | Proposed |
 | [FW-0027](#fw-0027-one-triggereffect-framework-behind-phases-1-2a-and-3) | One trigger/effect framework behind Phases 1, 2a and 3 | Rules engine + task-event layer + Phase 3 host | Proposed |
 | [FW-0028](#fw-0028-scope-the-session-summary-to-the-startstop-window) | Scope the session summary to the Start/Stop window | Session controller + summary + stats cores | Proposed |
+| [FW-0029](#fw-0029-real-water-timestamps--hours-since-water-in-the-daily-table) | Real water timestamps + hours-since-water in the daily table | Daily husbandry table + animal_state | Proposed |
 
 ## Entries
 
@@ -1381,6 +1382,50 @@ since-arm totals for transparency?
 
 **ADR needed?** Yes - it changes what window a session's reported behavior covers
 (a small follow-up to ADR-0071).
+
+### FW-0029: Real water timestamps + hours-since-water in the daily table
+
+- **Status:** Proposed
+- **Date added:** 2026-08-06
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** `os_code_t_maze_resources/records/animal/daily_log.csv` +
+  `build_daily_log.py` (the `water_on` / `water_off` columns + Entry-sheet
+  validation), `host/daily_log.py` (parse), `host/animal_state.py`
+  (`last_water_on` / `last_water_off` / `hours_since_water`)
+- **Related ADRs:** [ADR-0076](decisions/0076-daily-husbandry-table-source-of-truth.md)
+  (the daily table), [ADR-0077](decisions/0077-pre-session-animal-state-in-bundle.md)
+  (the in-bundle animal state that would consume real timestamps)
+
+**Motivation / context.** The daily husbandry table records when water was turned
+on/off as **free text** ("6pm", "5:30pm", "Till Monday evening"), carried over
+verbatim from the paper log. ADR-0077 therefore stores `last_water_on` /
+`last_water_off` as strings and leaves `hours_since_water` **null** - even though
+time-since-water is a direct measure of the animal's motivational state for a
+water-rewarded task, and would be a valuable per-session covariate. Making it a
+real number requires the underlying data to be real timestamps first.
+
+**Sketch of approach.** Give the daily table real datetime fields for water
+on/off (Entry-sheet date+time validation, ISO in the CSV), keeping a free-text
+"note" for the irregular cases ("till Monday evening" -> an explicit datetime or a
+flag). `daily_log.py` parses them to datetimes; `animal_state.from_daily_row`
+computes `hours_since_water` as (session start - last water off), and Session
+Start can fall back to a typed value in the dialog. Preserve backward
+compatibility: rows with the old free-text form still load (hours stays null).
+
+**Evaluation / acceptance.** For rows with real timestamps, `hours_since_water`
+computes and lands in `animal_state.json`; free-text legacy rows still load with a
+null; the Entry sheet rejects an un-parseable time; a unit test covers both forms.
+
+**Effort / risk.** Low-medium. Main tension is human data-entry friction (typing a
+precise time vs "6pm") and the irregular "till Monday" cases - needs a tolerant
+format plus a clear convention, not a hard schema that the lab fights.
+
+**Open questions.** One combined datetime or a date + time-of-day? How to encode
+the "kept on over a weekend" case? Should the rig also stamp its own "water off at
+session start" event to cross-check the table?
+
+**ADR needed?** Yes - it changes the daily-table schema and how a motivational
+covariate is derived (a small follow-up to ADR-0076/0077).
 
 ## Completed
 
