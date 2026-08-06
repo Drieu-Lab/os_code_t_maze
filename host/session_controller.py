@@ -89,6 +89,7 @@ from datetime import datetime
 from tkinter import messagebox, ttk
 from typing import Any, Callable, Optional
 
+import animals
 import note_tags
 import phase3_config
 import phase3_stats
@@ -197,6 +198,10 @@ class SessionControlView:
         self._manifest_path: Optional[str] = None
         self._resolve_after: Optional[str] = None
         self._learned_animal = ""         # last animal id seen on the serial stream
+        # Canonical animal-id list (resources repo), loaded best-effort once so
+        # Session Start can normalize/validate the entered id (docs/decisions/0075).
+        # An empty (unavailable) registry when the resources repo is absent.
+        self._animals = animals.load_registry()
         # Open handle for the per-session filtered serial file (None when idle).
         self._serial_file = None
         self._serial_path: Optional[str] = None
@@ -665,6 +670,25 @@ class SessionControlView:
         else:
             self._start_session()
 
+    def _resolve_animal_id(self, raw: str) -> "tuple[str, Optional[str]]":
+        """Normalize the entered animal id against the canonical registry.
+
+        Returns ``(id_for_session, warning_or_None)``: the canonical id when the
+        entry is recognized; otherwise the sanitized slug (the old behaviour) plus
+        a short non-blocking warning so a typo is caught at capture time. When the
+        registry is unavailable (resources repo absent) it can't validate, so it
+        just sanitizes without warning. See docs/decisions/0075.
+        """
+        canonical = self._animals.normalize(raw) if raw else None
+        if canonical is not None:
+            return canonical, None
+        slug = protocol.sanitize_animal_id(raw)
+        if not raw:
+            return slug, "no animal id set (Task tab)"
+        if self._animals.available:
+            return slug, f"animal id {raw!r} not in registry (using {slug!r})"
+        return slug, None
+
     def _start_session(self) -> None:
         # The Session button no longer arms Phase 3; it REQUIRES the operator to
         # have armed it first, so a recording is never started without the task
@@ -680,8 +704,8 @@ class SessionControlView:
                 "until Phase 3 is armed. See docs/decisions/0060.")
             return
 
-        animal = protocol.sanitize_animal_id(
-            self._animal_text() or self._learned_animal)
+        raw_animal = (self._animal_text() or self._learned_animal or "").strip()
+        animal, id_warning = self._resolve_animal_id(raw_animal)
         stamp = time.strftime("%Y%m%d_%H%M%S")
         self._session_id = f"{animal}_{stamp}"
         # Start the session clock now that the session is committed; its span
@@ -720,6 +744,12 @@ class SessionControlView:
             self._manifest.set_stream(NOTES_STREAM_KEY, self._notes_path)
 
         notes = []
+        # Surface an unknown/blank animal id at capture time (non-blocking): the
+        # session still starts (the rig must keep running), but the operator sees
+        # it in the status line so a typo doesn't quietly mint an orphan bundle
+        # (docs/decisions/0075).
+        if id_warning:
+            notes.append(id_warning)
         # Open the per-session filtered serial file (sensors + central port). Its
         # path is recorded even if the open fails (it just stays empty).
         self._serial_path = os.path.join(serial_dir, f"sensors_{self._session_id}.csv")
