@@ -98,6 +98,7 @@ import phase3_stats
 import protocol
 import reward_volume
 import session_config
+import session_meta
 import session_notes
 import session_summary
 from rig_config import load_rig_config
@@ -136,6 +137,18 @@ NOTE_TAGS_PATH = os.path.join(
 # following the notes-stream precedent.
 ANIMAL_STATE_STREAM_KEY = "animal_state"
 ANIMAL_STATE_FILENAME = "animal_state.json"
+
+# Sticky per-session metadata (docs/decisions/0079). The per-session record is
+# written into the bundle's config/ folder at Start as its own manifest stream
+# (like animal_state); the sticky trainer/reward defaults persist next to the
+# other host/*.json config (same pattern as note_tags.json).
+SESSION_META_STREAM_KEY = "session_meta"
+SESSION_META_FILENAME = "session_meta.json"
+SESSION_META_DEFAULTS_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "session_meta.json")
+# Sub-stage choices offered as the (optional) Stage override; blank keeps the
+# auto-derived phase. Free-text is still allowed via the combobox.
+STAGE_OVERRIDE_CHOICES = ("", "Habituation", "Shaping", "Reversal", "Probe")
 
 # How often (ms) to re-check each recorder for its resolved output path while a
 # session is active. The camera path resolves immediately; the Phase 3 file only
@@ -232,6 +245,15 @@ class SessionControlView:
         # existing one instead of stacking duplicates.
         self._notes_win: Optional[tk.Toplevel] = None
 
+        # Sticky per-session metadata: trainer + reward type are set-and-forget,
+        # remembered across sessions in host/session_meta.json; the stage is
+        # auto-derived from the active phase with an optional override (ADR-0079).
+        meta_defaults = session_meta.load_defaults(SESSION_META_DEFAULTS_PATH)
+        self._trainer_var = tk.StringVar(value=meta_defaults.trainer)
+        self._reward_type_var = tk.StringVar(value=meta_defaults.reward_type)
+        self._stage_var = tk.StringVar(value=self._derive_stage())
+        self._stage_override_var = tk.StringVar(value="")
+
         self._build_ui()
 
     # ------------------------------------------------------------ module API
@@ -307,6 +329,30 @@ class SessionControlView:
         ttk.Label(root, textvariable=self._status_var, anchor="w",
                   wraplength=360, justify="left").grid(
             row=1, column=0, columnspan=3, sticky="w", padx=6, pady=(0, 4))
+
+        # Sticky metadata row (trainer / reward type + auto-derived stage with an
+        # optional sub-stage override), kept to a single grid row so the
+        # full-height Rig view gains minimal height (docs/decisions/0079). The
+        # small widgets pack inside a sub-frame; trainer + reward type persist
+        # across sessions, stage is re-derived each time.
+        meta = ttk.Frame(root)
+        meta.grid(row=2, column=0, columnspan=3, sticky="w", padx=6, pady=(0, 4))
+        ttk.Label(meta, text="Trainer",
+                  font=("TkDefaultFont", 8)).pack(side="left")
+        ttk.Entry(meta, textvariable=self._trainer_var, width=8).pack(
+            side="left", padx=(2, 8))
+        ttk.Label(meta, text="Reward",
+                  font=("TkDefaultFont", 8)).pack(side="left")
+        ttk.Entry(meta, textvariable=self._reward_type_var, width=10).pack(
+            side="left", padx=(2, 8))
+        ttk.Label(meta, text="Stage",
+                  font=("TkDefaultFont", 8)).pack(side="left")
+        ttk.Label(meta, textvariable=self._stage_var,
+                  font=("TkDefaultFont", 8, "italic")).pack(
+            side="left", padx=(2, 2))
+        ttk.Combobox(meta, textvariable=self._stage_override_var,
+                     values=STAGE_OVERRIDE_CHOICES, width=11).pack(
+            side="left", padx=(2, 0))
 
         # Quick-stamp hotkey: mark the moment on the shared timeline without
         # opening the dialog (text can be filled in later). Bound on the toplevel
@@ -762,6 +808,49 @@ class SessionControlView:
         except tk.TclError:
             return None
 
+    def _derive_stage(self) -> str:
+        """The training stage auto-derived from the active phase (docs/decisions/
+        0079). The Session panel drives the Phase 3 task (Start requires it armed;
+        docs/decisions/0060), so a present Phase 3 controller means "Phase 3";
+        with none wired (headless/standalone) the stage is left blank for the
+        operator's override."""
+        return "Phase 3" if self._phase3 is not None else ""
+
+    def _write_session_meta(self, config_dir: str) -> Optional[str]:
+        """Write the sticky per-session metadata into config/session_meta.json and
+        register it as its own manifest stream (docs/decisions/0079).
+
+        Trainer + reward type come from the Session-panel fields (and are
+        remembered across sessions in host/session_meta.json); the stage is
+        auto-derived from the active phase unless the operator picked an override.
+        Best-effort: a write failure must not break a clean Start. Returns a short
+        status note, or None."""
+        meta = session_meta.build(
+            self._session_id,
+            trainer=self._trainer_var.get(),
+            reward_type=self._reward_type_var.get(),
+            auto_stage=self._derive_stage(),
+            stage_override=self._stage_override_var.get())
+        path = os.path.join(config_dir, SESSION_META_FILENAME)
+        try:
+            self._atomic_write(path, meta.render())
+        except OSError:
+            return "session meta: write failed"
+        if (self._manifest is not None
+                and path_within_session(path, self._session_dir)):
+            self._manifest.set_stream(SESSION_META_STREAM_KEY, path)
+        # Remember trainer + reward type for next time (set-and-forget). The stage
+        # is deliberately not persisted so a stale override can't mislabel a later
+        # session (docs/decisions/0079).
+        try:
+            session_meta.save_defaults(
+                SESSION_META_DEFAULTS_PATH,
+                session_meta.SessionMetaDefaults(
+                    trainer=meta.trainer, reward_type=meta.reward_type))
+        except OSError:
+            pass
+        return None
+
     def _start_session(self) -> None:
         # The Session button no longer arms Phase 3; it REQUIRES the operator to
         # have armed it first, so a recording is never started without the task
@@ -830,6 +919,12 @@ class SessionControlView:
         state_note = self._write_animal_state(config_dir, animal, session_date)
         if state_note:
             notes.append(state_note)
+        # Capture the sticky human-side metadata (trainer/stage/reward type) into
+        # the bundle as its own stream, and remember trainer/reward for next time
+        # (ADR-0079).
+        meta_note = self._write_session_meta(config_dir)
+        if meta_note:
+            notes.append(meta_note)
         # Open the per-session filtered serial file (sensors + central port). Its
         # path is recorded even if the open fails (it just stays empty).
         self._serial_path = os.path.join(serial_dir, f"sensors_{self._session_id}.csv")
