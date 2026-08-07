@@ -230,6 +230,22 @@ no-upward-imports invariant; the placement rule is added to the auto-loaded
   moved in Stages 1a/1b/3; relocate the `test_*` suite to `host/tests/` and, with
   it, resolve `tmaze.tools.maze_state_validate`'s `from test_maze_state import
   make_zone_map` (a tool importing a test fixture - move the fixture or inline it).
+- Stage 5a (`Refs ADR-0083`): relocated the whole `test_*` suite (37 modules)
+  into a `host/tests/` package (added `tests/__init__.py`), leaving `host/` root
+  free of source. Discovery is now `python -m unittest discover -s tests -t .`
+  (updated `run_tests.bat`). Resolved the one bad dependency direction the move
+  exposed: `tmaze.tools.maze_state_validate` had imported the `make_zone_map`
+  fixture *from* `test_maze_state` (a tool depending on a test). Moved the
+  fixture (and its tiny `rect` helper) into the tool - its natural home, since
+  `--selftest` needs a synthetic map - and pointed `test_maze_state` /
+  `test_maze_pipeline` at it, so the direction is now test -> tool -> core. Tests
+  import the code under test via the installed package path, so their new folder
+  location doesn't affect resolution. Verified: `make_zone_map` tests + the tool
+  `--selftest` pass from the flat layout before the move; **523 passed, 0 skipped**
+  from the new `tests/` layout after. (Note: the one Tk GUI wiring test,
+  `test_session_phase3_wiring`, occasionally blocks on a window focus grab when
+  run in the full non-verbose sweep - pre-existing flakiness of a test that drives
+  real Tk, unrelated to this move; captured as FW for a hang-proofing pass.)
 - Subsequent stages carry `Refs ADR-0083` and record their own smoke tests.
 - Related conventions: CONTRIBUTING.md #1 (pure core + thin shell), #6
   (organize into homes; defer speculative generality), #7 (one canonical way);

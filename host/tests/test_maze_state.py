@@ -23,9 +23,12 @@ import unittest
 from tmaze.core.maze_state import (
     HUB, CENTRAL_STEM, JUNCTION, LEFT_CHOICE, RIGHT_CHOICE, LEFT_RETURN,
     RIGHT_RETURN, UNKNOWN, IN_WELL, OUTSIDE_WELL, UP_STEM, DOWN_STEM, LEFT, RIGHT,
-    MazeStateEstimator, MazeStateParams, Zone, ZoneMap,
+    MazeStateEstimator, MazeStateParams, ZoneMap,
     point_in_polygon, project_scalar, state_timeline_header, state_row,
 )
+# The synthetic maze layout lives in the validation tool so the tool's --selftest
+# and these tests share one fixture (test -> tool -> core direction; see ADR-0083).
+from tmaze.tools.maze_state_validate import make_zone_map
 
 FRAME_W, FRAME_H = 1000, 1000
 
@@ -33,27 +36,6 @@ FRAME_W, FRAME_H = 1000, 1000
 def rect(x0, y0, x1, y1):
     """Axis-aligned rectangle as a normalized 4-vertex polygon."""
     return ((x0, y0), (x1, y0), (x1, y1), (x0, y1))
-
-
-# A figure-8 / continuous-alternation layout in normalized coords (image y
-# increases downward). The HUB (central reward zone, holds the well) is at the
-# bottom; the central stem rises to the junction, which splits into the choice
-# arms; the return arms bring the rat back down to the HUB.
-def make_zone_map():
-    return ZoneMap(
-        zones=(
-            Zone(HUB,          rect(0.35, 0.80, 0.65, 1.00)),
-            Zone(CENTRAL_STEM, rect(0.40, 0.50, 0.60, 0.80)),
-            Zone(JUNCTION,     rect(0.40, 0.34, 0.60, 0.50)),
-            Zone(LEFT_CHOICE,  rect(0.00, 0.20, 0.40, 0.50)),
-            Zone(RIGHT_CHOICE, rect(0.60, 0.20, 1.00, 0.50)),
-            Zone(LEFT_RETURN,  rect(0.00, 0.50, 0.20, 0.80)),
-            Zone(RIGHT_RETURN, rect(0.80, 0.50, 1.00, 0.80)),
-        ),
-        well=rect(0.40, 0.88, 0.60, 1.00),
-        stem_base=(0.50, 0.85),   # HUB / well end
-        stem_tip=(0.50, 0.42),    # junction end
-    )
 
 
 # Representative interior points, in FULL-frame px (norm * 1000).

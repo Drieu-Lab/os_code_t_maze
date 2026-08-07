@@ -53,8 +53,8 @@ from typing import Dict, List, Optional, Tuple
 from tmaze.core import protocol
 from tmaze.core.cue_gate import CueGate, CueParams
 from tmaze.core.maze_state import (
-    CENTRAL_STEM, JUNCTION, LEFT_CHOICE, RIGHT_CHOICE, LEFT_RETURN,
-    RIGHT_RETURN, ZONES_PATH, MazeStateEstimator, MazeStateParams, ZoneMap,
+    HUB, CENTRAL_STEM, JUNCTION, LEFT_CHOICE, RIGHT_CHOICE, LEFT_RETURN,
+    RIGHT_RETURN, ZONES_PATH, MazeStateEstimator, MazeStateParams, Zone, ZoneMap,
     load_zone_map,
 )
 from tmaze.core.task_events import TaskEvents
@@ -305,8 +305,36 @@ def format_report(report: dict) -> str:
 
 
 # ================================ self-test ==================================
+# The canonical synthetic maze layout used by --selftest. The pure-core tests
+# (test_maze_state / test_maze_pipeline) import make_zone_map() from here so the
+# fixture has one home and the dependency runs test -> tool -> core, never the
+# reverse (a tool importing a test); see ADR-0083.
+def rect(x0, y0, x1, y1):
+    """Axis-aligned rectangle as a normalized 4-vertex polygon."""
+    return ((x0, y0), (x1, y0), (x1, y1), (x0, y1))
+
+
+def make_zone_map() -> ZoneMap:
+    """A figure-8 / continuous-alternation layout in normalized coords (image y
+    increases downward): the HUB (holds the well) at the bottom, the central stem
+    rising to the junction, the choice arms, and the return arms back to the HUB."""
+    return ZoneMap(
+        zones=(
+            Zone(HUB,          rect(0.35, 0.80, 0.65, 1.00)),
+            Zone(CENTRAL_STEM, rect(0.40, 0.50, 0.60, 0.80)),
+            Zone(JUNCTION,     rect(0.40, 0.34, 0.60, 0.50)),
+            Zone(LEFT_CHOICE,  rect(0.00, 0.20, 0.40, 0.50)),
+            Zone(RIGHT_CHOICE, rect(0.60, 0.20, 1.00, 0.50)),
+            Zone(LEFT_RETURN,  rect(0.00, 0.50, 0.20, 0.80)),
+            Zone(RIGHT_RETURN, rect(0.80, 0.50, 1.00, 0.80)),
+        ),
+        well=rect(0.40, 0.88, 0.60, 1.00),
+        stem_base=(0.50, 0.85),   # HUB / well end
+        stem_tip=(0.50, 0.42),    # junction end
+    )
+
+
 def _selftest_zone_map() -> ZoneMap:
-    from test_maze_state import make_zone_map  # reuse the test fixture
     return make_zone_map()
 
 
