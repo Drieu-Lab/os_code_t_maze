@@ -82,6 +82,7 @@ except Exception as e:  # pragma: no cover
 
 from tmaze.vision.tracker import MODEL_REAPPLY_FIELDS, MODEL_SHAPING_FIELDS, RatTracker
 from tmaze.vision.calibration import Undistorter, load_calibration
+from tmaze.paths import host_dir
 
 # Reuse the rig camera identity + orientation so this view matches camera_view.
 try:
@@ -99,7 +100,7 @@ PROC_MAX_W = 720          # processing/display width
 WIN_MAIN = "tracker"
 WIN_MASK = "mask"
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
+_HERE = str(host_dir())   # host/ - config/models live beside the package (ADR-0083)
 ROI_PATH = os.path.join(_HERE, "roi_polygon.json")   # shared with the GUI
 MODEL_DIR = os.path.join(_HERE, "ratmodels")          # appearance models (.npz)
 

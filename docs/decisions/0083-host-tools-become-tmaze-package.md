@@ -181,6 +181,26 @@ no-upward-imports invariant; the placement rule is added to the auto-loaded
   unskipped with cv2 present). Camera smoke: grabbed 6 live Basler frames
   (1280x1024 BGR) and ran them through the moved `tracker.process()` reference-
   diff path - returned a valid `TrackResult` (cv2 mask computed).
+- Stage 4a (`Refs ADR-0083`): **config-path anchoring** - split out of Stage 4 as
+  its own purpose (per the reviewability rule). Added `tmaze.paths.host_dir()`
+  (= `repo_root()/"host"`, landmark-based) and rebased every default that pointed
+  at a `host/*.json` / `host/data` / the sibling-repo calibration onto it, so the
+  paths survive a module living inside the package. This **repaired a latent bug
+  introduced in Stages 1a/1b**: `maze_state.ZONES_PATH` (read directly by
+  `experiment_control`) and `session_config`'s `host_dir` default were computed
+  `__file__`-relative, so after those modules moved they resolved *inside* the
+  package (`host/tmaze/core/zones.json`) instead of `host/zones.json` - the GUI
+  would have silently failed to load the zone map. String constants (built at
+  import), so no crash and the headless tests - which pass explicit paths - didn't
+  catch it; found by auditing path defaults before the ui move. Touched (moved
+  cores) `maze_state`, `session_config`; (still-flat, anchored in place before
+  their Stage 4b move) `behavior_view`, `rules_view`, `tracker_view` (incl.
+  `MODEL_DIR=ratmodels`), `maze_state_view`, `phase3_controller`,
+  `session_controller`, `camera_view` (calibration now via `resources_root()`,
+  not `../..`), `blob_tracker_prototype`, `build_session_registry`. Verified in
+  the rig env: every anchored constant resolves to the real `host/<file>` (all 8
+  configs + the sibling calibration present); all edited flat modules import with
+  real cv2/pypylon; **523 passed, 0 skipped** (unchanged).
 - Subsequent stages carry `Refs ADR-0083` and record their own smoke tests.
 - Related conventions: CONTRIBUTING.md #1 (pure core + thin shell), #6
   (organize into homes; defer speculative generality), #7 (one canonical way);

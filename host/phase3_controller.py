@@ -70,6 +70,7 @@ from tmaze.core.phase3.phase3_task import ABANDONED, CORRECT, INCORRECT, Phase3C
 from tmaze.core.reward.reward_dispenser import WellDispenser
 from tmaze.core.reward.reward_volume import format_volume, reward_volume_ul
 from tmaze.core.rig_config import load_rig_config
+from tmaze.paths import host_dir
 from trial_ribbon_view import (
     _ARM_SHORT, _CELL_CURRENT_BG, _CUE_SHORT, _UNSET, TrialRibbonView,
     progress_signature)
@@ -108,10 +109,11 @@ PHASE3_LICK_DEBOUNCE_MS = 150
 # Versioned config file for the config-driven Phase 3 reward/cue/sequence params
 # (FW-0024, ADR-0070); absent -> built-in defaults. Same host/ location + pattern
 # as rules.json (docs/decisions/0031).
-PHASE3_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "phase3.json")
+PHASE3_PATH = os.path.join(str(host_dir()), "phase3.json")
 
 # Per-session data files live under host/data/ (same tree as rig_logger.py).
-DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+# host/ is found by landmark search, not relative to this module (ADR-0083).
+DATA_DIR = os.path.join(str(host_dir()), "data")
 
 # Physical return arm ("left"/"right", from CueGate) -> trial_sequence side int,
 # to look up that arm's planned return cue (see docs/decisions/0047).

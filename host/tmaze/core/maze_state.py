@@ -53,6 +53,8 @@ from collections import deque
 from dataclasses import dataclass, field, replace
 from typing import Deque, List, Optional, Sequence, Tuple
 
+from tmaze.paths import host_dir
+
 # ============================== zone vocabulary ==============================
 HUB = "HUB"  # central reward zone: the well + where stem and both returns meet
 CENTRAL_STEM = "CENTRAL_STEM"
@@ -98,9 +100,10 @@ STATE_TRACKING = "TRACKING"
 
 ZONES_VERSION = 1
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
 # Default per-rig zone map, gitignored like roi_polygon.json / landmarks.json.
-ZONES_PATH = os.path.join(_HERE, "zones.json")
+# It lives in host/ (beside the package), resolved by landmark search rather than
+# relative to this module's location (see docs/decisions/0083).
+ZONES_PATH = os.path.join(str(host_dir()), "zones.json")
 
 # Physical maze adjacency (undirected). Documents the figure-8 topology the
 # direction / loop model assumes; a transition between non-adjacent zones is

@@ -105,10 +105,11 @@ from tmaze.core.rig_config import load_rig_config
 from tmaze.core.session.session_log import SessionManifest, clock_snapshot, path_within_session
 from tmaze.core.session.session_serial import is_sensor_or_central
 from tmaze.core.session.session_timer import SessionTimer
+from tmaze.paths import host_dir
 
 # Fallback recordings root if experiment_control doesn't pass one; normally the
 # GUI passes <camera default>/phase3_recordings (see docs/decisions/0049).
-DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+DATA_DIR = os.path.join(str(host_dir()), "data")   # host/data (ADR-0083)
 DEFAULT_RECORDINGS_ROOT = os.path.join(DATA_DIR, "phase3_recordings")
 
 # Per-session subfolders (one per stream family).
@@ -129,8 +130,7 @@ CENTER_SOL_PORT = 2
 # the summary/ folder as JSON Lines and is registered under this manifest key;
 # the user-defined tag vocabulary persists next to the other host/*.json config.
 NOTES_STREAM_KEY = "notes_events"
-NOTE_TAGS_PATH = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "note_tags.json")
+NOTE_TAGS_PATH = os.path.join(str(host_dir()), "note_tags.json")
 
 # Pre-session animal-state stream (docs/decisions/0077). Written into the bundle's
 # config/ folder at Start as its OWN manifest stream (not via config_snapshot),
@@ -144,8 +144,7 @@ ANIMAL_STATE_FILENAME = "animal_state.json"
 # other host/*.json config (same pattern as note_tags.json).
 SESSION_META_STREAM_KEY = "session_meta"
 SESSION_META_FILENAME = "session_meta.json"
-SESSION_META_DEFAULTS_PATH = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "session_meta.json")
+SESSION_META_DEFAULTS_PATH = os.path.join(str(host_dir()), "session_meta.json")
 # Sub-stage choices offered as the (optional) Stage override; blank keeps the
 # auto-derived phase. Free-text is still allowed via the combobox.
 STAGE_OVERRIDE_CHOICES = ("", "Habituation", "Shaping", "Reversal", "Probe")

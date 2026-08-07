@@ -49,6 +49,7 @@ from tmaze.core.phase3 import phase3_stats
 from tmaze.core.behavior_stats import BehaviorStats
 from tmaze.core.session.session_timer import SessionTimer
 from tmaze.core.task_events import TaskEvents
+from tmaze.paths import host_dir
 
 try:
     from tmaze.core.rules_engine import Scale, load_scale
@@ -56,7 +57,7 @@ except Exception:  # pragma: no cover - rules engine is a pure sibling core
     Scale = None  # type: ignore
     load_scale = None  # type: ignore
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
+_HERE = str(host_dir())   # host/ - the per-rig config lives beside the package (ADR-0083)
 SCALE_PATH = os.path.join(_HERE, "rig_scale.json")   # shared with rules_view.py
 
 POLL_INTERVAL_MS = 150   # readout / estimator refresh (~ the Maze state tab rate)

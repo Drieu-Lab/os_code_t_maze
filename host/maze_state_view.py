@@ -37,6 +37,7 @@ from tooltips import tip
 from zone_overlay import ZONE_HEX, WELL_HEX, AXIS_HEX, draw_zone_overlay
 
 from tmaze.core import protocol
+from tmaze.paths import host_dir
 from tmaze.core.maze_state import (
     EDITABLE_ZONES, IN_WELL, ZONES_PATH, MazeStateParams, Zone,
     ZoneMap, load_zone_map, save_zone_map, state_row, state_timeline_header,
@@ -62,7 +63,7 @@ except Exception:  # pragma: no cover
 
 
 # ================================== CONFIG ===================================
-_HERE = os.path.dirname(os.path.abspath(__file__))
+_HERE = str(host_dir())   # host/ - "Load zone map" dialog opens here (ADR-0083)
 TRACK_LOG_SUBDIR = "track_logs"   # subfolder of the recordings dir, shared with tracker_view
 
 POLL_INTERVAL_MS = 150       # readout / estimator / state-log refresh (~ tracker UI rate)

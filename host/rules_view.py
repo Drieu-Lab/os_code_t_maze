@@ -81,6 +81,8 @@ WELL_TEMPLATE = "well_reward_with_excursion"
 # the task-event context it produces from the shared pipeline's RatState stream.
 # The maze-state estimator itself is no longer built here - it is the one shared
 # estimator on the tracking worker (maze_pipeline; ADR-0041). See ADR-0026.
+from tmaze.paths import host_dir
+
 try:
     from tmaze.core.task_events import TaskEvents
     _MAZE_STATE_IMPORT_ERROR = None
@@ -97,7 +99,7 @@ except Exception:  # pragma: no cover
 
 
 # ================================== CONFIG ===================================
-_HERE = os.path.dirname(os.path.abspath(__file__))
+_HERE = str(host_dir())   # host/ - the per-rig config lives beside the package (ADR-0083)
 RULES_PATH = os.path.join(_HERE, "rules.json")       # versioned example config
 SCALE_PATH = os.path.join(_HERE, "rig_scale.json")   # per-rig scale (gitignored)
 RULE_LOG_SUBDIR = "track_logs"                        # shared with track logs

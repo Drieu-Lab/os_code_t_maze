@@ -26,10 +26,11 @@ import os
 from tmaze.core.records import daily_log
 from tmaze.core.records import note_tags
 from tmaze.core.session import session_registry
+from tmaze.paths import host_dir
 
-# Default recordings root + the note-tag vocabulary location, resolved relative
-# to this file so the script runs from any working directory (host/ convention).
-_HERE = os.path.dirname(os.path.abspath(__file__))
+# Default recordings root + the note-tag vocabulary location. host/ is found by
+# landmark search, so the script runs from any working directory (ADR-0083).
+_HERE = str(host_dir())
 DEFAULT_RECORDINGS_ROOT = os.path.join(_HERE, "data", "phase3_recordings")
 NOTE_TAGS_PATH = os.path.join(_HERE, "note_tags.json")
 

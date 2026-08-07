@@ -36,10 +36,14 @@ import shutil
 from datetime import datetime
 from typing import Any, Dict, List, Mapping, Optional
 
+from tmaze.paths import host_dir as _host_dir
+
 # Bump when the snapshot/index layout changes so an offline reader can branch.
 SCHEMA_VERSION = 1
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
+# The host-local config files live in host/ (beside the package), found by
+# landmark search rather than relative to this module (see docs/decisions/0083).
+_HOST = str(_host_dir())
 
 # Host-local config files copied verbatim into a session's config/ folder. Each
 # is owned by a GUI module (noted); the filename is the shared contract. These
@@ -55,7 +59,7 @@ HOST_CONFIG_FILES = (
 )
 
 
-def host_config_sources(host_dir: str = _HERE) -> Dict[str, str]:
+def host_config_sources(host_dir: str = _HOST) -> Dict[str, str]:
     """The ``{filename: absolute path}`` map of the host-local config files."""
     return {name: os.path.join(host_dir, name) for name in HOST_CONFIG_FILES}
 
@@ -84,7 +88,7 @@ def _atomic_json(path: str, obj: Any) -> None:
 def write_config_snapshot(dest_dir: str, *, session_id: str = "",
                           extra_sources: Optional[Mapping[str, str]] = None,
                           runtime_params: Optional[Mapping[str, Any]] = None,
-                          host_dir: str = _HERE) -> Dict[str, Any]:
+                          host_dir: str = _HOST) -> Dict[str, Any]:
     """Copy every existing config source into ``dest_dir`` and write the index.
 
     ``extra_sources`` adds/overrides files by ``{filename: source path}`` (e.g.

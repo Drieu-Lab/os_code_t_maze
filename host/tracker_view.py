@@ -38,6 +38,7 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 from typing import Optional
 
 from tmaze.core import protocol
+from tmaze.paths import host_dir
 from gui_deps import Image, ImageTk, cv2, missing_dependency, np
 from preview import PreviewLoop, safe_after
 from still_frame_editor import _StillFrameEditorBase
@@ -77,7 +78,7 @@ except Exception:  # pragma: no cover
 
 
 # ================================== CONFIG ===================================
-_HERE = os.path.dirname(os.path.abspath(__file__))
+_HERE = str(host_dir())   # host/ - the per-rig config lives beside the package (ADR-0083)
 ROI_PATH = os.path.join(_HERE, "roi_polygon.json")   # shared with the prototype
 LANDMARKS_PATH = os.path.join(_HERE, "landmarks.json")  # reward-well/body-sensor points
 MODEL_DIR = os.path.join(_HERE, "ratmodels")          # appearance models (.npz)

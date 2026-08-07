@@ -48,6 +48,7 @@ from gui_deps import (  # noqa: E402
 )
 from tmaze.vision.calibration import Undistorter, load_calibration  # noqa: E402
 from tmaze.core import protocol  # noqa: E402  (shared serial-line parser; see docs/decisions/0024)
+from tmaze.core.records.animals import resources_root  # noqa: E402  (sibling resources-repo resolver)
 from tmaze.core.maze_state import IN_WELL as _IN_WELL  # noqa: E402  (HUB well substate label)
 from preview import render_bgr_to_label, safe_after  # noqa: E402
 from tooltips import tip  # noqa: E402
@@ -110,10 +111,10 @@ FPS_WINDOW_S = 0.5
 # versioned in the resources repo). When a valid calibration is loaded it is
 # applied at the source (debayer -> undistort -> orient), so the preview, the
 # tracking pipeline, and the recording all share the corrected geometry. The
-# default path resolves to the sibling resources repo, location-independently.
+# default resolves to the sibling resources repo via resources_root() (env
+# override + landmark search), not a fixed "../.." hop (ADR-0075, ADR-0083).
 CALIBRATION_PATH = os.path.normpath(os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), os.pardir, os.pardir,
-    "os_code_t_maze_resources", "rig-hardware", "camera", "camera_calibration.json"))
+    resources_root(), "rig-hardware", "camera", "camera_calibration.json"))
 # getOptimalNewCameraMatrix alpha: 0 scales so the undistorted image has no
 # invalid (black) border at the cost of cropping a little; 1 keeps all pixels
 # with black wedges. 0 keeps the recorded frame full and border-free.

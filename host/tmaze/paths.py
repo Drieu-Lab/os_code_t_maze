@@ -38,6 +38,16 @@ def repo_root() -> Path:
     )
 
 
+def host_dir() -> Path:
+    """Absolute path to the repo's ``host/`` folder - the home of the per-rig
+    runtime config/data that lives *beside* the package, not inside it:
+    ``zones.json`` / ``roi_polygon.json`` / ``landmarks.json`` / ``rig_scale.json``
+    / ``phase3.json`` / ``rules.json`` / ``note_tags.json`` / ``session_meta.json``
+    and the ``data/`` logs. Anchored off ``repo_root()`` so it is unaffected by how
+    deep the calling module sits in the package (see docs/decisions/0083)."""
+    return repo_root() / "host"
+
+
 def package_data(*parts: str) -> Path:
     """Filesystem path to a data file bundled inside the ``tmaze`` package,
     addressed by package name (depth-immune, unlike a relative ``..`` path)."""
