@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-import protocol
+from tmaze.core import protocol
 
 
 def is_sensor_or_central(info: protocol.LineInfo, *,

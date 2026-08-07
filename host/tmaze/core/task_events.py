@@ -32,7 +32,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from maze_state import (
+from tmaze.core.maze_state import (
     RatState, HUB, IN_WELL, CENTRAL_STEM, LEFT_CHOICE, RIGHT_CHOICE,
     LEFT_RETURN, RIGHT_RETURN, LEFT, RIGHT,
 )

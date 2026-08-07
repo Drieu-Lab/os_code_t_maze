@@ -49,14 +49,14 @@ import math
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
-import protocol  # shared serial-line parser (pure stdlib; see docs/decisions/0024)
+from tmaze.core import protocol  # shared serial-line parser (pure stdlib; see docs/decisions/0024)
 # The well-reward "how" (WellDispenser) and "why" (RewardTrigger) live in the
 # pure reward_dispenser core (see docs/decisions/0068, FW-0009). The shared
 # reward primitives (FireReward / LogEvent / LickAt / CONJUNCTION_FRESH_S) are
 # defined there too and re-exported here so ``from rules_engine import
 # FireReward`` and the landmark rule below keep working. The dependency runs one
 # way: rules_engine -> reward_dispenser (that core imports nothing from here).
-from reward_dispenser import (  # noqa: F401  (LickAt/CONJUNCTION_FRESH_S re-export)
+from tmaze.core.reward.reward_dispenser import (  # noqa: F401  (LickAt/CONJUNCTION_FRESH_S re-export)
     CONJUNCTION_FRESH_S, FireReward, LickAt, LogEvent, RewardTrigger, WellDispenser,
 )
 

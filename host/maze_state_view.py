@@ -36,8 +36,8 @@ from still_frame_editor import _StillFrameEditorBase
 from tooltips import tip
 from zone_overlay import ZONE_HEX, WELL_HEX, AXIS_HEX, draw_zone_overlay
 
-import protocol
-from maze_state import (
+from tmaze.core import protocol
+from tmaze.core.maze_state import (
     EDITABLE_ZONES, IN_WELL, ZONES_PATH, MazeStateParams, Zone,
     ZoneMap, load_zone_map, save_zone_map, state_row, state_timeline_header,
 )

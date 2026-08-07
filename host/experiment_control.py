@@ -46,16 +46,16 @@ import sys
 import tkinter as tk
 from tkinter import messagebox, ttk
 
-import protocol
+from tmaze.core import protocol
 from rig_io import RigClient
 from rig_view import RigView
 from camera_view import (CameraView, DEFAULT_OUTPUT_DIR, ORIENTATION,
                          UNDISTORT_ALPHA, CALIBRATION_PATH)
-from reward_volume import (reward_volume_ul, format_volume,
+from tmaze.core.reward.reward_volume import (reward_volume_ul, format_volume,
                            DEFAULT_REWARD_PULSE_MS)
-from rig_config import load_rig_config, RigConfig
+from tmaze.core.rig_config import load_rig_config, RigConfig
 from rig_process import find_rig_pids, rig_session_id, taskkill
-from line_router import LineRouter
+from tmaze.core.line_router import LineRouter
 from tooltips import tip
 
 # Markerless tracker + its control tab are optional (need opencv/numpy/pillow);
@@ -107,7 +107,7 @@ except Exception as e:  # pragma: no cover
 # Phase 3), so a reward is handled identically whichever task drove it. Stdlib
 # only; guarded like the tabs above. See docs/decisions/0054 (FW-0019).
 try:
-    from reward_dispatcher import RewardDispatcher
+    from tmaze.core.reward.reward_dispatcher import RewardDispatcher
 except Exception:  # pragma: no cover
     RewardDispatcher = None  # type: ignore
     _TRACKER_ERR = _TRACKER_ERR or f"{type(e).__name__}: {e}"
@@ -148,7 +148,7 @@ except Exception:  # pragma: no cover
 # See docs/decisions/0041.
 try:
     from maze_pipeline import MazeStatePipeline
-    from maze_state import (
+    from tmaze.core.maze_state import (
         MazeStateParams, ZoneMap, ZONES_PATH, load_zone_map,
     )
 except Exception as e:  # pragma: no cover

@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from typing import Callable, Dict, Union
 
-from rig_config import load_rig_config
+from tmaze.core.rig_config import load_rig_config
 
 # Parsed once, like the other host tools. Degrades gracefully (ok == False) if
 # the header can't be read; the builders below fall back to bare labels.

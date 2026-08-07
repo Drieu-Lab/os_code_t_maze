@@ -52,7 +52,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from maze_state import (CENTRAL_STEM, LEFT, LEFT_RETURN, RIGHT, RIGHT_RETURN,
+from tmaze.core.maze_state import (CENTRAL_STEM, LEFT, LEFT_RETURN, RIGHT, RIGHT_RETURN,
                         UP_STEM)
 
 # Cue kinds (match the CUE_ON,<kind> firmware command; see firmware/PROTOCOL.md).

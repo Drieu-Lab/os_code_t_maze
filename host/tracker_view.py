@@ -37,7 +37,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 from typing import Optional
 
-import protocol
+from tmaze.core import protocol
 from gui_deps import Image, ImageTk, cv2, missing_dependency, np
 from preview import PreviewLoop, safe_after
 from still_frame_editor import _StillFrameEditorBase

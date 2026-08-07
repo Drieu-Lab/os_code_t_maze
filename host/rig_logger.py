@@ -37,7 +37,7 @@ import sys
 import time
 from datetime import datetime
 
-import protocol
+from tmaze.core import protocol
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 

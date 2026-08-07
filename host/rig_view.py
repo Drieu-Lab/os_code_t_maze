@@ -42,8 +42,8 @@ import tkinter as tk
 from dataclasses import dataclass, replace
 from typing import Optional, Tuple, Union
 
-import protocol
-from rig_config import load_rig_config
+from tmaze.core import protocol
+from tmaze.core.rig_config import load_rig_config
 from tooltips import canvas_tip
 
 # firmware/common/rig_config.h is the single source of truth for the pin map;

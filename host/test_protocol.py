@@ -12,8 +12,8 @@ import unittest
 
 import dataclasses
 
-import protocol
-from protocol import (animal_id, classify, cue_info, leading_ms, lick_edge,
+from tmaze.core import protocol
+from tmaze.core.protocol import (animal_id, classify, cue_info, leading_ms, lick_edge,
                       mode_name, parse, reward_info, sanitize_animal_id,
                       sensor_edge, sol_pulse)
 

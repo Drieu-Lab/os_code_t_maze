@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import unittest
 
-from serial_liveness import (DEAD, OK, PROBE, LivenessMonitor, LivenessParams)
+from tmaze.core.serial_liveness import (DEAD, OK, PROBE, LivenessMonitor, LivenessParams)
 
 
 def _fresh(params=None, t0=100.0):

@@ -33,8 +33,8 @@ from typing import List, Optional
 
 import serial
 
-from protocol import leading_ms
-from serial_liveness import DEAD, PROBE, LivenessMonitor, LivenessParams
+from tmaze.core.protocol import leading_ms
+from tmaze.core.serial_liveness import DEAD, PROBE, LivenessMonitor, LivenessParams
 
 # ================= DEFAULTS =================
 DEFAULT_PORT = "COM3"          # Due Programming port; see docs/decisions/0065

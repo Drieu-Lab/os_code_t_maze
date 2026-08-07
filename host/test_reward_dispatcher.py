@@ -17,10 +17,10 @@ from __future__ import annotations
 import unittest
 from dataclasses import replace
 
-from reward_dispatcher import (
+from tmaze.core.reward.reward_dispatcher import (
     DEFAULT_GLOBAL_MIN_INTERVAL_MS, RewardDispatcher, RewardRecord,
 )
-from reward_volume import reward_volume_ul
+from tmaze.core.reward.reward_volume import reward_volume_ul
 
 
 class _Clock:

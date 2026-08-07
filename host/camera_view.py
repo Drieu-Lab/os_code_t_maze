@@ -47,8 +47,8 @@ from gui_deps import (  # noqa: E402
     Image, ImageTk, _AV_ERR, av, cv2, missing_dependency, np, pylon,
 )
 from calibration import Undistorter, load_calibration  # noqa: E402
-import protocol  # noqa: E402  (shared serial-line parser; see docs/decisions/0024)
-from maze_state import IN_WELL as _IN_WELL  # noqa: E402  (HUB well substate label)
+from tmaze.core import protocol  # noqa: E402  (shared serial-line parser; see docs/decisions/0024)
+from tmaze.core.maze_state import IN_WELL as _IN_WELL  # noqa: E402  (HUB well substate label)
 from preview import render_bgr_to_label, safe_after  # noqa: E402
 from tooltips import tip  # noqa: E402
 from tracker import TRACK_COLUMNS, track_row  # noqa: E402

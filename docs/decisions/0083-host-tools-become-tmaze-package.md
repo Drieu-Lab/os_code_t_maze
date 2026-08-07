@@ -117,6 +117,21 @@ no-upward-imports invariant; the placement rule is added to the auto-loaded
   root (not `host/`); the flat modules stay isolated; the test suite is
   unchanged at **522 passed, 17 skipped** (`python -m unittest discover` from
   `host/`, system Python 3.13 without OpenCV, so the tracker tests skip).
+- Stage 1a (`Refs ADR-0083`): moved the pure-core primitives + the `reward/`
+  cluster into `host/tmaze/core/` (9 top-level: `protocol`, `maze_state`,
+  `task_events`, `rules_engine`, `cue_gate`, `line_router`, `serial_liveness`,
+  `behavior_stats`, `rig_config`; `reward/`: `reward_volume`, `reward_dispenser`,
+  `reward_dispatcher` - the dispatcher is core-safe because it takes a *send
+  callback*, not a broker). Added `tmaze/paths.py` (landmark `repo_root()` +
+  `package_data()`); re-anchored `rig_config`'s firmware-header path through it.
+  Added the `test_architecture.py` boundary test (AST-parses `tmaze/core`,
+  fails on any Tk/OpenCV/numpy/serial or `tmaze.io|vision|ui` import). Imports
+  were rewritten to `from tmaze.core... import` across 43 files by a one-off,
+  reviewed-and-deleted script. Test files stay flat in `host/` for now (they get
+  the import rewrite) and relocate to `host/tests/` in one clean step at the end,
+  so `run_tests.bat` discovery keeps working throughout. Verified: `compileall`
+  clean; every `tmaze.core` submodule imports; `rig_config` header resolves and
+  exists; **523 passed, 17 skipped** (522 baseline + the new boundary test).
 - Subsequent stages carry `Refs ADR-0083` and record their own smoke tests.
 - Related conventions: CONTRIBUTING.md #1 (pure core + thin shell), #6
   (organize into homes; defer speculative generality), #7 (one canonical way);

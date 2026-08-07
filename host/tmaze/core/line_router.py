@@ -29,7 +29,7 @@ from __future__ import annotations
 
 from typing import Callable, List
 
-from protocol import LineInfo
+from tmaze.core.protocol import LineInfo
 
 ModeCallback = Callable[[str], None]
 

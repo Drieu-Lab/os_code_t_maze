@@ -18,9 +18,9 @@ import unittest
 from types import SimpleNamespace
 
 import phase3_stats
-import reward_volume
+from tmaze.core.reward import reward_volume
 import session_summary
-from behavior_stats import BehaviorStats
+from tmaze.core.behavior_stats import BehaviorStats
 from phase3_log import Phase3Log
 from phase3_task import CORRECT, INCORRECT
 from trial_sequence import TrialConfig, TrialSequence

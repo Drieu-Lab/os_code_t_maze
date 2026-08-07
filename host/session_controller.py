@@ -95,13 +95,13 @@ import daily_log
 import note_tags
 import phase3_config
 import phase3_stats
-import protocol
-import reward_volume
+from tmaze.core import protocol
+from tmaze.core.reward import reward_volume
 import session_config
 import session_meta
 import session_notes
 import session_summary
-from rig_config import load_rig_config
+from tmaze.core.rig_config import load_rig_config
 from session_log import SessionManifest, clock_snapshot, path_within_session
 from session_serial import is_sensor_or_central
 from session_timer import SessionTimer

@@ -20,11 +20,11 @@ from __future__ import annotations
 import types
 import unittest
 
-from maze_state import (
+from tmaze.core.maze_state import (
     HUB, CENTRAL_STEM, JUNCTION, LEFT_CHOICE, RIGHT_CHOICE, LEFT_RETURN,
     RIGHT_RETURN, LEFT, RIGHT, MazeStateEstimator, MazeStateParams, Zone, ZoneMap,
 )
-from task_events import TaskEvents
+from tmaze.core.task_events import TaskEvents
 
 FRAME_W, FRAME_H = 1000, 1000
 

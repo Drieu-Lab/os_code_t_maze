@@ -28,12 +28,14 @@ import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Union
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+from tmaze.paths import repo_root
 
-# host/ -> ../firmware/common/rig_config.h (the ONE real header; the sketch
-# folders only hold symlinks to it - see docs/decisions/0006).
+# <repo>/firmware/common/rig_config.h (the ONE real header; the sketch folders
+# only hold symlinks to it - see docs/decisions/0006). Resolved from the repo
+# root by landmark search (tmaze.paths) rather than a fixed ".." hop, so it is
+# unaffected by this module's depth inside the package (see docs/decisions/0083).
 DEFAULT_HEADER_PATH = os.path.normpath(
-    os.path.join(SCRIPT_DIR, "..", "firmware", "common", "rig_config.h")
+    os.path.join(str(repo_root()), "firmware", "common", "rig_config.h")
 )
 
 # Body-beam roles, in the fixed order SENSOR_PINS is defined in (which must match

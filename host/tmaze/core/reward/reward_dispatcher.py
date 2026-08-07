@@ -37,7 +37,7 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Optional
 
-from reward_volume import reward_volume_ul
+from tmaze.core.reward.reward_volume import reward_volume_ul
 
 # Default global minimum interval (ms) between two accepted reward fires,
 # regardless of which task drove them - a last-resort guard against runaway

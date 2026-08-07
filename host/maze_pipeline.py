@@ -61,7 +61,7 @@ from collections import deque
 from dataclasses import dataclass, replace
 from typing import Any, Callable, Deque, List, Optional
 
-from maze_state import MazeStateEstimator, MazeStateParams, RatState, ZoneMap
+from tmaze.core.maze_state import MazeStateEstimator, MazeStateParams, RatState, ZoneMap
 
 # A subscriber queue holds up to ~this many bundles before dropping the oldest.
 # At a ~30-60 fps camera and a ~100-150 ms consumer poll a poll drains only a

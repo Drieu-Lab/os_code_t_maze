@@ -52,8 +52,8 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Deque, Optional, Tuple
 
-from maze_state import LEFT, RIGHT
-from task_events import TaskEventFrame
+from tmaze.core.maze_state import LEFT, RIGHT
+from tmaze.core.task_events import TaskEventFrame
 
 DEFAULT_WINDOW = 10          # rolling window size, in most-recent choice entries
 DEFAULT_MAX_DT_S = 0.5       # per-tick cap on the gap counted as active time

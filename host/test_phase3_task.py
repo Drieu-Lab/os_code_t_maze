@@ -14,12 +14,12 @@ from __future__ import annotations
 import types
 import unittest
 
-from maze_state import (
+from tmaze.core.maze_state import (
     HUB, CENTRAL_STEM, JUNCTION, LEFT_CHOICE, RIGHT_CHOICE, LEFT_RETURN,
     RIGHT_RETURN, MazeStateEstimator, MazeStateParams, Zone, ZoneMap,
 )
 from phase3_task import CORRECT, INCORRECT, Phase3Config, Phase3Task
-from task_events import TaskEvents
+from tmaze.core.task_events import TaskEvents
 from trial_sequence import LEFT, RIGHT, TrialConfig, TrialSequence
 
 

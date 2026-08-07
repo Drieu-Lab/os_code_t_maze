@@ -53,10 +53,10 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
-import reward_volume
+from tmaze.core.reward import reward_volume
 
 if TYPE_CHECKING:  # type-only imports - no runtime coupling to the stats cores
-    from behavior_stats import BehaviorSnapshot
+    from tmaze.core.behavior_stats import BehaviorSnapshot
     from phase3_stats import Phase3Stats
 
 # Bump when the summary JSON layout changes so an offline reader can branch on it.

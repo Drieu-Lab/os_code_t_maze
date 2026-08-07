@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import unittest
 
-import protocol
+from tmaze.core import protocol
 from session_serial import is_sensor_or_central, is_sensor_or_central_line
 
 # Verified central-well mapping (docs/decisions/0022): center lick = L2; the

@@ -21,7 +21,7 @@ from __future__ import annotations
 import types
 import unittest
 
-from rules_engine import (
+from tmaze.core.rules_engine import (
     EngineDefaults, FireReward, LogEvent, RulesEngine, Scale, resolve_landmark,
 )
 

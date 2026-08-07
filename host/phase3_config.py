@@ -38,7 +38,7 @@ from __future__ import annotations
 import json
 from typing import Optional
 
-from cue_gate import CueParams
+from tmaze.core.cue_gate import CueParams
 from phase3_task import Phase3Config
 from trial_sequence import TrialConfig
 

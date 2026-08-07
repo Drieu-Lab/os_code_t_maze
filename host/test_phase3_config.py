@@ -16,7 +16,7 @@ import os
 import tempfile
 import unittest
 
-from cue_gate import CueParams
+from tmaze.core.cue_gate import CueParams
 from phase3_config import (
     DEFAULT_MAX_TOPUPS, default_config, load_phase3_config, resolve_seed,
     reward_max_topups, save_phase3_config, to_cue_params, to_phase3_config,

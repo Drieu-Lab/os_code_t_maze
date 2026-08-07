@@ -13,10 +13,10 @@ the homography path, and the active-time pause behavior. See docs/decisions/0032
 
 import unittest
 
-from behavior_stats import BehaviorStats, LEFT, RIGHT
-from maze_state import HUB, UNKNOWN, RatState
-from task_events import TaskEventFrame
-from rules_engine import Scale
+from tmaze.core.behavior_stats import BehaviorStats, LEFT, RIGHT
+from tmaze.core.maze_state import HUB, UNKNOWN, RatState
+from tmaze.core.task_events import TaskEventFrame
+from tmaze.core.rules_engine import Scale
 
 
 _UNSET = object()

@@ -60,16 +60,16 @@ from datetime import datetime
 from tkinter import messagebox, ttk
 from typing import Callable, Optional
 
-import protocol
-from cue_gate import CHOICE, RETURN, CueGate, CueParams
+from tmaze.core import protocol
+from tmaze.core.cue_gate import CHOICE, RETURN, CueGate, CueParams
 from phase3_config import (
     DEFAULT_MAX_TOPUPS, default_config, load_phase3_config, resolve_seed,
     save_phase3_config, to_trial_config, validate_phase3_config)
 from phase3_log import Phase3Log, Phase3StateSnapshot
 from phase3_task import ABANDONED, CORRECT, INCORRECT, Phase3Config, Phase3Task
-from reward_dispenser import WellDispenser
-from reward_volume import format_volume, reward_volume_ul
-from rig_config import load_rig_config
+from tmaze.core.reward.reward_dispenser import WellDispenser
+from tmaze.core.reward.reward_volume import format_volume, reward_volume_ul
+from tmaze.core.rig_config import load_rig_config
 from trial_ribbon_view import (
     _ARM_SHORT, _CELL_CURRENT_BG, _CUE_SHORT, _UNSET, TrialRibbonView,
     progress_signature)
@@ -77,7 +77,7 @@ from trial_sequence import LEFT, RIGHT, TrialConfig, TrialSequence
 from vision_actuator import VisionActuator
 
 try:
-    from task_events import TaskEvents
+    from tmaze.core.task_events import TaskEvents
 except Exception:  # pragma: no cover
     TaskEvents = None  # type: ignore
 

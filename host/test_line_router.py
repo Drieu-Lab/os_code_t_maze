@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import unittest
 
-import protocol
-from line_router import LineRouter
+from tmaze.core import protocol
+from tmaze.core.line_router import LineRouter
 
 
 class _RecordingModule:

@@ -14,7 +14,7 @@ from __future__ import annotations
 import types
 import unittest
 
-from reward_dispenser import (
+from tmaze.core.reward.reward_dispenser import (
     FireReward, LogEvent, RewardTrigger, WellDispenser,
 )
 

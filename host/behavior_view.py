@@ -46,12 +46,12 @@ from preview import safe_after
 from tooltips import tip
 
 import phase3_stats
-from behavior_stats import BehaviorStats
+from tmaze.core.behavior_stats import BehaviorStats
 from session_timer import SessionTimer
-from task_events import TaskEvents
+from tmaze.core.task_events import TaskEvents
 
 try:
-    from rules_engine import Scale, load_scale
+    from tmaze.core.rules_engine import Scale, load_scale
 except Exception:  # pragma: no cover - rules engine is a pure sibling core
     Scale = None  # type: ignore
     load_scale = None  # type: ignore

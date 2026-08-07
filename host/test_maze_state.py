@@ -20,7 +20,7 @@ from __future__ import annotations
 import types
 import unittest
 
-from maze_state import (
+from tmaze.core.maze_state import (
     HUB, CENTRAL_STEM, JUNCTION, LEFT_CHOICE, RIGHT_CHOICE, LEFT_RETURN,
     RIGHT_RETURN, UNKNOWN, IN_WELL, OUTSIDE_WELL, UP_STEM, DOWN_STEM, LEFT, RIGHT,
     MazeStateEstimator, MazeStateParams, Zone, ZoneMap,

@@ -25,7 +25,7 @@ import time
 import tkinter as tk
 import unittest
 
-from maze_state import CENTRAL_STEM, HUB, RatState
+from tmaze.core.maze_state import CENTRAL_STEM, HUB, RatState
 from phase3_controller import DATA_DIR, Phase3ControlView
 from session_controller import SessionControlView
 

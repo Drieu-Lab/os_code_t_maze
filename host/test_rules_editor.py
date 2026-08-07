@@ -11,7 +11,7 @@ import os
 import tempfile
 import unittest
 
-from rules_engine import (
+from tmaze.core.rules_engine import (
     coerce_rule_field, load_rules_config, save_rules_config, set_rule_debias,
     validate_profile_rules,
 )

@@ -39,8 +39,8 @@ from matplotlib.backends.backend_tkagg import (  # noqa: E402
 )
 from matplotlib.figure import Figure  # noqa: E402
 
-import protocol  # noqa: E402
-from rig_config import load_rig_config  # noqa: E402
+from tmaze.core import protocol  # noqa: E402
+from tmaze.core.rig_config import load_rig_config  # noqa: E402
 from rig_io import RigClient  # noqa: E402
 from tooltips import tip  # noqa: E402
 

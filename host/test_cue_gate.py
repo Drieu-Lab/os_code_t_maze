@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import unittest
 
-from cue_gate import CHOICE, RETURN, CueGate, CueParams
-from maze_state import (CENTRAL_STEM, DOWN_STEM, HUB, JUNCTION, LEFT_CHOICE,
+from tmaze.core.cue_gate import CHOICE, RETURN, CueGate, CueParams
+from tmaze.core.maze_state import (CENTRAL_STEM, DOWN_STEM, HUB, JUNCTION, LEFT_CHOICE,
                         LEFT_RETURN, RIGHT_RETURN, UNKNOWN, UP_STEM)
 
 

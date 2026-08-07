@@ -66,7 +66,7 @@ try:
 except Exception:  # pragma: no cover
     _draw_overlay = None  # type: ignore
 
-from rules_engine import (
+from tmaze.core.rules_engine import (
     DEBIAS_CREDENTIALS, NONSTEM_CREDENTIALS, RULE_EDIT_FIELDS,
     RULE_FIELD_CHOICES, EngineDefaults, FireReward, LogEvent, RulesEngine, Scale,
     coerce_rule_field, load_rules_config, resolve_landmark, save_rules_config,
@@ -82,7 +82,7 @@ WELL_TEMPLATE = "well_reward_with_excursion"
 # The maze-state estimator itself is no longer built here - it is the one shared
 # estimator on the tracking worker (maze_pipeline; ADR-0041). See ADR-0026.
 try:
-    from task_events import TaskEvents
+    from tmaze.core.task_events import TaskEvents
     _MAZE_STATE_IMPORT_ERROR = None
 except Exception as e:  # pragma: no cover
     TaskEvents = None  # type: ignore

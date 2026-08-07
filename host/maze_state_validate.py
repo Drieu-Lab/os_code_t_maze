@@ -50,14 +50,14 @@ import types
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
-import protocol
-from cue_gate import CueGate, CueParams
-from maze_state import (
+from tmaze.core import protocol
+from tmaze.core.cue_gate import CueGate, CueParams
+from tmaze.core.maze_state import (
     CENTRAL_STEM, JUNCTION, LEFT_CHOICE, RIGHT_CHOICE, LEFT_RETURN,
     RIGHT_RETURN, ZONES_PATH, MazeStateEstimator, MazeStateParams, ZoneMap,
     load_zone_map,
 )
-from task_events import TaskEvents
+from tmaze.core.task_events import TaskEvents
 
 # Beam index (firmware Beam order) -> the zone whose ENTRY that beam marks.
 BEAM_TO_ZONE = {

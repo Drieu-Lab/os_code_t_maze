@@ -3,8 +3,8 @@ import tkinter as tk
 from functools import partial
 from tkinter import messagebox
 
-import protocol
-from rig_config import load_rig_config
+from tmaze.core import protocol
+from tmaze.core.rig_config import load_rig_config
 from rig_io import RigClient
 
 # ================= CONFIG =================
