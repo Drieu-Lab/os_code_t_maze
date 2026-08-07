@@ -44,7 +44,7 @@ from typing import Optional, Tuple, Union
 
 from tmaze.core import protocol
 from tmaze.core.rig_config import load_rig_config
-from tooltips import canvas_tip
+from tmaze.ui.tooltips import canvas_tip
 
 # firmware/common/rig_config.h is the single source of truth for the pin map;
 # read it once so lick roles / the reward column can't drift from the firmware.

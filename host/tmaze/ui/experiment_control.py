@@ -48,15 +48,15 @@ from tkinter import messagebox, ttk
 
 from tmaze.core import protocol
 from tmaze.io.rig_io import RigClient
-from rig_view import RigView
-from camera_view import (CameraView, DEFAULT_OUTPUT_DIR, ORIENTATION,
+from tmaze.ui.rig_view import RigView
+from tmaze.ui.camera_view import (CameraView, DEFAULT_OUTPUT_DIR, ORIENTATION,
                          UNDISTORT_ALPHA, CALIBRATION_PATH)
 from tmaze.core.reward.reward_volume import (reward_volume_ul, format_volume,
                            DEFAULT_REWARD_PULSE_MS)
 from tmaze.core.rig_config import load_rig_config, RigConfig
 from tmaze.io.rig_process import find_rig_pids, rig_session_id, taskkill
 from tmaze.core.line_router import LineRouter
-from tooltips import tip
+from tmaze.ui.tooltips import tip
 
 # Markerless tracker + its control tab are optional (need opencv/numpy/pillow);
 # guard the imports so the GUI still runs if they're missing.
@@ -67,7 +67,7 @@ except Exception as e:  # pragma: no cover - depends on host environment
     RatTracker = None  # type: ignore
     _TRACKER_ERR = f"{type(e).__name__}: {e}"
 try:
-    from tracker_view import TrackerControlView
+    from tmaze.ui.tracker_view import TrackerControlView
 except Exception as e:  # pragma: no cover
     TrackerControlView = None  # type: ignore
     _TRACKER_ERR = _TRACKER_ERR or f"{type(e).__name__}: {e}"
@@ -75,7 +75,7 @@ except Exception as e:  # pragma: no cover
 # reward via the broker). Optional; guarded so a missing dep never breaks the
 # GUI. See docs/decisions/0023.
 try:
-    from rules_view import RulesControlView
+    from tmaze.ui.rules_view import RulesControlView
 except Exception as e:  # pragma: no cover
     RulesControlView = None  # type: ignore
     _TRACKER_ERR = _TRACKER_ERR or f"{type(e).__name__}: {e}"
@@ -83,7 +83,7 @@ except Exception as e:  # pragma: no cover
 # per-tick maze state + zone editor). Optional; guarded like the tabs above.
 # See docs/decisions/0025.
 try:
-    from maze_state_view import MazeStateControlView
+    from tmaze.ui.maze_state_view import MazeStateControlView
 except Exception as e:  # pragma: no cover
     MazeStateControlView = None  # type: ignore
     _TRACKER_ERR = _TRACKER_ERR or f"{type(e).__name__}: {e}"
@@ -91,7 +91,7 @@ except Exception as e:  # pragma: no cover
 # gate + trial FSM over the shared pipeline; drives CUE_ON,<kind>,<hz> / reward.
 # Optional; guarded like the tabs above. See docs/decisions/0046.
 try:
-    from phase3_controller import Phase3ControlView
+    from tmaze.ui.phase3_controller import Phase3ControlView
 except Exception as e:  # pragma: no cover
     Phase3ControlView = None  # type: ignore
     _TRACKER_ERR = _TRACKER_ERR or f"{type(e).__name__}: {e}"
@@ -99,7 +99,7 @@ except Exception as e:  # pragma: no cover
 # exclusive selector and the single shared Animal ID field (ADR-0053 phase 4).
 # Pure Tk container; guarded like the tabs above. See docs/decisions/0053.
 try:
-    from task_view import TaskControlView
+    from tmaze.ui.task_view import TaskControlView
 except Exception as e:  # pragma: no cover
     TaskControlView = None  # type: ignore
 # Shared reward seam: one RewardDispatcher owns the global rate backstop, the
@@ -115,14 +115,14 @@ except Exception:  # pragma: no cover
 # writes a shared session manifest (docs/decisions/0048). Needs no tracker (just
 # tk + the recorders' public seams), so it is guarded on its own import only.
 try:
-    from session_controller import SessionControlView
+    from tmaze.ui.session_controller import SessionControlView
 except Exception:  # pragma: no cover
     SessionControlView = None  # type: ignore
 # Live Phase 2a behavior readout: a read-only tracker consumer that fills the
 # empty bottom-right of the Rig view tab. Optional; guarded like the tabs above.
 # See docs/decisions/0032.
 try:
-    from behavior_view import BehaviorView
+    from tmaze.ui.behavior_view import BehaviorView
 except Exception as e:  # pragma: no cover
     BehaviorView = None  # type: ignore
     _TRACKER_ERR = _TRACKER_ERR or f"{type(e).__name__}: {e}"
@@ -131,7 +131,7 @@ except Exception as e:  # pragma: no cover
 # switching tabs. Reads the published Phase 3 snapshot. Optional; guarded like
 # the tabs above. See docs/decisions/0057.
 try:
-    from trial_ribbon_view import TrialRibbonView
+    from tmaze.ui.trial_ribbon_view import TrialRibbonView
 except Exception:  # pragma: no cover
     TrialRibbonView = None  # type: ignore
 # Trial-control buttons (Skip / Repeat / Back / +Trials / Restart / Pause): the
@@ -139,7 +139,7 @@ except Exception:  # pragma: no cover
 # the ribbon + live-stats panels on the Rig view. Wired to the live Phase 3
 # controller. Optional; guarded like the tabs above. See docs/decisions/0058.
 try:
-    from trial_control_bar import TrialControlBar
+    from tmaze.ui.trial_control_bar import TrialControlBar
 except Exception:  # pragma: no cover
     TrialControlBar = None  # type: ignore
 # One shared maze-state pipeline (pure stdlib): a single estimator driven on the

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from gui_deps import cv2, np
+from tmaze.ui.gui_deps import cv2, np
 
 # Per-zone draw colours (hex for the Tk canvas editor; converted to BGR for the
 # OpenCV overlay via _hex_to_bgr).

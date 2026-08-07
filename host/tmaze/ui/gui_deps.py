@@ -8,7 +8,7 @@ never crashes when numpy/OpenCV/Pillow (or pypylon/av on the camera tab) are
 absent; each tab surfaces the failure in its UI instead.
 
 Usage:
-    from gui_deps import np, cv2, Image, ImageTk, av, pylon, missing_dependency
+    from tmaze.ui.gui_deps import np, cv2, Image, ImageTk, av, pylon, missing_dependency
 
     missing = missing_dependency("numpy", "opencv-python", "pillow")
 """

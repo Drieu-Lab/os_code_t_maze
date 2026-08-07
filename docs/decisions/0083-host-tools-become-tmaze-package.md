@@ -201,6 +201,35 @@ no-upward-imports invariant; the placement rule is added to the auto-loaded
   the rig env: every anchored constant resolves to the real `host/<file>` (all 8
   configs + the sibling calibration present); all edited flat modules import with
   real cv2/pypylon; **523 passed, 0 skipped** (unchanged).
+- Stage 4b (`Refs ADR-0083`): moved the **ui shells + standalone tools** - the
+  last flat source - into the package. 20 modules to `host/tmaze/ui/`
+  (`experiment_control`, `camera_view`, `rig_view`, `tracker_view`, `rules_view`,
+  `maze_state_view`, `phase3_controller`, `session_controller`, `task_view`,
+  `behavior_view`, `trial_ribbon_view`, `trial_control_bar`, `preview`,
+  `tooltips`, `tooltip_text`, `still_frame_editor`, `zone_overlay`, `gui_deps`,
+  `lick_tuner`, `maze_gui`) and 3 to `host/tmaze/tools/` (`blob_tracker_prototype`,
+  `build_session_registry`, `maze_state_validate`). `gui_deps`/`zone_overlay` are
+  ui-only post-migration, so they went to `ui/`. **Launch** for the three GUI
+  entry points changed to `python -m tmaze.ui.{experiment_control,lick_tuner,
+  maze_gui}` and the tools to `python -m tmaze.tools.<name>` (`start_rig.bat`,
+  `PROGRAMS.md`); the "Quit rig" fallback matcher (`rig_process.RIG_SCRIPTS`) now
+  matches those module command lines. Added a `tmaze`-import pre-flight to
+  `run_tests.bat`. Imports rewritten across 19 files (18 moved modules that
+  cross-import + the one Tk wiring test) by a one-off, reviewed-and-deleted
+  script; the tools and `maze_gui`/`session_controller`/`tooltip_text` needed no
+  rewrite (they import only `core`/`io`). Verified in the rig env: no stale flat
+  imports; `compileall` clean over the whole tree; importing
+  `tmaze.ui.experiment_control` (which transitively pulls in every ui view) and
+  the 3 tool modules all succeed with real cv2/pypylon; **523 passed, 0 skipped**.
+  A live GUI launch smoke (operator ran `start_rig.bat`) confirmed the windows
+  open and "Quit rig" closes them. After 4b, `host/` root holds only the `test_*`
+  suite, the config JSON, `data/`, `ratmodels/`, the two `.bat` launchers, and
+  `tools/test_sensors_licks.py` (a pre-existing standalone bring-up script).
+- Deferred to Stage 5 (docs pass): reconcile the remaining stale
+  `host/<name>.py` library paths in `PROGRAMS.md` for the core/vision modules
+  moved in Stages 1a/1b/3; relocate the `test_*` suite to `host/tests/` and, with
+  it, resolve `tmaze.tools.maze_state_validate`'s `from test_maze_state import
+  make_zone_map` (a tool importing a test fixture - move the fixture or inline it).
 - Subsequent stages carry `Refs ADR-0083` and record their own smoke tests.
 - Related conventions: CONTRIBUTING.md #1 (pure core + thin shell), #6
   (organize into homes; defer speculative generality), #7 (one canonical way);

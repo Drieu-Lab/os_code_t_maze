@@ -27,7 +27,7 @@ from typing import Callable, Dict, Optional
 from tmaze.core.phase3.phase3_log import Phase3StateSnapshot
 
 try:
-    from tooltips import tip
+    from tmaze.ui.tooltips import tip
 except Exception:  # pragma: no cover
     def tip(*_a, **_k):  # type: ignore
         return None

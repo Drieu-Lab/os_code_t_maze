@@ -26,8 +26,8 @@ import tkinter as tk
 import unittest
 
 from tmaze.core.maze_state import CENTRAL_STEM, HUB, RatState
-from phase3_controller import DATA_DIR, Phase3ControlView
-from session_controller import SessionControlView
+from tmaze.ui.phase3_controller import DATA_DIR, Phase3ControlView
+from tmaze.ui.session_controller import SessionControlView
 
 # How long to wait for the actuation thread to apply an enqueued command. The work
 # is microseconds; this is a generous ceiling so a loaded machine can't flake.

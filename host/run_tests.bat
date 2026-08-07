@@ -15,4 +15,18 @@ REM   ../firmware/cue-guided-task/test/README.md.
 REM ============================================================================
 
 cd /d "%~dp0"
+
+REM The tests import the installed package (import tmaze...), so it must be
+REM installed in this env once per machine (pip install -e . from the repo root).
+python -c "import tmaze" 1>nul 2>nul
+if errorlevel 1 (
+    echo.
+    echo ERROR: the 'tmaze' package is not installed in the current python.
+    echo Install it once per machine, from the repo root:
+    echo     pip install -e .
+    echo.
+    pause
+    exit /b 1
+)
+
 python -m unittest discover -p "test_*.py" -v

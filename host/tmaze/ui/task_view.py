@@ -41,7 +41,7 @@ from tkinter import ttk
 from typing import List, Optional, Tuple
 
 try:
-    from tooltips import tip
+    from tmaze.ui.tooltips import tip
 except Exception:  # pragma: no cover
     def tip(*_a, **_k):  # type: ignore
         return None

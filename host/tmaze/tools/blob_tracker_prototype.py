@@ -86,7 +86,7 @@ from tmaze.paths import host_dir
 
 # Reuse the rig camera identity + orientation so this view matches camera_view.
 try:
-    from camera_view import (  # type: ignore
+    from tmaze.ui.camera_view import (  # type: ignore
         CAMERA_IP, CAMERA_SERIAL, CAMERA_MAC, ORIENTATION,
         CALIBRATION_PATH, UNDISTORT_ALPHA,
     )

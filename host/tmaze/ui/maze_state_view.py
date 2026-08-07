@@ -30,11 +30,11 @@ from dataclasses import replace
 from tkinter import filedialog, messagebox, ttk
 from typing import Optional
 
-from gui_deps import missing_dependency
-from preview import PreviewLoop, safe_after
-from still_frame_editor import _StillFrameEditorBase
-from tooltips import tip
-from zone_overlay import ZONE_HEX, WELL_HEX, AXIS_HEX, draw_zone_overlay
+from tmaze.ui.gui_deps import missing_dependency
+from tmaze.ui.preview import PreviewLoop, safe_after
+from tmaze.ui.still_frame_editor import _StillFrameEditorBase
+from tmaze.ui.tooltips import tip
+from tmaze.ui.zone_overlay import ZONE_HEX, WELL_HEX, AXIS_HEX, draw_zone_overlay
 
 from tmaze.core import protocol
 from tmaze.paths import host_dir
@@ -57,7 +57,7 @@ except Exception:  # pragma: no cover
     _LANDMARK_DEFAULT = (255, 255, 255)  # type: ignore
 
 try:
-    from camera_view import DEFAULT_OUTPUT_DIR as _RECORDINGS_DIR  # noqa: E402
+    from tmaze.ui.camera_view import DEFAULT_OUTPUT_DIR as _RECORDINGS_DIR  # noqa: E402
 except Exception:  # pragma: no cover
     _RECORDINGS_DIR = "recordings"
 

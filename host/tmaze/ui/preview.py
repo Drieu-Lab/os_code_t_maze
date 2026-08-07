@@ -13,7 +13,7 @@ from __future__ import annotations
 import tkinter as tk
 from typing import Callable, Optional
 
-from gui_deps import Image, ImageTk, cv2
+from tmaze.ui.gui_deps import Image, ImageTk, cv2
 
 
 def safe_after(widget: tk.Misc, ms: int, fn: Callable, *args) -> None:

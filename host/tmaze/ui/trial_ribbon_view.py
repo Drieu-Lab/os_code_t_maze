@@ -35,7 +35,7 @@ from tmaze.core.phase3.phase3_log import Phase3StateSnapshot
 from tmaze.core.phase3.phase3_task import ABANDONED, CORRECT
 
 try:
-    from tooltips import tip
+    from tmaze.ui.tooltips import tip
 except Exception:  # pragma: no cover
     def tip(*_a, **_k):  # type: ignore
         return None

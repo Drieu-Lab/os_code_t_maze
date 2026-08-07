@@ -43,15 +43,15 @@ from dataclasses import dataclass
 from tkinter import filedialog, ttk
 from typing import Optional, Tuple
 
-from gui_deps import (  # noqa: E402
+from tmaze.ui.gui_deps import (  # noqa: E402
     Image, ImageTk, _AV_ERR, av, cv2, missing_dependency, np, pylon,
 )
 from tmaze.vision.calibration import Undistorter, load_calibration  # noqa: E402
 from tmaze.core import protocol  # noqa: E402  (shared serial-line parser; see docs/decisions/0024)
 from tmaze.core.records.animals import resources_root  # noqa: E402  (sibling resources-repo resolver)
 from tmaze.core.maze_state import IN_WELL as _IN_WELL  # noqa: E402  (HUB well substate label)
-from preview import render_bgr_to_label, safe_after  # noqa: E402
-from tooltips import tip  # noqa: E402
+from tmaze.ui.preview import render_bgr_to_label, safe_after  # noqa: E402
+from tmaze.ui.tooltips import tip  # noqa: E402
 from tmaze.vision.tracker import TRACK_COLUMNS, track_row  # noqa: E402
 from tmaze.vision.track_worker import LatestFrameSlot, TrackPublisher  # noqa: E402
 
@@ -68,7 +68,7 @@ except Exception:  # pragma: no cover
     _draw_track_overlay_shared = None  # type: ignore
     _draw_landmarks_shared = None  # type: ignore
 try:
-    from zone_overlay import draw_zone_overlay as _draw_zone_overlay_shared  # noqa: E402
+    from tmaze.ui.zone_overlay import draw_zone_overlay as _draw_zone_overlay_shared  # noqa: E402
 except Exception:  # pragma: no cover
     _draw_zone_overlay_shared = None  # type: ignore
 

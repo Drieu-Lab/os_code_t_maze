@@ -39,10 +39,10 @@ from typing import Optional
 
 from tmaze.core import protocol
 from tmaze.paths import host_dir
-from gui_deps import Image, ImageTk, cv2, missing_dependency, np
-from preview import PreviewLoop, safe_after
-from still_frame_editor import _StillFrameEditorBase
-from tooltips import tip
+from tmaze.ui.gui_deps import Image, ImageTk, cv2, missing_dependency, np
+from tmaze.ui.preview import PreviewLoop, safe_after
+from tmaze.ui.still_frame_editor import _StillFrameEditorBase
+from tmaze.ui.tooltips import tip
 from tmaze.vision.tracker import TRACK_COLUMNS, track_row
 
 # Shared tracking-overlay drawing (so this preview matches the camera tab's).
@@ -72,7 +72,7 @@ except Exception:  # pragma: no cover
 # safe even without pypylon/OpenCV). Track logs live in a subfolder of whatever
 # recordings folder the camera is actually using.
 try:
-    from camera_view import DEFAULT_OUTPUT_DIR as _RECORDINGS_DIR  # noqa: E402
+    from tmaze.ui.camera_view import DEFAULT_OUTPUT_DIR as _RECORDINGS_DIR  # noqa: E402
 except Exception:  # pragma: no cover
     _RECORDINGS_DIR = "recordings"
 

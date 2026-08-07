@@ -76,17 +76,17 @@ set "ANIMAL_ARG="
 if not "%RIG_ANIMAL%"=="" set "ANIMAL_ARG=--animal %RIG_ANIMAL%"
 
 REM ---- Launch broker, then clients after a brief delay so the TCP port is up ----
-REM The broker and logger are package entry points (python -m tmaze.io.<name>);
-REM the tmaze package must be installed once per machine (pip install -e . from
-REM the repo root). The still-flat GUIs below run as .py from this host/ dir.
+REM Everything now launches as a package module (python -m tmaze.<layer>.<name>),
+REM so the tmaze package must be installed once per machine (pip install -e . from
+REM the repo root) and the commands work regardless of the current directory.
 start "Rig Broker" cmd /k python -X rigsid=%RIG_SID% -m tmaze.io.rig_broker --port %RIG_PORT%
 timeout /t 2 /nobreak >nul
 
 REM Persistent session logger: writes every line to host\data\<animal>_<time>.csv
 start "Rig Logger" cmd /k python -X rigsid=%RIG_SID% -m tmaze.io.rig_logger %ANIMAL_ARG%
 
-REM start "Maze GUI"   python maze_gui.py
-start "Lick Tuner" python -X rigsid=%RIG_SID% lick_tuner.py
-start "Experiment Control" python -X rigsid=%RIG_SID% experiment_control.py
+REM start "Maze GUI"   python -m tmaze.ui.maze_gui
+start "Lick Tuner" python -X rigsid=%RIG_SID% -m tmaze.ui.lick_tuner
+start "Experiment Control" python -X rigsid=%RIG_SID% -m tmaze.ui.experiment_control
 
 endlocal

@@ -56,9 +56,9 @@ from dataclasses import dataclass, field, replace
 from tkinter import messagebox, ttk
 from typing import Optional
 
-from gui_deps import cv2, missing_dependency
-from preview import PreviewLoop, safe_after
-from tooltips import tip
+from tmaze.ui.gui_deps import cv2, missing_dependency
+from tmaze.ui.preview import PreviewLoop, safe_after
+from tmaze.ui.tooltips import tip
 from tmaze.io.vision_actuator import VisionActuator
 
 try:
@@ -93,7 +93,7 @@ except Exception as e:  # pragma: no cover
 # Recordings folder default (mirrors tracker_view): rule-event logs live in a
 # subfolder of whatever recordings folder the camera is actually using.
 try:
-    from camera_view import DEFAULT_OUTPUT_DIR as _RECORDINGS_DIR  # noqa: E402
+    from tmaze.ui.camera_view import DEFAULT_OUTPUT_DIR as _RECORDINGS_DIR  # noqa: E402
 except Exception:  # pragma: no cover
     _RECORDINGS_DIR = "recordings"
 

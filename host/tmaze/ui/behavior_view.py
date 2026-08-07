@@ -42,8 +42,8 @@ import tkinter as tk
 from tkinter import ttk
 from typing import Optional
 
-from preview import safe_after
-from tooltips import tip
+from tmaze.ui.preview import safe_after
+from tmaze.ui.tooltips import tip
 
 from tmaze.core.phase3 import phase3_stats
 from tmaze.core.behavior_stats import BehaviorStats

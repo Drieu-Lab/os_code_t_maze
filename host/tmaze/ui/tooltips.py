@@ -23,7 +23,7 @@ import sys
 import tkinter as tk
 from typing import Optional
 
-from tooltip_text import resolve
+from tmaze.ui.tooltip_text import resolve
 
 # How long the pointer must rest before the tip shows, and the tip's look.
 SHOW_DELAY_MS = 450

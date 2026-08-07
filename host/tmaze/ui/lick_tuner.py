@@ -42,7 +42,7 @@ from matplotlib.figure import Figure  # noqa: E402
 from tmaze.core import protocol  # noqa: E402
 from tmaze.core.rig_config import load_rig_config  # noqa: E402
 from tmaze.io.rig_io import RigClient  # noqa: E402
-from tooltips import tip  # noqa: E402
+from tmaze.ui.tooltips import tip  # noqa: E402
 
 # ================= CONFIG =================
 BROKER_HOST = "127.0.0.1"

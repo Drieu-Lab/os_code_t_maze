@@ -71,7 +71,7 @@ from tmaze.core.reward.reward_dispenser import WellDispenser
 from tmaze.core.reward.reward_volume import format_volume, reward_volume_ul
 from tmaze.core.rig_config import load_rig_config
 from tmaze.paths import host_dir
-from trial_ribbon_view import (
+from tmaze.ui.trial_ribbon_view import (
     _ARM_SHORT, _CELL_CURRENT_BG, _CUE_SHORT, _UNSET, TrialRibbonView,
     progress_signature)
 from tmaze.core.phase3.trial_sequence import LEFT, RIGHT, TrialConfig, TrialSequence
@@ -83,7 +83,7 @@ except Exception:  # pragma: no cover
     TaskEvents = None  # type: ignore
 
 try:
-    from tooltips import tip
+    from tmaze.ui.tooltips import tip
 except Exception:  # pragma: no cover
     def tip(*_a, **_k):  # type: ignore
         return None

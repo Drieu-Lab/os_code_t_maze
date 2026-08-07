@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import tkinter as tk
 
-from gui_deps import Image, ImageTk, cv2
+from tmaze.ui.gui_deps import Image, ImageTk, cv2
 
 EDITOR_MAX_W = 960   # still-frame editor display width (shared by all editors)
 
