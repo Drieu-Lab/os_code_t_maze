@@ -74,7 +74,7 @@ from trial_ribbon_view import (
     _ARM_SHORT, _CELL_CURRENT_BG, _CUE_SHORT, _UNSET, TrialRibbonView,
     progress_signature)
 from tmaze.core.phase3.trial_sequence import LEFT, RIGHT, TrialConfig, TrialSequence
-from vision_actuator import VisionActuator
+from tmaze.io.vision_actuator import VisionActuator
 
 try:
     from tmaze.core.task_events import TaskEvents

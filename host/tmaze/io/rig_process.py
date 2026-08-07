@@ -12,8 +12,10 @@ import os
 import subprocess
 import sys
 
-# Scripts start_rig.bat launches; fallback when no session id is present.
-RIG_SCRIPTS = ("rig_broker.py", "rig_logger.py", "lick_tuner.py",
+# Command-line fragments start_rig.bat launches; fallback when no session id is
+# present. The broker/logger are module entry points ("-m tmaze.io.<name>"), so
+# match those module paths; the still-flat GUIs match by script filename.
+RIG_SCRIPTS = ("tmaze.io.rig_broker", "tmaze.io.rig_logger", "lick_tuner.py",
                "experiment_control.py")
 
 # Hide transient PowerShell/taskkill console windows (Windows only).

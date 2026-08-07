@@ -15,8 +15,10 @@ The one line the broker sends on its own behalf is a periodic STATUS while the
 port is quiet - a liveness probe, so a wedged Due is noticed in seconds instead
 of going unnoticed for the rest of a session (see docs/decisions/0062).
 
-Run from os_code_t_maze/host/:
-    python rig_broker.py
+Run as a module (needs the tmaze package installed - pip install -e . once per
+machine; works from any directory):
+    python -m tmaze.io.rig_broker
+    python -m tmaze.io.rig_broker --port COM5
 
 Dependencies: pyserial (already required by the original GUIs).
 """

@@ -22,10 +22,11 @@ line. If the logger is started after the handshake has already gone by, it falls
 back to "unknown" (no lines are lost - early lines are buffered until the file is
 opened). Override the id with --animal.
 
-Run from os_code_t_maze/host/ (broker must be running; start_rig.bat launches
-both):
-    python rig_logger.py
-    python rig_logger.py --host 127.0.0.1 --port 5555 --dir data --animal RAT001
+Run as a module (broker must be running; start_rig.bat launches both). Needs
+the tmaze package installed (pip install -e . once per machine); works from any
+directory:
+    python -m tmaze.io.rig_logger
+    python -m tmaze.io.rig_logger --host 127.0.0.1 --port 5555 --animal RAT001
 """
 
 from __future__ import annotations
@@ -38,8 +39,12 @@ import time
 from datetime import datetime
 
 from tmaze.core import protocol
+from tmaze.paths import repo_root
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+# Session logs live in host/data/ regardless of where the logger is launched
+# from. Anchored via the repo-root landmark (tmaze.paths) rather than this
+# file's location, so it survives the module living in the package (ADR-0083).
+DEFAULT_DATA_DIR = os.path.join(str(repo_root()), "host", "data")
 
 RECV_BYTES = 4096
 RECONNECT_DELAY_S = 2.0
@@ -121,7 +126,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Persistent T-maze session logger (broker client).")
     ap.add_argument("--host", default="127.0.0.1", help="broker host (default 127.0.0.1)")
     ap.add_argument("--port", type=int, default=5555, help="broker TCP port (default 5555)")
-    ap.add_argument("--dir", default=os.path.join(SCRIPT_DIR, "data"),
+    ap.add_argument("--dir", default=DEFAULT_DATA_DIR,
                     help="output directory (default: host/data)")
     ap.add_argument("--animal", default=None,
                     help="override the animal id used in the filename")

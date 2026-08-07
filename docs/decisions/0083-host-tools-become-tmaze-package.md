@@ -147,6 +147,24 @@ no-upward-imports invariant; the placement rule is added to the auto-loaded
   resolves to the real sibling repo (`animals.json` present); **523 passed, 17
   skipped** (unchanged). After 1b, everything left flat in `host/` is a shell
   (`ui`/`io`/`vision`) or a `tool` - the pure core is fully packaged.
+- Stage 2 (`Refs ADR-0083`): moved the io layer into `host/tmaze/io/`:
+  `rig_broker`, `rig_io`, `rig_logger`, `rig_process`, `vision_actuator`. The
+  broker and logger became package entry points - launch changed from
+  `python rig_broker.py` to `python -m tmaze.io.rig_broker` (and likewise the
+  logger) in `start_rig.bat`; the still-flat GUIs keep running as `.py` from
+  `host/`. Re-anchored the logger's default output to `host/data` via
+  `tmaze.paths.repo_root()`. Updated the "Quit rig" fallback matcher
+  (`rig_process.RIG_SCRIPTS`) to match the broker/logger *module* command lines;
+  the primary `rigsid=`-based match is unchanged. Added a `tmaze`-import
+  pre-flight to `start_rig.bat` and updated the affected `PROGRAMS.md` rows.
+  This was the first stage needing the rig: I installed the package into the
+  `drieu_t_maze` conda env (`pip install -e .`, the one-time per-machine step)
+  and ran a real hardware smoke test - broker opened COM3, served TCP 5555, read
+  the Due's session clock; logger connected and wrote a wall-clock-stamped
+  `STATUS` line to `host/data/`. Verified: no stale flat imports; `compileall`
+  clean; all 5 io modules import and both `-m` entry points respond to `--help`;
+  `experiment_control` imports cleanly; **523 passed, 0 skipped** in the rig env
+  (unchanged from the pre-stage rig-env baseline).
 - Subsequent stages carry `Refs ADR-0083` and record their own smoke tests.
 - Related conventions: CONTRIBUTING.md #1 (pure core + thin shell), #6
   (organize into homes; defer speculative generality), #7 (one canonical way);

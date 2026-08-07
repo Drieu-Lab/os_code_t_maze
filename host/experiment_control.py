@@ -47,14 +47,14 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 from tmaze.core import protocol
-from rig_io import RigClient
+from tmaze.io.rig_io import RigClient
 from rig_view import RigView
 from camera_view import (CameraView, DEFAULT_OUTPUT_DIR, ORIENTATION,
                          UNDISTORT_ALPHA, CALIBRATION_PATH)
 from tmaze.core.reward.reward_volume import (reward_volume_ul, format_volume,
                            DEFAULT_REWARD_PULSE_MS)
 from tmaze.core.rig_config import load_rig_config, RigConfig
-from rig_process import find_rig_pids, rig_session_id, taskkill
+from tmaze.io.rig_process import find_rig_pids, rig_session_id, taskkill
 from tmaze.core.line_router import LineRouter
 from tooltips import tip
 

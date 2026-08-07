@@ -59,7 +59,7 @@ from typing import Optional
 from gui_deps import cv2, missing_dependency
 from preview import PreviewLoop, safe_after
 from tooltips import tip
-from vision_actuator import VisionActuator
+from tmaze.io.vision_actuator import VisionActuator
 
 try:
     from tracker import draw_overlay as _draw_overlay  # noqa: E402

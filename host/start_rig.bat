@@ -52,6 +52,20 @@ if errorlevel 1 (
     exit /b 1
 )
 
+REM The broker/logger are launched as "python -m tmaze.io.<name>", so the tmaze
+REM package must be installed in this env. Catch a missing install here too.
+python -c "import tmaze" 1>nul 2>nul
+if errorlevel 1 (
+    echo.
+    echo ERROR: the 'tmaze' package is not installed in the current python.
+    echo.
+    echo Install it once per machine, from the repo root:
+    echo     pip install -e .
+    echo.
+    pause
+    exit /b 1
+)
+
 REM ---- Ask which rat this session is for, so the logger names the file --------
 REM The firmware ANIMAL_ID is hard-coded (RAT001), so without this the log would
 REM be data\RAT001_<time>.csv for every rat. Entered once here and passed to the
@@ -62,11 +76,14 @@ set "ANIMAL_ARG="
 if not "%RIG_ANIMAL%"=="" set "ANIMAL_ARG=--animal %RIG_ANIMAL%"
 
 REM ---- Launch broker, then clients after a brief delay so the TCP port is up ----
-start "Rig Broker" cmd /k python -X rigsid=%RIG_SID% rig_broker.py --port %RIG_PORT%
+REM The broker and logger are package entry points (python -m tmaze.io.<name>);
+REM the tmaze package must be installed once per machine (pip install -e . from
+REM the repo root). The still-flat GUIs below run as .py from this host/ dir.
+start "Rig Broker" cmd /k python -X rigsid=%RIG_SID% -m tmaze.io.rig_broker --port %RIG_PORT%
 timeout /t 2 /nobreak >nul
 
 REM Persistent session logger: writes every line to host\data\<animal>_<time>.csv
-start "Rig Logger" cmd /k python -X rigsid=%RIG_SID% rig_logger.py %ANIMAL_ARG%
+start "Rig Logger" cmd /k python -X rigsid=%RIG_SID% -m tmaze.io.rig_logger %ANIMAL_ARG%
 
 REM start "Maze GUI"   python maze_gui.py
 start "Lick Tuner" python -X rigsid=%RIG_SID% lick_tuner.py

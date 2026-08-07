@@ -5,7 +5,7 @@ from tkinter import messagebox
 
 from tmaze.core import protocol
 from tmaze.core.rig_config import load_rig_config
-from rig_io import RigClient
+from tmaze.io.rig_io import RigClient
 
 # ================= CONFIG =================
 BROKER_HOST = "127.0.0.1"
