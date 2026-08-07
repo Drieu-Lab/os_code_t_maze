@@ -246,7 +246,22 @@ no-upward-imports invariant; the placement rule is added to the auto-loaded
   `test_session_phase3_wiring`, occasionally blocks on a window focus grab when
   run in the full non-verbose sweep - pre-existing flakiness of a test that drives
   real Tk, unrelated to this move; captured as FW for a hang-proofing pass.)
-- Subsequent stages carry `Refs ADR-0083` and record their own smoke tests.
+- Stage 5b (`Refs ADR-0083`): the docs pass that finishes the migration. Reversed
+  the "not a package / `cd host` / sibling imports" guidance everywhere it lived
+  and replaced it with the package model (`pip install -e .` once per machine;
+  launch `python -m tmaze.<layer>.<name>`; the placement rule; resolve paths via
+  `tmaze.paths`): `.cursor/rules/conventions.mdc`, `CONTRIBUTING.md`,
+  `host/README.md`, `AGENTS.md`, `pyproject.toml`, and `docs/maze_state_validation.md`.
+  Reconciled `PROGRAMS.md`: the setup/intro sections, the 22 per-test commands
+  (`python -m unittest tests.test_<name>`), the `run_tests.bat` row
+  (`discover -s tests -t .`), and the 17 stale `host/<name>.py` library-table paths
+  for the core/vision modules moved in Stages 1a/1b/3 (now
+  `host/tmaze/<layer>/...`). Captured the intermittent Tk-wiring-test hang as
+  FW-0030. The immutable earlier ADRs (0023/0024/0025/0057/0058) keep their
+  historical "run from host/" wording - this ADR supersedes that guidance rather
+  than rewriting them. **Migration complete:** `host/` root now holds only the
+  config JSON, `data/`, `ratmodels/`, the two `.bat` launchers, `tools/`, and the
+  `tmaze/` package + `tests/` suite.
 - Related conventions: CONTRIBUTING.md #1 (pure core + thin shell), #6
   (organize into homes; defer speculative generality), #7 (one canonical way);
   AGENTS.md "cap change size to human reviewability"; ADR-0075 (the sibling-path

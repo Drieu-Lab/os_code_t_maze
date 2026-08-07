@@ -20,9 +20,13 @@ This project spans **two sibling folders**:
   - [`docs/decisions/`](docs/decisions/) — ADRs explaining *why* key choices
     were made (read the index in [`docs/decisions/README.md`](docs/decisions/README.md)).
   - [`CONTRIBUTING.md`](CONTRIBUTING.md) — how code is written here (the
-    "pure core + thin shell" pattern, the run-from-`host/` rule, the new-coder
-    learning path), framed around minimizing comprehension debt. **Read it before
-    writing or changing host code.**
+    "pure core + thin shell" pattern, the installable-`tmaze`-package layout +
+    placement rule, the new-coder learning path), framed around minimizing
+    comprehension debt. **Read it before writing or changing host code.** The PC
+    tools are an installable package `tmaze` (source under `host/tmaze/`, layered
+    `core / io / vision / ui / tools`; tests in `host/tests/`); run
+    `pip install -e .` from the repo root once per machine, then launch runnables
+    as `python -m tmaze.<layer>.<name>` (see ADR-0083).
   - [`docs/glossary.md`](docs/glossary.md) — plain-language definitions of the
     recurring technical terms (thread, lock, hot path, pure core, snapshot, …).
     Point to it (or gloss briefly) when you use jargon; add new recurring terms.

@@ -24,11 +24,17 @@ merging AI-generated code, the rules in `AGENTS.md`
 ### 1. Pure core + thin shell
 Put decision logic in a **pure core**: stdlib-only, no Tkinter / OpenCV /
 serial, and headless-testable. Put I/O and UI in a **thin shell** that calls the
-core. This split is the backbone of the whole codebase — the pure cores
-([`host/protocol.py`](host/protocol.py), [`host/maze_state.py`](host/maze_state.py),
-[`host/task_events.py`](host/task_events.py), [`host/rules_engine.py`](host/rules_engine.py))
-are small and readable; the shells ([`host/experiment_control.py`](host/experiment_control.py)
-and the `*_view.py` tabs) only wire them to hardware. The firmware mirrors it:
+core. This split is the backbone of the whole codebase, and the folder layout
+now mirrors it: the pure cores live under
+[`host/tmaze/core/`](host/tmaze/core) ([`protocol`](host/tmaze/core/protocol.py),
+[`maze_state`](host/tmaze/core/maze_state.py),
+[`task_events`](host/tmaze/core/task_events.py),
+[`rules_engine`](host/tmaze/core/rules_engine.py)) and are small and readable;
+the shells live in [`host/tmaze/ui/`](host/tmaze/ui)
+([`experiment_control`](host/tmaze/ui/experiment_control.py) and the `*_view`
+tabs), [`host/tmaze/io/`](host/tmaze/io), and
+[`host/tmaze/vision/`](host/tmaze/vision), and only wire the cores to hardware
+(ADR-0083). The firmware mirrors it:
 `task_core.h` is pure, `cue-guided-task.ino` is the shell. New logic goes in a
 core, not in a widget's callback.
 
@@ -77,10 +83,12 @@ don't exist yet (wait for the callers).
 
 ### 7. One canonical way to do each thing
 New code uses the shared utilities rather than re-inventing them: parse firmware
-lines through [`host/protocol.py`](host/protocol.py) (never a hand-rolled
-`line.split(",")`), talk to the broker through [`host/rig_io.py`](host/rig_io.py),
-guard optional deps through [`host/gui_deps.py`](host/gui_deps.py). Two ways to do
-one thing forces every reader to learn the codebase twice.
+lines through [`tmaze.core.protocol`](host/tmaze/core/protocol.py) (never a
+hand-rolled `line.split(",")`), talk to the broker through
+[`tmaze.io.rig_io`](host/tmaze/io/rig_io.py), guard optional deps through
+[`tmaze.ui.gui_deps`](host/tmaze/ui/gui_deps.py), and resolve on-disk paths
+through [`tmaze.paths`](host/tmaze/paths.py) rather than hand-rolled `..` hops.
+Two ways to do one thing forces every reader to learn the codebase twice.
 
 ### 8. Shared vocabulary, consistent naming
 Much of the difficulty here is the *domain*, not Python. Use the task's real
@@ -97,26 +105,44 @@ intent without re-reading everything — the direct antidote to debt.
 
 ## Practical onboarding
 
-### Run everything from `host/`
-The Python tools import sibling modules (`from rig_io import RigClient`) and use
-paths relative to the working directory, so they are **not** a package — always
-`cd host` first (inside the `drieu_t_maze` conda env). Running from the repo root
-will break imports. See [`PROGRAMS.md`](PROGRAMS.md).
+### It's an installable package — `pip install -e .` once
+The PC tools are an installable package **`tmaze`** (source under `host/tmaze/`,
+layered `core / io / vision / ui / tools`; see
+[ADR-0083](docs/decisions/0083-host-tools-become-tmaze-package.md)). Install it
+editable once per machine (including each rig PC after a pull), inside the
+`drieu_t_maze` env:
+
+```
+pip install -e .        # from the repo root
+```
+
+Then `import tmaze` and `python -m tmaze.<layer>.<name>` work from any directory —
+no more `cd host` / sibling imports. Imports are package-qualified
+(`from tmaze.core import protocol`); paths resolve via
+[`tmaze.paths`](host/tmaze/paths.py), never hand-rolled `os.path.dirname(__file__)
++ "/.."` hops. See [`PROGRAMS.md`](PROGRAMS.md) for the exact launch commands.
+
+**Placement rule (where a new module goes).** A *shell* layer
+(`ui` / `vision` / `io`) if it imports Tk / OpenCV / serial; else `core/` (plus
+the right cluster — `reward` / `phase3` / `session` / `records`) if it is pure and
+headless-testable; else `tools/` if it is a standalone runnable. Cores must not
+import `io` / `vision` / `ui`; the boundary is enforced by
+[`host/tests/test_architecture.py`](host/tests/test_architecture.py).
 
 ### A learning path for new coders
 Read in this order — each is a small, pure, tested module, so you can understand
 the system without any hardware:
 
-1. [`host/protocol.py`](host/protocol.py) + [`host/test_protocol.py`](host/test_protocol.py) — the serial line format.
-2. [`host/maze_state.py`](host/maze_state.py) + [`host/test_maze_state.py`](host/test_maze_state.py) — position → discrete maze state.
-3. [`host/task_events.py`](host/task_events.py) + [`host/test_task_events.py`](host/test_task_events.py) — maze state → task vocabulary.
-4. [`host/rules_engine.py`](host/rules_engine.py) + [`host/test_rules_engine.py`](host/test_rules_engine.py) / [`host/test_well_reward.py`](host/test_well_reward.py) — when a reward fires.
+1. [`tmaze/core/protocol.py`](host/tmaze/core/protocol.py) + [`tests/test_protocol.py`](host/tests/test_protocol.py) — the serial line format.
+2. [`tmaze/core/maze_state.py`](host/tmaze/core/maze_state.py) + [`tests/test_maze_state.py`](host/tests/test_maze_state.py) — position → discrete maze state.
+3. [`tmaze/core/task_events.py`](host/tmaze/core/task_events.py) + [`tests/test_task_events.py`](host/tests/test_task_events.py) — maze state → task vocabulary.
+4. [`tmaze/core/rules_engine.py`](host/tmaze/core/rules_engine.py) + [`tests/test_rules_engine.py`](host/tests/test_rules_engine.py) / [`tests/test_well_reward.py`](host/tests/test_well_reward.py) — when a reward fires.
 
-Only then open the GUI shells (`camera_view.py`, `tracker.py`, `tracker_view.py`) —
-they are large and mix Tk + threading + OpenCV.
+Only then open the shells (`tmaze/vision/tracker.py`, `tmaze/ui/camera_view.py`,
+`tmaze/ui/tracker_view.py`) — they are large and mix Tk + threading + OpenCV.
 
 ### Legacy files — don't copy their style
-[`host/maze_gui.py`](host/maze_gui.py) and
+[`host/tmaze/ui/maze_gui.py`](host/tmaze/ui/maze_gui.py) and
 [`host/tools/test_sensors_licks.py`](host/tools/test_sensors_licks.py) predate the
 conventions above (no docstrings, untyped, hand-rolled line parsing). They still
 work, but they are **not** the pattern to imitate; when you touch them,
@@ -124,11 +150,12 @@ migrate them toward the current style rather than extending the old one.
 
 ## Running the tests
 
-From `host/`, in the `drieu_t_maze` env:
+From `host/`, in the `drieu_t_maze` env (the package must be installed —
+`pip install -e .`):
 
 ```
 run_tests.bat            REM Windows: discovers and runs every host test
-python -m unittest discover -p "test_*.py"   REM cross-platform equivalent
+python -m unittest discover -s tests -t .   REM cross-platform equivalent
 ```
 
 Firmware logic has its own host-compiled tests — see

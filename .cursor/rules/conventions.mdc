@@ -10,17 +10,31 @@ Canonical sources, kept deliberately un-duplicated here:
 [CONTRIBUTING.md](../../CONTRIBUTING.md) (how code is written here) and
 [AGENTS.md](../../AGENTS.md) (maintenance contract). Reminders:
 
-## Writing code (`host/**/*.py`)
-- **Pure core + thin shell:** logic in stdlib-only, headless-testable cores
-  (`protocol.py`, `maze_state.py`, `task_events.py`, `rules_engine.py`);
-  Tk/OpenCV/serial in the `*_view.py` shells. Don't grow a GUI file with logic.
-- **Run from `host/`** — sibling imports, not a package. Parse firmware lines via
-  `protocol.py`, reach the broker via `rig_io.py`, guard optional deps via `gui_deps.py`.
+## Writing code (`host/tmaze/**/*.py`)
+- **It's an installable package `tmaze`** (under `host/tmaze/`, layered
+  `core / io / vision / ui / tools`; see ADR-0083). Import package-qualified
+  (`from tmaze.core import protocol`); launch as `python -m tmaze.<layer>.<name>`.
+  Editable-install once per machine: `pip install -e .` from the repo root (also
+  on each rig PC after a pull). No more "`cd host`, sibling imports".
+- **Pure core + thin shell:** logic in stdlib-only, headless-tested cores under
+  `tmaze/core/` (`protocol`, `maze_state`, `task_events`, `rules_engine`, and the
+  `reward/ phase3/ session/ records/` clusters); Tk/OpenCV/serial in the shells
+  (`tmaze/ui/*`, `tmaze/io/*`, `tmaze/vision/*`). Don't grow a GUI file with logic.
+- **Placement rule (where a new module goes):** a *shell* layer
+  (`ui` / `vision` / `io`) if it imports Tk/OpenCV/serial; else `core/` (+ the
+  right cluster) if it's pure and headless-testable; else `tools/` if it's a
+  standalone runnable. Cores must not import `io`/`vision`/`ui` — the
+  `tests/test_architecture.py` boundary test enforces this.
+- **Resolve paths via `tmaze.paths`** (`repo_root()`, `host_dir()`,
+  `package_data()`) or `records.animals.resources_root()` for the sibling repo —
+  never hand-rolled `os.path.dirname(__file__) + "/.."` hops (ADR-0083).
+- Parse firmware lines via `tmaze.core.protocol`, reach the broker via
+  `tmaze.io.rig_io`, guard optional deps via `tmaze.ui.gui_deps`.
 - No magic numbers (named constant or `# see docs/decisions/NNNN`); comments
   explain why, not what; no new abstraction until 2–3 real callers.
-- `maze_gui.py` and `tools/test_sensors_licks.py` are legacy — don't copy them.
-- Any pure-core change ships a `test_*.py`; run `run_tests.bat` (or
-  `python -m unittest discover -p "test_*.py"`) from `host/`.
+- `tmaze.ui.maze_gui` and `tools/test_sensors_licks.py` are legacy — don't copy them.
+- Any pure-core change ships a `tests/test_*.py`; run `run_tests.bat` (or
+  `python -m unittest discover -s tests -t .`) from `host/`.
 
 ## Keeping docs in sync (same change)
 - New/changed runnable → update [PROGRAMS.md](../../PROGRAMS.md) (one line, exact command).

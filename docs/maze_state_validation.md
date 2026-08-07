@@ -1,7 +1,7 @@
 # Maze-state vs beam validation - results note
 
 Companion to [ADR-0025](decisions/0025-maze-state-module.md). Records how the
-vision-derived maze-state transitions (from `host/maze_state.py`) are validated
+vision-derived maze-state transitions (from `tmaze.core.maze_state`) are validated
 against the firmware body-beam edges, and the current results.
 
 ## Why beams are the reference
@@ -14,7 +14,7 @@ the module is that continuous position *adds* what the beams can't give
 (direction up-stem vs returning, completed loops); agreement on the crossings it
 CAN check is the sanity check that the zone map + estimator are correct.
 
-## Method (`host/maze_state_validate.py`)
+## Method (`tmaze.tools.maze_state_validate`)
 
 Two CSVs sharing the host wall-clock timeline:
 
@@ -52,9 +52,8 @@ explained by any beam (candidate false transitions).
 Run:
 
 ```
-cd host
-python maze_state_validate.py --selftest
-python maze_state_validate.py --beams data/<rat>_<t>.csv \
+python -m tmaze.tools.maze_state_validate --selftest
+python -m tmaze.tools.maze_state_validate --beams data/<rat>_<t>.csv \
     --track recordings/track_logs/<rat>_<t>_track.csv --frame-size 1280 1024
 ```
 

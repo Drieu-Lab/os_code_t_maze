@@ -82,6 +82,7 @@ criteria).
 | [FW-0027](#fw-0027-one-triggereffect-framework-behind-phases-1-2a-and-3) | One trigger/effect framework behind Phases 1, 2a and 3 | Rules engine + task-event layer + Phase 3 host | Proposed |
 | [FW-0028](#fw-0028-scope-the-session-summary-to-the-startstop-window) | Scope the session summary to the Start/Stop window | Session controller + summary + stats cores | Proposed |
 | [FW-0029](#fw-0029-real-water-timestamps--hours-since-water-in-the-daily-table) | Real water timestamps + hours-since-water in the daily table | Daily husbandry table + animal_state | Proposed |
+| [FW-0030](#fw-0030-hang-proof-the-tk-gui-wiring-test) | Hang-proof the Tk GUI wiring test | Test suite (`tests/test_session_phase3_wiring.py`) | Proposed |
 
 ## Entries
 
@@ -1426,6 +1427,51 @@ session start" event to cross-check the table?
 
 **ADR needed?** Yes - it changes the daily-table schema and how a motivational
 covariate is derived (a small follow-up to ADR-0076/0077).
+
+### FW-0030: Hang-proof the Tk GUI wiring test
+
+- **Status:** Proposed
+- **Date added:** 2026-08-07
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** `host/tests/test_session_phase3_wiring.py` (the one test that
+  drives real Tk widgets), possibly a small shared Tk-test helper
+- **Related ADRs:** [ADR-0083](decisions/0083-host-tools-become-tmaze-package.md)
+  (the package/test-relocation change during which this was observed)
+
+**Motivation / context.** `test_session_phase3_wiring` is the only suite that
+constructs real Tk shells (a `tk.Tk()` root + the two controllers with a stub
+pipeline). Almost always it runs in a few seconds, but it has **intermittently
+blocked indefinitely** during a full non-verbose `unittest discover` sweep on the
+rig PC (observed twice: once with a stale orphaned Python/Tk process still holding
+a display resource, and once on a clean machine). It passes in isolation, under
+`-v`, and in most full runs, so it is flaky rather than broken - but a hanging
+test with no timeout stalls the whole suite and needs a manual kill, which is a
+poor experience for the humans who run `run_tests.bat` before committing.
+
+**Sketch of approach.** Make the test self-limiting and display-robust: guard the
+Tk lifecycle so a grabbed `Toplevel` / focus grab can't block teardown (ensure
+`grab_release()` + `destroy()` run in `tearDown` even on failure, pump the event
+loop with `update()` rather than blocking calls), and/or wrap the test body in a
+watchdog that fails fast instead of hanging (e.g. a timeout thread that calls
+`root.destroy()`). Consider skipping cleanly when another process holds the
+display, and confirming no non-daemon Tk thread outlives the test. A shared
+Tk-test fixture (setUp/tearDown) would let any future GUI test inherit the same
+guards.
+
+**Evaluation / acceptance.** The full suite (`run_tests.bat`) completes in its
+usual ~10 s with no hang across many repeated non-verbose runs, including
+immediately after a previous run; if the display is genuinely unavailable the test
+skips rather than blocks; no orphaned Python/Tk process survives a run.
+
+**Effort / risk.** Low. Risk is a watchdog that masks a real deadlock - prefer
+fixing the grab/teardown lifecycle over only bolting on a timeout.
+
+**Open questions.** Is the hang purely a focus-grab/teardown issue, or does a
+non-daemon thread (e.g. a `VisionActuator`) sometimes outlive the test? Is a
+per-test timeout or a shared Tk-test base class the better home for the guard?
+
+**ADR needed?** No - a test-robustness fix, not a behavioral or architectural
+decision.
 
 ## Completed
 

@@ -7,25 +7,33 @@ Python tools that talk to the Arduino Due over a shared serial broker.
 From an environment with Python 3 (the lab uses a conda env, e.g. `drieu_t_maze`):
 
 ```
-pip install -r requirements.txt
+pip install -r requirements.txt   # runtime deps
+pip install -e .                  # the tmaze package, editable, from the repo root
 ```
+
+The PC tools are an installable package **`tmaze`** (source under `host/tmaze/`,
+layered `core / io / vision / ui / tools`; see
+[ADR-0083](../docs/decisions/0083-host-tools-become-tmaze-package.md)). The
+editable install makes `import tmaze` and `python -m tmaze...` work from any
+directory; run it once per machine (including each rig PC after a pull). The
+`test_*` suite lives in `host/tests/`.
 
 ## Architecture
 
 ```
-Arduino Due  <--USB serial-->  rig_broker.py  <--TCP localhost:5555-->  N clients
+Arduino Due  <--USB serial-->  tmaze.io.rig_broker  <--TCP localhost:5555-->  N clients
 ```
 
-- `rig_broker.py` - owns the Due's COM port and exposes its byte stream on
+- `tmaze.io.rig_broker` - owns the Due's COM port and exposes its byte stream on
   TCP `localhost:5555`. Run this first.
-- `rig_io.py` - `RigClient`, the shared TCP client used by the GUIs.
-- `maze_gui.py` - live monitor for body sensors, lick sensors, and solenoids.
-- `lick_tuner.py` - real-time traces for tuning the lick-detector amplifiers.
-- `experiment_control.py` - extensible experiment-control GUI; modules fill
+- `tmaze.io.rig_io` - `RigClient`, the shared TCP client used by the GUIs.
+- `tmaze.ui.maze_gui` - live monitor for body sensors, lick sensors, and solenoids.
+- `tmaze.ui.lick_tuner` - real-time traces for tuning the lick-detector amplifiers.
+- `tmaze.ui.experiment_control` - extensible experiment-control GUI; modules fill
   tabs (the first tab shows the maze schematic beside the camera). Add modules
   via the TABS registry.
-- `rig_view.py` - the maze-illustration module used by `experiment_control.py`.
-- `camera_view.py` - the camera module (beside the schematic): live Basler
+- `tmaze.ui.rig_view` - the maze-illustration module used by `experiment_control`.
+- `tmaze.ui.camera_view` - the camera module (beside the schematic): live Basler
   preview + recording (free-run), rotated to match the schematic. A **Format**
   dropdown picks per recording between lossless FFV1 (`.mkv`, bit-exact, large)
   and compressed H.264 (`.mp4`, lossy, ~25-100x smaller, with a CRF quality
@@ -54,15 +62,15 @@ Two consequences worth knowing at the bench: opening the port **resets the board
 so starting the broker begins a fresh firmware session with a new trial sequence,
 and firmware uploads need the "Arduino Due (Programming Port)" board entry.
 
-Or start the pieces manually:
+Or start the pieces manually (from any directory once `pip install -e .` has run):
 
 ```
-python rig_broker.py --port COM3      # terminal 1
-python maze_gui.py                    # terminal 2
-python lick_tuner.py                  # terminal 3
-python experiment_control.py          # terminal 4 (maze illustration)
+python -m tmaze.io.rig_broker --port COM3    # terminal 1
+python -m tmaze.ui.maze_gui                  # terminal 2
+python -m tmaze.ui.lick_tuner                # terminal 3
+python -m tmaze.ui.experiment_control        # terminal 4 (maze illustration)
 ```
 
-`experiment_control.py` is a broker client like the GUIs above, so the broker
-must be running first. It is built to grow: additional modules (reward control,
-trial monitor, ...) are added as notebook tabs.
+`experiment_control` is a broker client like the GUIs above, so the broker must
+be running first. It is built to grow: additional modules (reward control, trial
+monitor, ...) are added as notebook tabs.

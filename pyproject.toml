@@ -1,12 +1,12 @@
-# Packaging for the host tools. The former flat `host/*.py` scripts are being
-# migrated into an installable package `tmaze` that lives under `host/tmaze/`
-# (see docs/decisions for the ADR). Install it once, editable, into the rig's
-# conda env so `import tmaze` and `python -m tmaze...` work from any directory:
+# Packaging for the host tools. The PC-side tools are an installable package
+# `tmaze` under `host/tmaze/`, layered core / io / vision / ui / tools (see
+# docs/decisions/0083). Install it once, editable, into the rig's conda env so
+# `import tmaze` and `python -m tmaze...` work from any directory:
 #
 #   pip install -e .        # run from the repo root, once per machine
 #
-# Only the `tmaze` package is installed; modules not yet migrated still live flat
-# in `host/` and are run from there during the staged migration.
+# The `test_*` suite lives in `host/tests/` (not packaged); everything runnable
+# is a module entry point, `python -m tmaze.<layer>.<name>`.
 [build-system]
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
