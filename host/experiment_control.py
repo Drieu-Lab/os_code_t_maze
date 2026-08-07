@@ -61,7 +61,7 @@ from tooltips import tip
 # Markerless tracker + its control tab are optional (need opencv/numpy/pillow);
 # guard the imports so the GUI still runs if they're missing.
 try:
-    from tracker import RatTracker
+    from tmaze.vision.tracker import RatTracker
     _TRACKER_ERR = None
 except Exception as e:  # pragma: no cover - depends on host environment
     RatTracker = None  # type: ignore
@@ -147,7 +147,7 @@ except Exception:  # pragma: no cover
 # replacing their per-tab estimators. Optional; guarded like the tabs above.
 # See docs/decisions/0041.
 try:
-    from maze_pipeline import MazeStatePipeline
+    from tmaze.vision.maze_pipeline import MazeStatePipeline
     from tmaze.core.maze_state import (
         MazeStateParams, ZoneMap, ZONES_PATH, load_zone_map,
     )

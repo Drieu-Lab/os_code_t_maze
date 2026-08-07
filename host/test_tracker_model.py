@@ -17,8 +17,8 @@ import tempfile
 import unittest
 from dataclasses import asdict, replace
 
-import tracker
-from tracker import (MODEL_PROVENANCE_ONLY_FIELDS, MODEL_REAPPLY_FIELDS,
+from tmaze.vision import tracker
+from tmaze.vision.tracker import (MODEL_PROVENANCE_ONLY_FIELDS, MODEL_REAPPLY_FIELDS,
                      RatModel, TrackerParams)
 
 _HAVE_NUMPY = tracker.np is not None
@@ -80,7 +80,7 @@ class TestRatModelPersistence(unittest.TestCase):
 @unittest.skipUnless(_HAVE_NUMPY and _HAVE_CV2, "numpy + OpenCV required")
 class TestLoadModelRestore(unittest.TestCase):
     def test_load_restores_reapply_fields_only(self):
-        from tracker import RatTracker
+        from tmaze.vision.tracker import RatTracker
         np = tracker.np
         model = RatModel()
         model.acq_params = _CUSTOM
@@ -109,7 +109,7 @@ class TestLoadModelRestore(unittest.TestCase):
                                 f"test bug: {name} must differ to be meaningful")
 
     def test_load_without_settings_keeps_session(self):
-        from tracker import RatTracker
+        from tmaze.vision.tracker import RatTracker
         np = tracker.np
         model = RatModel()  # no acq_params
         model.add_sample(

@@ -80,8 +80,8 @@ except Exception as e:  # pragma: no cover
     print(f"numpy is required: {type(e).__name__}: {e}", file=sys.stderr)
     sys.exit(1)
 
-from tracker import MODEL_REAPPLY_FIELDS, MODEL_SHAPING_FIELDS, RatTracker
-from calibration import Undistorter, load_calibration
+from tmaze.vision.tracker import MODEL_REAPPLY_FIELDS, MODEL_SHAPING_FIELDS, RatTracker
+from tmaze.vision.calibration import Undistorter, load_calibration
 
 # Reuse the rig camera identity + orientation so this view matches camera_view.
 try:

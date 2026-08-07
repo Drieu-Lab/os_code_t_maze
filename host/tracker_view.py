@@ -42,18 +42,18 @@ from gui_deps import Image, ImageTk, cv2, missing_dependency, np
 from preview import PreviewLoop, safe_after
 from still_frame_editor import _StillFrameEditorBase
 from tooltips import tip
-from tracker import TRACK_COLUMNS, track_row
+from tmaze.vision.tracker import TRACK_COLUMNS, track_row
 
 # Shared tracking-overlay drawing (so this preview matches the camera tab's).
 try:
-    from tracker import draw_overlay as _draw_overlay  # noqa: E402
+    from tmaze.vision.tracker import draw_overlay as _draw_overlay  # noqa: E402
 except Exception:  # pragma: no cover
     _draw_overlay = None  # type: ignore
 
 # Canonical fixed landmark set (reward wells + body-sensor beams). Guarded so a
 # missing tracker core doesn't break this module's import.
 try:
-    from tracker import FIXED_LANDMARKS as _FIXED_LANDMARKS  # noqa: E402
+    from tmaze.vision.tracker import FIXED_LANDMARKS as _FIXED_LANDMARKS  # noqa: E402
 except Exception:  # pragma: no cover
     _FIXED_LANDMARKS = ()  # type: ignore
 
@@ -61,7 +61,7 @@ except Exception:  # pragma: no cover
 # get restored on load, and which of those are the correctness-critical shaping
 # knobs (a proc_max_w change means the background must be re-grabbed).
 try:
-    from tracker import (MODEL_REAPPLY_FIELDS as _MODEL_REAPPLY_FIELDS,  # noqa: E402
+    from tmaze.vision.tracker import (MODEL_REAPPLY_FIELDS as _MODEL_REAPPLY_FIELDS,  # noqa: E402
                          MODEL_SHAPING_FIELDS as _MODEL_SHAPING_FIELDS)
 except Exception:  # pragma: no cover
     _MODEL_REAPPLY_FIELDS = ()  # type: ignore

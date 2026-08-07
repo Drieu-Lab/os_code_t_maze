@@ -46,20 +46,20 @@ from typing import Optional, Tuple
 from gui_deps import (  # noqa: E402
     Image, ImageTk, _AV_ERR, av, cv2, missing_dependency, np, pylon,
 )
-from calibration import Undistorter, load_calibration  # noqa: E402
+from tmaze.vision.calibration import Undistorter, load_calibration  # noqa: E402
 from tmaze.core import protocol  # noqa: E402  (shared serial-line parser; see docs/decisions/0024)
 from tmaze.core.maze_state import IN_WELL as _IN_WELL  # noqa: E402  (HUB well substate label)
 from preview import render_bgr_to_label, safe_after  # noqa: E402
 from tooltips import tip  # noqa: E402
-from tracker import TRACK_COLUMNS, track_row  # noqa: E402
-from track_worker import LatestFrameSlot, TrackPublisher  # noqa: E402
+from tmaze.vision.tracker import TRACK_COLUMNS, track_row  # noqa: E402
+from tmaze.vision.track_worker import LatestFrameSlot, TrackPublisher  # noqa: E402
 
 # Shared tracking-overlay drawing (also used by the Tracking tab so previews
 # match). Guarded: tracking deps may be absent without breaking the camera tab.
 # draw_landmarks_overlay lets the Rig view toggle landmarks on their own; the
 # zone overlay + colours are shared with the Maze state tab.
 try:
-    from tracker import (  # noqa: E402
+    from tmaze.vision.tracker import (  # noqa: E402
         draw_overlay as _draw_track_overlay_shared,
         draw_landmarks_overlay as _draw_landmarks_shared,
     )

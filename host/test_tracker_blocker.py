@@ -17,8 +17,8 @@ import os
 import tempfile
 import unittest
 
-import tracker
-from tracker import RatTracker, TrackerParams
+from tmaze.vision import tracker
+from tmaze.vision.tracker import RatTracker, TrackerParams
 
 _HAVE = tracker.np is not None and tracker.cv2 is not None
 

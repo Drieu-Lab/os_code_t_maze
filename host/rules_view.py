@@ -62,7 +62,7 @@ from tooltips import tip
 from tmaze.io.vision_actuator import VisionActuator
 
 try:
-    from tracker import draw_overlay as _draw_overlay  # noqa: E402
+    from tmaze.vision.tracker import draw_overlay as _draw_overlay  # noqa: E402
 except Exception:  # pragma: no cover
     _draw_overlay = None  # type: ignore
 

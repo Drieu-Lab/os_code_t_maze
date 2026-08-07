@@ -17,7 +17,7 @@ import threading
 import time
 import unittest
 
-from track_worker import LatestFrameSlot, TrackPublisher
+from tmaze.vision.track_worker import LatestFrameSlot, TrackPublisher
 
 
 class TestLatestFrameSlot(unittest.TestCase):

@@ -165,6 +165,22 @@ no-upward-imports invariant; the placement rule is added to the auto-loaded
   clean; all 5 io modules import and both `-m` entry points respond to `--help`;
   `experiment_control` imports cleanly; **523 passed, 0 skipped** in the rig env
   (unchanged from the pre-stage rig-env baseline).
+- Stage 3 (`Refs ADR-0083`): moved the vision layer into `host/tmaze/vision/`:
+  `tracker`, `track_worker`, `maze_pipeline`, `calibration`. No path anchoring
+  needed - `tracker`/`calibration` take their model/ROI/calibration paths from
+  callers (the `host/ratmodels/` + `host/roi_polygon.json` defaults live in the
+  still-flat `tracker_view`/`blob_tracker_prototype`, so they move with the ui/
+  tools stages). Kept the stage single-purpose (vision only): the standalone
+  tools were left flat because they still depend on not-yet-moved layers
+  (`blob_tracker_prototype` -> `camera_view` (ui); `maze_state_validate` ->
+  `test_maze_state` (flat test)); they get only the import rewrite and move once
+  those land. `gui_deps`/`zone_overlay` stay flat too (ui-shared) - none of the
+  4 vision cores import them. Imports rewritten across 11 files. Verified in the
+  rig env: no stale flat imports; `compileall` clean; all 4 vision modules import
+  with real cv2 4.13.0; **523 passed, 0 skipped** (the tracker/pipeline tests run
+  unskipped with cv2 present). Camera smoke: grabbed 6 live Basler frames
+  (1280x1024 BGR) and ran them through the moved `tracker.process()` reference-
+  diff path - returned a valid `TrackResult` (cv2 mask computed).
 - Subsequent stages carry `Refs ADR-0083` and record their own smoke tests.
 - Related conventions: CONTRIBUTING.md #1 (pure core + thin shell), #6
   (organize into homes; defer speculative generality), #7 (one canonical way);

@@ -45,7 +45,7 @@ from tmaze.core.maze_state import (
 # Shared tracking overlay (ROI/landmarks/path/centroid) + the per-kind landmark
 # colours, guarded so a missing tracker core doesn't break this module's import.
 try:
-    from tracker import (  # noqa: E402
+    from tmaze.vision.tracker import (  # noqa: E402
         draw_overlay as _draw_overlay,
         LANDMARK_COLORS as _LANDMARK_COLORS,
         _LANDMARK_DEFAULT_COLOR as _LANDMARK_DEFAULT,

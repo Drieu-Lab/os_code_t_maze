@@ -20,7 +20,7 @@ import time
 import types
 import unittest
 
-from maze_pipeline import DEFAULT_QUEUE_MAX, MazeStatePipeline
+from tmaze.vision.maze_pipeline import DEFAULT_QUEUE_MAX, MazeStatePipeline
 from tmaze.core.maze_state import HUB, LEFT_CHOICE, MazeStateParams
 from test_maze_state import make_zone_map  # reuse the estimator test fixture
 
