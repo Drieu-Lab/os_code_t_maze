@@ -4,14 +4,14 @@
   },
   "reward": {
     "port": 2,
-    "pulse_ms": 500,
-    "max_topups": 3,
+    "pulse_ms": 250,
+    "max_topups": 1,
     "reward_incorrect": false
   },
   "cue": {
     "choice_enabled": true,
     "return_enabled": true,
-    "require_up_stem": true,
+    "require_up_stem": false,
     "min_confidence": 0.0
   },
   "sequence": {
