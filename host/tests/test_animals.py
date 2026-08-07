@@ -15,9 +15,12 @@ import os
 import tempfile
 import unittest
 
+import json
+
 from tmaze.core.records.animals import (
-    AnimalRegistry, animals_json_path, load_registry, parse_registry,
-    resources_root)
+    AnimalRegistry, animals_json_path, load_records, load_registry,
+    normalize_records, parse_registry, resources_root, validate_records,
+    write_records)
 
 _SAMPLE = (
     '{"schema_version": 1, "animals": ['
@@ -111,6 +114,73 @@ class TestResolver(unittest.TestCase):
                 del os.environ["OS_CODE_T_MAZE_RESOURCES"]
             else:
                 os.environ["OS_CODE_T_MAZE_RESOURCES"] = prev
+
+
+class TestRosterEditing(unittest.TestCase):
+    def test_normalize_trims_and_dedups_aliases(self):
+        recs = normalize_records([
+            {"id": " 600 ", "aliases": ["Rat 600", "Rat 600", " ", "R600"]},
+            {"id": "", "aliases": ["x"]},                     # dropped (blank id)
+            {"id": "601"},                                     # no aliases key
+        ])
+        self.assertEqual(recs, [
+            {"id": "600", "aliases": ["Rat 600", "R600"]},
+            {"id": "601", "aliases": []},
+        ])
+
+    def test_validate_ok(self):
+        self.assertEqual(validate_records(
+            [{"id": "600", "aliases": ["Rat 600"]}, {"id": "601"}]), [])
+
+    def test_validate_blank_id(self):
+        errs = validate_records([{"id": ""}])
+        self.assertTrue(any("blank id" in e for e in errs))
+
+    def test_validate_duplicate_and_ambiguous_ids(self):
+        self.assertTrue(any("Duplicate" in e
+                            for e in validate_records([{"id": "600"},
+                                                       {"id": "600"}])))
+        self.assertTrue(any("Ambiguous" in e
+                            for e in validate_records([{"id": "600"},
+                                                       {"id": "6 0 0"}])))
+
+    def test_validate_alias_collision(self):
+        errs = validate_records([{"id": "600", "aliases": ["601"]},
+                                 {"id": "601"}])
+        self.assertTrue(any("collides" in e for e in errs))
+
+    def test_write_records_roundtrip_and_preserves_schema(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "animals.json")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(_SAMPLE)
+            write_records([{"id": "600", "aliases": ["Rat 600", "Kalmia"]},
+                           {"id": "700", "aliases": []}], path)
+            with open(path, "r", encoding="utf-8") as fh:
+                doc = json.load(fh)
+            recs = load_records(path)
+            # A round-tripped file still loads as a working registry.
+            normalized = load_registry(path).normalize("Kalmia")
+        self.assertEqual(doc["schema_version"], 1)
+        self.assertEqual([r["id"] for r in recs], ["600", "700"])
+        self.assertIn("Kalmia", recs[0]["aliases"])
+        self.assertEqual(normalized, "600")
+
+    def test_write_records_rejects_invalid_without_writing(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "animals.json")
+            with self.assertRaises(ValueError):
+                write_records([{"id": "600"}, {"id": "600"}], path)
+            self.assertFalse(os.path.exists(path))
+
+    def test_write_records_defaults_schema_when_absent(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "animals.json")
+            write_records([{"id": "600"}], path)
+            with open(path, "r", encoding="utf-8") as fh:
+                doc = json.load(fh)
+        self.assertIn("_schema", doc)
+        self.assertEqual(doc["schema_version"], 1)
 
 
 if __name__ == "__main__":

@@ -13,9 +13,9 @@ analysis) and it re-scans every bundle, so it never double-counts. The outputs
 land under the recordings root, which is git-ignored (``host/data/``), matching
 how the resources repo treats ``planning/outputs/`` - regenerate, don't version.
 
-Run from host/ (conda env drieu_t_maze):
-    python build_session_registry.py                 # default recordings root
-    python build_session_registry.py --root PATH     # a custom root
+Run (conda env drieu_t_maze; from anywhere - paths resolve by landmark search):
+    python -m tmaze.tools.build_session_registry              # default recordings root
+    python -m tmaze.tools.build_session_registry --root PATH  # a custom root
 """
 
 from __future__ import annotations

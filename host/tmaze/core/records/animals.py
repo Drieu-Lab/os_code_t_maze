@@ -144,3 +144,170 @@ def load_registry(path: Optional[str] = None) -> AnimalRegistry:
             return parse_registry(fh.read())
     except (OSError, ValueError):
         return AnimalRegistry()
+
+
+# --------------------------------------------------------------------------- #
+# Roster editing (Records Manager GUI). animals.json is the single source of
+# truth for identity, so the writer validates before it touches disk and never
+# drops the human-readable ``_schema`` note.
+# --------------------------------------------------------------------------- #
+
+# Kept in step with animals.json's own ``schema_version`` (ADR-0075).
+ANIMALS_SCHEMA_VERSION = 1
+
+# Restored if an existing file has no ``_schema`` block, so a GUI-written file
+# stays self-documenting.
+_DEFAULT_SCHEMA = {
+    "note": (
+        "Canonical animal identity (ADR-0075). Each entry is {id, aliases}; the "
+        "id is the lab's rat number used to key session recordings to husbandry "
+        "records. Aliases match loosely (case-, space- and punctuation-"
+        "insensitive), so 'Rat 600' resolves to '600'. This is the single source "
+        "of truth for animal identity, read by the rig at Session Start and by "
+        "the records builders."
+    )
+}
+
+
+def load_records(path: Optional[str] = None) -> List[Dict[str, object]]:
+    """The raw ``[{id, aliases}]`` roster (best-effort; [] if missing/malformed).
+
+    Unlike :func:`load_registry`, this keeps each animal's aliases so the GUI can
+    show and edit them. Each entry is normalised to ``{"id": str,
+    "aliases": [str, ...]}``.
+    """
+    p = path or animals_json_path()
+    try:
+        with open(p, "r", encoding="utf-8") as fh:
+            raw = json.load(fh)
+    except (OSError, ValueError):
+        return []
+    if not isinstance(raw, dict) or not isinstance(raw.get("animals"), list):
+        return []
+    return normalize_records(raw["animals"])
+
+
+def normalize_records(
+        records: List[Dict[str, object]]) -> List[Dict[str, object]]:
+    """Trim ids, drop blank/duplicate aliases, coerce to ``{id, aliases}``.
+
+    Blank ids are dropped. Alias order is preserved (first occurrence wins).
+    """
+    out: List[Dict[str, object]] = []
+    for rec in records or []:
+        if not isinstance(rec, dict):
+            continue
+        aid = str(rec.get("id", "")).strip()
+        if not aid:
+            continue
+        aliases: List[str] = []
+        seen = set()
+        raw_aliases = rec.get("aliases") or []
+        if isinstance(raw_aliases, list):
+            for alias in raw_aliases:
+                a = str(alias).strip()
+                if a and a not in seen:
+                    seen.add(a)
+                    aliases.append(a)
+        out.append({"id": aid, "aliases": aliases})
+    return out
+
+
+def validate_records(records: List[Dict[str, object]]) -> List[str]:
+    """Human-readable problems with a roster; [] means it's safe to write.
+
+    Catches blank ids, duplicate/loosely-colliding ids (e.g. "600" and "Rat 600"
+    as two separate animals), and an alias that would resolve to a *different*
+    animal than its owner (which would make normalization ambiguous).
+    """
+    errors: List[str] = []
+    id_keys: Dict[str, str] = {}
+    for i, rec in enumerate(records or []):
+        aid = str(rec.get("id", "")).strip() if isinstance(rec, dict) else ""
+        if not aid:
+            errors.append(f"Animal #{i + 1}: blank id")
+            continue
+        k = _key(aid)
+        if k in id_keys:
+            other = id_keys[k]
+            if other == aid:
+                errors.append(f"Duplicate id '{aid}'")
+            else:
+                errors.append(
+                    f"Ambiguous ids '{aid}' and '{other}' collapse to the "
+                    "same key")
+        id_keys[k] = aid
+
+    # Alias collisions across the whole roster (an alias may only ever point at
+    # its own animal). Seed the claim map with every canonical id first.
+    claim: Dict[str, str] = {}
+    for rec in records or []:
+        if not isinstance(rec, dict):
+            continue
+        aid = str(rec.get("id", "")).strip()
+        if aid:
+            claim.setdefault(_key(aid), aid)
+    for rec in records or []:
+        if not isinstance(rec, dict):
+            continue
+        aid = str(rec.get("id", "")).strip()
+        if not aid:
+            continue
+        for alias in rec.get("aliases") or []:
+            k = _key(alias)
+            if not k:
+                continue
+            owner = claim.get(k)
+            if owner is None:
+                claim[k] = aid
+            elif owner != aid:
+                errors.append(
+                    f"Alias '{alias}' for '{aid}' collides with '{owner}'")
+    return errors
+
+
+def _read_meta(path: str) -> Dict[str, object]:
+    """Preserve an existing file's ``_schema`` + ``schema_version`` (or defaults)."""
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            raw = json.load(fh)
+        if isinstance(raw, dict):
+            return {
+                "_schema": raw.get("_schema", _DEFAULT_SCHEMA),
+                "schema_version": raw.get("schema_version",
+                                          ANIMALS_SCHEMA_VERSION),
+            }
+    except (OSError, ValueError):
+        pass
+    return {"_schema": _DEFAULT_SCHEMA, "schema_version": ANIMALS_SCHEMA_VERSION}
+
+
+def write_records(records: List[Dict[str, object]],
+                  path: Optional[str] = None) -> List[Dict[str, object]]:
+    """Validate + write the roster to animals.json atomically; return it cleaned.
+
+    Raises ``ValueError`` (without touching disk) if :func:`validate_records`
+    finds a problem, so a bad edit can't corrupt the identity source of truth.
+    Preserves the ``_schema`` note and ``schema_version`` of any existing file.
+    Writes to a temp file then ``os.replace``.
+    """
+    cleaned = normalize_records(records)
+    errors = validate_records(cleaned)
+    if errors:
+        raise ValueError("Invalid animal roster:\n  " + "\n  ".join(errors))
+
+    p = path or animals_json_path()
+    meta = _read_meta(p)
+    doc = {
+        "_schema": meta["_schema"],
+        "schema_version": meta["schema_version"],
+        "animals": cleaned,
+    }
+    parent = os.path.dirname(os.path.abspath(p))
+    os.makedirs(parent, exist_ok=True)
+    tmp = p + ".tmp"
+    with open(tmp, "w", encoding="utf-8", newline="") as fh:
+        json.dump(doc, fh, indent=2, ensure_ascii=False)
+        fh.write("\n")
+    os.replace(tmp, p)
+    return cleaned

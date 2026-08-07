@@ -1,10 +1,11 @@
 """
-test_daily_log.py - headless tests for the daily-husbandry-table reader.
+test_daily_log.py - headless tests for the daily-husbandry-table reader/writer.
 
 Covers the pure ``daily_log`` core (docs/decisions/0076/0077): skipping the
 `# schema_version` comment line, the exact `(animal, date)` lookup, the
-most-recent-on-or-before lookup, and the tolerant load of a missing file. Pure
-stdlib; no hardware/Tk.
+most-recent-on-or-before lookup, the tolerant load of a missing file, and the
+Records Manager writer path (``compute_pct_baseline``, ``upsert_rows``,
+``write_rows`` round-trip / atomic on-disk shape). Pure stdlib; no hardware/Tk.
 
 Run from host/:  python -m unittest test_daily_log
 """
@@ -15,7 +16,14 @@ import os
 import tempfile
 import unittest
 
-from tmaze.core.records.daily_log import DailyLog, load, load_rows
+from tmaze.core.records.daily_log import (
+    DailyLog,
+    compute_pct_baseline,
+    load,
+    load_rows,
+    upsert_rows,
+    write_rows,
+)
 
 _CSV = (
     "# schema_version=1\n"
@@ -81,6 +89,93 @@ def load_rows_text(text):
         with open(path, "w", encoding="utf-8", newline="") as fh:
             fh.write(text)
         return load_rows(path)
+
+
+class TestComputePctBaseline(unittest.TestCase):
+    def test_fraction_rounded_4dp(self):
+        self.assertEqual(compute_pct_baseline(330, 348), round(330 / 348, 4))
+
+    def test_accepts_strings(self):
+        self.assertEqual(compute_pct_baseline("332", "348"), round(332 / 348, 4))
+
+    def test_blank_or_zero_or_bad_is_none(self):
+        self.assertIsNone(compute_pct_baseline("", 348))
+        self.assertIsNone(compute_pct_baseline(330, 0))
+        self.assertIsNone(compute_pct_baseline(330, ""))
+        self.assertIsNone(compute_pct_baseline("abc", 348))
+
+
+class TestWriteRows(unittest.TestCase):
+    def test_roundtrip_and_on_disk_shape(self):
+        rows = [
+            {"animal_id": "600", "date": "2026-07-02", "weight_g": "332",
+             "baseline_g": "348", "pct_baseline": "0.954", "water_on": "6pm",
+             "water_off": "7pm", "water_ml": "", "supp_water": "", "notes": ""},
+            {"animal_id": "601", "date": "2026-07-02", "weight_g": "338",
+             "baseline_g": "350", "pct_baseline": "0.9657", "water_on": "6pm",
+             "water_off": "7pm", "water_ml": "", "supp_water": "", "notes": ""},
+        ]
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "daily_log.csv")
+            write_rows(rows, path)
+            with open(path, "r", encoding="utf-8", newline="") as fh:
+                first = fh.readline()
+            self.assertEqual(first, "# schema_version=1\n")
+            back = load_rows(path)
+        self.assertEqual(len(back), 2)
+        self.assertEqual(back[0]["animal_id"], "600")
+
+    def test_dedup_last_wins_and_sorted(self):
+        rows = [
+            {"animal_id": "601", "date": "2026-07-02", "weight_g": "338"},
+            {"animal_id": "600", "date": "2026-07-03", "weight_g": "330"},
+            {"animal_id": "600", "date": "2026-07-02", "weight_g": "1"},
+            {"animal_id": "600", "date": "2026-07-02", "weight_g": "332"},
+        ]
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "daily_log.csv")
+            written = write_rows(rows, path)
+        keys = [(r["animal_id"], r["date"]) for r in written]
+        self.assertEqual(keys, [("600", "2026-07-02"),
+                                ("600", "2026-07-03"),
+                                ("601", "2026-07-02")])
+        self.assertEqual(written[0]["weight_g"], "332")
+
+    def test_creates_missing_parent_dir(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "nested", "sub", "daily_log.csv")
+            write_rows([{"animal_id": "600", "date": "2026-07-02"}], path)
+            self.assertTrue(os.path.exists(path))
+
+
+class TestUpsertRows(unittest.TestCase):
+    def test_edit_replaces_matching_key(self):
+        existing = load_rows_text(_CSV)
+        edit = {"animal_id": "600", "date": "2026-07-03", "weight_g": "999",
+                "notes": "corrected"}
+        merged = upsert_rows(existing, [edit])
+        target = [r for r in merged
+                  if r["animal_id"] == "600" and r["date"] == "2026-07-03"]
+        self.assertEqual(len(target), 1)
+        self.assertEqual(target[0]["weight_g"], "999")
+        self.assertEqual(target[0]["notes"], "corrected")
+
+    def test_new_key_is_added_without_dropping_others(self):
+        existing = load_rows_text(_CSV)
+        add = {"animal_id": "602", "date": "2026-07-02", "weight_g": "300"}
+        merged = upsert_rows(existing, [add])
+        keys = {(r["animal_id"], r["date"]) for r in merged}
+        self.assertIn(("602", "2026-07-02"), keys)
+        self.assertIn(("600", "2026-07-02"), keys)
+        self.assertIn(("601", "2026-07-02"), keys)
+        self.assertEqual(len(merged), len(existing) + 1)
+
+    def test_does_not_mutate_inputs(self):
+        existing = load_rows_text(_CSV)
+        before = len(existing)
+        upsert_rows(existing, [{"animal_id": "600", "date": "2026-07-02",
+                                "weight_g": "0"}])
+        self.assertEqual(len(existing), before)
 
 
 if __name__ == "__main__":

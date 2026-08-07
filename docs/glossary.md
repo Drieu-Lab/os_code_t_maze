@@ -177,6 +177,16 @@ off whole. The Tk [poll](#poll--poll-loop) publishes a "gate snapshot" that the
 actuation [thread](#thread) reads all at once, so the thread never sees a
 half-updated mix of GUI values. See ADR-0043.
 
+### Source of truth
+The one file that *owns* a piece of data; everything else is derived from it and
+must never silently disagree. For the lab records these are the diffable CSV/JSON
+files — `animals.json` (identity), `daily_log.csv` (daily husbandry),
+`session_annotations.csv` (per-session notes) — while the Excel workbooks are
+*generated views / hand-editable fallbacks* reconciled back by an
+[upsert](#upsert-keyed-merge). Keeping a single source of truth is what lets the
+rig, the builders, and the [Records Manager](#tk--tkinter) GUI all read the same
+data without it drifting apart. See ADR-0076, ADR-0085.
+
 ### Stamped note entry
 One operator observation recorded as a *timestamped event* rather than a line in
 a free-text blob: it carries when it happened (wall-clock time + the steady
@@ -249,6 +259,15 @@ difference matters:
   rate here, and opening the port resets the board.
 
 See ADR-0062, ADR-0064 and ADR-0065.
+
+### Upsert (keyed merge)
+Update-or-insert: fold a batch of edited rows into an existing table *by a key*
+(e.g. `(animal_id, date)` for the daily log, `session_id` for annotations),
+replacing the matching row or adding a new one, and leaving every other row
+untouched. The records tools upsert rather than overwrite so that a save from the
+[Records Manager](#tk--tkinter) GUI can't drop a row someone added straight in
+Excel (and vice-versa) — the basis of the reversible CSV<->Excel design. The one
+thing an upsert can't carry across surfaces is a *deletion*. See ADR-0085.
 
 ### Watchdog
 Code whose only job is to notice that something has stopped working and raise the
