@@ -24,7 +24,7 @@ import tkinter as tk
 from tkinter import ttk
 from typing import Callable, Dict, Optional
 
-from phase3_log import Phase3StateSnapshot
+from tmaze.core.phase3.phase3_log import Phase3StateSnapshot
 
 try:
     from tooltips import tip

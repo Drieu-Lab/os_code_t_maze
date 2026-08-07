@@ -57,7 +57,7 @@ from tmaze.core.reward import reward_volume
 
 if TYPE_CHECKING:  # type-only imports - no runtime coupling to the stats cores
     from tmaze.core.behavior_stats import BehaviorSnapshot
-    from phase3_stats import Phase3Stats
+    from tmaze.core.phase3.phase3_stats import Phase3Stats
 
 # Bump when the summary JSON layout changes so an offline reader can branch on it.
 # v2 adds the operator ``notes``, the folded ``task_params``, and the estimated

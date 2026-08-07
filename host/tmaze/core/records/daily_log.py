@@ -30,7 +30,7 @@ import csv
 import os
 from typing import Dict, List, Optional
 
-import animals
+from tmaze.core.records import animals
 
 # Column order mirrors the resources builder (records/animal/build_daily_log.py).
 FIELDS = [

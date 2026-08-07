@@ -45,9 +45,9 @@ from typing import Optional
 from preview import safe_after
 from tooltips import tip
 
-import phase3_stats
+from tmaze.core.phase3 import phase3_stats
 from tmaze.core.behavior_stats import BehaviorStats
-from session_timer import SessionTimer
+from tmaze.core.session.session_timer import SessionTimer
 from tmaze.core.task_events import TaskEvents
 
 try:

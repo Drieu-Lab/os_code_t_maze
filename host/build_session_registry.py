@@ -23,9 +23,9 @@ from __future__ import annotations
 import argparse
 import os
 
-import daily_log
-import note_tags
-import session_registry
+from tmaze.core.records import daily_log
+from tmaze.core.records import note_tags
+from tmaze.core.session import session_registry
 
 # Default recordings root + the note-tag vocabulary location, resolved relative
 # to this file so the script runs from any working directory (host/ convention).

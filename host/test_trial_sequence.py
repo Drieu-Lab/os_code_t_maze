@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import unittest
 
-from trial_sequence import (
+from tmaze.core.phase3.trial_sequence import (
     HIGH, LEFT, LOW, RIGHT, TrialConfig, TrialSequence, cue_for,
     generate_balanced, generate_sequence, lcg, max_run_ok,
 )

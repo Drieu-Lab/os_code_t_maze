@@ -12,7 +12,7 @@ reset clearing everything, and the pre-start empty state. See docs/decisions/003
 
 import unittest
 
-from session_timer import SessionTimer
+from tmaze.core.session.session_timer import SessionTimer
 
 
 class TestSessionTimer(unittest.TestCase):

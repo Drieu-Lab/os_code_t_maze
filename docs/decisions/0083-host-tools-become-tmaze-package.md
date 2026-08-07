@@ -132,6 +132,21 @@ no-upward-imports invariant; the placement rule is added to the auto-loaded
   so `run_tests.bat` discovery keeps working throughout. Verified: `compileall`
   clean; every `tmaze.core` submodule imports; `rig_config` header resolves and
   exists; **523 passed, 17 skipped** (522 baseline + the new boundary test).
+- Stage 1b (`Refs ADR-0083`): moved the remaining pure cores into three
+  clusters under `host/tmaze/core/`. `phase3/`: `trial_sequence`,
+  `phase3_config`, `phase3_task`, `phase3_log`, `phase3_stats`, `phase3_ribbon`.
+  `session/`: `session_serial`, `session_summary`, `session_config`,
+  `session_log`, `session_meta`, `session_notes`, `session_registry`,
+  `session_timer`. `records/`: `animals`, `daily_log`, `animal_state`,
+  `note_tags`. The two `*_controller` shells (Tk) and the `build_session_registry`
+  tool stayed flat (they get only the import rewrite). Re-anchored
+  `animals.resources_root()` - the sibling-repo resolver (ADR-0075) - through
+  `tmaze.paths.repo_root()`, retiring its `..`-hop. Imports rewritten across 32
+  files by the same one-off, deleted script. Verified: no stale flat imports;
+  `compileall` clean; all 34 `tmaze.core` submodules import; `resources_root()`
+  resolves to the real sibling repo (`animals.json` present); **523 passed, 17
+  skipped** (unchanged). After 1b, everything left flat in `host/` is a shell
+  (`ui`/`io`/`vision`) or a `tool` - the pure core is fully packaged.
 - Subsequent stages carry `Refs ADR-0083` and record their own smoke tests.
 - Related conventions: CONTRIBUTING.md #1 (pure core + thin shell), #6
   (organize into homes; defer speculative generality), #7 (one canonical way);

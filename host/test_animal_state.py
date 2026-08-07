@@ -13,8 +13,8 @@ from __future__ import annotations
 import json
 import unittest
 
-import animal_state
-from animal_state import AnimalState
+from tmaze.core.records import animal_state
+from tmaze.core.records.animal_state import AnimalState
 
 
 class TestFromDailyRow(unittest.TestCase):

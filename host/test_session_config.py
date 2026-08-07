@@ -9,7 +9,7 @@ import os
 import tempfile
 import unittest
 
-import session_config
+from tmaze.core.session import session_config
 
 
 def _write(path: str, text: str) -> None:

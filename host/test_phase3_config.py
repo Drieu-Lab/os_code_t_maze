@@ -17,12 +17,12 @@ import tempfile
 import unittest
 
 from tmaze.core.cue_gate import CueParams
-from phase3_config import (
+from tmaze.core.phase3.phase3_config import (
     DEFAULT_MAX_TOPUPS, default_config, load_phase3_config, resolve_seed,
     reward_max_topups, save_phase3_config, to_cue_params, to_phase3_config,
     to_trial_config, validate_phase3_config)
-from phase3_task import Phase3Config
-from trial_sequence import TrialConfig
+from tmaze.core.phase3.phase3_task import Phase3Config
+from tmaze.core.phase3.trial_sequence import TrialConfig
 
 
 class TestDefaults(unittest.TestCase):

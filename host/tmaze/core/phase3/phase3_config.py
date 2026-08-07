@@ -39,8 +39,8 @@ import json
 from typing import Optional
 
 from tmaze.core.cue_gate import CueParams
-from phase3_task import Phase3Config
-from trial_sequence import TrialConfig
+from tmaze.core.phase3.phase3_task import Phase3Config
+from tmaze.core.phase3.trial_sequence import TrialConfig
 
 # Default number of lick top-ups at the well after the correct-choice prime
 # (ADR-0069). Not a field on Phase3Config (it belongs to the WellDispenser the

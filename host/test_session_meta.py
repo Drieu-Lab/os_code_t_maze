@@ -15,7 +15,7 @@ import os
 import tempfile
 import unittest
 
-import session_meta
+from tmaze.core.session import session_meta
 
 
 class TestBuild(unittest.TestCase):

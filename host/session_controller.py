@@ -89,22 +89,22 @@ from datetime import datetime
 from tkinter import messagebox, simpledialog, ttk
 from typing import Any, Callable, Optional
 
-import animal_state
-import animals
-import daily_log
-import note_tags
-import phase3_config
-import phase3_stats
+from tmaze.core.records import animal_state
+from tmaze.core.records import animals
+from tmaze.core.records import daily_log
+from tmaze.core.records import note_tags
+from tmaze.core.phase3 import phase3_config
+from tmaze.core.phase3 import phase3_stats
 from tmaze.core import protocol
 from tmaze.core.reward import reward_volume
-import session_config
-import session_meta
-import session_notes
-import session_summary
+from tmaze.core.session import session_config
+from tmaze.core.session import session_meta
+from tmaze.core.session import session_notes
+from tmaze.core.session import session_summary
 from tmaze.core.rig_config import load_rig_config
-from session_log import SessionManifest, clock_snapshot, path_within_session
-from session_serial import is_sensor_or_central
-from session_timer import SessionTimer
+from tmaze.core.session.session_log import SessionManifest, clock_snapshot, path_within_session
+from tmaze.core.session.session_serial import is_sensor_or_central
+from tmaze.core.session.session_timer import SessionTimer
 
 # Fallback recordings root if experiment_control doesn't pass one; normally the
 # GUI passes <camera default>/phase3_recordings (see docs/decisions/0049).

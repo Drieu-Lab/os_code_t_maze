@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 import unittest
 
-from session_log import (
+from tmaze.core.session.session_log import (
     FIDUCIAL_METHOD, SCHEMA_VERSION, SessionManifest, clock_snapshot,
     path_within_session,
 )

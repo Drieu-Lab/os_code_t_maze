@@ -62,7 +62,7 @@ import json
 import os
 from typing import Any, Dict, List, Optional, Tuple
 
-import session_notes
+from tmaze.core.session import session_notes
 
 # Bump when the registry CSV column set / semantics change so an offline reader
 # can branch on it (written as a leading `# schema_version=N` comment line, the

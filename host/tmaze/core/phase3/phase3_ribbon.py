@@ -29,8 +29,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import List, Optional
 
-from phase3_log import Phase3StateSnapshot
-from trial_sequence import HIGH
+from tmaze.core.phase3.phase3_log import Phase3StateSnapshot
+from tmaze.core.phase3.trial_sequence import HIGH
 
 # The ribbon shows the current trial flanked by this many resolved trials behind
 # it and upcoming trials ahead of it (a 7-trial window at most; clamped near the

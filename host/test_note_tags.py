@@ -15,7 +15,7 @@ import os
 import tempfile
 import unittest
 
-from note_tags import (
+from tmaze.core.records.note_tags import (
     DuplicateTagError, TagVocabulary, load_tags, save_tags)
 
 

@@ -18,9 +18,9 @@ from tmaze.core.maze_state import (
     HUB, CENTRAL_STEM, JUNCTION, LEFT_CHOICE, RIGHT_CHOICE, LEFT_RETURN,
     RIGHT_RETURN, MazeStateEstimator, MazeStateParams, Zone, ZoneMap,
 )
-from phase3_task import CORRECT, INCORRECT, Phase3Config, Phase3Task
+from tmaze.core.phase3.phase3_task import CORRECT, INCORRECT, Phase3Config, Phase3Task
 from tmaze.core.task_events import TaskEvents
-from trial_sequence import LEFT, RIGHT, TrialConfig, TrialSequence
+from tmaze.core.phase3.trial_sequence import LEFT, RIGHT, TrialConfig, TrialSequence
 
 
 def frame(valid=True, choice_entered=None, outbound_used_stem=False,

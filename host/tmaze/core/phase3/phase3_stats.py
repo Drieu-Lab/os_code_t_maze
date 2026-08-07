@@ -52,9 +52,9 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import List, Optional, Tuple
 
-from phase3_log import Phase3RowView, Phase3StateSnapshot
-from phase3_task import CORRECT, INCORRECT
-from trial_sequence import HIGH, LOW
+from tmaze.core.phase3.phase3_log import Phase3RowView, Phase3StateSnapshot
+from tmaze.core.phase3.phase3_task import CORRECT, INCORRECT
+from tmaze.core.phase3.trial_sequence import HIGH, LOW
 
 # Rolling-window size, in most-recent COMPLETED trials. A Phase 3 session is a few
 # hundred trials, so 20 is ~a block's worth - long enough to smooth per-trial noise

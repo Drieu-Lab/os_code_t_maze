@@ -15,7 +15,7 @@ import os
 import tempfile
 import unittest
 
-from daily_log import DailyLog, load, load_rows
+from tmaze.core.records.daily_log import DailyLog, load, load_rows
 
 _CSV = (
     "# schema_version=1\n"

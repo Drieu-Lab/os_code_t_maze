@@ -33,7 +33,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from trial_sequence import LEFT, RIGHT, TrialSequence
+from tmaze.core.phase3.trial_sequence import LEFT, RIGHT, TrialSequence
 
 # task_events choice/loop sides are the strings "left"/"right"; map to arm codes.
 _ARM_OF_SIDE = {"left": LEFT, "right": RIGHT}

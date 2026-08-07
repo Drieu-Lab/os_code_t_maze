@@ -38,8 +38,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field, fields
 from typing import List, Optional, Tuple
 
-from phase3_task import ABANDONED
-from trial_sequence import HIGH, LEFT, LOW, RIGHT, TrialSequence
+from tmaze.core.phase3.phase3_task import ABANDONED
+from tmaze.core.phase3.trial_sequence import HIGH, LEFT, LOW, RIGHT, TrialSequence
 
 # Row values use these arm labels (uppercased); the sequence uses int LEFT/RIGHT
 # and task_events/cue_gate use lowercase "left"/"right", so normalize on the way in.

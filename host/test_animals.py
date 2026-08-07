@@ -15,7 +15,7 @@ import os
 import tempfile
 import unittest
 
-from animals import (
+from tmaze.core.records.animals import (
     AnimalRegistry, animals_json_path, load_registry, parse_registry,
     resources_root)
 

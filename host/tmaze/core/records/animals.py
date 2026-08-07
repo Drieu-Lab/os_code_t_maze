@@ -31,17 +31,18 @@ import json
 import os
 from typing import Dict, List, Optional
 
+from tmaze.paths import repo_root
+
 # Environment override for the sibling resources repo location; when unset we use
 # the default sibling folder next to this repo (both are checked out together on
 # the rig PC). See docs/decisions/0075.
 RESOURCES_ENV = "OS_CODE_T_MAZE_RESOURCES"
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-# This file lives in host/; the code-repo root is its parent, and the resources
-# repo is that root's sibling.
-_REPO_ROOT = os.path.dirname(_HERE)
+# The resources repo is the code-repo root's sibling. Find that root by landmark
+# search (tmaze.paths.repo_root) rather than counting ".." from this file, so it
+# is unaffected by this module's depth in the package (see docs/decisions/0083).
 _DEFAULT_RESOURCES = os.path.join(
-    os.path.dirname(_REPO_ROOT), "os_code_t_maze_resources")
+    os.path.dirname(str(repo_root())), "os_code_t_maze_resources")
 
 
 def resources_root() -> str:

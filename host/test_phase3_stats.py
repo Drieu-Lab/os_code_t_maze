@@ -14,10 +14,10 @@ from __future__ import annotations
 
 import unittest
 
-from phase3_log import Phase3Log
-from phase3_stats import DEFAULT_WINDOW, Phase3Stats, compute
-from phase3_task import CORRECT, INCORRECT
-from trial_sequence import HIGH, LOW, TrialConfig, TrialSequence
+from tmaze.core.phase3.phase3_log import Phase3Log
+from tmaze.core.phase3.phase3_stats import DEFAULT_WINDOW, Phase3Stats, compute
+from tmaze.core.phase3.phase3_task import CORRECT, INCORRECT
+from tmaze.core.phase3.trial_sequence import HIGH, LOW, TrialConfig, TrialSequence
 
 
 def _seq(n=20, block=20, seed=123, high_tone_is_left=True):

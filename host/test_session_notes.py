@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import unittest
 
-from session_notes import NoteEntry, NoteLog, parse_jsonl
+from tmaze.core.session.session_notes import NoteEntry, NoteLog, parse_jsonl
 
 
 class TestAddAndStamp(unittest.TestCase):

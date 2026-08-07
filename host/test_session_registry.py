@@ -20,8 +20,8 @@ import os
 import tempfile
 import unittest
 
-import daily_log
-import session_registry
+from tmaze.core.records import daily_log
+from tmaze.core.session import session_registry
 
 
 def _make_bundle(root: str, session_id: str, *, summary=None,

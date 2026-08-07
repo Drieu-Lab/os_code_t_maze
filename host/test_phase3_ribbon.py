@@ -15,10 +15,10 @@ from __future__ import annotations
 
 import unittest
 
-from phase3_log import Phase3Log
-from phase3_ribbon import (LEFT_LABEL, RIGHT_LABEL, RIBBON_AFTER, RIBBON_BEFORE,
+from tmaze.core.phase3.phase3_log import Phase3Log
+from tmaze.core.phase3.phase3_ribbon import (LEFT_LABEL, RIGHT_LABEL, RIBBON_AFTER, RIBBON_BEFORE,
                            RibbonRow, cue_side, ribbon_rows)
-from trial_sequence import HIGH, LOW, TrialConfig, TrialSequence
+from tmaze.core.phase3.trial_sequence import HIGH, LOW, TrialConfig, TrialSequence
 
 
 def _seq(n=20, block=20, seed=123, high_tone_is_left=True):

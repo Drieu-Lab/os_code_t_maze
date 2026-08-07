@@ -14,9 +14,9 @@ from __future__ import annotations
 import unittest
 from dataclasses import fields
 
-from phase3_log import (COLUMNS, Phase3Log, Phase3RowView, Phase3StateSnapshot,
+from tmaze.core.phase3.phase3_log import (COLUMNS, Phase3Log, Phase3RowView, Phase3StateSnapshot,
                         _Row)
-from trial_sequence import HIGH, LEFT, LOW, RIGHT, TrialConfig, TrialSequence
+from tmaze.core.phase3.trial_sequence import HIGH, LEFT, LOW, RIGHT, TrialConfig, TrialSequence
 
 
 def _seq(n=20, block=20, seed=123):

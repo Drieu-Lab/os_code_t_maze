@@ -30,9 +30,9 @@ import tkinter as tk
 from tkinter import ttk
 from typing import Callable, Optional
 
-from phase3_ribbon import RIBBON_AFTER, RIBBON_BEFORE, RibbonRow, ribbon_rows
-from phase3_log import Phase3StateSnapshot
-from phase3_task import ABANDONED, CORRECT
+from tmaze.core.phase3.phase3_ribbon import RIBBON_AFTER, RIBBON_BEFORE, RibbonRow, ribbon_rows
+from tmaze.core.phase3.phase3_log import Phase3StateSnapshot
+from tmaze.core.phase3.phase3_task import ABANDONED, CORRECT
 
 try:
     from tooltips import tip
