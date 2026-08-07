@@ -242,10 +242,13 @@ no-upward-imports invariant; the placement rule is added to the auto-loaded
   import the code under test via the installed package path, so their new folder
   location doesn't affect resolution. Verified: `make_zone_map` tests + the tool
   `--selftest` pass from the flat layout before the move; **523 passed, 0 skipped**
-  from the new `tests/` layout after. (Note: the one Tk GUI wiring test,
-  `test_session_phase3_wiring`, occasionally blocks on a window focus grab when
-  run in the full non-verbose sweep - pre-existing flakiness of a test that drives
-  real Tk, unrelated to this move; captured as FW for a hang-proofing pass.)
+  from the new `tests/` layout after. (Note: the full sweep initially *appeared*
+  to hang on the one Tk GUI wiring test, `test_session_phase3_wiring`. The
+  operator identified the real cause: with a real Tk display and no daily-table
+  row for rat 600, `_start_session()` popped the operator-facing pre-session
+  weight modal (`simpledialog.askfloat`) once per test method (~5 dialogs) and
+  blocked waiting for input. Fixed in Stage 5c by stubbing that one prompt in the
+  headless test - see below.)
 - Stage 5b (`Refs ADR-0083`): the docs pass that finishes the migration. Reversed
   the "not a package / `cd host` / sibling imports" guidance everywhere it lived
   and replaced it with the package model (`pip install -e .` once per machine;
@@ -256,12 +259,22 @@ no-upward-imports invariant; the placement rule is added to the auto-loaded
   (`python -m unittest tests.test_<name>`), the `run_tests.bat` row
   (`discover -s tests -t .`), and the 17 stale `host/<name>.py` library-table paths
   for the core/vision modules moved in Stages 1a/1b/3 (now
-  `host/tmaze/<layer>/...`). Captured the intermittent Tk-wiring-test hang as
-  FW-0030. The immutable earlier ADRs (0023/0024/0025/0057/0058) keep their
-  historical "run from host/" wording - this ADR supersedes that guidance rather
-  than rewriting them. **Migration complete:** `host/` root now holds only the
-  config JSON, `data/`, `ratmodels/`, the two `.bat` launchers, `tools/`, and the
-  `tmaze/` package + `tests/` suite.
+  `host/tmaze/<layer>/...`). The immutable earlier ADRs (0023/0024/0025/0057/0058)
+  keep their historical "run from host/" wording - this ADR supersedes that
+  guidance rather than rewriting them. **Migration complete:** `host/` root now
+  holds only the config JSON, `data/`, `ratmodels/`, the two `.bat` launchers,
+  `tools/`, and the `tmaze/` package + `tests/` suite.
+- Stage 5c (`Refs ADR-0083`): fixed the suite stall the operator diagnosed after
+  5a (see the 5a note). `SessionControlView._ask_pre_session_weight` legitimately
+  pops a modal `simpledialog.askfloat` in real use when the daily husbandry table
+  has no row for the animal; the headless `test_session_phase3_wiring` drives a
+  real Tk root, so `_start_session()` hit that modal and blocked. Stubbed the one
+  method to return `None` (the "operator skipped" path -> a minimal animal-state
+  record, which this folder-wiring test doesn't exercise) in the test's `setUp`,
+  so it can never present a dialog. Verified: the wiring test runs unattended in
+  ~1.8 s across repeated runs; the full suite stays **523 passed**. (This
+  supersedes the earlier, incorrect "window focus grab / flaky" reading of the
+  stall.) No production behavior change - the modal is untouched for operators.
 - Related conventions: CONTRIBUTING.md #1 (pure core + thin shell), #6
   (organize into homes; defer speculative generality), #7 (one canonical way);
   AGENTS.md "cap change size to human reviewability"; ADR-0075 (the sibling-path

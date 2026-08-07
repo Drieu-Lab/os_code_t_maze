@@ -13,7 +13,7 @@ the bug lives in the wiring between them, not in either core. It needs no camera
 serial link or rat: the pipeline/camera are stubs and frames are synthetic
 ``RatState`` values. It does need a Tk display, and skips itself without one.
 
-Run from host/:  python -m unittest test_session_phase3_wiring
+Run from host/:  python -m unittest tests.test_session_phase3_wiring
 """
 
 from __future__ import annotations
@@ -97,6 +97,14 @@ class SessionPhase3WiringTest(unittest.TestCase):
             self.root, camera=self.camera, phase3=self.phase3,
             send=lambda _cmd: None, recordings_root=self.recordings,
             animal_id=lambda: "600")
+        # This is a headless regression test with a REAL Tk display, so the
+        # operator-facing "pre-session weight" modal (simpledialog.askfloat) is not
+        # skipped by its headless guard: with no daily-table row for rat 600,
+        # _start_session() would pop that dialog once per test and block forever
+        # waiting for input. Stub it to "skipped" (None) - the animal state then
+        # falls back to a minimal record, which this folder-wiring test does not
+        # exercise. (See docs/decisions/0083.)
+        self.session._ask_pre_session_weight = lambda _animal: None
         self.addCleanup(self.root.destroy)
         self.addCleanup(self.session.close)
         self.addCleanup(self.phase3.close)
