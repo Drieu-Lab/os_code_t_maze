@@ -138,7 +138,7 @@ class TestRenderJson(unittest.TestCase):
         self.assertIsNone(data["cued_task"])
         self.assertIsNone(data["locomotion"])
         # Later additions default to empty / None when nothing was provided.
-        self.assertEqual(data["schema_version"], 4)
+        self.assertEqual(data["schema_version"], 5)
         self.assertEqual(data["task_params"], {})
         self.assertIsNone(data["estimated_water"])
         # manual_water is always a definite figure (0 when no manual dispenses).
@@ -208,16 +208,19 @@ class TestEstimatedWater(unittest.TestCase):
 
 
 class TestManualWater(unittest.TestCase):
-    def test_none_when_no_manual_pulses(self):
-        # A session with no manual dispenses still reports a definite zero (so
+    # manual_water totals OPERATOR reward dispenses (the GUI button), passed as
+    # manual_pulses_ms by the shell which collects them at their source; it is
+    # disjoint from and additive with the task estimate (docs/decisions/0084).
+    def test_zero_when_no_operator_pulses(self):
+        # A session with no operator dispenses still reports a definite zero (so
         # the day's intake reconciles), unlike estimated_water's None.
         summ = session_summary.build_summary(
             session_id="s", animal="a", t0=_T0, t_end=_T_END)
         self.assertEqual(summ.manual_water, {"ul": 0.0, "pulses": 0})
-        # No manual line clutters the text when there were no manual pulses.
+        # No manual line clutters the text when there were no operator pulses.
         self.assertNotIn("Water (man):", summ.render_text())
 
-    def test_totals_manual_pulses_at_their_widths(self):
+    def test_totals_operator_pulses_at_their_widths(self):
         # Two operator-fired pulses (250 ms + 300 ms) summed at their own widths.
         summ = session_summary.build_summary(
             session_id="s1", animal="RAT600", t0=_T0, t_end=_T_END,
@@ -231,8 +234,8 @@ class TestManualWater(unittest.TestCase):
         self.assertIn("Water (man):", summ.render_text())
 
     def test_manual_is_independent_of_task_estimate(self):
-        # Manual water is a separate channel: the task estimate does not change,
-        # and both appear side by side (docs/decisions/0078).
+        # Operator water is a separate channel: the task estimate does not change,
+        # and both appear side by side (docs/decisions/0084).
         cued, _ = _cued_stats()
         summ = session_summary.build_summary(
             session_id="s1", animal="RAT600", t0=_T0, t_end=_T_END,
@@ -242,6 +245,23 @@ class TestManualWater(unittest.TestCase):
         text = summ.render_text()
         self.assertIn("Water (est):", text)
         self.assertIn("Water (man):", text)
+
+    def test_task_and_operator_channels_are_additive(self):
+        # The two channels are disjoint, so the day's reward intake is their sum
+        # (docs/decisions/0084). Task = 3 primes @ 250 ms; operator = one 300 ms
+        # button press; neither figure includes the other.
+        cued, _ = _cued_stats()
+        summ = session_summary.build_summary(
+            session_id="s1", animal="RAT600", t0=_T0, t_end=_T_END,
+            cued=cued, params=_PARAMS, manual_pulses_ms=[300.0])
+        task_ul = summ.estimated_water["ul"]
+        operator_ul = summ.manual_water["ul"]
+        self.assertAlmostEqual(task_ul, reward_volume.reward_volume_ul(250) * 3)
+        self.assertAlmostEqual(operator_ul, round(reward_volume.reward_volume_ul(300), 1))
+        # Additive: the total is exactly task + operator, with no overlap.
+        self.assertAlmostEqual(task_ul + operator_ul,
+                               reward_volume.reward_volume_ul(250) * 3
+                               + reward_volume.reward_volume_ul(300))
 
 
 def _note_entries():
@@ -266,7 +286,7 @@ class TestNotes(unittest.TestCase):
         summ = session_summary.build_summary(
             session_id="s", animal="a", t0=_T0, t_end=_T_END, notes=entries)
         data = json.loads(summ.render_json())
-        self.assertEqual(data["schema_version"], 4)
+        self.assertEqual(data["schema_version"], 5)
         self.assertEqual(data["notes"], entries)          # verbatim list
 
     def test_notes_render_timestamped_list(self):

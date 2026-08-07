@@ -79,10 +79,12 @@ rebuild](glossary.md#idempotent-rebuild) of everything under the recordings root
   `(animal, date)` join against `daily_log.csv`): `husbandry_source`
   (`daily_table`/`start_dialog`/`manual`/`daily_table_join`/`none`), `weight_g`,
   `baseline_g`, `pct_baseline`, `hours_since_water`.
-- **Water — four channels, never summed:** `task_reward_ml` (auto rewards, from
-  the summary's `estimated_water`), `manual_reward_ml` (rare in-task manual
-  dispenses, ADR-0078), `supp_water` (post-session top-up, daily table),
-  `water_on`/`water_off` (restriction span).
+- **Water — four channels:** `task_reward_ml` (auto rewards, from the summary's
+  `estimated_water`), `manual_reward_ml` (operator GUI-button reward dispenses,
+  from the summary's `manual_water`; ADR-0084, supersedes 0078), `supp_water`
+  (post-session top-up, daily table), `water_on`/`water_off` (restriction span).
+  The task and operator reward channels are disjoint, so `task_reward_ml +
+  manual_reward_ml` is a correct reward total; the others are separate figures.
 - **Cued task** (verbatim from the summary's `cued_task`/`phase3_stats` block,
   ADR-0052): `trials_total, completed, correct, incorrect, accuracy_cum,
   high_accuracy, low_accuracy, side_bias_left, side_bias_right, reward_rate,

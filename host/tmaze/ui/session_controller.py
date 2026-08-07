@@ -96,7 +96,6 @@ from tmaze.core.records import note_tags
 from tmaze.core.phase3 import phase3_config
 from tmaze.core.phase3 import phase3_stats
 from tmaze.core import protocol
-from tmaze.core.reward import reward_volume
 from tmaze.core.session import session_config
 from tmaze.core.session import session_meta
 from tmaze.core.session import session_notes
@@ -232,10 +231,14 @@ class SessionControlView:
         # Open handle for the per-session filtered serial file (None when idle).
         self._serial_file = None
         self._serial_path: Optional[str] = None
-        # Pulse widths (ms) of the rare in-task MANUAL reward dispenses seen while
-        # a session is active; totalled into the summary's manual_water on Stop
-        # (docs/decisions/0078). Reset at each Start.
-        self._manual_pulses_ms: list = []
+        # Pulse widths (ms) of the OPERATOR GUI-button reward dispenses (the
+        # "Solenoid test" reward spout) fired while a session is active; totalled
+        # into the summary's manual_water on Stop. Collected at the source via
+        # note_operator_reward() rather than parsed from the wire, because the
+        # firmware echoes task and operator fires identically as REWARD,MANUAL, so
+        # the wire cannot tell them apart (docs/decisions/0084, supersedes 0078).
+        # Reset at each Start.
+        self._operator_pulses_ms: list = []
         # Operator notes for the current session as timestamped, editable entries
         # (docs/decisions/0074). The log buffers entries even before Start (so a
         # note jotted while setting up is not lost); on Start it is bound to a
@@ -278,23 +281,34 @@ class SessionControlView:
         append the SENSOR + CENTRAL-PORT lines to this session's filtered serial
         file (docs/decisions/0049). Reads the pre-parsed protocol.LineInfo
         (docs/decisions/0056). Runs on the Tk thread (the sole writer of that
-        file), so no locking is needed."""
+        file), so no locking is needed.
+
+        Note: reward water is NOT collected from the wire here. The firmware
+        echoes both task and operator fires as REWARD,MANUAL (they are the same
+        R<port>1,<ms> command), so the wire cannot attribute them; operator feeds
+        are collected at their source instead (see note_operator_reward,
+        docs/decisions/0084)."""
         if info.animal:
             self._learned_animal = info.animal
-        if self._active and info.reward is not None:
-            manual, dur_ms = info.reward
-            if manual:
-                # A pre-v4 line without a trailing duration falls back to the
-                # configured reward pulse width, mirroring estimated_water's
-                # fallback so the two channels stay comparable (ADR-0019/0078).
-                width = (dur_ms if dur_ms is not None
-                         else reward_volume.DEFAULT_REWARD_PULSE_MS)
-                self._manual_pulses_ms.append(float(width))
         if (self._active and self._serial_file is not None
                 and is_sensor_or_central(
                     info, center_lick_index=self._center_lick,
                     center_sol_port=CENTER_SOL_PORT)):
             self._write_serial(info.raw)
+
+    def note_operator_reward(self, ms: float) -> None:
+        """Record one OPERATOR reward dispense (the "Solenoid test" reward-spout
+        button) fired at its pulse width ``ms``, so the summary's manual_water
+        totals only operator-triggered water - disjoint from and additive with
+        the task estimate (docs/decisions/0084).
+
+        Attributing at the source (the button handler calls this) is what fixes
+        the old double-count: task and operator fires are the same R<port>1,<ms>
+        command and echo identically as REWARD,MANUAL on the wire, so they can
+        only be told apart here. A no-op unless a session is active. Runs on the
+        Tk thread like the button handler, so no locking is needed."""
+        if self._active:
+            self._operator_pulses_ms.append(float(ms))
 
     def close(self) -> None:
         self._closed = True
@@ -967,10 +981,11 @@ class SessionControlView:
         self._mark_session_start(self._manifest.t0)
         self._write_manifest()
 
-        # Fresh accounting of the rare in-task manual reward dispenses for this
-        # session; apply() accumulates their pulse widths off the wire and the
-        # summary totals them into manual_water on Stop (docs/decisions/0078).
-        self._manual_pulses_ms = []
+        # Fresh accounting of the OPERATOR reward dispenses for this session;
+        # note_operator_reward() accumulates their pulse widths at the source (the
+        # Solenoid-test button) and the summary totals them into manual_water on
+        # Stop (docs/decisions/0084).
+        self._operator_pulses_ms = []
         self._active = True
         self._start_btn.configure(text="Stop session")
         self._resolve_paths()   # first pass + schedules the poll
@@ -1199,7 +1214,7 @@ class SessionControlView:
                 t0=self._manifest.t0, t_end=self._manifest.t_end,
                 cued=cued, locomotor=locomotor, seed=seed, tones=tones,
                 params=params, notes=notes,
-                manual_pulses_ms=self._manual_pulses_ms)
+                manual_pulses_ms=self._operator_pulses_ms)
             summary_dir = os.path.join(self._session_dir, SUMMARY_SUBDIR)
             json_path = os.path.join(
                 summary_dir, f"session_summary_{self._session_id}.json")

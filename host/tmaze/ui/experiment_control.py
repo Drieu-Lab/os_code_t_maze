@@ -277,8 +277,17 @@ def build_mode_controls(parent: tk.Misc, client: RigClient,
     tip(mode_lbl, "mode.label")
 
 
-def build_solenoid_panel(parent: tk.Misc, client: RigClient) -> None:
-    """Solenoid mapping helper: fire R<port><sol> and watch Rig view markers."""
+def build_solenoid_panel(parent: tk.Misc, client: RigClient,
+                         on_reward_fire=None) -> None:
+    """Solenoid mapping helper: fire R<port><sol> and watch Rig view markers.
+
+    ``on_reward_fire`` (callable(ms)) is notified whenever the operator fires the
+    REWARD SPOUT here (sol == the reward solenoid index), so the Session panel can
+    attribute that operator-triggered water at its source - the firmware echoes it
+    identically to task reward on the wire, so this is the only place the two can
+    be told apart (docs/decisions/0084)."""
+    reward_sol = _RIG_CFG.reward_sol_index if _RIG_CFG.reward_sol_index is not None else 1
+
     sol_frame = ttk.LabelFrame(
         parent,
         text="Solenoid test  -  fire R<port><sol>, watch the valve and its marker")
@@ -295,6 +304,14 @@ def build_solenoid_panel(parent: tk.Misc, client: RigClient) -> None:
         ms = max(1, min(5000, ms))
         pulse_var.set(str(ms))
         client.send(f"R{port}{sol},{ms}")
+        # Attribute an operator reward-spout fire at its source (docs/decisions/
+        # 0084). The port is not constrained: any reward-spout fire is operator
+        # water, and the central port is the reward well (docs/decisions/0007).
+        if sol == reward_sol and on_reward_fire is not None:
+            try:
+                on_reward_fire(ms)
+            except Exception:
+                pass
 
     headers = ("", "reward", "reward", "reward", "drain", "rinse")
     header_tips = (None, "sol.header.reward", "sol.header.reward",
@@ -730,7 +747,17 @@ def main() -> int:
         return 1
 
     build_mode_controls(rig_controls_left, client, mode_var)
-    build_solenoid_panel(rig_controls_left, client)
+
+    # Attribute operator reward-spout feeds (the Solenoid-test reward button) to
+    # the Session panel at their source, so its manual_water counts operator water
+    # only and stays disjoint from the task estimate (docs/decisions/0084). The
+    # session is resolved lazily via session_ref (built below) at click time.
+    def on_operator_reward(ms: int) -> None:
+        s = session_ref.get("session")
+        if s is not None and hasattr(s, "note_operator_reward"):
+            s.note_operator_reward(ms)
+    build_solenoid_panel(rig_controls_left, client,
+                         on_reward_fire=on_operator_reward)
     build_cue_panel(rig_controls_left, client)
     build_reward_panel(rig_controls_left, reward_tally)
     build_lick_panel(rig_controls_left, lick_tally)

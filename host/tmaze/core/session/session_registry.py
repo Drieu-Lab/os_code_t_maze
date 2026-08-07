@@ -24,11 +24,12 @@ Design (docs/decisions/0081):
   new sessions and is robust to later edits of ``daily_log.csv``.
 
 - **Four water channels, not one.** Surface ``task_reward_ml`` (auto rewards, from
-  the summary's ``estimated_water``), ``manual_reward_ml`` (rare in-task manual
-  dispenses, ADR-0078), ``supp_water`` (post-session top-up, daily table) and the
-  restriction span ``water_on``/``water_off`` as SEPARATE, provenance-labelled
-  columns - never summed - so the "accounted several ways" water reconciles in one
-  row.
+  the summary's ``estimated_water``), ``manual_reward_ml`` (operator GUI-button
+  reward dispenses, from the summary's ``manual_water``; ADR-0084, supersedes
+  0078), ``supp_water`` (post-session top-up, daily table) and the restriction
+  span ``water_on``/``water_off`` as SEPARATE, provenance-labelled columns so the
+  "accounted several ways" water reconciles in one row. Task and operator reward
+  are disjoint, so those two add up; the rest are distinct figures.
 
 - **Stable tag output.** Because the note-tag vocabulary (``note_tags.json``,
   ADR-0074) is user-editable, "one wide column per tag" would make the schema

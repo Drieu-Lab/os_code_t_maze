@@ -30,6 +30,16 @@ Additions widen the summary to be self-contained:
     ``duration_s``, the water figure is a session-level scalar this formatter
     derives from its inputs; it is not one of the two stats cores' measures.
 
+    Reward water reaches the animal through two channels the summary reports
+    SEPARATELY and never merges: ``estimated_water`` is the automatic TASK reward
+    above; ``manual_water`` is the rare OPERATOR reward (the GUI "Solenoid test"
+    button). They are disjoint and therefore additive - the day's reward intake is
+    ``estimated_water + manual_water``. The shell attributes operator dispenses at
+    their source and passes their pulse widths as ``manual_pulses_ms``; it does NOT
+    read them off the wire, because the firmware echoes task and operator fires
+    identically as ``REWARD,MANUAL`` and so the wire cannot tell them apart
+    (docs/decisions/0084, supersedes 0078).
+
 The thin ``session_controller.py`` shell calls :func:`build_summary` on Session
 Stop and writes the two files into the session's ``summary/`` folder; this module
 does no file I/O, imports no Tk/serial, and is headlessly testable like the other
@@ -63,10 +73,13 @@ if TYPE_CHECKING:  # type-only imports - no runtime coupling to the stats cores
 # v2 adds the operator ``notes``, the folded ``task_params``, and the estimated
 # water block (docs/decisions/0073). v3 changes ``notes`` from a single string to
 # an ordered list of timestamped entry objects (docs/decisions/0074). v4 adds the
-# ``manual_water`` figure - a sibling to ``estimated_water`` totalling the rare
-# in-task MANUAL reward pulses that the task estimate deliberately excludes
-# (docs/decisions/0078).
-SCHEMA_VERSION = 4
+# ``manual_water`` figure - a sibling to ``estimated_water`` (docs/decisions/0078).
+# v5 keeps the ``manual_water`` key but corrects what feeds it: only OPERATOR
+# GUI-button reward dispenses, collected at their source, so it is disjoint from
+# and additive with the task estimate. v4 wrongly counted task reward too, because
+# the firmware echoes task and operator fires identically as REWARD,MANUAL
+# (docs/decisions/0084, supersedes 0078).
+SCHEMA_VERSION = 5
 
 # Both inputs are measured from the Phase 3 arm edge, not Session Start (see the
 # module docstring + docs/future-work.md FW-0028); recorded so a reader knows what
@@ -100,10 +113,11 @@ class SessionSummary:
     # timestamped entries (session_notes.NoteEntry dicts; docs/decisions/0074);
     # [] when none were recorded.
     notes: List[Dict[str, Any]] = field(default_factory=list)
-    # Pulse widths (ms) of the rare in-task MANUAL reward dispenses the session
-    # saw on the wire (REWARD,<port>,MANUAL,<dur_ms>; docs/decisions/0019). The
-    # shell collects these during the session; this core totals them into the
-    # ``manual_water`` figure (docs/decisions/0078). [] when none occurred.
+    # Pulse widths (ms) of the OPERATOR reward dispenses (the GUI "Solenoid test"
+    # reward button) fired during the session. The shell collects these at their
+    # source (docs/decisions/0084) - NOT off the wire, since task and operator
+    # fires echo identically as REWARD,MANUAL - and this core totals them into the
+    # ``manual_water`` figure. [] when none occurred.
     manual_pulses_ms: List[float] = field(default_factory=list)
     generated_iso: Optional[str] = None
     schema_version: int = SCHEMA_VERSION
@@ -133,7 +147,8 @@ class SessionSummary:
         recomputed here - each at the configured reward pulse width, converted to
         microliters via the shared ``reward_volume`` bench calibration
         (docs/decisions/0019). This is an ESTIMATE of task-delivered reward only:
-        operator/manual pulses are not counted (docs/decisions/0073), so it can
+        operator/manual pulses are not counted here - they are the separate
+        ``manual_water`` channel (docs/decisions/0073/0084) - so on its own it can
         undercount the day's true intake."""
         if self.cued is None:
             return None
@@ -159,14 +174,17 @@ class SessionSummary:
 
     @property
     def manual_water(self) -> Dict[str, Any]:
-        """Water delivered by rare in-task MANUAL reward pulses this session.
+        """Water delivered by OPERATOR reward dispenses this session (the GUI
+        "Solenoid test" reward button).
 
-        Totals the operator-fired ``REWARD,<port>,MANUAL,<dur_ms>`` pulses the
-        shell collected off the wire (docs/decisions/0019), each converted to
-        microliters at its own pulse width via the shared ``reward_volume``
-        calibration. This is the channel the task estimate (``estimated_water``)
-        deliberately excludes, surfaced separately so the two never conflate and
-        the day's true task+manual intake can be reconciled (docs/decisions/0078).
+        Totals the operator-fired pulses the shell collected at their source
+        (docs/decisions/0084), each converted to microliters at its own pulse
+        width via the shared ``reward_volume`` calibration (docs/decisions/0019).
+        This is the channel the task estimate (``estimated_water``) deliberately
+        excludes; the two are disjoint and additive, so the day's true task+manual
+        intake reconciles as their sum. (v4/ADR-0078 fed this off the wire, which
+        also swept in task reward - task and operator fires echo identically as
+        REWARD,MANUAL - so it double-counted; v5 attributes at the source instead.)
         Always returns a definite figure (``0`` pulses / ``0.0`` uL when no manual
         dispenses occurred), unlike ``estimated_water`` which is None when it
         can't be computed."""
@@ -265,10 +283,11 @@ def build_summary(*, session_id: str, animal: str,
     """Build a :class:`SessionSummary` from the session metadata + the two frozen
     stat readouts, plus the folded task ``params``, the operator ``notes``
     (an ordered list of timestamped entry dicts; docs/decisions/0074), and the
-    ``manual_pulses_ms`` widths of any in-task manual reward dispenses the shell
-    collected (docs/decisions/0078). Pure: it stores and formats the inputs
-    (deriving only the session-level scalars ``duration_s`` / ``estimated_water``
-    / ``manual_water``); it recomputes none of the stats cores' measures.
+    ``manual_pulses_ms`` widths of any OPERATOR reward dispenses the shell
+    collected at their source (docs/decisions/0084). Pure: it stores and formats
+    the inputs (deriving only the session-level scalars ``duration_s`` /
+    ``estimated_water`` / ``manual_water``); it recomputes none of the stats
+    cores' measures.
     ``generated_iso`` defaults to now (the moment the summary was built)."""
     return SessionSummary(
         session_id=session_id, animal=animal, t0=t0, t_end=t_end,
@@ -321,7 +340,8 @@ def _water_str(water: Optional[Dict[str, Any]]) -> str:
 
 
 def _manual_water_str(water: Dict[str, Any]) -> str:
-    """The manual in-task water as a one-line string (docs/decisions/0078)."""
+    """The operator (manual) reward water as a one-line string
+    (docs/decisions/0084)."""
     return (f"{reward_volume.format_volume(water['ul'])}   "
             f"[{water['pulses']} manual pulses]")
 
