@@ -93,18 +93,17 @@ class SessionPhase3WiringTest(unittest.TestCase):
         self.phase3 = Phase3ControlView(
             self.root, camera=self.camera, pipeline=_FakePipeline(),
             send=lambda _cmd: None, animal_id=lambda: "600")
+        # This is a headless regression test with a REAL Tk display, so the
+        # operator-facing "pre-session weight" modal is not skipped by its headless
+        # guard: with no daily-table row for rat 600, _start_session() would pop
+        # that dialog once per test and block forever waiting for input. Inject a
+        # non-interactive ask_weight that "skips" (None) - the animal state then
+        # falls back to a minimal record, which this folder-wiring test does not
+        # exercise. (See docs/decisions/0083.)
         self.session = SessionControlView(
             self.root, camera=self.camera, phase3=self.phase3,
             send=lambda _cmd: None, recordings_root=self.recordings,
-            animal_id=lambda: "600")
-        # This is a headless regression test with a REAL Tk display, so the
-        # operator-facing "pre-session weight" modal (simpledialog.askfloat) is not
-        # skipped by its headless guard: with no daily-table row for rat 600,
-        # _start_session() would pop that dialog once per test and block forever
-        # waiting for input. Stub it to "skipped" (None) - the animal state then
-        # falls back to a minimal record, which this folder-wiring test does not
-        # exercise. (See docs/decisions/0083.)
-        self.session._ask_pre_session_weight = lambda _animal: None
+            animal_id=lambda: "600", ask_weight=lambda _animal: None)
         self.addCleanup(self.root.destroy)
         self.addCleanup(self.session.close)
         self.addCleanup(self.phase3.close)

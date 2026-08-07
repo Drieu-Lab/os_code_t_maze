@@ -268,13 +268,17 @@ no-upward-imports invariant; the placement rule is added to the auto-loaded
   5a (see the 5a note). `SessionControlView._ask_pre_session_weight` legitimately
   pops a modal `simpledialog.askfloat` in real use when the daily husbandry table
   has no row for the animal; the headless `test_session_phase3_wiring` drives a
-  real Tk root, so `_start_session()` hit that modal and blocked. Stubbed the one
-  method to return `None` (the "operator skipped" path -> a minimal animal-state
-  record, which this folder-wiring test doesn't exercise) in the test's `setUp`,
-  so it can never present a dialog. Verified: the wiring test runs unattended in
-  ~1.8 s across repeated runs; the full suite stays **523 passed**. (This
-  supersedes the earlier, incorrect "window focus grab / flaky" reading of the
-  stall.) No production behavior change - the modal is untouched for operators.
+  real Tk root, so `_start_session()` hit that modal and blocked. Added an
+  injectable `ask_weight` provider to the `SessionControlView` constructor (takes
+  the animal id, returns grams or `None`): it defaults to the operator-facing
+  modal, and `_ask_pre_session_weight` calls the provider when one is given. The
+  test injects `ask_weight=lambda _a: None` (the "operator skipped" path -> a
+  minimal animal-state record it doesn't exercise), so it - and any future headless
+  driver of Start - can never present a dialog. Verified: the wiring test runs
+  unattended in ~1.8 s across repeated runs; the full suite stays **523 passed**.
+  (This supersedes the earlier, incorrect "window focus grab / flaky" reading of
+  the stall.) No production behavior change - the app constructs the panel without
+  `ask_weight`, so operators still get the modal.
 - Related conventions: CONTRIBUTING.md #1 (pure core + thin shell), #6
   (organize into homes; defer speculative generality), #7 (one canonical way);
   AGENTS.md "cap change size to human reviewability"; ADR-0075 (the sibling-path

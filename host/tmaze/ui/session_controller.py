@@ -177,7 +177,8 @@ class SessionControlView:
                  recordings_root: Optional[str] = None,
                  animal_id: Optional[Callable[[], str]] = None,
                  behavior_summary: Optional[Callable[[], Any]] = None,
-                 config_inputs: Optional[Callable[[], dict]] = None):
+                 config_inputs: Optional[Callable[[], dict]] = None,
+                 ask_weight: Optional[Callable[[str], Optional[float]]] = None):
         self._parent = parent
         self._camera = camera
         self._phase3 = phase3
@@ -196,6 +197,11 @@ class SessionControlView:
         # The single host-side animal-id source (the Task tab's shared field;
         # docs/decisions/0053). None -> rely on the ANIMAL-handshake fallback.
         self._animal_id = animal_id
+        # How Start asks for the pre-session weight when the daily table has no row
+        # (takes the animal id, returns grams or None to skip). Defaults to the
+        # operator-facing modal; a headless caller/test injects a non-interactive
+        # one so Start never blocks on a dialog (docs/decisions/0083).
+        self._ask_weight = ask_weight
         # Central-well lick channel (from the rig pin map; None -> central licks
         # simply aren't captured) for the filtered serial file. ADR-0022/0049.
         self._center_lick = load_rig_config().lick_index_by_role.get("center")
@@ -795,9 +801,13 @@ class SessionControlView:
         return note
 
     def _ask_pre_session_weight(self, animal: str) -> Optional[float]:
-        """Prompt for the pre-session weight (g) when the daily table has no row
-        for today. Cancel/blank returns None (the operator can skip). Best-effort:
-        any Tk error (e.g. headless) just skips the dialog."""
+        """Ask for the pre-session weight (g) when the daily table has no row for
+        today. Uses the injected ``ask_weight`` provider if one was given (a
+        headless caller/test supplies a non-interactive one so Start never blocks);
+        otherwise pops the operator-facing modal. Cancel/blank returns None (the
+        operator can skip). Best-effort: any Tk error (e.g. headless) skips it."""
+        if self._ask_weight is not None:
+            return self._ask_weight(animal)
         try:
             return simpledialog.askfloat(
                 "Pre-session weight",
