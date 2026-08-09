@@ -373,6 +373,39 @@ TIPS: Dict[str, Entry] = {
                     "press again (Resume) to continue. The next cue re-arms from a "
                     "fresh hub->stem run.",
 
+    # ---- phase3_controller.py: closed-loop debias generator + block knobs ----
+    "phase3.generator": "Trial-sequence generator. 'balanced' is the default "
+                        "counterbalanced schedule (per-block L/R balance + a "
+                        "max-same-run cap; open-loop). 'debias_blocks' keeps that "
+                        "as the default but, when the animal develops a side bias, "
+                        "runs a corrective block that forces the non-preferred side "
+                        "as correct until it complies, then reverts (closed-loop; "
+                        "see the ADR). The knobs below apply only to 'debias_blocks' "
+                        "and take effect on the next arm.",
+    "phase3.debias_window": "Sliding window (most-recent scored trials) the side "
+                            "bias is measured over. Larger = smoother/slower to "
+                            "react; smaller = twitchier.",
+    "phase3.debias_min_samples": "How many scored trials must accrue before a "
+                                 "corrective block can auto-trigger (must be <= "
+                                 "window). Stops a block firing on a tiny sample.",
+    "phase3.debias_trigger_bias": "The |directional-error bias| threshold (0-1) "
+                                  "that starts a corrective block. Directional bias "
+                                  "b>0 means left-biased; a block forces the "
+                                  "over-pulled side's opposite as correct.",
+    "phase3.debias_exit_consecutive": "How many consecutive correct choices to the "
+                                      "forced (non-preferred) side end a corrective "
+                                      "block and revert to counterbalanced.",
+    "phase3.debias_max_block_len": "Welfare failsafe: the maximum trials a "
+                                   "corrective block may run before it auto-reverts "
+                                   "to counterbalanced (flagged as capped in the "
+                                   "log) even if the animal never complies.",
+    "phase3.debias_toggle": "Manually start or end a corrective debias block, "
+                            "overriding the closed-loop scheduler (only active "
+                            "under the 'debias_blocks' generator). A manual block "
+                            "forces the non-preferred side and is flagged "
+                            "'manual' in the log; it still ends on the normal exit "
+                            "criteria. Applies on the next trial.",
+
     # ---- maze_state_view.py: Maze state tab ----
     "maze.define_zones": "Draw the maze zones (central reward HUB, stem, "
                          "junction, choice/return arms), the well region (inside "
@@ -486,6 +519,17 @@ TIPS: Dict[str, Entry] = {
                           "stamps (n). These are host wall-clock times (they carry "
                           "serial/actuation latency), so it is an approximate "
                           "latency, not a hardware-precise reaction time.",
+    "behavior.phase3.debias": "Closed-loop debias readout (only under the "
+                              "'debias_blocks' generator). Shows the current "
+                              "scheduler state (NORMAL/INTERVENTION), the live "
+                              "sliding-window directional bias vs its trigger "
+                              "threshold (b>0 = left-biased), the number of "
+                              "corrective blocks so far (ok = ended by the "
+                              "consecutive-correct exit, cap = hit the length "
+                              "failsafe), and accuracy on the forced in-block "
+                              "trials. The learning measures above are computed over "
+                              "out-of-block (counterbalanced) trials only, so a "
+                              "block never distorts them.",
 
     # ---- behavior_view.py: Phase 3 'Excursions' column - the same live
     #      locomotor/compliance group as Phase 2a, but over ALL excursions during

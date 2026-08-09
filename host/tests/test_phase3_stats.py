@@ -14,10 +14,12 @@ from __future__ import annotations
 
 import unittest
 
+from tmaze.core.phase3.debias import DebiasBlockConfig
 from tmaze.core.phase3.phase3_log import Phase3Log
 from tmaze.core.phase3.phase3_stats import DEFAULT_WINDOW, Phase3Stats, compute
 from tmaze.core.phase3.phase3_task import CORRECT, INCORRECT
-from tmaze.core.phase3.trial_sequence import HIGH, LOW, TrialConfig, TrialSequence
+from tmaze.core.phase3.trial_sequence import (
+    GEN_DEBIAS_BLOCKS, HIGH, LEFT, LOW, RIGHT, TrialConfig, TrialSequence)
 
 
 def _seq(n=20, block=20, seed=123, high_tone_is_left=True):
@@ -301,6 +303,89 @@ class TestDisarmedSnapshotStillReads(unittest.TestCase):
         s = compute(log.snapshot(4, armed=False))
         self.assertEqual(s.completed, 4)
         self.assertEqual(s.accuracy_cum, 1.0)
+
+
+# --------------------------------------------------------------------------- #
+# Closed-loop debias partitioning: learning measures over out-of-block trials, #
+# corrective (in-block) trials summarized separately (see phase3_stats + ADR).  #
+# --------------------------------------------------------------------------- #
+def _debias_log(n=60, seed=3):
+    cfg = TrialConfig(max_trials=n, block_size=20, max_same_run=4,
+                      generator=GEN_DEBIAS_BLOCKS,
+                      debias=DebiasBlockConfig(window=8, min_samples=4,
+                                               trigger_bias=0.3, exit_consecutive=3,
+                                               max_block_len=6))
+    seq = TrialSequence(cfg, seed=seed)
+    log = Phase3Log(seq, animal="RAT600",
+                    session_start_iso="2026-07-23T12:00:00")
+    return log, seq
+
+
+def _drive_debias(log, seq, n):
+    """Fill n trials like the controller: pull LEFT while NORMAL (to build a left
+    bias that triggers blocks), comply (choose the forced RIGHT) while in a block
+    (so blocks succeed via the consecutive-correct exit)."""
+    for i in range(n):
+        seq.commit(i)
+        log.set_decision(i)
+        state = seq.trial_meta(i)["sched_state"]
+        correct = seq.correct_arm(i)
+        chosen = RIGHT if state == "INTERVENTION" else LEFT
+        side = "left" if chosen == LEFT else "right"
+        outcome = CORRECT if chosen == correct else INCORRECT
+        log.choice_scored(i, side, outcome, f"t{i}")
+        if outcome == CORRECT:
+            log.reward_fired(i, f"r{i}")
+        seq.record_outcome(i, correct, chosen)
+        log.set_decision(i)
+
+
+class TestDebiasPartition(unittest.TestCase):
+    def _stats(self, n=40):
+        log, seq = _debias_log(n=60)
+        _drive_debias(log, seq, n)
+        return compute(log.snapshot(n, armed=True)), log, seq
+
+    def test_reports_debias_generator_and_blocks_occur(self):
+        st, _log, _seq = self._stats()
+        self.assertEqual(st.generator, GEN_DEBIAS_BLOCKS)
+        self.assertGreater(st.inblock_completed, 0)     # a block ran
+        self.assertGreater(st.oob_completed, 0)         # and normal trials too
+        self.assertEqual(st.oob_completed + st.inblock_completed, st.completed)
+        self.assertGreaterEqual(st.n_blocks, 1)
+
+    def test_learning_measures_use_out_of_block_only(self):
+        st, log, _seq = self._stats()
+        rows = log.snapshot(40, armed=True).rows
+        oob = [r for r in rows
+               if r.outcome in (CORRECT, INCORRECT)
+               and r.sched_state != "INTERVENTION"]
+        correct_oob = sum(1 for r in oob if r.outcome == CORRECT)
+        self.assertEqual(st.oob_completed, len(oob))
+        self.assertAlmostEqual(st.accuracy_cum, correct_oob / len(oob))
+
+    def test_directional_bias_is_left_and_blocks_succeed(self):
+        st, _log, _seq = self._stats()
+        # The out-of-block animal always pulled LEFT, so directional bias b > 0.
+        self.assertIsNotNone(st.dir_bias)
+        self.assertGreater(st.dir_bias, 0.0)
+        # In-block it always chose the forced (RIGHT == correct) side, so those
+        # trials are all correct and every completed block exits on success.
+        self.assertEqual(st.inblock_accuracy, 1.0)
+        self.assertGreaterEqual(st.blocks_success, 1)
+        self.assertEqual(st.blocks_capped, 0)
+
+    def test_balanced_generator_has_neutral_debias_fields(self):
+        # The default generator: no partitioning, no blocks, dir_bias still defined.
+        log = _log(n=10, block=10)
+        for i in range(6):
+            _resolve(log, i, _side_for(log, i, True), CORRECT)
+        st = compute(log.snapshot(6, armed=True))
+        self.assertEqual(st.generator, "balanced")
+        self.assertEqual(st.inblock_completed, 0)
+        self.assertEqual(st.oob_completed, st.completed)
+        self.assertEqual(st.n_blocks, 0)
+        self.assertEqual(st.dir_bias, 0.0)              # all correct -> no pulls
 
 
 if __name__ == "__main__":

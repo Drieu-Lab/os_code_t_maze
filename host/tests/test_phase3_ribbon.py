@@ -15,10 +15,13 @@ from __future__ import annotations
 
 import unittest
 
+from tmaze.core.phase3.debias import DebiasBlockConfig
 from tmaze.core.phase3.phase3_log import Phase3Log
 from tmaze.core.phase3.phase3_ribbon import (LEFT_LABEL, RIGHT_LABEL, RIBBON_AFTER, RIBBON_BEFORE,
                            RibbonRow, cue_side, ribbon_rows)
-from tmaze.core.phase3.trial_sequence import HIGH, LOW, TrialConfig, TrialSequence
+from tmaze.core.phase3.phase3_task import CORRECT, INCORRECT
+from tmaze.core.phase3.trial_sequence import (
+    GEN_DEBIAS_BLOCKS, HIGH, LEFT, LOW, RIGHT, TrialConfig, TrialSequence)
 
 
 def _seq(n=20, block=20, seed=123, high_tone_is_left=True):
@@ -144,6 +147,42 @@ class TestResolvedFields(unittest.TestCase):
             self.assertEqual(r.return_cue_left, seq.return_cue(0, i))   # LEFT arm
             self.assertEqual(r.return_cue_right, seq.return_cue(1, i))  # RIGHT arm
             self.assertIn(r.choice_cue, (HIGH, LOW))
+
+
+class TestCorrectiveFlag(unittest.TestCase):
+    def test_corrective_matches_intervention_state(self):
+        # Drive a debias session so some trials fall inside a corrective block, then
+        # check the ribbon flags exactly those rows (sched_state == INTERVENTION).
+        cfg = TrialConfig(max_trials=60, block_size=20, max_same_run=4,
+                          generator=GEN_DEBIAS_BLOCKS,
+                          debias=DebiasBlockConfig(window=8, min_samples=4,
+                                                   trigger_bias=0.3,
+                                                   exit_consecutive=3,
+                                                   max_block_len=6))
+        seq = TrialSequence(cfg, seed=3)
+        log = Phase3Log(seq, animal="RAT600", session_start_iso="t")
+        n = 40
+        for i in range(n):
+            seq.commit(i)
+            log.set_decision(i)
+            state = seq.trial_meta(i)["sched_state"]
+            correct = seq.correct_arm(i)
+            chosen = RIGHT if state == "INTERVENTION" else LEFT
+            side = "left" if chosen == LEFT else "right"
+            outcome = CORRECT if chosen == correct else INCORRECT
+            log.choice_scored(i, side, outcome, f"t{i}")
+            seq.record_outcome(i, correct, chosen)
+            log.set_decision(i)
+
+        snap = log.snapshot(n, armed=True)
+        rows = ribbon_rows(snap, before=n, after=0)
+        by_trial = {r.trial: r for r in rows}
+        self.assertTrue(any(r.corrective for r in rows))   # a block appeared
+        for row in snap.rows:
+            ribbon = by_trial.get(row.trial)
+            if ribbon is None:
+                continue
+            self.assertEqual(ribbon.corrective, row.sched_state == "INTERVENTION")
 
 
 if __name__ == "__main__":

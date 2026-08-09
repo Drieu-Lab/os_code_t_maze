@@ -54,6 +54,11 @@ COLUMNS = (
     "trial_start_iso", "choice_cue_on_iso", "choice_cue_off_iso",
     "choice_time_iso", "reward_cmd_iso", "return_cue_on_iso",
     "return_cue_off_iso", "trial_end_iso", "lick_time_iso", "lick_fw_ms",
+    # Closed-loop debias context (debias_blocks generator; blank for balanced).
+    # sched_state = NORMAL/INTERVENTION, block_id = 1-based within a block (blank
+    # in NORMAL), block_trigger = auto/manual, bias = signed directional-error
+    # bias at this trial's decision. See debias.py and the ADR.
+    "sched_state", "block_id", "block_trigger", "bias",
 )
 
 
@@ -87,6 +92,12 @@ class _Row:
     trial_end_iso: Optional[str] = None
     lick_time_iso: Optional[str] = None
     lick_fw_ms: Optional[str] = None
+    # Closed-loop debias context, set when the trial's side is decided (blank for
+    # the balanced generator). See :meth:`Phase3Log.set_decision`.
+    sched_state: Optional[str] = None
+    block_id: Optional[str] = None
+    block_trigger: Optional[str] = None
+    bias: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -117,6 +128,10 @@ class Phase3RowView:
     trial_end_iso: Optional[str]
     lick_time_iso: Optional[str]
     lick_fw_ms: Optional[str]
+    sched_state: Optional[str]
+    block_id: Optional[str]
+    block_trigger: Optional[str]
+    bias: Optional[str]
 
 
 @dataclass(frozen=True)
@@ -134,6 +149,17 @@ class Phase3StateSnapshot:
     high_tone_is_left: bool
     high_tone_hz: int
     low_tone_hz: int
+    # Trial-sequence generator + closed-loop debias context, so panels/stats can
+    # render the debias state without re-reading the live sequence. For the
+    # balanced generator: generator="balanced", state="NORMAL", bias 0.0, and the
+    # threshold/exit/cap fields 0. ``debias_state`` / ``debias_bias`` are the
+    # CURRENT scheduler readings at snapshot time.
+    generator: str = "balanced"
+    debias_state: str = "NORMAL"
+    debias_bias: float = 0.0
+    trigger_bias: float = 0.0
+    exit_consecutive: int = 0
+    max_block_len: int = 0
 
 
 class Phase3Log:
@@ -146,6 +172,9 @@ class Phase3Log:
         self.animal = animal
         self.seed = sequence.seed
         self.cfg = sequence.cfg
+        # Kept so a snapshot can read the CURRENT closed-loop debias state (state +
+        # bias) for panels; the snapshot copies those readings out by value.
+        self._sequence = sequence
         self.session_start_iso = session_start_iso
         self.reward_incorrect = reward_incorrect
         # Reward dispensing params used this run (ADR-0069), recorded in the header
@@ -183,6 +212,29 @@ class Phase3Log:
         r = self._row(index)
         if r is not None and r.trial_start_iso is None:
             r.trial_start_iso = iso
+
+    def set_decision(self, index: int) -> None:
+        """Refresh a trial's realized correct side + choice cue + debias context
+        from the sequence, once its side has been committed (the closed-loop
+        decision point). No-op for the balanced generator, whose planned columns
+        are already final. Idempotent - safe to call on every trial start / re-run.
+        """
+        if not self._sequence.is_debias:
+            return
+        r = self._row(index)
+        if r is None:
+            return
+        arm = self._sequence.correct_arm(index)
+        if arm is not None:
+            r.correct_arm = _ARM_LABEL.get(arm, r.correct_arm)
+        cue = self._sequence.choice_cue(index)
+        if cue:
+            r.choice_cue = cue
+        m = self._sequence.trial_meta(index)
+        r.sched_state = m["sched_state"]
+        r.block_id = None if not m["block_id"] else str(m["block_id"])
+        r.block_trigger = m["block_trigger"] or None
+        r.bias = f"{m['bias']:.4f}"
 
     def choice_cue_started(self, index: int, iso: str) -> None:
         r = self._row(index)
@@ -315,27 +367,51 @@ class Phase3Log:
             for i, r in enumerate(self._rows)
         )
         c = self.cfg
+        db = getattr(c, "debias", None)
+        seq = self._sequence
         return Phase3StateSnapshot(
             rows=rows, current_index=current_index, total=len(self._rows),
             armed=armed, seed=self.seed, high_tone_is_left=c.high_tone_is_left,
-            high_tone_hz=c.high_tone_hz, low_tone_hz=c.low_tone_hz)
+            high_tone_hz=c.high_tone_hz, low_tone_hz=c.low_tone_hz,
+            generator=c.generator, debias_state=seq.debias_state(),
+            debias_bias=seq.debias_bias(),
+            trigger_bias=(db.trigger_bias if db is not None else 0.0),
+            exit_consecutive=(db.exit_consecutive if db is not None else 0),
+            max_block_len=(db.max_block_len if db is not None else 0))
 
     # ------------------------------------------------------------- render
     def _header_comment(self) -> List[str]:
         c = self.cfg
-        return [
+        lines = [
             f"# phase3_session animal={self.animal} session_id={self.session_id} "
-            f"seed={self.seed} proto=6",
+            f"seed={self.seed} proto=7",
             f"# high_tone_is_left={c.high_tone_is_left} "
             f"high_tone_hz={c.high_tone_hz} low_tone_hz={c.low_tone_hz}",
             f"# block_size={c.block_size} max_same_run={c.max_same_run} "
             f"max_trials={c.max_trials} planned_trials={len(self._rows)} "
             f"reward_incorrect={self.reward_incorrect} "
             f"reward_pulse_ms={self.reward_pulse_ms} max_topups={self.max_topups}",
+            f"# generator={c.generator}",
+        ]
+        # For a closed-loop debias session, record its params and the caveat that
+        # the seed ALONE no longer reproduces the schedule (it also depends on the
+        # animal's realized choices + any operator overrides). See debias.py.
+        db = getattr(c, "debias", None)
+        if c.generator != "balanced" and db is not None:
+            lines.append(
+                f"# debias_blocks window={db.window} min_samples={db.min_samples} "
+                f"trigger_bias={db.trigger_bias} "
+                f"exit_consecutive={db.exit_consecutive} "
+                f"max_block_len={db.max_block_len} signal={db.signal}")
+            lines.append(
+                "# note: debias schedule is closed-loop - seed alone does NOT "
+                "reproduce it; it also depends on realized choices + overrides")
+        lines += [
             f"# session_start_iso={self.session_start_iso}",
             "# note: *_iso are host actuation-decision times (serial latency ~ms); "
             "lick_fw_ms is the firmware hardware clock. see docs/decisions/0047",
         ]
+        return lines
 
     def render_csv(self) -> str:
         """Render the whole table (header comment + column row + trials) as CSV

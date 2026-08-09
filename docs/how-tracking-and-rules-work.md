@@ -469,6 +469,11 @@ Phase 3 task) asks for - it is now one seam shared by both task controllers
 - **The "why" behind each design choice:** the numbered notes in
   `decisions/` - especially 0014 (tracking), 0017 (tuning knobs), 0023 (rules
   engine + decide-vs-act split), 0025 (maze state), and 0026 (shaping phases).
+- **De-biasing in the real cued task:** the shaping-phase anti-bias here just caps
+  same-side runs. Phase 3 (host-owned; ADR-0046) adds an opt-in *closed-loop*
+  de-bias - the `debias_blocks` generator runs a short corrective block that makes
+  the rat's avoided side the only rewarded one until it reliably switches, then
+  reverts to the balanced schedule. See `decisions/0086`.
 - **The scientific goal these serve:** the grant and protocol PDFs in the
   sibling `os_code_t_maze_resources` repo explain the cue→choice→reward task the
   rig is ultimately built to run.

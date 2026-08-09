@@ -55,6 +55,7 @@ class RibbonRow:
     resolved: bool                 # the rat has chosen on this trial
     chosen_arm: Optional[str]      # LEFT / RIGHT once scored, else None
     outcome: Optional[str]         # CORRECT / INCORRECT once scored, else None
+    corrective: bool = False       # part of a closed-loop debias corrective block
 
 
 def cue_side(cue: str, high_tone_is_left: bool) -> str:
@@ -99,5 +100,6 @@ def ribbon_rows(state: Optional[Phase3StateSnapshot], *,
             resolved=row.outcome is not None,
             chosen_arm=row.chosen_arm,
             outcome=row.outcome,
+            corrective=(row.sched_state == "INTERVENTION"),
         ))
     return rows

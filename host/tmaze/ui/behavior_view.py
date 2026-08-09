@@ -124,7 +124,7 @@ class BehaviorView:
         # live locomotor/compliance group from self._p3_stats (docs/decisions/0071).
         self._p3_vars = {k: tk.StringVar(value="-") for k in (
             "session", "trials", "accuracy", "bycue", "bias", "reward",
-            "strategy", "rt",
+            "strategy", "rt", "debias",
             "compliance", "nonstem", "run", "throughput", "distance")}
         self._window = tk.IntVar(value=self._stats.snapshot().window_n)
 
@@ -223,14 +223,14 @@ class BehaviorView:
         tip(session3_lbl, "behavior.phase3.session")
 
         for r, key in enumerate(("trials", "accuracy", "bycue", "bias", "reward",
-                                 "strategy", "rt"), start=1):
+                                 "strategy", "rt", "debias"), start=1):
             lbl = ttk.Label(self._p3_box, textvariable=self._p3_vars[key], anchor="w",
                             font=("TkDefaultFont", 10))
             lbl.grid(row=r, column=0, sticky="w", **pad)
             tip(lbl, f"behavior.phase3.{key}")
 
         ttk.Separator(self._p3_box, orient="vertical").grid(
-            row=1, column=1, rowspan=7, sticky="ns", padx=8, pady=1)
+            row=1, column=1, rowspan=8, sticky="ns", padx=8, pady=1)
 
         # Right column: the locomotor/compliance "excursions" group. A static
         # heading distinguishes these all-excursion counts from the cued trials.
@@ -433,12 +433,24 @@ class BehaviorView:
             f"LOW {_pct(st.low_accuracy)} [{st.low_completed}]")
         self._p3_vars["bias"].set(
             f"Side bias (chose): {_lr(st.lr_bias)}   "
-            f"[{st.left_choices}L/{st.right_choices}R]")
+            f"[{st.left_choices}L/{st.right_choices}R]   dir b={_signed(st.dir_bias)}")
         self._p3_vars["reward"].set(
             f"Reward rate: {_pct(st.reward_rate)}   [{st.rewarded}/{st.completed}]")
         self._p3_vars["strategy"].set(
             f"Win-stay: {_pct(st.win_stay)}   Lose-shift: {_pct(st.lose_shift)}")
         self._p3_vars["rt"].set(f"Choice RT: {_rt(st.mean_rt_s)}   [n={st.rt_n}]")
+        # Closed-loop debias line: only meaningful under the debias_blocks
+        # generator (learning measures above are over out-of-block trials; here we
+        # surface the live scheduler state + the corrective-block efficacy). See
+        # phase3_stats / debias.py.
+        if st.generator != "balanced":
+            self._p3_vars["debias"].set(
+                f"Debias [{st.sched_state}] live b={_signed(st.live_bias)}"
+                f"/{st.trigger_bias:.2f}   blocks {st.n_blocks} "
+                f"(ok {st.blocks_success}/cap {st.blocks_capped})   "
+                f"in-block acc {_pct(st.inblock_accuracy)} [{st.inblock_completed}]")
+        else:
+            self._p3_vars["debias"].set("Debias: off (balanced generator)")
         # Right column: the live locomotor/compliance group over ALL excursions
         # during the Phase 3 session (denied non-stem trips included), from the
         # session-scoped accumulator (docs/decisions/0071). Same formatting as
@@ -532,6 +544,11 @@ def _rate(x: Optional[float]) -> str:
 
 def _rt(x: Optional[float]) -> str:
     return "--" if x is None else f"{x:.2f} s"
+
+
+def _signed(x: Optional[float]) -> str:
+    """A signed bias value (b > 0 = left-biased), or '--' when undefined."""
+    return "--" if x is None else f"{x:+.2f}"
 
 
 def _side(side: Optional[str]) -> str:

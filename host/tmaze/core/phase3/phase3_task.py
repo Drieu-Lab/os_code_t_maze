@@ -68,6 +68,11 @@ class Phase3Decision:
     ``reward`` requests a dispense THIS tick; ``advanced`` flags that a trial just
     completed (index moved on); ``complete`` is true once all trials are done.
     ``trial_index`` / ``correct_arm`` describe the trial CURRENTLY in progress.
+
+    ``sched_state`` / ``block_id`` / ``block_trigger`` / ``bias`` carry the
+    closed-loop debias context of ``trial_index`` (from the TrialSequence's debias
+    metadata; NORMAL/0/""/0.0 for the balanced generator), so the controller can
+    log and display it.
     """
     trial_index: int
     correct_arm: Optional[int]
@@ -76,6 +81,10 @@ class Phase3Decision:
     reward: bool = False
     advanced: bool = False
     complete: bool = False
+    sched_state: str = "NORMAL"
+    block_id: int = 0
+    block_trigger: str = ""
+    bias: float = 0.0
 
 
 class Phase3Task:
@@ -95,6 +104,20 @@ class Phase3Task:
         # trip" guard now lives in the shared task_events choice-commit edge
         # (docs/decisions/0055, FW-0020), so no separate _scored_this_trial flag.
         self._awaiting_return = False
+        # Rewind the closed-loop debias scheduler too (no-op for the balanced
+        # generator), so a Restart re-decides the schedule from scratch.
+        self.seq.reset_debias()
+
+    def _ensure_committed(self) -> None:
+        """Fix the current trial's correct side (and any before it), in order.
+
+        No-op for the balanced generator; for debias_blocks this is the decision
+        point that reads the animal's recorded choices, so it must run before the
+        cue frequency / correct arm of the current trial is read."""
+        self.seq.commit(self._index)
+
+    def _meta(self):
+        return self.seq.trial_meta(self._index)
 
     # ----------------------------------------------- operator manual controls
     # The Rig-view trial-control buttons drive these directly (via the actuation
@@ -140,11 +163,33 @@ class Phase3Task:
         return self._index >= len(self.seq)
 
     def current_correct_arm(self) -> Optional[int]:
+        self._ensure_committed()
         return self.seq.correct_arm(self._index)
 
     def current_choice_freq(self) -> Optional[int]:
         """The CHOICE cue frequency for the trial in progress (for CUE_ON,CHOICE,<hz>)."""
+        self._ensure_committed()
         return self.seq.choice_freq(self._index)
+
+    # ------------------------------------------------ debias operator controls
+    # The Rig-view "debias block" toggle drives these (via the actuation thread,
+    # like the other manual controls; docs/decisions/0058). They take effect on the
+    # next committed trial. No-ops for the balanced generator.
+    def force_debias_block(self, side: Optional[int] = None) -> None:
+        self.seq.force_block(side)
+
+    def end_debias_block(self) -> None:
+        self.seq.end_block()
+
+    def debias_state(self) -> str:
+        return self.seq.debias_state()
+
+    def debias_bias(self) -> float:
+        return self.seq.debias_bias()
+
+    @property
+    def is_debias(self) -> bool:
+        return self.seq.is_debias
 
     # ----------------------------------------------------------------- tick
     def update(self, frame) -> Phase3Decision:
@@ -156,10 +201,14 @@ class Phase3Task:
         fabricates a choice or advances a trial.
         """
         idx = self._index
+        # Fix this trial's side before reading it (the closed-loop decision point;
+        # no-op for the balanced generator).
+        self._ensure_committed()
         correct = self.seq.correct_arm(idx)
+        meta = self._meta()
         if self.complete or not getattr(frame, "valid", False):
             return Phase3Decision(trial_index=idx, correct_arm=correct,
-                                  complete=self.complete)
+                                  complete=self.complete, **meta)
 
         # --- Score the choice on the SHARED once-per-excursion choice-commit edge
         # (task_events.choice_committed; docs/decisions/0055, FW-0020). A genuine
@@ -174,11 +223,15 @@ class Phase3Task:
             chosen = _ARM_OF_SIDE[choice_side]
             is_correct = (chosen == correct)
             self._awaiting_return = True
+            # Feed the (cued, chosen) pair back so the debias scheduler's bias +
+            # block counters update for the NEXT trial's decision (no-op balanced).
+            if correct is not None:
+                self.seq.record_outcome(idx, correct, chosen)
             return Phase3Decision(
                 trial_index=idx, correct_arm=correct,
                 choice_side=choice_side,
                 outcome=CORRECT if is_correct else INCORRECT,
-                reward=bool(is_correct or self.cfg.reward_incorrect))
+                reward=bool(is_correct or self.cfg.reward_incorrect), **meta)
 
         # --- Advance on the return lap (rat back at the hub after the choice). ---
         if self._awaiting_return and getattr(frame, "loop_closed", None) is not None:
@@ -186,6 +239,6 @@ class Phase3Task:
             self._awaiting_return = False
             return Phase3Decision(
                 trial_index=idx, correct_arm=correct,
-                advanced=True, complete=self.complete)
+                advanced=True, complete=self.complete, **meta)
 
-        return Phase3Decision(trial_index=idx, correct_arm=correct)
+        return Phase3Decision(trial_index=idx, correct_arm=correct, **meta)

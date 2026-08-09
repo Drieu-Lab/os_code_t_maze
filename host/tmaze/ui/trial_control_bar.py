@@ -45,6 +45,10 @@ _BUTTONS = (
     ("extend", "+Trials", "phase3.extend"),
     ("restart", "Restart", "phase3.restart"),
     ("pause", "Pause", "phase3.pause"),
+    # Manual override of the closed-loop debias scheduler (debias_blocks generator
+    # only): toggles a corrective block on/off. Label + enable are set in _refresh
+    # from the published scheduler state (like Pause/Resume). See debias.py.
+    ("debias", "Start debias block", "phase3.debias_toggle"),
 )
 
 
@@ -130,6 +134,12 @@ class TrialControlBar:
         has_state = state is not None
         armed = bool(has_state and state.armed)
         current = state.current_index if has_state else 0
+        # The debias toggle is live only under the debias_blocks generator (the
+        # snapshot carries the generator + current scheduler state).
+        debias_on = bool(has_state
+                         and getattr(state, "generator", "balanced") != "balanced")
+        in_block = bool(has_state
+                        and getattr(state, "debias_state", "NORMAL") == "INTERVENTION")
         enabled = {
             "skip": armed,
             "repeat": armed,
@@ -137,6 +147,7 @@ class TrialControlBar:
             "extend": armed,
             "restart": has_state,
             "pause": armed,
+            "debias": armed and debias_on,
         }
         for key, b in self._buttons.items():
             b.configure(state=("normal" if enabled.get(key) else "disabled"))
@@ -147,3 +158,8 @@ class TrialControlBar:
                 paused = False
             self._buttons["pause"].configure(
                 text="Resume" if paused else "Pause")
+        # Toggle the debias button label to match the current scheduler state, so it
+        # reads "End debias block" while a corrective block is running.
+        if "debias" in self._buttons:
+            self._buttons["debias"].configure(
+                text="End debias block" if in_block else "Start debias block")

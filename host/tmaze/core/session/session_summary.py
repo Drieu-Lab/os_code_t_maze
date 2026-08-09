@@ -469,12 +469,22 @@ def _tone_line(tones: Dict[str, Any]) -> str:
     return f"HIGH {high_hz} Hz -> {high_side}   LOW {low_hz} Hz -> {low_side}"
 
 
+def _signed(x: Optional[float]) -> str:
+    """A signed bias value (b > 0 = left-biased), or '--' when undefined."""
+    return "--" if x is None else f"{x:+.2f}"
+
+
 def _cued_lines(st: Optional["Phase3Stats"]) -> list:
-    """Human-readable Phase 3 cued-task lines (docs/decisions/0052 measures)."""
+    """Human-readable Phase 3 cued-task lines (docs/decisions/0052 measures).
+
+    For a closed-loop debias session the learning measures above are over the
+    out-of-block (counterbalanced) trials only, and two extra lines summarize the
+    directional bias + the corrective-block efficacy (see phase3_stats / the debias
+    ADR). Balanced sessions are unchanged (no extra lines)."""
     if st is None:
         return ["  (no cued-task data)"]
     n = st.window_n
-    return [
+    lines = [
         f"  Completed:   {st.completed}/{st.total}   "
         f"correct {st.correct}  incorrect {st.incorrect}",
         f"  Accuracy:    {_pct(st.accuracy_cum)}  "
@@ -489,6 +499,16 @@ def _cued_lines(st: Optional["Phase3Stats"]) -> list:
         f"Lose-shift: {_pct(st.lose_shift)}",
         f"  Choice RT:   {_rt(st.mean_rt_s)}   [n={st.rt_n}]",
     ]
+    if getattr(st, "generator", "balanced") != "balanced":
+        lines.append(
+            f"  Debias:      dir-bias {_signed(st.dir_bias)} "
+            f"(trigger {st.trigger_bias:.2f})   "
+            f"measures over {st.oob_completed} out-of-block trials")
+        lines.append(
+            f"  Blocks:      {st.n_blocks} (ok {st.blocks_success}/cap "
+            f"{st.blocks_capped})   in-block acc {_pct(st.inblock_accuracy)} "
+            f"[{st.inblock_completed}]   mean len {_rate(st.block_mean_len)}")
+    return lines
 
 
 def _locomotor_lines(sn: Optional["BehaviorSnapshot"]) -> list:

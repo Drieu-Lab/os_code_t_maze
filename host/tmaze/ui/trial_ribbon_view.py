@@ -50,6 +50,9 @@ _FG = "#222222"
 _FG_MUTED = "#888888"           # not-yet-resolved trials
 _FG_CORRECT = "#1a7f37"         # a correct choice
 _FG_INCORRECT = "#b3261e"       # an incorrect choice
+# A closed-loop debias corrective block: a distinct coloured outline around the
+# cell (purple, so it reads apart from the current-trial fill and the OK/X colours).
+_CORRECTIVE_OUTLINE = "#8a2be2"
 
 # Compact one-letter labels for the strip (arms and cue tones).
 _ARM_SHORT = {"LEFT": "L", "RIGHT": "R"}
@@ -74,7 +77,10 @@ def progress_signature(state: Optional[Phase3StateSnapshot]):
     if state is None:
         return None
     return (state.seed, state.total, state.current_index, state.armed,
-            sum(1 for r in state.rows if r.outcome is not None))
+            sum(1 for r in state.rows if r.outcome is not None),
+            # so a NORMAL<->INTERVENTION toggle (incl. an operator override) redraws
+            state.debias_state,
+            sum(1 for r in state.rows if r.sched_state == "INTERVENTION"))
 
 
 class TrialRibbonView:
@@ -158,7 +164,9 @@ class TrialRibbonView:
     def _make_cell(self, parent: tk.Misc, col: int) -> dict:
         """One ribbon cell: a coloured frame of stacked labels, updated in place."""
         frame = tk.Frame(parent, bg=_CELL_BG, bd=1, relief="solid",
-                         padx=5, pady=3)
+                         padx=5, pady=3, highlightthickness=0,
+                         highlightbackground=_CORRECTIVE_OUTLINE,
+                         highlightcolor=_CORRECTIVE_OUTLINE)
         frame.grid(row=0, column=col, padx=2, sticky="n")
         trial = tk.Label(frame, bg=_CELL_BG, fg=_FG, font=("TkDefaultFont", 8, "bold"))
         choice = tk.Label(frame, bg=_CELL_BG, fg=_FG, font=("TkDefaultFont", 8))
@@ -174,7 +182,11 @@ class TrialRibbonView:
         bg = _CELL_CURRENT_BG if row.is_current else _CELL_BG
         for key in ("frame", "trial", "choice", "ret"):
             cell[key].configure(bg=bg)
-        cell["trial"].configure(text=f"#{row.trial}")
+        # Ring corrective-block trials in a distinct outline (and mark the number).
+        cell["frame"].configure(
+            highlightthickness=2 if row.corrective else 0)
+        cell["trial"].configure(
+            text=(f"#{row.trial} blk" if row.corrective else f"#{row.trial}"))
         cell["choice"].configure(
             text=f"{row.choice_cue}->{_ARM_SHORT.get(row.choice_side, '?')}")
         cell["ret"].configure(

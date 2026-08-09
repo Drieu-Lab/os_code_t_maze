@@ -39,8 +39,11 @@ import json
 from typing import Optional
 
 from tmaze.core.cue_gate import CueParams
+from tmaze.core.phase3.debias import DebiasBlockConfig
 from tmaze.core.phase3.phase3_task import Phase3Config
-from tmaze.core.phase3.trial_sequence import TrialConfig
+from tmaze.core.phase3.trial_sequence import (
+    GEN_BALANCED, GEN_DEBIAS_BLOCKS, TrialConfig,
+)
 
 # Default number of lick top-ups at the well after the correct-choice prime
 # (ADR-0069). Not a field on Phase3Config (it belongs to the WellDispenser the
@@ -59,10 +62,13 @@ _SECTIONS = ("reward", "cue", "sequence")
 # explains itself (mirrors rules.json's ``_schema``). Preserved on round-trip.
 _SCHEMA = {
     "note": ("Host-owned Phase 3 config (FW-0024, ADR-0070). Delete this file to "
-             "reset to built-in defaults. 'reward' + 'cue' are editable from the "
-             "Phase 3 tab (Save settings); 'sequence' holds scientific schedule "
-             "params - hand-edit here only. seed: null = fresh random each launch, "
-             "an integer pins the schedule."),
+             "reset to built-in defaults. 'reward' + 'cue' + the sequence "
+             "'generator'/'debias_blocks' are editable from the Phase 3 tab (Save "
+             "settings); the rest of 'sequence' holds scientific schedule params - "
+             "hand-edit here only. seed: null = fresh random each launch, an "
+             "integer pins the schedule. generator: 'balanced' (counterbalanced, "
+             "default) or 'debias_blocks' (counterbalanced + closed-loop corrective "
+             "blocks when a side bias develops; params in 'debias_blocks')."),
 }
 
 
@@ -75,7 +81,7 @@ def default_config() -> dict:
     Includes the ``_schema`` doc block so a first Save writes a self-explaining
     file.
     """
-    pc, cp, tc = Phase3Config(), CueParams(), TrialConfig()
+    pc, cp, tc, db = Phase3Config(), CueParams(), TrialConfig(), DebiasBlockConfig()
     return {
         "_schema": dict(_SCHEMA),
         "reward": {
@@ -98,6 +104,17 @@ def default_config() -> dict:
             "high_tone_hz": tc.high_tone_hz,
             "low_tone_hz": tc.low_tone_hz,
             "seed": None,
+            # Trial-sequence generator + the closed-loop debias-block params it uses
+            # (only when generator == "debias_blocks"; see debias.py, ADR).
+            "generator": tc.generator,
+            "debias_blocks": {
+                "window": db.window,
+                "min_samples": db.min_samples,
+                "trigger_bias": db.trigger_bias,
+                "exit_consecutive": db.exit_consecutive,
+                "max_block_len": db.max_block_len,
+                "signal": db.signal,
+            },
         },
     }
 
@@ -175,6 +192,32 @@ def to_cue_params(config: dict) -> CueParams:
                      require_up_stem=bool(c.get("require_up_stem", True)))
 
 
+def _to_debias_config(d: dict) -> DebiasBlockConfig:
+    """Build + range-check the closed-loop `DebiasBlockConfig` from the
+    ``sequence.debias_blocks`` sub-section (missing keys fall back to defaults)."""
+    db = DebiasBlockConfig()
+    window = int(d.get("window", db.window))
+    min_samples = int(d.get("min_samples", db.min_samples))
+    trigger_bias = float(d.get("trigger_bias", db.trigger_bias))
+    exit_consecutive = int(d.get("exit_consecutive", db.exit_consecutive))
+    max_block_len = int(d.get("max_block_len", db.max_block_len))
+    signal = str(d.get("signal", db.signal))
+    if window <= 0:
+        raise ValueError("sequence.debias_blocks.window must be > 0")
+    if not 0 < min_samples <= window:
+        raise ValueError("sequence.debias_blocks.min_samples must be in (0, window]")
+    if not 0.0 <= trigger_bias <= 1.0:
+        raise ValueError("sequence.debias_blocks.trigger_bias must be in [0, 1]")
+    if exit_consecutive <= 0:
+        raise ValueError("sequence.debias_blocks.exit_consecutive must be > 0")
+    if max_block_len <= 0:
+        raise ValueError("sequence.debias_blocks.max_block_len must be > 0")
+    return DebiasBlockConfig(window=window, min_samples=min_samples,
+                             trigger_bias=trigger_bias,
+                             exit_consecutive=exit_consecutive,
+                             max_block_len=max_block_len, signal=signal)
+
+
 def to_trial_config(config: dict) -> TrialConfig:
     """Build the schedule/tone `TrialConfig` from the ``sequence`` section."""
     s = config.get("sequence", {})
@@ -183,6 +226,7 @@ def to_trial_config(config: dict) -> TrialConfig:
     max_same_run = int(s.get("max_same_run", 4))
     high_hz = int(s.get("high_tone_hz", 8000))
     low_hz = int(s.get("low_tone_hz", 4000))
+    generator = str(s.get("generator", GEN_BALANCED))
     if max_trials <= 0:
         raise ValueError("sequence.max_trials must be > 0")
     if block_size <= 0:
@@ -191,10 +235,19 @@ def to_trial_config(config: dict) -> TrialConfig:
         raise ValueError("sequence.max_same_run must be >= 0")
     if high_hz <= 0 or low_hz <= 0:
         raise ValueError("sequence tone Hz must be > 0")
+    if generator not in (GEN_BALANCED, GEN_DEBIAS_BLOCKS):
+        raise ValueError(
+            f"sequence.generator must be {GEN_BALANCED!r} or {GEN_DEBIAS_BLOCKS!r}")
+    # Always validate the debias params (so a bad value is caught on Save even if
+    # not currently selected), but only ATTACH them when the debias generator is
+    # active - so the balanced default stays debias=None (identical to TrialConfig).
+    debias_cfg = _to_debias_config(s.get("debias_blocks", {}))
+    debias = debias_cfg if generator == GEN_DEBIAS_BLOCKS else None
     return TrialConfig(max_trials=max_trials, block_size=block_size,
                        max_same_run=max_same_run,
                        high_tone_is_left=bool(s.get("high_tone_is_left", True)),
-                       high_tone_hz=high_hz, low_tone_hz=low_hz)
+                       high_tone_hz=high_hz, low_tone_hz=low_hz,
+                       generator=generator, debias=debias)
 
 
 def resolve_seed(config: dict) -> Optional[int]:

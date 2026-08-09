@@ -91,7 +91,16 @@ criteria).
 - **Date added:** 2026-06-24
 - **Author / Agent:** Agent (Cursor) on behalf of Celine
 - **Area / modules:** `firmware/cue-guided-task/task_core.h` (`generateSequence`), `firmware/common/rig_config.h` (a new `SAME_SIDE_FRACTION` knob), `firmware/cue-guided-task/test/test_task_core.cpp`
-- **Related ADRs:** [ADR-0009](decisions/0009-runtime-training-modes-and-logging.md) (added the anti-bias run-length cap; this is the deferred half of the same anti-bias goal)
+- **Related ADRs:** [ADR-0009](decisions/0009-runtime-training-modes-and-logging.md) (added the anti-bias run-length cap; this is the deferred half of the same anti-bias goal), [ADR-0086](decisions/0086-phase3-debias-blocks.md) (a *sibling* host-side `debias_blocks` generator)
+
+**Update (2026-08-09).** [ADR-0086](decisions/0086-phase3-debias-blocks.md) added a
+selectable host-side `debias_blocks` generator (bias-triggered corrective *blocks*
+that force the non-preferred side until the animal reliably switches). That is a
+*different* generator from the ~60/40 transition-bias scheme sketched here — it
+reacts to a developing bias in closed loop rather than baking a fixed transition
+ratio into the open-loop schedule — so this item **remains open**. The generator
+selector (`sequence.generator`) that ADR-0086 introduced is the natural place a
+future `transition_bias` generator would slot in.
 
 **Motivation / context.** Rats have a strong innate **spontaneous-alternation**
 tendency (natural foraging: don't return to a just-depleted source), so they
@@ -353,6 +362,17 @@ within the spatially-stable window rather than for the whole beam-bounded
 `CueRunning` interval. What REMAINS for FW-0008 is the **correction-trial**
 sequencing below (and, if desired, folding the cue into the firmware trial FSM
 rather than the host-driven path).
+
+**Update (2026-08-09).** The closed-loop *bias-correction* half is now handled
+**host-side** by [ADR-0086](decisions/0086-phase3-debias-blocks.md): a
+`debias_blocks` generator runs a corrective block (forcing the non-preferred side,
+with a 3-consecutive-correct exit + a length cap) when a directional-error bias
+develops. It differs from the per-error "repeat the errored side once" idea below,
+and lives in the host (where Phase 3 sequencing/scoring already lives, ADR-0046),
+not the firmware. What REMAINS for FW-0008 is therefore the *firmware-native* path
+only: per-error correction trials inside `task_core.h::generateSequence` and/or
+folding the cue into the firmware trial FSM — relevant only if Phase 3 sequencing
+ever moves back into firmware.
 
 **Motivation / context.** The host-side shaping phases (ADR-0026) end at Phase 2b
 (stem-gated choice with choice-side anti-bias, primed at the choice; ADR-0030).

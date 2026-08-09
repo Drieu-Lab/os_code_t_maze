@@ -14,9 +14,11 @@ from __future__ import annotations
 import unittest
 from dataclasses import fields
 
+from tmaze.core.phase3.debias import DebiasBlockConfig
 from tmaze.core.phase3.phase3_log import (COLUMNS, Phase3Log, Phase3RowView, Phase3StateSnapshot,
                         _Row)
-from tmaze.core.phase3.trial_sequence import HIGH, LEFT, LOW, RIGHT, TrialConfig, TrialSequence
+from tmaze.core.phase3.trial_sequence import (
+    GEN_DEBIAS_BLOCKS, HIGH, LEFT, LOW, RIGHT, TrialConfig, TrialSequence)
 
 
 def _seq(n=20, block=20, seed=123):
@@ -268,6 +270,72 @@ class TestSnapshot(unittest.TestCase):
         self.assertTrue(armed.armed)
         disarmed = log.snapshot(3, armed=False)
         self.assertFalse(disarmed.armed)
+
+
+def _debias_seq(n=40, seed=3):
+    cfg = TrialConfig(max_trials=n, block_size=20, max_same_run=4,
+                      generator=GEN_DEBIAS_BLOCKS,
+                      debias=DebiasBlockConfig(window=8, min_samples=4,
+                                               trigger_bias=0.3, exit_consecutive=3,
+                                               max_block_len=6))
+    return TrialSequence(cfg, seed=seed)
+
+
+class TestDebiasLogging(unittest.TestCase):
+    def test_new_columns_exist_in_order(self):
+        # The four closed-loop columns are appended at the end of the schema.
+        self.assertEqual(COLUMNS[-4:],
+                         ("sched_state", "block_id", "block_trigger", "bias"))
+
+    def test_header_bumped_to_proto7_with_generator(self):
+        header = [ln for ln in _log().render_csv().split("\n") if ln.startswith("#")]
+        self.assertTrue(any("proto=7" in ln for ln in header))
+        self.assertTrue(any("generator=balanced" in ln for ln in header))
+        # A balanced session records no closed-loop params.
+        self.assertFalse(any("debias_blocks" in ln for ln in header))
+
+    def test_balanced_generator_leaves_debias_columns_blank(self):
+        log = _log()
+        log.choice_scored(0, "left", "CORRECT", "t0")
+        log.set_decision(0)                       # no-op for the balanced generator
+        r = log._rows[0]
+        self.assertIsNone(r.sched_state)
+        self.assertIsNone(r.block_id)
+        self.assertIsNone(r.block_trigger)
+        self.assertIsNone(r.bias)
+        self.assertEqual(log.snapshot(1, armed=True).generator, "balanced")
+
+    def test_debias_header_and_columns_are_filled(self):
+        seq = _debias_seq(n=40)
+        log = Phase3Log(seq, animal="RAT600", session_start_iso="t")
+        header = [ln for ln in log.render_csv().split("\n") if ln.startswith("#")]
+        self.assertTrue(any("generator=debias_blocks" in ln for ln in header))
+        self.assertTrue(any("debias_blocks window=" in ln for ln in header))
+        self.assertTrue(any("closed-loop" in ln for ln in header))   # seed caveat
+
+        saw_block = False
+        for i in range(40):
+            seq.commit(i)
+            log.set_decision(i)
+            state = seq.trial_meta(i)["sched_state"]
+            correct = seq.correct_arm(i)
+            chosen = RIGHT if state == "INTERVENTION" else LEFT
+            side = "left" if chosen == LEFT else "right"
+            outcome = "CORRECT" if chosen == correct else "INCORRECT"
+            log.choice_scored(i, side, outcome, f"t{i}")
+            seq.record_outcome(i, correct, chosen)
+            log.set_decision(i)
+            r = log._rows[i]
+            self.assertIn(r.sched_state, ("NORMAL", "INTERVENTION"))
+            self.assertIsNotNone(r.bias)                # every decided trial logs b
+            if r.sched_state == "INTERVENTION":
+                saw_block = True
+                self.assertIsNotNone(r.block_id)
+                self.assertEqual(r.block_trigger, "auto")
+        self.assertTrue(saw_block)                      # a corrective block ran
+        snap = log.snapshot(40, armed=True)
+        self.assertEqual(snap.generator, "debias_blocks")
+        self.assertGreater(snap.trigger_bias, 0.0)
 
 
 if __name__ == "__main__":

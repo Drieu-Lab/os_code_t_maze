@@ -849,6 +849,9 @@ def main() -> int:
                 "extend": _p3_call("extend_trials"),
                 "restart": _restart,
                 "pause": _toggle_pause,
+                # Manual override of the closed-loop debias scheduler (no-op unless
+                # the debias_blocks generator is active). See debias.py / ADR.
+                "debias": _p3_call("toggle_debias_block"),
             }
             ctrl_bar = TrialControlBar(
                 upper, callbacks=controls, state_getter=phase3_state,

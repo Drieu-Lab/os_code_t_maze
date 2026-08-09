@@ -1,6 +1,6 @@
 {
   "_schema": {
-    "note": "Host-owned Phase 3 config (FW-0024, ADR-0070). Delete this file to reset to built-in defaults. 'reward' + 'cue' are editable from the Phase 3 tab (Save settings); 'sequence' holds scientific schedule params - hand-edit here only. seed: null = fresh random each launch, an integer pins the schedule."
+    "note": "Host-owned Phase 3 config (FW-0024, ADR-0070). Delete this file to reset to built-in defaults. 'reward' + 'cue' + the sequence 'generator'/'debias_blocks' are editable from the Phase 3 tab (Save settings); the rest of 'sequence' holds scientific schedule params - hand-edit here only. seed: null = fresh random each launch, an integer pins the schedule. generator: 'balanced' (counterbalanced, default) or 'debias_blocks' (counterbalanced + closed-loop corrective blocks when a side bias develops)."
   },
   "reward": {
     "port": 2,
@@ -21,6 +21,15 @@
     "high_tone_is_left": true,
     "high_tone_hz": 8000,
     "low_tone_hz": 4000,
-    "seed": null
+    "seed": null,
+    "generator": "balanced",
+    "debias_blocks": {
+      "window": 20,
+      "min_samples": 10,
+      "trigger_bias": 0.3,
+      "exit_consecutive": 3,
+      "max_block_len": 15,
+      "signal": "directional_errors"
+    }
   }
 }

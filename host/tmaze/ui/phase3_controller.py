@@ -62,9 +62,11 @@ from typing import Callable, Optional
 
 from tmaze.core import protocol
 from tmaze.core.cue_gate import CHOICE, RETURN, CueGate, CueParams
+from tmaze.core.phase3.debias import DebiasBlockConfig
 from tmaze.core.phase3.phase3_config import (
     DEFAULT_MAX_TOPUPS, default_config, load_phase3_config, resolve_seed,
     save_phase3_config, to_trial_config, validate_phase3_config)
+from tmaze.core.phase3.trial_sequence import GEN_BALANCED, GEN_DEBIAS_BLOCKS
 from tmaze.core.phase3.phase3_log import Phase3Log, Phase3StateSnapshot
 from tmaze.core.phase3.phase3_task import ABANDONED, CORRECT, INCORRECT, Phase3Config, Phase3Task
 from tmaze.core.reward.reward_dispenser import WellDispenser
@@ -249,6 +251,9 @@ class Phase3ControlView(VisionActuator):
         self._config_path = PHASE3_PATH
         self._config = default_config()
         self._config_error = ""
+        # Last live-validation error of the GUI debias fields (invalid edits fall
+        # back to the last valid config; surfaced in the sequence readout).
+        self._debias_error = ""
         self._load_config()
 
         # --- actuation thread (ADR-0043 skeleton, shared via VisionActuator) ---
@@ -436,6 +441,33 @@ class Phase3ControlView(VisionActuator):
     def is_paused(self) -> bool:
         return self._paused
 
+    # The debias corrective-block override (Rig-view / control-bar button). These
+    # only do anything under the "debias_blocks" generator; they enqueue a command
+    # the actuation thread applies (it owns the task), taking effect on the NEXT
+    # committed trial (the current trial's side is already fixed). See debias.py.
+    def start_debias_block(self) -> None:
+        """Operator: force a corrective block to start (side inferred from bias)."""
+        self._enqueue_act(("cmd", "debias_start"))
+
+    def end_debias_block(self) -> None:
+        """Operator: end the current corrective block early."""
+        self._enqueue_act(("cmd", "debias_end"))
+
+    def toggle_debias_block(self) -> None:
+        """Flip between a corrective block and normal counterbalanced trials, based
+        on the currently published scheduler state."""
+        st = self._state
+        if st is not None and st.debias_state == "INTERVENTION":
+            self.end_debias_block()
+        else:
+            self.start_debias_block()
+
+    def debias_active(self) -> bool:
+        """Whether the debias_blocks generator is in effect this session (so the
+        control bar can enable/disable its toggle)."""
+        st = self._state
+        return st is not None and st.generator != "balanced"
+
     # --------------------------------------------------------------- thread
     def _process_act_item(self, item, snap) -> None:
         """Sole caller of CueGate.step / TaskEvents.update / Phase3Task.update /
@@ -528,6 +560,16 @@ class Phase3ControlView(VisionActuator):
             return
         idx = self._task.index
         iso = _now_iso()
+        if name in ("debias_start", "debias_end"):
+            # Operator override of the closed-loop scheduler (debias.py). Latched on
+            # the controller, applied on the next committed trial; publish so the
+            # panel/control-bar reflect the request promptly.
+            if name == "debias_start":
+                self._task.force_debias_block(None)
+            else:
+                self._task.end_debias_block()
+            self._publish_state(armed=snap.gate_open)
+            return
         if name == "skip":
             self._log_call(lambda: self._log.trial_abandoned(idx, iso))
             self._task.abandon_current()
@@ -653,7 +695,11 @@ class Phase3ControlView(VisionActuator):
         # The edge is true only on a valid tick, and the log keeps only the first
         # stamp per trial, so a poke-and-retreat re-entry is ignored. ADR-0047.
         if task_frame is not None and task_frame.departed_hub_via_stem:
+            # The trial's side is committed by now (every frame's task.update commits
+            # the current trial), so record its realized correct side + debias
+            # context alongside the start stamp (no-op for the balanced generator).
             self._log_call(lambda: self._log.trial_started(idx, iso))
+            self._log_call(lambda: self._log.set_decision(idx))
             changed = True
 
         # WHEN: the positional cue gate. Host supplies identity via ,<hz> (v6).
@@ -702,6 +748,9 @@ class Phase3ControlView(VisionActuator):
             if dec.choice_side is not None and dec.outcome is not None:
                 self._log_call(lambda: self._log.choice_scored(
                     dec.trial_index, dec.choice_side, dec.outcome, iso))
+                # Refresh the realized side + debias context for the scored trial
+                # (its bias/state were fixed when it was committed; no-op balanced).
+                self._log_call(lambda: self._log.set_decision(dec.trial_index))
                 changed = True
             if dec.reward:
                 # Prime the correct-choice pulse at the well via the shared
@@ -889,6 +938,51 @@ class Phase3ControlView(VisionActuator):
         except (tk.TclError, ValueError):
             return 0
 
+    # ---------------------------------------------- debias (closed-loop) fields
+    def _current_debias_dict(self) -> dict:
+        """The debias-block params from the GUI fields (safe parse, defaults on a
+        blank/bad entry). Range-checking is left to ``to_trial_config`` so a bad
+        combo (e.g. min_samples > window) is reported, not silently clamped."""
+        db = DebiasBlockConfig()
+
+        def _i(var, default):
+            try:
+                return int(float(var.get()))
+            except (tk.TclError, ValueError):
+                return default
+
+        def _f(var, default):
+            try:
+                return float(var.get())
+            except (tk.TclError, ValueError):
+                return default
+
+        return {"window": _i(self._db_window_var, db.window),
+                "min_samples": _i(self._db_min_samples_var, db.min_samples),
+                "trigger_bias": _f(self._db_trigger_var, db.trigger_bias),
+                "exit_consecutive": _i(self._db_exit_var, db.exit_consecutive),
+                "max_block_len": _i(self._db_cap_var, db.max_block_len)}
+
+    def _current_trial_config(self) -> TrialConfig:
+        """Resolve the schedule config for the NEXT arm, overlaying the GUI
+        generator + debias fields onto the file's ``sequence`` section. On an
+        invalid debias edit it records the error and falls back to the last valid
+        (loaded/saved) config, so the Tk poll never crashes on a half-typed field.
+        """
+        if not hasattr(self, "_gen_var"):
+            return to_trial_config(self._config)
+        seq = dict(self._config["sequence"])
+        seq["generator"] = self._gen_var.get()
+        seq["debias_blocks"] = {**seq.get("debias_blocks", {}),
+                                **self._current_debias_dict()}
+        try:
+            tc = to_trial_config({"sequence": seq})
+            self._debias_error = ""
+            return tc
+        except Exception as e:
+            self._debias_error = f"{type(e).__name__}: {e}"
+            return to_trial_config(self._config)
+
     # -------------------------------------------------- phase3.json config
     def _load_config(self) -> None:
         """(Re)load host/phase3.json into ``self._config``, validating it. A
@@ -921,6 +1015,18 @@ class Phase3ControlView(VisionActuator):
         seed = resolve_seed(self._config)
         self._seed_var.set(str(seed) if seed is not None
                            else str(random.randint(1, SEED_MASK)))
+        # Debias generator + block params (GUI-editable subset of ``sequence``;
+        # ADR-0070 carve-out).
+        s = self._config["sequence"]
+        self._gen_var.set(s.get("generator", GEN_BALANCED))
+        db = s.get("debias_blocks", {})
+        dc = DebiasBlockConfig()
+        self._db_window_var.set(str(db.get("window", dc.window)))
+        self._db_min_samples_var.set(str(db.get("min_samples", dc.min_samples)))
+        self._db_trigger_var.set(str(db.get("trigger_bias", dc.trigger_bias)))
+        self._db_exit_var.set(str(db.get("exit_consecutive", dc.exit_consecutive)))
+        self._db_cap_var.set(str(db.get("max_block_len", dc.max_block_len)))
+        self._sync_debias_enabled()
 
     def _save_settings(self) -> None:
         """Persist the tab's reward + cue fields to phase3.json (Save button).
@@ -938,6 +1044,12 @@ class Phase3ControlView(VisionActuator):
         cfg["cue"]["return_enabled"] = p.return_enabled
         cfg["cue"]["require_up_stem"] = p.require_up_stem
         cfg["cue"]["min_confidence"] = p.min_confidence
+        # Debias generator + block params are the GUI-editable slice of the
+        # otherwise file-only ``sequence`` section (ADR-0070 carve-out); persist
+        # them too, leaving the scientific schedule params untouched.
+        cfg["sequence"]["generator"] = self._gen_var.get()
+        cfg["sequence"].setdefault("debias_blocks", {}).update(
+            self._current_debias_dict())
         try:
             validate_phase3_config(cfg)
         except Exception as e:
@@ -954,8 +1066,9 @@ class Phase3ControlView(VisionActuator):
         self._refresh_seq_info()
         messagebox.showinfo(
             "Save Phase 3 settings",
-            "Saved reward + cue settings to phase3.json. (Sequence & tones are "
-            "edited in the file.) New settings apply on the next arm.")
+            "Saved reward + cue + debias settings to phase3.json. (The scientific "
+            "schedule params - trials/block/tones/seed - are edited in the file.) "
+            "New settings apply on the next arm.")
 
     def _reload_settings(self) -> None:
         """Re-read phase3.json from disk into the tab (Reload button), e.g. after
@@ -982,6 +1095,18 @@ class Phase3ControlView(VisionActuator):
             f"trials {s['max_trials']} \u00b7 block {s['block_size']} \u00b7 "
             f"max-run {s['max_same_run']} \u00b7 tones {s['high_tone_hz']}/"
             f"{s['low_tone_hz']} Hz (HIGH={left}) \u00b7 seed {seed_txt}")
+
+    def _sync_debias_enabled(self) -> None:
+        """Enable the debias param spinboxes only under the debias_blocks generator
+        (they are inert for the balanced schedule)."""
+        if not hasattr(self, "_debias_spinboxes"):
+            return
+        on = self._gen_var.get() == GEN_DEBIAS_BLOCKS
+        for sb in self._debias_spinboxes:
+            try:
+                sb.configure(state=("normal" if on else "disabled"))
+            except tk.TclError:
+                pass
 
     # -------------------------------------------------------------------- UI
     def _build_ui(self) -> None:
@@ -1077,12 +1202,14 @@ class Phase3ControlView(VisionActuator):
         fat-fingered mid-session."""
         box = ttk.LabelFrame(root, text="Sequence & tones (edit phase3.json)")
         box.grid(row=row, column=0, columnspan=2, sticky="ew", padx=6, pady=3)
+        box.columnconfigure(0, weight=1)
         self._seq_info_var = tk.StringVar(value="")
         ttk.Label(box, textvariable=self._seq_info_var, foreground="#555",
                   wraplength=440, justify="left").grid(
-            row=0, column=0, sticky="w", padx=6, pady=3)
+            row=0, column=0, columnspan=2, sticky="w", padx=6, pady=3)
         tip(box, "phase3.sequence_config")
         self._refresh_seq_info()
+        self._build_debias_ui(box, row=1)
 
         btns = ttk.Frame(root)
         btns.grid(row=row + 1, column=0, columnspan=2, sticky="w", padx=6, pady=3)
@@ -1093,6 +1220,69 @@ class Phase3ControlView(VisionActuator):
                                 command=self._reload_settings)
         reload_btn.pack(side=tk.LEFT, padx=(6, 0))
         tip(reload_btn, "phase3.reload_config")
+
+    def _build_debias_ui(self, parent: ttk.Frame, *, row: int) -> None:
+        """The GUI-editable slice of the otherwise file-only ``sequence`` section:
+        the trial-sequence generator + the closed-loop corrective-block params
+        (ADR-0070 carve-out; see debias.py). The generator dropdown picks
+        ``balanced`` (counterbalanced, unchanged) or ``debias_blocks``
+        (counterbalanced + corrective blocks when a side bias develops); the
+        spinboxes are the block state-machine knobs and are enabled only under the
+        debias generator. All apply on the NEXT arm (like the seed), and are saved
+        to phase3.json by Save settings."""
+        s = self._config["sequence"]
+        dc = DebiasBlockConfig()
+        db = s.get("debias_blocks", {})
+
+        frame = ttk.Frame(parent)
+        frame.grid(row=row, column=0, columnspan=2, sticky="ew", padx=6, pady=(2, 4))
+
+        ttk.Label(frame, text="Generator:").grid(
+            row=0, column=0, sticky="w", padx=(0, 4), pady=2)
+        self._gen_var = tk.StringVar(value=s.get("generator", GEN_BALANCED))
+        gen = ttk.Combobox(frame, width=15, state="readonly",
+                           textvariable=self._gen_var,
+                           values=(GEN_BALANCED, GEN_DEBIAS_BLOCKS))
+        gen.grid(row=0, column=1, columnspan=3, sticky="w", pady=2)
+        gen.bind("<<ComboboxSelected>>", lambda _e: self._sync_debias_enabled())
+        tip(gen, "phase3.generator")
+
+        # The five corrective-block knobs. (var, label, tooltip, from, to, step,
+        # is_float). Kept compact in a 2-column grid under the dropdown.
+        self._db_window_var = tk.StringVar(value=str(db.get("window", dc.window)))
+        self._db_min_samples_var = tk.StringVar(
+            value=str(db.get("min_samples", dc.min_samples)))
+        self._db_trigger_var = tk.StringVar(
+            value=str(db.get("trigger_bias", dc.trigger_bias)))
+        self._db_exit_var = tk.StringVar(
+            value=str(db.get("exit_consecutive", dc.exit_consecutive)))
+        self._db_cap_var = tk.StringVar(
+            value=str(db.get("max_block_len", dc.max_block_len)))
+        spinspec = (
+            ("Window (trials):", self._db_window_var, "phase3.debias_window",
+             1, 500, 1, False),
+            ("Min samples:", self._db_min_samples_var, "phase3.debias_min_samples",
+             1, 500, 1, False),
+            ("Trigger |bias|:", self._db_trigger_var, "phase3.debias_trigger_bias",
+             0.0, 1.0, 0.05, True),
+            ("Exit (consec. correct):", self._db_exit_var,
+             "phase3.debias_exit_consecutive", 1, 20, 1, False),
+            ("Max block length:", self._db_cap_var, "phase3.debias_max_block_len",
+             1, 200, 1, False),
+        )
+        self._debias_spinboxes = []
+        for i, (label, var, tkey, lo, hi, step, is_float) in enumerate(spinspec):
+            r = 1 + i // 2
+            c = (i % 2) * 2
+            ttk.Label(frame, text=label).grid(
+                row=r, column=c, sticky="w", padx=(0, 4), pady=2)
+            sb = ttk.Spinbox(frame, from_=lo, to=hi, increment=step, width=7,
+                             textvariable=var,
+                             format=("%.2f" if is_float else "%.0f"))
+            sb.grid(row=r, column=c + 1, sticky="w", padx=(0, 12), pady=2)
+            tip(sb, tkey)
+            self._debias_spinboxes.append(sb)
+        self._sync_debias_enabled()
 
     def _build_reward_ui(self, root: ttk.Frame, *, row: int) -> None:
         """Reward controls: the correct-choice prime pulse width, the number of
@@ -1188,7 +1378,7 @@ class Phase3ControlView(VisionActuator):
             reward_pulse_ms=self._current_pulse_ms(),
             max_topups=self._current_max_topups(),
             reward_port=int(self._config["reward"]["port"]),
-            trial_config=to_trial_config(self._config),
+            trial_config=self._current_trial_config(),
             animal=self._current_animal(),
             session_id=self._session_id,
             session_out_dir=self._session_out_dir,

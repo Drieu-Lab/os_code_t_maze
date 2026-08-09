@@ -66,6 +66,10 @@ DEFAULT_WINDOW = 20
 LEFT_LABEL = "LEFT"
 RIGHT_LABEL = "RIGHT"
 
+# The per-trial scheduler state that marks an in-block (corrective) trial (the
+# ``sched_state`` value phase3_log records; debias.INTERVENTION).
+INTERVENTION_LABEL = "INTERVENTION"
+
 
 @dataclass(frozen=True)
 class Phase3Stats:
@@ -106,6 +110,30 @@ class Phase3Stats:
     # ---- reaction time (cue onset -> scored choice) ----
     mean_rt_s: Optional[float]
     rt_n: int
+    # ---- closed-loop debias (blank/neutral for the balanced generator) ----
+    # The learning measures above are over OUT-OF-BLOCK completed trials only, so a
+    # corrective block (which forces one side) never distorts them; the in-block
+    # trials are summarized separately here. See the module docstring + the ADR.
+    generator: str = "balanced"
+    sched_state: str = "NORMAL"                 # current scheduler state
+    # Headline: signed directional-error bias over OUT-OF-BLOCK completed trials
+    # (b > 0 = left-biased); left/right "pull" error counts that make it up.
+    dir_bias: Optional[float] = None
+    dir_bias_left_pull: int = 0
+    dir_bias_right_pull: int = 0
+    live_bias: float = 0.0                       # controller's sliding-window bias
+    trigger_bias: float = 0.0                    # |b| threshold that starts a block
+    # ---- in-block vs out-of-block split ----
+    oob_completed: int = 0
+    inblock_completed: int = 0
+    inblock_accuracy: Optional[float] = None
+    inblock_reward_rate: Optional[float] = None
+    inblock_fraction: Optional[float] = None    # in-block / all completed
+    # ---- corrective-block efficacy ----
+    n_blocks: int = 0
+    blocks_success: int = 0                      # ended by the consecutive-correct exit
+    blocks_capped: int = 0                       # hit the max-length failsafe
+    block_mean_len: Optional[float] = None       # mean completed trials per block
 
 
 def _parse_iso(iso: Optional[str]) -> Optional[datetime]:
@@ -158,24 +186,44 @@ def compute(snapshot: Optional[Phase3StateSnapshot], *,
     correct = sum(1 for r in completed if r.outcome == CORRECT)
     incorrect = sum(1 for r in completed if r.outcome == INCORRECT)
 
-    accuracy_cum = (correct / ncomp) if ncomp else None
-    win = completed[-n:]
-    accuracy_win = _accuracy(win)
+    # Partition on the closed-loop scheduler state. Out-of-block (NORMAL or, for the
+    # balanced generator, unset) trials are the animal's UNCOERCED behavior, so all
+    # learning measures use them; in-block (INTERVENTION) trials force one side and
+    # are summarized on their own. For a balanced session inb is empty and oob is
+    # every completed trial, so every measure below matches the pre-debias readout.
+    inb = [r for r in completed if r.sched_state == INTERVENTION_LABEL]
+    oob = [r for r in completed if r.sched_state != INTERVENTION_LABEL]
+    noob = len(oob)
 
-    high = [r for r in completed if r.choice_cue == HIGH]
-    low = [r for r in completed if r.choice_cue == LOW]
+    correct_oob = sum(1 for r in oob if r.outcome == CORRECT)
+    accuracy_cum = (correct_oob / noob) if noob else None
+    accuracy_win = _accuracy(oob[-n:])
 
-    left = sum(1 for r in completed if r.chosen_arm == LEFT_LABEL)
-    right = sum(1 for r in completed if r.chosen_arm == RIGHT_LABEL)
+    high = [r for r in oob if r.choice_cue == HIGH]
+    low = [r for r in oob if r.choice_cue == LOW]
+
+    left = sum(1 for r in oob if r.chosen_arm == LEFT_LABEL)
+    right = sum(1 for r in oob if r.chosen_arm == RIGHT_LABEL)
     sided = left + right
     lr_bias = (left / sided, right / sided) if sided else None
 
     rewarded = sum(1 for r in completed if r.rewarded == "1")
-    reward_rate = (rewarded / ncomp) if ncomp else None
+    reward_rate = (sum(1 for r in oob if r.rewarded == "1") / noob) if noob else None
     topups = sum(_int_or_zero(r.topups) for r in completed)
 
-    win_stay, lose_shift = _win_stay_lose_shift(completed)
-    mean_rt_s, rt_n = _mean_reaction_time(completed)
+    win_stay, lose_shift = _win_stay_lose_shift(oob)
+    mean_rt_s, rt_n = _mean_reaction_time(oob)
+
+    # Headline directional-error bias (over out-of-block trials) + the block split.
+    dir_bias, lpull, rpull = _dir_bias(oob)
+    inblock_accuracy = _accuracy(inb)
+    inblock_reward_rate = (sum(1 for r in inb if r.rewarded == "1") / len(inb)
+                           if inb else None)
+    inblock_fraction = (len(inb) / ncomp) if ncomp else None
+    exit_consecutive = snapshot.exit_consecutive if snapshot is not None else 0
+    max_block_len = snapshot.max_block_len if snapshot is not None else 0
+    n_blocks, succ, capped, mean_len = _block_efficacy(
+        inb, exit_consecutive, max_block_len)
 
     return Phase3Stats(
         window_n=n, total=total, current_index=current_index,
@@ -186,7 +234,65 @@ def compute(snapshot: Optional[Phase3StateSnapshot], *,
         lr_bias=lr_bias, left_choices=left, right_choices=right,
         rewarded=rewarded, reward_rate=reward_rate, topups=topups,
         win_stay=win_stay, lose_shift=lose_shift,
-        mean_rt_s=mean_rt_s, rt_n=rt_n)
+        mean_rt_s=mean_rt_s, rt_n=rt_n,
+        generator=(snapshot.generator if snapshot is not None else "balanced"),
+        sched_state=(snapshot.debias_state if snapshot is not None else "NORMAL"),
+        dir_bias=dir_bias, dir_bias_left_pull=lpull, dir_bias_right_pull=rpull,
+        live_bias=(snapshot.debias_bias if snapshot is not None else 0.0),
+        trigger_bias=(snapshot.trigger_bias if snapshot is not None else 0.0),
+        oob_completed=noob, inblock_completed=len(inb),
+        inblock_accuracy=inblock_accuracy, inblock_reward_rate=inblock_reward_rate,
+        inblock_fraction=inblock_fraction,
+        n_blocks=n_blocks, blocks_success=succ, blocks_capped=capped,
+        block_mean_len=mean_len)
+
+
+def _dir_bias(rows: List[Phase3RowView]) -> Tuple[Optional[float], int, int]:
+    """Signed directional-error bias over ``rows`` (out-of-block completed trials).
+
+    A "pull" error is choosing the arm the cue told the rat NOT to: a left-pull is
+    (cued RIGHT, chose LEFT), a right-pull is (cued LEFT, chose RIGHT). Returns
+    ``(b, left_pull, right_pull)`` with ``b = (left_pull - right_pull) / n`` in
+    [-1, 1] (b > 0 = left-biased), or ``(None, 0, 0)`` if empty. This is the
+    session-level twin of the sliding-window measure the debias controller acts on
+    (debias.py)."""
+    if not rows:
+        return None, 0, 0
+    left_pull = sum(1 for r in rows
+                    if r.correct_arm == RIGHT_LABEL and r.chosen_arm == LEFT_LABEL)
+    right_pull = sum(1 for r in rows
+                     if r.correct_arm == LEFT_LABEL and r.chosen_arm == RIGHT_LABEL)
+    return (left_pull - right_pull) / len(rows), left_pull, right_pull
+
+
+def _block_efficacy(
+        inb: List[Phase3RowView], exit_consecutive: int, max_block_len: int
+) -> Tuple[int, int, int, Optional[float]]:
+    """Summarize the corrective blocks over the in-block completed trials.
+
+    Groups them by ``block_id`` (a block is a maximal run of one id) and returns
+    ``(n_blocks, n_success, n_capped, mean_len)``: a block is a SUCCESS if its last
+    ``exit_consecutive`` completed trials are all CORRECT (the consecutive-correct
+    exit), else CAPPED if it reached ``max_block_len`` completed trials (the
+    failsafe); a still-open block is counted in ``n_blocks`` but neither. Order is
+    preserved from the snapshot rows (insertion-ordered dict)."""
+    groups: "dict[str, List[Phase3RowView]]" = {}
+    for r in inb:
+        if r.block_id:
+            groups.setdefault(r.block_id, []).append(r)
+    if not groups:
+        return 0, 0, 0, None
+    succ = capped = 0
+    for g in groups.values():
+        tail = g[-exit_consecutive:] if exit_consecutive > 0 else []
+        is_success = (exit_consecutive > 0 and len(tail) >= exit_consecutive
+                      and all(r.outcome == CORRECT for r in tail))
+        if is_success:
+            succ += 1
+        elif max_block_len > 0 and len(g) >= max_block_len:
+            capped += 1
+    mean_len = sum(len(g) for g in groups.values()) / len(groups)
+    return len(groups), succ, capped, mean_len
 
 
 def _win_stay_lose_shift(
