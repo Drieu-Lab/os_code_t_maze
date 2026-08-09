@@ -122,5 +122,50 @@ class TestSignal4(unittest.TestCase):
                          ["2026-07-01", "2026-07-02"])
 
 
+class TestWaterMlTrend(unittest.TestCase):
+    """The optional water overlay: per-day total mL over the window."""
+
+    _WATER_ROWS = [
+        {"animal_id": "600", "date": "2026-07-01",
+         "water_ml": "10", "supp_water": "3"},          # 13 mL (cage + supp)
+        {"animal_id": "600", "date": "2026-07-02",
+         "water_ml": "", "supp_water": "6:30pm"},        # nothing numeric -> 0
+        {"animal_id": "600", "date": "2026-07-03",
+         "water_ml": "8", "supp_water": ""},             # 8 mL, but registry adds task
+    ]
+
+    def setUp(self):
+        self.log = DailyLog(self._WATER_ROWS)
+        self.reg = [
+            {"animal": "600", "date": "2026-07-03",
+             "task_reward_ml": "2.5", "manual_reward_ml": "0.5"},
+            {"animal": "601", "date": "2026-07-03",
+             "task_reward_ml": "99", "manual_reward_ml": "99"},
+        ]
+
+    def test_sums_channels_per_day_oldest_first(self):
+        series = dashboard.water_ml_trend(self.log, self.reg, "600",
+                                          "2026-07-03", days=14)
+        self.assertEqual([r["date"] for r in series],
+                         ["2026-07-01", "2026-07-02", "2026-07-03"])
+        totals = {r["date"]: r["total_ml"] for r in series}
+        self.assertEqual(totals["2026-07-01"], 13.0)   # 10 cage + 3 supp
+        self.assertEqual(totals["2026-07-02"], 0.0)    # time string -> 0
+        self.assertEqual(totals["2026-07-03"], 11.0)   # 8 cage + 2.5 + 0.5 reward
+
+    def test_window_excludes_out_of_range(self):
+        series = dashboard.water_ml_trend(self.log, self.reg, "600",
+                                          "2026-07-01", days=1)
+        self.assertEqual([r["date"] for r in series], ["2026-07-01"])
+
+    def test_registry_only_date_is_included(self):
+        # A day with no daily row but a registry row still appears in the trend.
+        log = DailyLog([])
+        reg = [{"animal": "600", "date": "2026-07-05",
+                "task_reward_ml": "4", "manual_reward_ml": ""}]
+        series = dashboard.water_ml_trend(log, reg, "600", "2026-07-05", days=14)
+        self.assertEqual(series, [{"date": "2026-07-05", "total_ml": 4.0}])
+
+
 if __name__ == "__main__":
     unittest.main()

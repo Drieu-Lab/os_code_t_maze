@@ -82,6 +82,7 @@ criteria).
 | [FW-0027](#fw-0027-one-triggereffect-framework-behind-phases-1-2a-and-3) | One trigger/effect framework behind Phases 1, 2a and 3 | Rules engine + task-event layer + Phase 3 host | Proposed |
 | [FW-0028](#fw-0028-scope-the-session-summary-to-the-startstop-window) | Scope the session summary to the Start/Stop window | Session controller + summary + stats cores | Proposed |
 | [FW-0029](#fw-0029-real-water-timestamps--hours-since-water-in-the-daily-table) | Real water timestamps + hours-since-water in the daily table | Daily husbandry table + animal_state | Proposed |
+| [FW-0030](#fw-0030-weekend-ad-libitum-water-accounting-in-the-daily-table--dashboard) | Weekend ad-libitum water accounting in the daily table + dashboard | Daily husbandry table + dashboard | Proposed |
 
 ## Entries
 
@@ -1446,6 +1447,55 @@ session start" event to cross-check the table?
 
 **ADR needed?** Yes - it changes the daily-table schema and how a motivational
 covariate is derived (a small follow-up to ADR-0076/0077).
+
+### FW-0030: Weekend ad-libitum water accounting in the daily table + dashboard
+
+- **Status:** Proposed
+- **Date added:** 2026-08-09
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** `os_code_t_maze_resources/records/animal/daily_log.csv` +
+  `build_daily_log.py` (a way to mark ad-lib days), `host/tmaze/core/records/dashboard.py`
+  (`water_ml_trend` / `not_logged_today` / `weight_status` interpretation),
+  `host/tmaze/ui/records_manager.py` (dashboard rendering of ad-lib days)
+- **Related ADRs:** [ADR-0087](decisions/0087-dashboard-trend-charts.md) (the
+  water trace this qualifies), [ADR-0076](decisions/0076-daily-husbandry-table-source-of-truth.md)
+  (the daily table), [ADR-0077](decisions/0077-pre-session-animal-state-in-bundle.md)
+  (pre-session state)
+
+**Motivation / context.** Water is available **ad libitum on weekends** (typically
+Friday evening through Sunday afternoon) - the rats are off water restriction for
+that span. The daily husbandry table and the dashboard don't model this. As a
+result an ad-lib weekend day looks like either a "not logged / not weighed" alarm
+(no restriction data to enter) or, once the optional water trace (ADR-0087) is on,
+a spuriously large/absent water bar that distorts any read of the *maintenance*
+water level (the amount that holds the animal at target during restriction). The
+scientific point is that maintenance-level inference should be computed over
+restriction days only; ad-lib days are a different regime.
+
+**Sketch of approach.** Give the daily table an explicit way to mark a day (or a
+span) as ad-lib / off-restriction (e.g. a `water_regime` column or a recognized
+note flag), set once for the weekend rather than per row. Teach the dashboard to
+treat ad-lib days distinctly: exclude them from the not-logged/not-weighed alarm
+(they're expected blanks), and either omit them from the water-maintenance trace
+or draw them in a visibly different style (so the eye doesn't read a weekend as a
+restriction-day intake). Keep the % baseline trend showing them (weight is still
+meaningful), just annotated as ad-lib.
+
+**Evaluation / acceptance.** A marked Fri-evening->Sun weekend no longer raises a
+not-logged alarm; the water trace either drops those days or renders them
+distinctly; the % baseline line still plots them; a unit test covers the
+ad-lib-day classification and its effect on the signals.
+
+**Effort / risk.** Low-medium. Main tension is data-entry friction (marking a span
+without a row per day) and picking a convention the lab will actually keep. Couples
+to the water-entry clean-up and FW-0029 (real water timestamps).
+
+**Open questions.** A per-row `water_regime` value or a span marker? Fixed
+Fri-evening->Sun-afternoon default, or explicitly entered each weekend? Should
+ad-lib days feed the maintenance-level estimate at all, or only the weight trend?
+
+**ADR needed?** Yes - it changes the daily-table schema and how the dashboard
+interprets welfare signals (a follow-up to ADR-0076/0087).
 
 ## Completed
 

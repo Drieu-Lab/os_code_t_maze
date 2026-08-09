@@ -210,3 +210,43 @@ def weight_trend(log: daily_log.DailyLog, animal_id: str, end_date: str,
         })
     out.sort(key=lambda r: r["date"])
     return out
+
+
+def water_ml_trend(log: daily_log.DailyLog, registry_rows: List[Dict[str, Any]],
+                   animal_id: str, end_date: str,
+                   days: int = 14) -> List[Dict[str, Any]]:
+    """Oldest-first ``[{date, total_ml}]`` of each day's total water (all four
+    channels summed by :func:`collect_water`) over the window ending (inclusive)
+    at ``end_date``, spanning ``days`` calendar days.
+
+    A date is included when it has a daily row *or* any registry row for the
+    animal within the window; ``total_ml`` is 0.0 when nothing numeric is
+    recorded that day. If ``end_date`` doesn't parse, the window is unbounded.
+
+    This is the optional water overlay behind the dashboard's Show-water toggle;
+    it stays sparse until the numeric ``water_ml``/``supp_water`` cells (or the
+    registry's reward channels) are populated.
+    """
+    end = _iso(end_date)
+    start = end - dt.timedelta(days=max(days, 1) - 1) if end else None
+    aid = str(animal_id).strip()
+
+    def _in_window(d: Optional[dt.date]) -> bool:
+        return d is not None and (start is None or start <= d <= end)
+
+    dates: set = set()
+    for row in log.rows_for(animal_id):
+        if _in_window(_iso(row.get("date"))):
+            dates.add(row.get("date", "").strip())
+    for r in registry_rows:
+        if str(r.get("animal", "")).strip() == aid and _in_window(_iso(r.get("date"))):
+            dates.add(str(r.get("date", "")).strip())
+
+    out: List[Dict[str, Any]] = []
+    for ds in dates:
+        drow = log.for_date(aid, ds)
+        day_reg = registry_rows_for(registry_rows, aid, ds)
+        total = water_breakdown(collect_water(drow, day_reg))["total_ml"]
+        out.append({"date": ds, "total_ml": total})
+    out.sort(key=lambda r: r["date"])
+    return out
