@@ -46,15 +46,18 @@ import contextlib
 import csv
 import datetime as dt
 import io
+import json
 import os
 import subprocess
 import sys
 import threading
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 from typing import Dict, List, Optional
 
 from tmaze.core.records import animals, dashboard, daily_log, session_annotations
+from tmaze.core.session import session_detail
+from tmaze.paths import host_dir, phase3_recordings_root
 from tmaze.tools import build_session_registry
 
 # The four daily-entry water/measurement fields the form binds to (the rest of
@@ -69,6 +72,12 @@ _ENTRY_LABELS = {
 }
 
 _BUILDER_TIMEOUT_S = 180
+
+# Small GUI-pref file (a machine path, so git-ignored): remembers the recordings
+# folder the operator picked so it survives restarts. Precedence for the scan
+# root is this pref, else tmaze.paths.phase3_recordings_root() (which itself
+# honours the TMAZE_RECORDINGS_DIR env var, else the machine default; ADR-0088).
+_PREFS_PATH = os.path.join(str(host_dir()), "records_manager.json")
 
 # Stable per-rat colours for the combined dashboard trend (matplotlib tab10);
 # assigned by the rat's position in the roster so a given rat keeps its colour.
@@ -103,11 +112,19 @@ class RecordsManager:
         self.annot_path = session_annotations.default_annotations_path()
         self.animals_path = animals.animals_json_path()
         self.records_dir = os.path.dirname(self.daily_path)
+        # Where the rig's session bundles are SCANNED from (operator-pickable,
+        # persisted). The registry CSV is READ from a fixed spot regardless of the
+        # scan root (host/data/phase3_recordings; see docs/decisions/0088).
+        self.recordings_root = self._load_recordings_root()
         self.registry_path = os.path.join(
-            build_session_registry.DEFAULT_RECORDINGS_ROOT,
+            build_session_registry.REGISTRY_OUTPUT_DIR,
             build_session_registry.REGISTRY_FILENAME)
 
         self._busy = False
+        # Sessions tab selection state (session_id of the selected row + the
+        # per-Treeview-item registry rows behind it).
+        self.current_session_id = ""
+        self._session_row_by_item: Dict[str, Dict[str, str]] = {}
         self._load_data()
         self._build_ui()
         self._refresh_all()
@@ -136,6 +153,18 @@ class RecordsManager:
         ttk.Label(bar, textvariable=self.status_var,
                   foreground="#555").pack(side="right")
 
+        # Recordings folder: the root "Generate files" scans for session bundles.
+        # Shown + pickable so the operator can point it at the rig's recordings
+        # without editing code; the choice persists (see docs/decisions/0088).
+        recbar = ttk.Frame(self.root, padding=(8, 0))
+        recbar.pack(side="top", fill="x")
+        ttk.Label(recbar, text="Recordings:").pack(side="left")
+        self.rec_root_var = tk.StringVar(value=self.recordings_root)
+        ttk.Label(recbar, textvariable=self.rec_root_var,
+                  foreground="#555").pack(side="left", padx=(4, 6))
+        ttk.Button(recbar, text="Browse...",
+                   command=self._on_pick_recordings).pack(side="left")
+
         if not os.path.isdir(self.records_dir):
             warn = ttk.Label(
                 self.root, foreground="#9C0006",
@@ -148,7 +177,7 @@ class RecordsManager:
         self.nb = ttk.Notebook(self.root)
         self.nb.pack(side="top", fill="both", expand=True, padx=8, pady=6)
         self._build_daily_tab()
-        self._build_annotations_tab()
+        self._build_sessions_tab()
         self._build_roster_tab()
         self._build_dashboard_tab()
 
@@ -318,31 +347,82 @@ class RecordsManager:
             self.d_tree.insert("", "end",
                                values=[r.get(f, "") for f in daily_log.FIELDS])
 
-    # ---- Annotations tab --------------------------------------------------
-    def _build_annotations_tab(self) -> None:
+    # ---- Sessions tab (browse recordings + view logs + annotate) ---------
+    def _build_sessions_tab(self) -> None:
         tab = ttk.Frame(self.nb, padding=8)
-        self.nb.add(tab, text="Annotations")
+        self.nb.add(tab, text="Sessions")
 
-        top = ttk.Frame(tab)
-        top.pack(side="top", fill="x")
-        ttk.Label(top, text="Session").pack(side="left")
-        self.a_session = ttk.Combobox(top, width=44, state="readonly")
-        self.a_session.pack(side="left", padx=(4, 0))
-        self.a_session.bind("<<ComboboxSelected>>", self._load_selected_annotation)
-        ttk.Button(top, text="Save annotation",
-                   command=self._save_annotation).pack(side="left", padx=(8, 0))
+        # Top: a rat filter + the session list (mirrors the Daily tab's table).
+        filt = ttk.Frame(tab)
+        filt.pack(side="top", fill="x")
+        ttk.Label(filt, text="Show rat").pack(side="left")
+        self.s_filter = tk.StringVar(value="All")
+        self.s_filter_box = ttk.Combobox(
+            filt, textvariable=self.s_filter, values=["All"] + self.animal_ids,
+            state="readonly", width=10)
+        self.s_filter_box.pack(side="left", padx=(4, 0))
+        self.s_filter_box.bind("<<ComboboxSelected>>",
+                               lambda _e: self._refresh_sessions())
 
-        body = ttk.Frame(tab)
-        body.pack(side="top", fill="both", expand=True, pady=(8, 0))
-        ttk.Label(body, text="Common procedures across days").grid(
-            row=0, column=0, sticky="w")
-        self.a_proc = tk.Text(body, height=4, width=90, wrap="word")
-        self.a_proc.grid(row=1, column=0, sticky="we", pady=(0, 8))
-        ttk.Label(body, text="Notes").grid(row=2, column=0, sticky="w")
-        self.a_notes = tk.Text(body, height=12, width=90, wrap="word")
-        self.a_notes.grid(row=3, column=0, sticky="nswe")
-        body.rowconfigure(3, weight=1)
-        body.columnconfigure(0, weight=1)
+        listwrap = ttk.Frame(tab)
+        listwrap.pack(side="top", fill="x", pady=(4, 0))
+        cols = session_detail.list_columns() + ["annot"]
+        heads = {"date": "Date", "time": "Time", "animal": "Animal",
+                 "duration": "Duration", "trials": "Trials", "accuracy": "Acc",
+                 "task_ml": "Task mL", "manual_ml": "Man mL", "stage": "Stage",
+                 "annot": "Annot"}
+        widths = {"date": 92, "time": 54, "animal": 60, "duration": 74,
+                  "trials": 74, "accuracy": 50, "task_ml": 64, "manual_ml": 64,
+                  "stage": 96, "annot": 54}
+        self.s_tree = ttk.Treeview(listwrap, columns=cols, show="headings",
+                                   height=9)
+        for c in cols:
+            self.s_tree.heading(c, text=heads.get(c, c))
+            self.s_tree.column(c, width=widths.get(c, 80),
+                               anchor="w" if c == "stage" else "center")
+        vsb = ttk.Scrollbar(listwrap, orient="vertical",
+                            command=self.s_tree.yview)
+        self.s_tree.configure(yscrollcommand=vsb.set)
+        self.s_tree.pack(side="left", fill="x", expand=True)
+        vsb.pack(side="right", fill="y")
+        self.s_tree.bind("<<TreeviewSelect>>", self._on_session_select)
+
+        # Bottom: left = read-only session log, right = the annotation editor.
+        split = ttk.PanedWindow(tab, orient="horizontal")
+        split.pack(side="top", fill="both", expand=True, pady=(8, 0))
+
+        left = ttk.LabelFrame(split, text="Session log (read-only)", padding=6)
+        # A compact metrics block folded from the registry row (works for every
+        # session, even old bundles without a rendered summary).
+        self.s_metrics = tk.Text(left, height=8, wrap="none",
+                                 background="#f4f4f4", relief="flat")
+        self.s_metrics.pack(side="top", fill="x")
+        self.s_metrics.configure(state="disabled")
+        ttk.Separator(left, orient="horizontal").pack(side="top", fill="x",
+                                                       pady=4)
+        # The bundle's rendered summary + operator-notes timeline (when present).
+        logwrap = ttk.Frame(left)
+        logwrap.pack(side="top", fill="both", expand=True)
+        self.s_log = tk.Text(logwrap, wrap="word")
+        lvsb = ttk.Scrollbar(logwrap, orient="vertical",
+                             command=self.s_log.yview)
+        self.s_log.configure(yscrollcommand=lvsb.set, state="disabled")
+        self.s_log.pack(side="left", fill="both", expand=True)
+        lvsb.pack(side="right", fill="y")
+        split.add(left, weight=3)
+
+        right = ttk.LabelFrame(split, text="Your annotations", padding=6)
+        ttk.Label(right, text="Common procedures across days").pack(
+            side="top", anchor="w")
+        self.a_proc = tk.Text(right, height=4, wrap="word")
+        self.a_proc.pack(side="top", fill="x", pady=(0, 6))
+        ttk.Label(right, text="Notes").pack(side="top", anchor="w")
+        self.a_notes = tk.Text(right, height=10, wrap="word")
+        self.a_notes.pack(side="top", fill="both", expand=True)
+        ttk.Button(right, text="Save annotation",
+                   command=self._save_annotation).pack(side="top", anchor="e",
+                                                        pady=(6, 0))
+        split.add(right, weight=2)
 
         self.a_hint = ttk.Label(
             tab, foreground="#555",
@@ -350,25 +430,98 @@ class RecordsManager:
                   "Generate files after recording sessions."))
         self.a_hint.pack(side="bottom", fill="x")
 
-    def _annotation_session_ids(self) -> List[str]:
-        """Session ids to annotate: registry sessions first, then any annotated
-        session not in the registry (so old notes remain reachable)."""
-        reg = [r.get("session_id", "").strip() for r in self.registry_rows
-               if r.get("session_id")]
-        extra = [r.get("session_id", "").strip() for r in self.annot_rows
-                 if r.get("session_id") and r.get("session_id") not in reg]
-        return reg + extra
+    def _sync_sessions_filter(self) -> None:
+        """Keep the Show-rat filter's options in step with the roster; if the
+        selected rat is gone, fall back to All."""
+        self.s_filter_box["values"] = ["All"] + self.animal_ids
+        if self.s_filter.get().strip() not in ("All", *self.animal_ids):
+            self.s_filter.set("All")
 
-    def _refresh_annotations(self) -> None:
-        ids = self._annotation_session_ids()
-        self.a_session["values"] = ids
-        if ids and not self.a_session.get():
-            self.a_session.set(ids[0])
-            self._load_selected_annotation()
+    def _session_rows_filtered(self) -> List[Dict[str, str]]:
+        """Registry rows for the list, newest-first, narrowed by the rat filter;
+        plus any annotated session absent from the registry (as a minimal
+        synthetic row) so old notes stay reachable."""
+        reg_ids = {r.get("session_id", "").strip() for r in self.registry_rows
+                   if r.get("session_id")}
+        rows: List[Dict[str, str]] = list(self.registry_rows)
+        for r in self.annot_rows:
+            sid = r.get("session_id", "").strip()
+            if sid and sid not in reg_ids:
+                rows.append({"session_id": sid, "animal": r.get("animal", ""),
+                             "date": r.get("date", "")})
+        sel = self.s_filter.get().strip()
+        if sel not in ("", "All"):
+            rows = [r for r in rows if str(r.get("animal", "")).strip() == sel]
+        rows.sort(key=lambda r: (str(r.get("date", "")),
+                                 str(r.get("session_id", ""))), reverse=True)
+        return rows
 
-    def _load_selected_annotation(self, _event=None) -> None:
-        sid = self.a_session.get().strip()
-        row = session_annotations.SessionAnnotations(self.annot_rows).for_session(sid)
+    def _refresh_sessions(self) -> None:
+        self._sync_sessions_filter()
+        prev = self.current_session_id
+        self.s_tree.delete(*self.s_tree.get_children())
+        self._session_row_by_item = {}
+        annotated = {r.get("session_id", "").strip() for r in self.annot_rows
+                     if r.get("session_id")}
+        reselect = None
+        for r in self._session_rows_filtered():
+            sid = str(r.get("session_id", "")).strip()
+            vals = list(session_detail.list_row(r)) + [
+                "yes" if sid in annotated else ""]
+            iid = self.s_tree.insert("", "end", values=vals)
+            self._session_row_by_item[iid] = r
+            if sid and sid == prev:
+                reselect = iid
+        children = self.s_tree.get_children()
+        # Selecting programmatically doesn't reliably raise <<TreeviewSelect>>,
+        # so populate the detail panel explicitly after auto-selecting.
+        if reselect:
+            self.s_tree.selection_set(reselect)
+            self.s_tree.see(reselect)
+            self._on_session_select()
+        elif children:
+            self.s_tree.selection_set(children[0])
+            self._on_session_select()
+        else:
+            self._clear_session_detail()
+
+    def _on_session_select(self, _event=None) -> None:
+        sel = self.s_tree.selection()
+        if not sel:
+            return
+        row = self._session_row_by_item.get(sel[0], {})
+        self.current_session_id = str(row.get("session_id", "")).strip()
+        self._set_readonly(self.s_metrics,
+                           "\n".join(session_detail.metrics_lines(row)))
+        text = session_detail.summary_text(
+            str(row.get("bundle", "")).strip() or None)
+        if not text:
+            text = ("No rendered summary for this session.\n\n"
+                    "Older bundles (recorded before the summary/ folder was "
+                    "written) show only the metrics above. Newer sessions include "
+                    "the full behavioral summary and the operator-notes timeline "
+                    "here.")
+        self._set_readonly(self.s_log, text)
+        self._load_annotation(self.current_session_id)
+
+    @staticmethod
+    def _set_readonly(widget: tk.Text, text: str) -> None:
+        """Replace a read-only Text widget's contents (toggling state around it)."""
+        widget.configure(state="normal")
+        widget.delete("1.0", "end")
+        widget.insert("1.0", text)
+        widget.configure(state="disabled")
+
+    def _clear_session_detail(self) -> None:
+        self.current_session_id = ""
+        self._set_readonly(self.s_metrics, "")
+        self._set_readonly(self.s_log, "Select a session to view its log.")
+        self.a_proc.delete("1.0", "end")
+        self.a_notes.delete("1.0", "end")
+
+    def _load_annotation(self, sid: str) -> None:
+        row = session_annotations.SessionAnnotations(
+            self.annot_rows).for_session(sid)
         self.a_proc.delete("1.0", "end")
         self.a_notes.delete("1.0", "end")
         if row:
@@ -376,7 +529,7 @@ class RecordsManager:
             self.a_notes.insert("1.0", row.get("notes", ""))
 
     def _save_annotation(self) -> None:
-        sid = self.a_session.get().strip()
+        sid = self.current_session_id.strip()
         if not sid:
             messagebox.showwarning("No session", "Pick a session first.")
             return
@@ -398,6 +551,7 @@ class RecordsManager:
             return
         self._set_status(f"Saved annotation for {sid}.")
         self._load_data()
+        self._refresh_sessions()
 
     # ---- Roster tab -------------------------------------------------------
     def _build_roster_tab(self) -> None:
@@ -699,9 +853,41 @@ class RecordsManager:
     def _refresh_all(self) -> None:
         self._refresh_daily_table()
         self._clear_daily()
-        self._refresh_annotations()
+        self._refresh_sessions()
         self._refresh_roster()
         self._refresh_dashboard()
+
+    # ------------------------------------------------------- recordings root
+    def _load_recordings_root(self) -> str:
+        """The recordings folder to scan: the persisted pref if present, else the
+        shared default (env-overridable) from tmaze.paths (ADR-0088)."""
+        try:
+            with open(_PREFS_PATH, "r", encoding="utf-8") as fh:
+                pref = json.load(fh).get("recordings_root", "")
+        except (OSError, ValueError):
+            pref = ""
+        return pref.strip() or str(phase3_recordings_root())
+
+    def _save_recordings_root(self, path: str) -> None:
+        """Persist the chosen recordings folder (best-effort)."""
+        try:
+            with open(_PREFS_PATH, "w", encoding="utf-8") as fh:
+                json.dump({"recordings_root": path}, fh, indent=2)
+        except OSError:
+            pass
+
+    def _on_pick_recordings(self) -> None:
+        start = self.recordings_root if os.path.isdir(self.recordings_root) else None
+        chosen = filedialog.askdirectory(
+            title="Select the Phase 3 recordings folder to scan",
+            initialdir=start)
+        if not chosen:
+            return
+        self.recordings_root = os.path.normpath(chosen)
+        self.rec_root_var.set(self.recordings_root)
+        self._save_recordings_root(self.recordings_root)
+        self._set_status(f"Recordings folder set to {self.recordings_root}. "
+                         "Click Generate files to re-scan.")
 
     # ---------------------------------------------------------------- actions
     def _on_reload(self) -> None:
@@ -730,11 +916,13 @@ class RecordsManager:
         return "\n".join(log)
 
     def _build_registry_inprocess(self) -> str:
-        """Rebuild session_registry.csv by calling the tool's main() directly."""
+        """Rebuild session_registry.csv by calling the tool's main() directly,
+        scanning the operator-chosen recordings root (the CSV still lands in the
+        tool's fixed output dir; see docs/decisions/0088)."""
         buf = io.StringIO()
         try:
             with contextlib.redirect_stdout(buf):
-                build_session_registry.main([])
+                build_session_registry.main(["--root", self.recordings_root])
             return "[session registry] " + (buf.getvalue().strip() or "rebuilt")
         except SystemExit as e:  # the tool raises SystemExit on a missing root
             return f"[session registry] {e}"

@@ -49,6 +49,7 @@ from tmaze.ui.gui_deps import (  # noqa: E402
 from tmaze.vision.calibration import Undistorter, load_calibration  # noqa: E402
 from tmaze.core import protocol  # noqa: E402  (shared serial-line parser; see docs/decisions/0024)
 from tmaze.core.records.animals import resources_root  # noqa: E402  (sibling resources-repo resolver)
+from tmaze.paths import camera_output_dir  # noqa: E402  (single source for the recordings root; ADR-0088)
 from tmaze.core.maze_state import IN_WELL as _IN_WELL  # noqa: E402  (HUB well substate label)
 from tmaze.ui.preview import render_bgr_to_label, safe_after  # noqa: E402
 from tmaze.ui.tooltips import tip  # noqa: E402
@@ -81,7 +82,10 @@ CAMERA_IP = "192.168.3.3"
 CAMERA_SERIAL = ""            # set if you prefer to pin by serial number
 CAMERA_MAC = "0030531AD4B0"   # 00:30:53:1A:D4:B0, colons stripped
 
-DEFAULT_OUTPUT_DIR = r"C:\Users\Celine\Documents\t-maze_recordings"
+# The rig recordings root. Single-sourced from tmaze.paths (env-overridable via
+# TMAZE_RECORDINGS_DIR) so the camera/session UI and the session-registry tool
+# agree on where recordings live (see docs/decisions/0088).
+DEFAULT_OUTPUT_DIR = str(camera_output_dir())
 DEFAULT_FPS = 30.0            # used for the video container if the camera can't report one
 
 # Orientation correction so the camera frame matches the Rig view schematic

@@ -104,12 +104,14 @@ from tmaze.core.rig_config import load_rig_config
 from tmaze.core.session.session_log import SessionManifest, clock_snapshot, path_within_session
 from tmaze.core.session.session_serial import is_sensor_or_central
 from tmaze.core.session.session_timer import SessionTimer
-from tmaze.paths import host_dir
+from tmaze.paths import host_dir, phase3_recordings_root
 
 # Fallback recordings root if experiment_control doesn't pass one; normally the
 # GUI passes <camera default>/phase3_recordings (see docs/decisions/0049).
+# Single-sourced from tmaze.paths so this fallback and the rig's real output
+# agree (env-overridable via TMAZE_RECORDINGS_DIR; see docs/decisions/0088).
 DATA_DIR = os.path.join(str(host_dir()), "data")   # host/data (ADR-0083)
-DEFAULT_RECORDINGS_ROOT = os.path.join(DATA_DIR, "phase3_recordings")
+DEFAULT_RECORDINGS_ROOT = str(phase3_recordings_root())
 
 # Per-session subfolders (one per stream family).
 VIDEO_SUBDIR = "video"

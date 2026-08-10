@@ -22,3 +22,9 @@ numpy>=2.1
 pillow>=11.0
 opencv-python>=4.10
 av>=12.0
+
+# openpyxl backs the resources-repo record builders (build_daily_log.py,
+# build_session_training_log.py). The Records Manager GUI (tmaze.ui.records_manager)
+# shells out to those builders with this env's interpreter, so it must be present.
+# See docs/decisions/0085.
+openpyxl>=3.1

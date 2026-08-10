@@ -27,6 +27,10 @@ dependencies:
   - py-opencv>=4.10
   # PyAV for multithreaded lossless FFV1 recording (see docs/decisions/0012).
   - av>=12.0
+  # openpyxl backs the resources-repo record builders (build_daily_log.py,
+  # build_session_training_log.py). The Records Manager GUI shells out to those
+  # builders with this env's interpreter, so the env must have openpyxl (ADR-0085).
+  - openpyxl>=3.1
   # pypylon (Basler SDK) is not on conda-forge; install it with pip into the env.
   - pip>=24.0
   - pip:

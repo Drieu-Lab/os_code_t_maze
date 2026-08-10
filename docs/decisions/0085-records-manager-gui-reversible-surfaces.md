@@ -86,6 +86,11 @@ and make the two write surfaces **reversible and non-destructive**.
   `schema_version`); the GUI shells out to the resources builders, so their CLI
   flags (`--rebuild`, `--export`, `--import-annotations`, `--import-legacy`) are an
   interface.
+- Because the GUI launches the resources builders with *this* env's interpreter
+  (`sys.executable`), the `drieu_t_maze` env must carry the builders' dependency
+  `openpyxl` even though the `tmaze` package never imports it. It is therefore
+  declared in `environment.yml` and `host/requirements.txt`, and `_run_script`
+  appends an install hint if a builder ever fails with a missing `openpyxl`.
 - The pure cores are headlessly unit-tested (`host/tests/test_daily_log.py`,
   `test_session_annotations.py`, `test_animals.py`, `test_dashboard.py`); the
   resources builders are validated by running them (that repo has no unit-test

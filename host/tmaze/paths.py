@@ -19,10 +19,19 @@ Pure stdlib; no Tk/OpenCV/serial, so cores may import this freely.
 """
 from __future__ import annotations
 
+import os
 from importlib import resources
 from pathlib import Path
 
 _LANDMARKS = (".git", "pyproject.toml")
+
+# Where the rig writes recordings (camera video + the per-session Phase 3
+# bundles). This is a *machine* location (not in-repo), so it is the one thing
+# here that isn't landmark-resolved: it defaults to the rig PC's folder but can
+# be overridden per-machine via the TMAZE_RECORDINGS_DIR env var, so the box
+# isn't hardcoded and tests can point elsewhere (see docs/decisions/0088).
+_RECORDINGS_ENV = "TMAZE_RECORDINGS_DIR"
+_DEFAULT_CAMERA_OUTPUT_DIR = r"C:\Users\Celine\Documents\t-maze_recordings"
 
 
 def repo_root() -> Path:
@@ -52,3 +61,18 @@ def package_data(*parts: str) -> Path:
     """Filesystem path to a data file bundled inside the ``tmaze`` package,
     addressed by package name (depth-immune, unlike a relative ``..`` path)."""
     return Path(resources.files("tmaze").joinpath(*parts))
+
+
+def camera_output_dir() -> Path:
+    """Root folder the rig writes recordings under (camera video + the
+    per-session bundle tree). The ``TMAZE_RECORDINGS_DIR`` env var overrides the
+    machine default, so this is the single source of truth for *where recordings
+    live* - shared by the camera/session UI and the session-registry tool so they
+    can't drift (see docs/decisions/0088)."""
+    return Path(os.environ.get(_RECORDINGS_ENV) or _DEFAULT_CAMERA_OUTPUT_DIR)
+
+
+def phase3_recordings_root() -> Path:
+    """Where the Phase 3 session bundles live: ``<camera_output_dir>/
+    phase3_recordings`` (the folder ``build_session_registry`` scans)."""
+    return camera_output_dir() / "phase3_recordings"
