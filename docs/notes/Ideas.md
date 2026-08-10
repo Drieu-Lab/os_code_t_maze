@@ -15,6 +15,8 @@ date column is needed. Don't rename a handle after you've referenced it elsewher
 <!-- Add newest at the top. Example:
 - #260710_PerArmReward Show reward count per arm on the Rig view tab [host/behavior_view.py?]
 -->
+- #260810_SolenoidVolumeCurve Measure a solenoid activation-duration vs volume-dispensed tuning curve, and characterize the central lick port specifically. Today reward_volume.py holds a single bench point (REWARD_UL_CALIBRATION = {300 ms: 60 uL}) and, with one point, assumes volume is proportional to duration (origin-anchored line) - the code comment already flags this as "roughly - but not exactly - linear". Take multiple (pulse_ms -> measured uL) points, add them as calibration rows (or fit a curve) so the assumption is data-backed rather than extrapolated. [reward calibration; host/tmaze/core/reward/reward_volume.py, ADR-0019]
+- #260810_MultisensoryCue Trigger cues multisensorily using body sensors + camera/zone detection together (rather than one modality alone). Related characterization: measure the latencies between (a) body-sensor trigger, (b) first frame the animal enters the zone limits, (c) when it's determined to be "In Zone", and (d) when the cue is triggered ON/OFF. [cue triggering; relates to bug #260720_TrackingDelays and FW-0014]
 
 ## Promoted (pending cleanup)
 

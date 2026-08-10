@@ -83,6 +83,7 @@ criteria).
 | [FW-0028](#fw-0028-scope-the-session-summary-to-the-startstop-window) | Scope the session summary to the Start/Stop window | Session controller + summary + stats cores | Proposed |
 | [FW-0029](#fw-0029-real-water-timestamps--hours-since-water-in-the-daily-table) | Real water timestamps + hours-since-water in the daily table | Daily husbandry table + animal_state | Proposed |
 | [FW-0030](#fw-0030-weekend-ad-libitum-water-accounting-in-the-daily-table--dashboard) | Weekend ad-libitum water accounting in the daily table + dashboard | Daily husbandry table + dashboard | Proposed |
+| [FW-0031](#fw-0031-latching-toggle-on-note-tags-that-span-subsequent-trials) | Latching (toggle-on) note tags that span subsequent trials | Note tags + session notes + summary + Session panel | Proposed |
 
 ## Entries
 
@@ -1496,6 +1497,82 @@ ad-lib days feed the maintenance-level estimate at all, or only the weight trend
 
 **ADR needed?** Yes - it changes the daily-table schema and how the dashboard
 interprets welfare signals (a follow-up to ADR-0076/0087).
+
+### FW-0031: Latching (toggle-on) note tags that span subsequent trials
+
+- **Status:** Proposed
+- **Date added:** 2026-08-10
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** `host/tmaze/core/records/note_tags.py` (a tag *kind*: point
+  vs latching/interval, alongside the existing `counter` flag),
+  `host/tmaze/core/session/session_notes.py` (represent an interval - an ON edge
+  paired with an OFF edge, or an explicit span - not only point entries),
+  `host/tmaze/ui/session_controller.py` (a toggle button that stays lit while
+  active + stamps the ON/OFF edges; the running state must survive across trials),
+  `host/tmaze/core/session/session_summary.py` (`_tag_tally` / notes rendering -
+  summarize an interval tag as its span + the trial range it covered), optionally
+  the Phase 3 per-trial data file (`phase3_log.py`) so downstream analysis can
+  mark which trials fell under an active condition
+- **Related ADRs:** [ADR-0074](decisions/0074-timestamped-note-entries.md)
+  (timestamped note entries + the user-defined tag vocabulary this extends)
+
+**Motivation / context.** Celine (2026-08-10): some interventions are a
+**condition over a block of trials**, not a point-in-time event. The concrete
+case is dissuading the animal from non-stem excursions: to do it she must **stand
+by the rig for a block of trials and cannot be at the PC** to press a tag per
+note, per trial. Two things follow. (1) The current tags (ADR-0074) are
+point/one-press events (even a `counter` tag stores one stamped entry per press),
+so marking "I was dissuading during these trials" means pressing once per trial -
+which is exactly what standing at the rig prevents. (2) Even when she does *not*
+actively dissuade on a given trial, **her standing beside the rig still influences
+the animal's behavior**, so the whole span - not just the trials where she
+intervened - is the scientifically relevant annotation. A tag that can be
+**toggled ON and applies to all subsequent trials until toggled OFF** captures the
+condition faithfully and hands-free.
+
+**Sketch of approach.** Add a third tag *kind* to the vocabulary (today a tag is
+`{name, counter}`): a **latching / interval** tag. Toggling it ON stamps an
+interval-start entry (iso + monotonic + current Phase 3 trial index); toggling it
+OFF stamps the matching end (or the session Stop closes any still-open interval).
+`session_notes` gains a way to represent the interval (simplest: a paired
+`tag_state` on/off on the existing timestamped entries, so an interval is
+reconstructable from the ordered log and no schema-breaking span object is needed;
+survives an unclean end because both edges are flushed like every other entry).
+The Session-panel tag button for a latching tag becomes a **toggle** that stays
+visibly lit while active, so the operator can flip it once from the PC and then
+walk to the rig for the whole block. The summary renders an interval tag as its
+duration and the **trial range it covered** (e.g. `dissuasion: trials 12-27,
+4m10s`), and `_tag_tally` counts spans rather than presses. Optionally stamp an
+"active conditions" set onto each Phase 3 trial row so the per-trial CSV can be
+filtered by condition offline (the higher-value but larger half).
+
+**Evaluation / acceptance.** Toggling a latching tag ON then OFF produces exactly
+one reconstructable interval with correct start/end trial indices; a session
+Stopped while a tag is still ON closes the interval at Stop (no dangling open
+span); the summary shows the span + trial range; existing point/counter tags are
+unchanged; pure-core tests cover the interval reconstruction and the summary
+rendering (headless, like `test_note_tags` / `test_session_summary`). On the rig:
+flip the toggle once, run a block hands-free at the rig, and confirm the whole
+block is annotated.
+
+**Effort / risk.** Medium. The pure-core pieces (tag kind, interval
+reconstruction, summary rendering) are small and testable. Main risks: a dangling
+ON interval if Stop/close doesn't close it (handle at `_stop_session`/`close`);
+the UI toggle state drifting from the logged edges; and deciding whether the
+per-trial CSV annotation is in scope (the larger, more valuable half) or deferred
+to a follow-up. Keep it additive so existing tags and old logs still load.
+
+**Open questions.** Represent an interval as paired on/off entries on the existing
+timestamped log, or add an explicit span object (schema bump)? Should turning a
+latching tag ON also allow free-text (why this block) on the ON edge? Should the
+covered-trials range be computed from trial indices at the edges, or from
+wall-clock against the trial timestamps? Is per-trial "active conditions" tagging
+in the phase3 CSV part of this item or a separate one? Can multiple latching tags
+be active at once (independent toggles)?
+
+**ADR needed?** Yes - it adds a tag *kind* and an interval concept to the notes
+model (a small follow-up to ADR-0074), and any per-trial condition column touches
+the Phase 3 data file.
 
 ## Completed
 
