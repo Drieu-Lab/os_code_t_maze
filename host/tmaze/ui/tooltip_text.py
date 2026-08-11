@@ -463,7 +463,9 @@ TIPS: Dict[str, Entry] = {
     "behavior.nonstem": "Count of non-stem choices this session (an outbound trip "
                         "that reached a choice arm without using the stem; credit "
                         "denied). Counted once per trip, so an out-one-arm/back-the-"
-                        "other lap counts one. An integer >= 0.",
+                        "other lap counts one. The [nL/nR] split is the side the "
+                        "rat committed to on those denied trips - its directional "
+                        "pull on the shortcuts (ADR-0095). An integer >= 0.",
     "behavior.sameside": "Consecutive same-side stem-gated choices: current run "
                          "and session max, each with the side (L/R) it is on "
                          "(e.g. 3L / max 4R). Each is an integer (0 before any "
@@ -495,20 +497,31 @@ TIPS: Dict[str, Entry] = {
                                 "cumulative and over the last N completed trials "
                                 "(the Window control). The primary 'is the rat "
                                 "learning the cue' number; -- until the first "
-                                "completed trial.",
+                                "completed trial. Under the debias generator this "
+                                "is over OUT-OF-BLOCK trials only (the [n/N] "
+                                "bracket counts the same), so forced corrective "
+                                "trials never distort it.",
     "behavior.phase3.bycue": "Accuracy split by the trial's CHOICE cue: HIGH tone "
                              "vs LOW tone (each with its completed-trial count). "
                              "A rat following the cue is accurate on both; a large "
                              "gap flags a cue it hasn't learned. -- until that cue "
                              "has been seen.",
-    "behavior.phase3.bias": "Side bias: the fraction of completed trials on which "
-                            "the rat chose LEFT vs RIGHT (its own choice, "
-                            "regardless of correctness), with the L/R counts. "
-                            "50/50 is unbiased; a lopsided split flags a side "
-                            "preference. -- before the first choice.",
-    "behavior.phase3.reward": "Reward rate = rewarded / completed trials. With the "
-                              "'reward incorrect choices' shaping aid on this "
-                              "approaches 100% and no longer tracks accuracy.",
+    "behavior.phase3.bias": "Two side-bias views. 'Side bias (chose)' = the "
+                            "fraction of trials the rat chose LEFT vs RIGHT (its "
+                            "own choice, regardless of correctness), with the L/R "
+                            "counts; 50/50 is unbiased. 'dir b' = the directional-"
+                            "ERROR bias in [-1,+1] (b>0 = left-biased): of the "
+                            "trials the rat got WRONG, how lopsided the pulls are "
+                            "(ADR-0090). It's the session-level twin of the signal "
+                            "the debias controller triggers on, shown for every "
+                            "session so you can watch it track performance. -- "
+                            "before the first choice / with no errors yet.",
+    "behavior.phase3.reward": "Reward rate = rewarded / completed trials (over "
+                              "OUT-OF-BLOCK trials under the debias generator, "
+                              "matching the [n/N] bracket). Hidden entirely when "
+                              "the 'reward incorrect choices' shaping aid is on, "
+                              "because it then pins at ~100% by construction and no "
+                              "longer tracks accuracy.",
     "behavior.phase3.strategy": "Naive-strategy readout over adjacent completed "
                                 "trials, on the trial OUTCOME (not reward, so it "
                                 "stays meaningful under the shaping aid): Win-stay "
@@ -517,11 +530,6 @@ TIPS: Dict[str, Entry] = {
                                 "one. High values flag a rat repeating/alternating "
                                 "on its own result instead of following the cue. "
                                 "-- until the conditioning outcome has occurred.",
-    "behavior.phase3.rt": "Mean choice reaction time: choice-cue onset -> scored "
-                          "choice, averaged over completed trials that carry both "
-                          "stamps (n). These are host wall-clock times (they carry "
-                          "serial/actuation latency), so it is an approximate "
-                          "latency, not a hardware-precise reaction time.",
     "behavior.phase3.debias": "Closed-loop debias readout (only under the "
                               "'debias_blocks' generator). Shows the current "
                               "scheduler state (NORMAL/INTERVENTION), the live "
@@ -551,7 +559,10 @@ TIPS: Dict[str, Entry] = {
                                "trip that reached a choice arm without using the "
                                "stem; credit denied). Counted once per trip. These "
                                "are the compliant-but-invisible excursions that "
-                               "don't appear in the cued-trial counts. Integer >= 0.",
+                               "don't appear in the cued-trial counts. The [nL/nR] "
+                               "split is the side the rat committed to on those "
+                               "denied trips - its directional pull on the "
+                               "shortcuts (ADR-0095). Integer >= 0.",
     "behavior.phase3.run": "Consecutive same-side stem-gated choices during the "
                            "session: current run and session max, each with the "
                            "side (L/R) it is on (e.g. 3L / max 4R). Integers "

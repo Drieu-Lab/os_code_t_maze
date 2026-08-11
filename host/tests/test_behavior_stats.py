@@ -94,6 +94,39 @@ class TestComplianceAndChoices(unittest.TestCase):
         self.assertAlmostEqual(snap.lr_cum[0], 2 / 3)
         self.assertAlmostEqual(snap.lr_cum[1], 1 / 3)
 
+    def test_nonstem_left_right_split(self):
+        # F8 (docs/decisions/0095): denied (non-stem) trips are also split by the
+        # committed side - a directional pull on the shortcut trips, kept separate
+        # from the stem-gated L/R balance. Here: 1 stem-LEFT trial, then three
+        # denied trips (LEFT, RIGHT, LEFT) => nonstem 2L/1R, stem L/R unchanged.
+        s = BehaviorStats()
+        s.update(hub(0.0))
+        s.update(frame(0.1, choice=LEFT, stem=True))       # stem-gated
+        s.update(hub(0.2))
+        s.update(frame(0.3, choice=LEFT, stem=False))      # denied L
+        s.update(hub(0.4))
+        s.update(frame(0.5, choice=RIGHT, stem=False))     # denied R
+        s.update(hub(0.6))
+        s.update(frame(0.7, choice=LEFT, stem=False))      # denied L
+        snap = s.snapshot()
+        self.assertEqual(snap.nonstem_choices, 3)
+        self.assertEqual((snap.nonstem_left, snap.nonstem_right), (2, 1))
+        # Split sums to the total denied count, by construction.
+        self.assertEqual(snap.nonstem_left + snap.nonstem_right,
+                         snap.nonstem_choices)
+        self.assertAlmostEqual(snap.nonstem_lr[0], 2 / 3)
+        self.assertAlmostEqual(snap.nonstem_lr[1], 1 / 3)
+        # Stem-gated L/R is untouched by the denied trips.
+        self.assertEqual((snap.left_choices, snap.right_choices), (1, 0))
+
+    def test_nonstem_lr_none_before_any_denied_trip(self):
+        s = BehaviorStats()
+        s.update(hub(0.0))
+        s.update(frame(0.1, choice=LEFT, stem=True))       # only a stem trial
+        snap = s.snapshot()
+        self.assertEqual((snap.nonstem_left, snap.nonstem_right), (0, 0))
+        self.assertIsNone(snap.nonstem_lr)
+
 
 class TestPerExcursionCounting(unittest.TestCase):
     def test_figure8_nonstem_cross_counts_one(self):

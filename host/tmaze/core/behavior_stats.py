@@ -73,6 +73,15 @@ class BehaviorSnapshot:
     total_choices: int
     stem_choices: int
     nonstem_choices: int
+    # The denied (non-stem) excursions split by the side the rat committed to, so
+    # a directional pull on the shortcut trips is visible (cumulative only; a
+    # distinct signal from the stem-gated ``lr_*`` and the cued dir-bias). By
+    # construction ``nonstem_left + nonstem_right == nonstem_choices``.
+    # ``nonstem_lr`` is ``(left_frac, right_frac)`` among them, None if there are
+    # none yet. See docs/decisions/0095.
+    nonstem_left: int
+    nonstem_right: int
+    nonstem_lr: Optional[Tuple[float, float]]
     compliance_cum: Optional[float]              # stem / total
     compliance_win: Optional[float]
     # ---- L/R balance among stem-gated trials ----
@@ -116,6 +125,8 @@ class BehaviorStats:
         self._stem = 0
         self._left = 0
         self._right = 0
+        self._nonstem_left = 0        # denied (non-stem) trips committed LEFT
+        self._nonstem_right = 0       # denied (non-stem) trips committed RIGHT
         self._run_cur = 0
         self._run_max = 0
         self._run_side: Optional[str] = None      # side of the current same-side run
@@ -199,6 +210,14 @@ class BehaviorStats:
                 self._left += 1
             elif side == RIGHT:
                 self._right += 1
+        else:
+            # A denied (non-stem) excursion: keep the committed side so its L/R
+            # split is available (docs/decisions/0095). Does NOT touch the
+            # stem-gated run/balance above.
+            if side == LEFT:
+                self._nonstem_left += 1
+            elif side == RIGHT:
+                self._nonstem_right += 1
 
     def _advance_run(self, side: str) -> None:
         """Extend or reset the same-side run over stem-gated excursions (a side
@@ -234,6 +253,8 @@ class BehaviorStats:
             window_n=self._window_n,
             total_choices=self._total, stem_choices=self._stem,
             nonstem_choices=self._total - self._stem,
+            nonstem_left=self._nonstem_left, nonstem_right=self._nonstem_right,
+            nonstem_lr=self._fracs(self._nonstem_left, self._nonstem_right),
             compliance_cum=compliance_cum, compliance_win=compliance_win,
             lr_cum=self._fracs(self._left, self._right),
             lr_win=self._fracs(win_left, win_right),

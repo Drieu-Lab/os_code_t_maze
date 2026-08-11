@@ -444,10 +444,6 @@ def _rate(x: Optional[float]) -> str:
     return "--" if x is None else f"{x:.1f}"
 
 
-def _rt(x: Optional[float]) -> str:
-    return "--" if x is None else f"{x:.2f} s"
-
-
 def _side(side: Optional[str]) -> str:
     return {"left": "L", "right": "R"}.get(side, "")
 
@@ -500,17 +496,25 @@ def _cued_lines(st: Optional["Phase3Stats"]) -> list:
         f"  Completed:   {st.completed}/{st.total}   "
         f"correct {st.correct}  incorrect {st.incorrect}",
         f"  Accuracy:    {_pct(st.accuracy_cum)}  "
-        f"(last {n}: {_pct(st.accuracy_win)})",
+        f"(last {n}: {_pct(st.accuracy_win)})   "
+        f"[{st.oob_correct}/{st.oob_completed}]",
         f"  By cue:      HIGH {_pct(st.high_accuracy)} [{st.high_completed}]   "
         f"LOW {_pct(st.low_accuracy)} [{st.low_completed}]",
         f"  Side bias:   {_lr(st.lr_bias)}   "
         f"[{st.left_choices}L/{st.right_choices}R]",
-        f"  Reward rate: {_pct(st.reward_rate)}   "
-        f"[{st.rewarded}/{st.completed}]",
-        f"  Win-stay:    {_pct(st.win_stay)}   "
-        f"Lose-shift: {_pct(st.lose_shift)}",
-        f"  Choice RT:   {_rt(st.mean_rt_s)}   [n={st.rt_n}]",
     ]
+    # Reward rate is uninformative under the reward-incorrect shaping aid (~100% by
+    # construction), so omit the line then rather than record a misleading figure
+    # (docs/decisions/0094). The Choice RT readout was removed pending hardware-
+    # latency characterization (docs/decisions/0094); the raw cue/choice stamps
+    # remain in the per-trial CSV.
+    if not getattr(st, "reward_incorrect", False):
+        lines.append(
+            f"  Reward rate: {_pct(st.reward_rate)}   "
+            f"[{st.oob_rewarded}/{st.oob_completed}]")
+    lines.append(
+        f"  Win-stay:    {_pct(st.win_stay)}   "
+        f"Lose-shift: {_pct(st.lose_shift)}")
     if getattr(st, "generator", "balanced") != "balanced":
         lines.append(
             f"  Debias:      dir-bias {_signed(st.dir_bias)} "
@@ -529,16 +533,22 @@ def _locomotor_lines(sn: Optional["BehaviorSnapshot"]) -> list:
         return ["  (no locomotor data)"]
     n = sn.window_n
     dist_m = sn.distance_cm / 100.0
+    # Denied (non-stem) trips, with their L/R split when any occurred - the
+    # directional pull on shortcut trips (docs/decisions/0095).
+    nonstem = f"  Non-stem:    {sn.nonstem_choices} (denied)"
+    if getattr(sn, "nonstem_choices", 0):
+        nonstem += (f"   [{getattr(sn, 'nonstem_left', 0)}L/"
+                    f"{getattr(sn, 'nonstem_right', 0)}R]")
     return [
         f"  Stem-gated:  {_pct(sn.compliance_cum)}  "
         f"(last {n}: {_pct(sn.compliance_win)})   "
         f"[{sn.stem_choices}/{sn.total_choices}]",
-        f"  Non-stem:    {sn.nonstem_choices} (denied)",
+        nonstem,
         f"  L/R choice:  {_lr(sn.lr_cum)}   "
         f"[{sn.left_choices}L/{sn.right_choices}R]",
         f"  Same-side run: max {sn.same_side_run_max}"
         f"{_side(sn.same_side_run_max_side)}",
-        f"  Throughput:  {sn.stem_choices} trials   "
+        f"  Throughput:  {sn.stem_choices} stem trips   "
         f"{_rate(sn.trials_per_min)}/min   "
         f"(active {_duration(sn.active_s)})",
         f"  Distance:    {dist_m:.1f} m   {_rate(sn.distance_m_per_min)} m/min",

@@ -4,8 +4,9 @@ test_phase3_stats.py - headless tests for the Phase 3 behavior-stats core.
 Covers the pure ``phase3_stats.compute`` (docs/decisions/0052) over deterministic
 snapshots (build a Phase3Log, fill trials via its public methods, ``.snapshot()``):
 trials-completed counting, cumulative + rolling-window accuracy, per-choice-cue
-accuracy split, side bias, reward rate, outcome-based win-stay/lose-shift, and the
-cue-onset->choice reaction time. Pure stdlib; no hardware/Tk.
+accuracy split, side bias, reward rate, and outcome-based win-stay/lose-shift
+(over truly-adjacent free-choice trials; docs/decisions/0093). Pure stdlib; no
+hardware/Tk.
 
 Run from host/:  python -m unittest test_phase3_stats
 """
@@ -13,10 +14,12 @@ Run from host/:  python -m unittest test_phase3_stats
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 
 from tmaze.core.phase3.debias import DebiasBlockConfig
 from tmaze.core.phase3.phase3_log import Phase3Log
-from tmaze.core.phase3.phase3_stats import DEFAULT_WINDOW, Phase3Stats, compute
+from tmaze.core.phase3.phase3_stats import (
+    DEFAULT_WINDOW, Phase3Stats, _win_stay_lose_shift, compute)
 from tmaze.core.phase3.phase3_task import CORRECT, INCORRECT
 from tmaze.core.phase3.trial_sequence import (
     GEN_DEBIAS_BLOCKS, HIGH, LEFT, LOW, RIGHT, TrialConfig, TrialSequence)
@@ -83,7 +86,6 @@ class TestEmpty(unittest.TestCase):
         self.assertIsNone(s.reward_rate)
         self.assertIsNone(s.win_stay)
         self.assertIsNone(s.lose_shift)
-        self.assertIsNone(s.mean_rt_s)
         self.assertEqual(s.topups, 0)
         self.assertEqual(s.window_n, DEFAULT_WINDOW)
 
@@ -261,36 +263,58 @@ class TestWinStayLoseShift(unittest.TestCase):
         self.assertIsNone(s.lose_shift)
 
 
-class TestReactionTime(unittest.TestCase):
-    def test_mean_rt_from_cue_onset_to_choice(self):
-        log = _log(n=20)
-        _resolve(log, 0, "left", CORRECT,
-                 cue_on="2026-07-23T12:00:00.000",
-                 choice="2026-07-23T12:00:00.400")           # 0.4 s
-        _resolve(log, 1, "left", CORRECT,
-                 cue_on="2026-07-23T12:00:10.000",
-                 choice="2026-07-23T12:00:10.600")           # 0.6 s
-        s = compute(log.snapshot(2, armed=True))
-        self.assertEqual(s.rt_n, 2)
-        self.assertAlmostEqual(s.mean_rt_s, 0.5)
+def _wsls_row(trial, arm, outcome, state="NORMAL"):
+    """A minimal duck-typed row carrying only the fields _win_stay_lose_shift
+    reads: the 1-based trial index, chosen arm, outcome, and scheduler state."""
+    return SimpleNamespace(trial=trial, chosen_arm=arm, outcome=outcome,
+                           sched_state=state)
 
-    def test_missing_stamp_is_skipped(self):
-        log = _log(n=20)
-        # trial 0 has both stamps; trial 1 has only the scored choice (no onset).
-        _resolve(log, 0, "left", CORRECT,
-                 cue_on="2026-07-23T12:00:00.000",
-                 choice="2026-07-23T12:00:00.500")
-        _resolve(log, 1, "left", CORRECT, choice="2026-07-23T12:00:05.000")
-        s = compute(log.snapshot(2, armed=True))
-        self.assertEqual(s.rt_n, 1)
-        self.assertAlmostEqual(s.mean_rt_s, 0.5)
 
-    def test_no_stamps_gives_none(self):
-        log = _log(n=20)
-        _resolve(log, 0, "left", CORRECT)   # helper's default choice stamp only
-        s = compute(log.snapshot(1, armed=True))
-        self.assertEqual(s.rt_n, 0)
-        self.assertIsNone(s.mean_rt_s)
+class TestWinStayAdjacency(unittest.TestCase):
+    """F3 (docs/decisions/0093): pairs must be genuine trial-to-next-trial
+    transitions of the rat's OWN choices - a forced in-block trial or any gap in
+    the trial numbering breaks the pair instead of being skipped over."""
+
+    def test_plain_adjacent_pair_counts(self):
+        rows = [_wsls_row(1, "LEFT", CORRECT), _wsls_row(2, "LEFT", CORRECT)]
+        win_stay, lose_shift = _win_stay_lose_shift(rows)
+        self.assertEqual(win_stay, 1.0)                 # stayed after a win
+        self.assertIsNone(lose_shift)
+
+    def test_in_block_trial_breaks_the_pair(self):
+        # A forced INTERVENTION trial sits between two out-of-block trials: neither
+        # (oob, forced) nor (forced, oob) pair may count, so there is no eligible
+        # win transition and win_stay is None (not a spurious 100%).
+        rows = [
+            _wsls_row(1, "LEFT", CORRECT),
+            _wsls_row(2, "RIGHT", CORRECT, state="INTERVENTION"),
+            _wsls_row(3, "LEFT", CORRECT),
+        ]
+        win_stay, lose_shift = _win_stay_lose_shift(rows)
+        self.assertIsNone(win_stay)
+        self.assertIsNone(lose_shift)
+
+    def test_trial_number_gap_breaks_the_pair(self):
+        # An intervening trial that isn't in this list (e.g. abandoned) shows up as
+        # a gap in the trial numbers, which also breaks adjacency.
+        rows = [_wsls_row(1, "LEFT", CORRECT), _wsls_row(3, "LEFT", CORRECT)]
+        self.assertEqual(_win_stay_lose_shift(rows), (None, None))
+
+    def test_only_out_of_block_adjacent_pairs_count(self):
+        # Two clean oob transitions around a forced block: L-correct -> L (stay),
+        # then later R-incorrect -> L (shift). The forced trials in between never
+        # pair. => win_stay 1.0 (one stay), lose_shift 1.0 (one shift).
+        rows = [
+            _wsls_row(1, "LEFT", CORRECT),
+            _wsls_row(2, "LEFT", CORRECT),                       # stay after win
+            _wsls_row(3, "RIGHT", CORRECT, state="INTERVENTION"),
+            _wsls_row(4, "RIGHT", CORRECT, state="INTERVENTION"),
+            _wsls_row(5, "RIGHT", INCORRECT),
+            _wsls_row(6, "LEFT", CORRECT),                       # shift after loss
+        ]
+        win_stay, lose_shift = _win_stay_lose_shift(rows)
+        self.assertAlmostEqual(win_stay, 1.0)
+        self.assertAlmostEqual(lose_shift, 1.0)
 
 
 class TestDisarmedSnapshotStillReads(unittest.TestCase):
@@ -364,6 +388,18 @@ class TestDebiasPartition(unittest.TestCase):
         self.assertEqual(st.oob_completed, len(oob))
         self.assertAlmostEqual(st.accuracy_cum, correct_oob / len(oob))
 
+    def test_oob_count_fields_match_the_displayed_percentages(self):
+        # F1 (docs/decisions/0092): the [n/N] bracket the panel/summary show next
+        # to accuracy / reward rate must be the OUT-OF-BLOCK numerator+denominator
+        # so the count agrees with the percentage. In this drive the in-block
+        # trials are all correct+rewarded, so the all-completed counts are strictly
+        # larger than the out-of-block ones - the exact mismatch F1 fixes.
+        st, _log, _seq = self._stats()
+        self.assertEqual(st.oob_correct, round(st.accuracy_cum * st.oob_completed))
+        self.assertEqual(st.oob_rewarded, round(st.reward_rate * st.oob_completed))
+        self.assertGreater(st.correct, st.oob_correct)
+        self.assertGreater(st.rewarded, st.oob_rewarded)
+
     def test_directional_bias_is_left_and_blocks_succeed(self):
         st, _log, _seq = self._stats()
         # The out-of-block animal always pulled LEFT, so directional bias b > 0.
@@ -386,6 +422,10 @@ class TestDebiasPartition(unittest.TestCase):
         self.assertEqual(st.oob_completed, st.completed)
         self.assertEqual(st.n_blocks, 0)
         self.assertEqual(st.dir_bias, 0.0)              # all correct -> no pulls
+        # With no in-block trials the oob counts equal the all-completed ones, so
+        # the F1 brackets read identically to the pre-debias behavior.
+        self.assertEqual(st.oob_correct, st.correct)
+        self.assertEqual(st.oob_rewarded, st.rewarded)
 
 
 if __name__ == "__main__":

@@ -5,8 +5,8 @@ Folds a published ``phase3_log.Phase3StateSnapshot`` (the immutable freeze of th
 session table, docs/decisions/0050) into a small set of scalar training measures
 for the host-owned Phase 3 cued task (docs/decisions/0046/0047): how far the
 session has progressed, how accurately the rat maps each choice cue to its arm,
-whether it is side-biased, its reward rate, a naive win-stay/lose-shift strategy
-readout, and its mean choice reaction time. It is the Phase 3 twin of the Phase 2a
+whether it is side-biased, its reward rate, and a naive win-stay/lose-shift
+strategy readout. It is the Phase 3 twin of the Phase 2a
 ``behavior_stats.BehaviorStats`` readout (docs/decisions/0032), and it feeds the
 same bottom-strip behavior panel once that panel goes phase-aware
 (docs/decisions/0052).
@@ -32,14 +32,16 @@ Measure definitions (all over the COMPLETED trials only):
     reward-incorrect shaping aid on this approaches 1 and stops tracking accuracy.
   - win-stay / lose-shift are defined on the trial OUTCOME (not the reward),
     deliberately so they stay interpretable under the reward-incorrect shaping
-    aid: over adjacent completed trials, ``win_stay`` = P(same arm chosen next |
-    this trial CORRECT) and ``lose_shift`` = P(different arm chosen next | this
-    trial INCORRECT). A cue-following rat has no reason to stay/shift on its own
-    outcome, so these flag a rat falling back on a naive strategy.
-  - ``mean_rt_s`` = mean of ``choice_time_iso - choice_cue_on_iso`` over the
-    completed trials that carry both stamps. These are host wall-clock ISO times
-    (they carry serial/actuation latency, docs/decisions/0047), so this is an
-    approximate cue-onset->choice latency, not a hardware-precise reaction time.
+    aid: over truly-adjacent free-choice trials, ``win_stay`` = P(same arm chosen
+    next | this trial CORRECT) and ``lose_shift`` = P(different arm chosen next |
+    this trial INCORRECT). A cue-following rat has no reason to stay/shift on its
+    own outcome, so these flag a rat falling back on a naive strategy. A forced
+    in-block trial (or any trial that intervened) breaks the pair rather than
+    being skipped over, so the transition is always the rat's own trial-to-next-
+    trial choice (docs/decisions/0093).
+
+    (The cue-onset->choice reaction time was removed - see the ``Phase3Stats``
+    note - pending hardware-latency characterization; docs/decisions/0094.)
 
 Pure stdlib, headless-testable over deterministic snapshots (build a Phase3Log,
 fill it via its public methods, ``.snapshot(idx, armed=...)``):
@@ -49,7 +51,6 @@ fill it via its public methods, ``.snapshot(idx, armed=...)``):
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
 from typing import List, Optional, Tuple
 
 from tmaze.core.phase3.phase3_log import Phase3RowView, Phase3StateSnapshot
@@ -85,9 +86,15 @@ class Phase3Stats:
     completed: int                   # trials with a scored outcome
     correct: int
     incorrect: int
+    # Correct count over OUT-OF-BLOCK completed trials only - the numerator that
+    # matches ``accuracy_cum`` (whose denominator is ``oob_completed``). Distinct
+    # from ``correct`` (all completed, including forced in-block trials), so the
+    # displayed [n/N] bracket agrees with the shown percentage. Equal to
+    # ``correct`` for a balanced session. See docs/decisions/0092.
+    oob_correct: int
     # ---- accuracy ----
-    accuracy_cum: Optional[float]              # correct / completed
-    accuracy_win: Optional[float]              # correct / completed over last N
+    accuracy_cum: Optional[float]              # correct_oob / oob_completed
+    accuracy_win: Optional[float]              # correct_oob / oob_completed over last N
     # ---- per choice-cue accuracy ----
     high_accuracy: Optional[float]
     high_completed: int
@@ -99,7 +106,12 @@ class Phase3Stats:
     right_choices: int
     # ---- reward ----
     rewarded: int
-    reward_rate: Optional[float]               # rewarded / completed
+    # Rewarded count over OUT-OF-BLOCK completed trials only - the numerator that
+    # matches ``reward_rate`` (denominator ``oob_completed``); ``rewarded`` stays
+    # over ALL completed for the water estimate (which wants every pulse). Equal
+    # for a balanced session. See docs/decisions/0092.
+    oob_rewarded: int
+    reward_rate: Optional[float]               # rewarded_oob / oob_completed
     # Total lick-triggered TOP-UP pulses over the completed trials (extras beyond
     # each ``rewarded`` prime; docs/decisions/0069). Summed here so the per-session
     # water estimate has a single source for the pulse count (docs/decisions/0073).
@@ -107,15 +119,22 @@ class Phase3Stats:
     # ---- naive strategy (outcome-based; see module docstring) ----
     win_stay: Optional[float]
     lose_shift: Optional[float]
-    # ---- reaction time (cue onset -> scored choice) ----
-    mean_rt_s: Optional[float]
-    rt_n: int
+    # NOTE: the cue-onset -> scored-choice reaction time (``mean_rt_s`` / ``rt_n``)
+    # was REMOVED (docs/decisions/0094): it was a host wall-clock interval carrying
+    # uncharacterized serial/actuation latency, so it was misleading to headline as
+    # a reaction time. The raw ``choice_cue_on_iso`` / ``choice_time_iso`` stamps
+    # stay in the per-trial CSV, so it can be reinstated once those latencies are
+    # measured.
     # ---- closed-loop debias (blank/neutral for the balanced generator) ----
     # The learning measures above are over OUT-OF-BLOCK completed trials only, so a
     # corrective block (which forces one side) never distorts them; the in-block
     # trials are summarized separately here. See the module docstring + the ADR.
     generator: str = "balanced"
     sched_state: str = "NORMAL"                 # current scheduler state
+    # Reward-incorrect shaping aid on this run (docs/decisions/0094): when True the
+    # reward rate is ~100% by construction and uninformative, so the view/summary
+    # hide that line instead of showing a misleading figure.
+    reward_incorrect: bool = False
     # Headline: signed directional-error bias over OUT-OF-BLOCK completed trials
     # (b > 0 = left-biased); left/right "pull" error counts that make it up.
     dir_bias: Optional[float] = None
@@ -134,16 +153,6 @@ class Phase3Stats:
     blocks_success: int = 0                      # ended by the consecutive-correct exit
     blocks_capped: int = 0                       # hit the max-length failsafe
     block_mean_len: Optional[float] = None       # mean completed trials per block
-
-
-def _parse_iso(iso: Optional[str]) -> Optional[datetime]:
-    """Parse a host wall-clock ISO stamp, or None if absent/unparseable."""
-    if not iso:
-        return None
-    try:
-        return datetime.fromisoformat(iso)
-    except ValueError:
-        return None
 
 
 def _int_or_zero(x: Optional[str]) -> int:
@@ -208,11 +217,11 @@ def compute(snapshot: Optional[Phase3StateSnapshot], *,
     lr_bias = (left / sided, right / sided) if sided else None
 
     rewarded = sum(1 for r in completed if r.rewarded == "1")
-    reward_rate = (sum(1 for r in oob if r.rewarded == "1") / noob) if noob else None
+    rewarded_oob = sum(1 for r in oob if r.rewarded == "1")
+    reward_rate = (rewarded_oob / noob) if noob else None
     topups = sum(_int_or_zero(r.topups) for r in completed)
 
-    win_stay, lose_shift = _win_stay_lose_shift(oob)
-    mean_rt_s, rt_n = _mean_reaction_time(oob)
+    win_stay, lose_shift = _win_stay_lose_shift(completed)
 
     # Headline directional-error bias (over out-of-block trials) + the block split.
     dir_bias, lpull, rpull = _dir_bias(oob)
@@ -228,15 +237,18 @@ def compute(snapshot: Optional[Phase3StateSnapshot], *,
     return Phase3Stats(
         window_n=n, total=total, current_index=current_index,
         completed=ncomp, correct=correct, incorrect=incorrect,
+        oob_correct=correct_oob,
         accuracy_cum=accuracy_cum, accuracy_win=accuracy_win,
         high_accuracy=_accuracy(high), high_completed=len(high),
         low_accuracy=_accuracy(low), low_completed=len(low),
         lr_bias=lr_bias, left_choices=left, right_choices=right,
-        rewarded=rewarded, reward_rate=reward_rate, topups=topups,
+        rewarded=rewarded, oob_rewarded=rewarded_oob,
+        reward_rate=reward_rate, topups=topups,
         win_stay=win_stay, lose_shift=lose_shift,
-        mean_rt_s=mean_rt_s, rt_n=rt_n,
         generator=(snapshot.generator if snapshot is not None else "balanced"),
         sched_state=(snapshot.debias_state if snapshot is not None else "NORMAL"),
+        reward_incorrect=(snapshot.reward_incorrect
+                          if snapshot is not None else False),
         dir_bias=dir_bias, dir_bias_left_pull=lpull, dir_bias_right_pull=rpull,
         live_bias=(snapshot.debias_bias if snapshot is not None else 0.0),
         trigger_bias=(snapshot.trigger_bias if snapshot is not None else 0.0),
@@ -302,16 +314,33 @@ def _block_efficacy(
 def _win_stay_lose_shift(
         completed: List[Phase3RowView]
 ) -> Tuple[Optional[float], Optional[float]]:
-    """Win-stay / lose-shift over adjacent completed trials (outcome-based).
+    """Win-stay / lose-shift over truly-adjacent free-choice trials (outcome-based).
 
     ``win_stay`` = P(next choice is the SAME arm | this trial was CORRECT);
     ``lose_shift`` = P(next choice is a DIFFERENT arm | this trial was INCORRECT).
-    Pairs whose arms aren't both LEFT/RIGHT are skipped. Each is None until its
-    conditioning outcome has occurred. See the module docstring for why outcome
-    (not reward) is the signal.
+    Each is None until its conditioning outcome has occurred. See the module
+    docstring for why outcome (not reward) is the signal.
+
+    A pair ``(a, b)`` is counted only when it is a genuine trial-to-next-trial
+    transition of the rat's OWN choices (docs/decisions/0093):
+      - ``a`` and ``b`` are consecutive trials (``b.trial == a.trial + 1``), so a
+        trial that sits between them - a forced in-block corrective trial, an
+        operator-abandoned trial, or any not-yet-scored one - breaks the pair
+        rather than being skipped over (``completed`` is the CORRECT/INCORRECT
+        prefix, so a gap in trial numbers means such a trial intervened); and
+      - neither ``a`` nor ``b`` is an in-block (INTERVENTION) trial: a forced
+        choice is not a strategy the rat adopted, and conditioning on a forced
+        outcome (or asking whether it "stayed" into a forced next trial) is
+        meaningless. For a balanced session every completed trial is out-of-block
+        and consecutive, so this reduces to the plain adjacent-pair definition.
+    Pairs whose arms aren't both LEFT/RIGHT are skipped.
     """
     stay_n = stay_c = shift_n = shift_c = 0
     for a, b in zip(completed, completed[1:]):
+        if b.trial != a.trial + 1:
+            continue
+        if INTERVENTION_LABEL in (a.sched_state, b.sched_state):
+            continue
         if a.chosen_arm not in (LEFT_LABEL, RIGHT_LABEL):
             continue
         if b.chosen_arm not in (LEFT_LABEL, RIGHT_LABEL):
@@ -326,24 +355,3 @@ def _win_stay_lose_shift(
     win_stay = (stay_c / stay_n) if stay_n else None
     lose_shift = (shift_c / shift_n) if shift_n else None
     return win_stay, lose_shift
-
-
-def _mean_reaction_time(
-        completed: List[Phase3RowView]
-) -> Tuple[Optional[float], int]:
-    """Mean ``choice_time_iso - choice_cue_on_iso`` (s) over trials with both
-    stamps; returns ``(mean_or_None, n_used)``. A missing/unparseable or negative
-    interval is skipped (a negative would mean the choice was scored before the
-    cue onset was logged - not a real reaction time)."""
-    deltas: List[float] = []
-    for r in completed:
-        onset = _parse_iso(r.choice_cue_on_iso)
-        chose = _parse_iso(r.choice_time_iso)
-        if onset is None or chose is None:
-            continue
-        dt = (chose - onset).total_seconds()
-        if dt >= 0:
-            deltas.append(dt)
-    if not deltas:
-        return None, 0
-    return sum(deltas) / len(deltas), len(deltas)

@@ -124,7 +124,7 @@ class BehaviorView:
         # live locomotor/compliance group from self._p3_stats (docs/decisions/0071).
         self._p3_vars = {k: tk.StringVar(value="-") for k in (
             "session", "trials", "accuracy", "bycue", "bias", "reward",
-            "strategy", "rt", "debias",
+            "strategy", "debias",
             "compliance", "nonstem", "run", "throughput", "distance")}
         self._window = tk.IntVar(value=self._stats.snapshot().window_n)
 
@@ -223,14 +223,14 @@ class BehaviorView:
         tip(session3_lbl, "behavior.phase3.session")
 
         for r, key in enumerate(("trials", "accuracy", "bycue", "bias", "reward",
-                                 "strategy", "rt", "debias"), start=1):
+                                 "strategy", "debias"), start=1):
             lbl = ttk.Label(self._p3_box, textvariable=self._p3_vars[key], anchor="w",
                             font=("TkDefaultFont", 10))
             lbl.grid(row=r, column=0, sticky="w", **pad)
             tip(lbl, f"behavior.phase3.{key}")
 
         ttk.Separator(self._p3_box, orient="vertical").grid(
-            row=1, column=1, rowspan=8, sticky="ns", padx=8, pady=1)
+            row=1, column=1, rowspan=7, sticky="ns", padx=8, pady=1)
 
         # Right column: the locomotor/compliance "excursions" group. A static
         # heading distinguishes these all-excursion counts from the cued trials.
@@ -420,25 +420,32 @@ class BehaviorView:
         n = st.window_n
         self._vars["status"].set(
             f"Phase 3 session active - trial "
-            f"{min(st.current_index + 1, st.total)}/{st.total}")
+            f"{min(st.current_index + 1, st.total)}/{st.total}"
+            "   (stats since Phase 3 arm)")
         self._p3_vars["session"].set(self._p3_session_text())
         self._p3_vars["trials"].set(
             f"Completed: {st.completed}/{st.total}   "
             f"correct {st.correct}  incorrect {st.incorrect}")
         self._p3_vars["accuracy"].set(
             f"Accuracy: {_pct(st.accuracy_cum)}  (last {n}: {_pct(st.accuracy_win)})"
-            f"   [{st.correct}/{st.completed}]")
+            f"   [{st.oob_correct}/{st.oob_completed}]")
         self._p3_vars["bycue"].set(
             f"By cue: HIGH {_pct(st.high_accuracy)} [{st.high_completed}]   "
             f"LOW {_pct(st.low_accuracy)} [{st.low_completed}]")
         self._p3_vars["bias"].set(
             f"Side bias (chose): {_lr(st.lr_bias)}   "
             f"[{st.left_choices}L/{st.right_choices}R]   dir b={_signed(st.dir_bias)}")
-        self._p3_vars["reward"].set(
-            f"Reward rate: {_pct(st.reward_rate)}   [{st.rewarded}/{st.completed}]")
+        # Reward rate is uninformative under the reward-incorrect shaping aid (it
+        # pins at ~100% by construction), so hide the line entirely then rather
+        # than show a misleading figure (docs/decisions/0094).
+        if st.reward_incorrect:
+            self._p3_vars["reward"].set("")
+        else:
+            self._p3_vars["reward"].set(
+                f"Reward rate: {_pct(st.reward_rate)}   "
+                f"[{st.oob_rewarded}/{st.oob_completed}]")
         self._p3_vars["strategy"].set(
             f"Win-stay: {_pct(st.win_stay)}   Lose-shift: {_pct(st.lose_shift)}")
-        self._p3_vars["rt"].set(f"Choice RT: {_rt(st.mean_rt_s)}   [n={st.rt_n}]")
         # Closed-loop debias line: only meaningful under the debias_blocks
         # generator (learning measures above are over out-of-block trials; here we
         # surface the live scheduler state + the corrective-block efficacy). See
@@ -484,7 +491,13 @@ class BehaviorView:
 
     @staticmethod
     def _nonstem_text(snap) -> str:
-        return f"Non-stem (denied): {snap.nonstem_choices}"
+        # The denied (non-stem) excursions split by the side the rat committed to
+        # - a directional pull on the shortcut trips, distinct from the stem-gated
+        # L/R and the cued dir-bias (docs/decisions/0095).
+        base = f"Non-stem (denied): {snap.nonstem_choices}"
+        if snap.nonstem_choices:
+            base += f"   [{snap.nonstem_left}L/{snap.nonstem_right}R]"
+        return base
 
     @staticmethod
     def _run_text(snap) -> str:
@@ -495,7 +508,10 @@ class BehaviorView:
 
     @staticmethod
     def _throughput_text(snap) -> str:
-        return f"Trials: {snap.stem_choices}   {_rate(snap.trials_per_min)}/min"
+        # "Stem trips", not "Trials": on the Phase 3 panel this excursion count
+        # sits beside the cued "Completed:" trials, and the two are different units
+        # (all stem excursions vs scored cued trials) - docs/decisions/0095.
+        return f"Stem trips: {snap.stem_choices}   {_rate(snap.trials_per_min)}/min"
 
     def _distance_text(self, snap) -> str:
         scale_ok = self._scale is not None and self._scale.valid()
@@ -540,10 +556,6 @@ def _lr(t) -> str:
 
 def _rate(x: Optional[float]) -> str:
     return "--" if x is None else f"{x:.1f}"
-
-
-def _rt(x: Optional[float]) -> str:
-    return "--" if x is None else f"{x:.2f} s"
 
 
 def _signed(x: Optional[float]) -> str:

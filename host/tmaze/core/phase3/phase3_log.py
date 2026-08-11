@@ -160,6 +160,11 @@ class Phase3StateSnapshot:
     trigger_bias: float = 0.0
     exit_consecutive: int = 0
     max_block_len: int = 0
+    # Whether the reward-incorrect shaping aid is on this run: with it on every
+    # completed trial is rewarded, so the reward rate pins at ~100% and stops
+    # tracking accuracy - panels suppress that line rather than show a misleading
+    # figure (docs/decisions/0094).
+    reward_incorrect: bool = False
 
 
 class Phase3Log:
@@ -377,7 +382,8 @@ class Phase3Log:
             debias_bias=seq.debias_bias(),
             trigger_bias=(db.trigger_bias if db is not None else 0.0),
             exit_consecutive=(db.exit_consecutive if db is not None else 0),
-            max_block_len=(db.max_block_len if db is not None else 0))
+            max_block_len=(db.max_block_len if db is not None else 0),
+            reward_incorrect=self.reward_incorrect)
 
     # ------------------------------------------------------------- render
     def _header_comment(self) -> List[str]:
