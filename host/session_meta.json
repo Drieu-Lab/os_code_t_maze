@@ -2,6 +2,6 @@
   "_schema": {
     "note": "Sticky Session-panel defaults (ADR-0079): trainer + reward_type remembered across sessions. Stage is NOT stored here - it is re-derived from the active phase each session so a stale override can't mislabel a later run."
   },
-  "trainer": "",
-  "reward_type": ""
+  "trainer": "RJ",
+  "reward_type": "10% sucrose"
 }

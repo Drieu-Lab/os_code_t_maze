@@ -491,6 +491,10 @@ def main() -> int:
     # its data-file path for the manifest (ADR-0048/0053).
     task_ref = {}
     phase3_ref = {}
+    # The shared reward dispatcher is captured (created inside make_task) so the
+    # Session panel can push the "Reward" field's liquid to it as the active liquid
+    # for per-fire volume accounting (ADR-0091).
+    dispatcher_ref = {}
     # The Session panel is captured too, so the behavior panel can read its
     # Start/Stop session clock for the Phase 3 session line (ADR-0060).
     session_ref = {}
@@ -528,6 +532,7 @@ def main() -> int:
         # The send closure resolves `client` at fire time (created below).
         dispatcher = (RewardDispatcher(lambda cmd: client.send(cmd))
                       if RewardDispatcher is not None else None)
+        dispatcher_ref["disp"] = dispatcher
         tv = TaskControlView(
             parent, tracker=tracker, camera=camera_ref.get("cam"),
             pipeline=pipeline, send=lambda cmd: client.send(cmd),
@@ -921,7 +926,8 @@ def main() -> int:
             session_parent, camera=camera_ref.get("cam"),
             phase3=phase3_ref.get("p3"), send=lambda cmd: client.send(cmd),
             recordings_root=recordings_root, animal_id=task_animal_id,
-            behavior_summary=behavior_summary, config_inputs=config_inputs)
+            behavior_summary=behavior_summary, config_inputs=config_inputs,
+            dispatcher=dispatcher_ref.get("disp"))
         session.widget().pack(side=tk.BOTTOM, fill=tk.X, padx=4, pady=4)
         add_module(session)
         # Expose the session clock to the behavior panel's Phase 3 line (ADR-0060).

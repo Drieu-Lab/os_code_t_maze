@@ -14,9 +14,16 @@ Run from host/:  python -m unittest test_reward_dispatcher
 
 from __future__ import annotations
 
+import os
+import shutil
+import tempfile
 import unittest
 from dataclasses import replace
 
+from tmaze.core.reward import reward_volume as rv
+from tmaze.core.reward.reward_calibration import (
+    DEFAULT_REWARD_LIQUID, CalibrationPoint, write_points,
+)
 from tmaze.core.reward.reward_dispatcher import (
     DEFAULT_GLOBAL_MIN_INTERVAL_MS, RewardDispatcher, RewardRecord,
 )
@@ -131,6 +138,45 @@ class TestRulesAndPhase3Parity(unittest.TestCase):
         norm_b = replace(phase3_rec, reason="", rule_id="")
         self.assertEqual(norm_a, norm_b)
         self.assertIsInstance(rules_rec, RewardRecord)
+
+
+class TestActiveLiquid(unittest.TestCase):
+    """ADR-0091: each fire is scored against the dispatcher's active liquid, so
+    switching liquids (from the Session panel) picks the matching curve."""
+
+    def test_default_active_liquid(self):
+        disp = RewardDispatcher(lambda _cmd: None)
+        self.assertEqual(disp.active_liquid, DEFAULT_REWARD_LIQUID)
+
+    def test_set_active_liquid_normalizes(self):
+        disp = RewardDispatcher(lambda _cmd: None)
+        disp.set_active_liquid("10% sucrose")
+        self.assertEqual(disp.active_liquid, "sucrose_10pct")
+        disp.set_active_liquid("H2O")
+        self.assertEqual(disp.active_liquid, "water")
+
+    def test_fire_uses_active_liquid_curve(self):
+        d = tempfile.mkdtemp()
+        path = os.path.join(d, "cal.csv")
+        write_points(path, [
+            CalibrationPoint("center", "water", 300, 60.0),
+            CalibrationPoint("center", "sucrose_10pct", 300, 45.0),
+        ])
+        rv.reload_calibration(path)
+        try:
+            disp, _sent, _clock = make(min_interval_ms=0)
+            # Default liquid is 10% sucrose -> the sucrose curve (45 uL).
+            self.assertEqual(disp.active_liquid, "sucrose_10pct")
+            rec = disp.fire(2, 300, reason="r", rule_id="x")
+            self.assertAlmostEqual(rec.volume_ul, 45.0)
+            # Switch to water -> the water curve (60 uL).
+            disp.set_active_liquid("water")
+            rec2 = disp.fire(2, 300, reason="r", rule_id="x")
+            self.assertAlmostEqual(rec2.volume_ul, 60.0)
+        finally:
+            rv._CALIBRATION_PATH = None
+            rv.reload_calibration()
+            shutil.rmtree(d, ignore_errors=True)
 
 
 if __name__ == "__main__":

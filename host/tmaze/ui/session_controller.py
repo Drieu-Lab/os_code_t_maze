@@ -96,6 +96,7 @@ from tmaze.core.records import note_tags
 from tmaze.core.phase3 import phase3_config
 from tmaze.core.phase3 import phase3_stats
 from tmaze.core import protocol
+from tmaze.core.reward.reward_calibration import KNOWN_LIQUIDS, liquid_label
 from tmaze.core.session import session_config
 from tmaze.core.session import session_meta
 from tmaze.core.session import session_notes
@@ -179,11 +180,17 @@ class SessionControlView:
                  animal_id: Optional[Callable[[], str]] = None,
                  behavior_summary: Optional[Callable[[], Any]] = None,
                  config_inputs: Optional[Callable[[], dict]] = None,
-                 ask_weight: Optional[Callable[[str], Optional[float]]] = None):
+                 ask_weight: Optional[Callable[[str], Optional[float]]] = None,
+                 dispatcher=None):
         self._parent = parent
         self._camera = camera
         self._phase3 = phase3
         self._send = send                 # callable(str) -> None (RigClient.send)
+        # Shared reward dispatcher (reward_dispatcher.RewardDispatcher). The panel's
+        # "Reward" field names the liquid in the line; we push it here as the active
+        # liquid so per-fire volume accounting picks the matching calibration curve
+        # (docs/decisions/0091). None -> the field stays a pure log label.
+        self._dispatcher = dispatcher
         self._recordings_root = recordings_root or DEFAULT_RECORDINGS_ROOT
         # Provider of the runtime bits the config snapshot can't read from a file:
         # ``{"files": {name: path}, "params": {...}}`` - extra files to copy (lens
@@ -263,6 +270,10 @@ class SessionControlView:
         self._reward_type_var = tk.StringVar(value=meta_defaults.reward_type)
         self._stage_var = tk.StringVar(value=self._derive_stage())
         self._stage_override_var = tk.StringVar(value="")
+        # Keep the dispatcher's active liquid in sync with the "Reward" field, live
+        # (on every edit) and from the restored sticky value (docs/decisions/0091).
+        self._reward_type_var.trace_add("write", self._apply_active_liquid)
+        self._apply_active_liquid()
 
         self._build_ui()
 
@@ -297,6 +308,20 @@ class SessionControlView:
                     info, center_lick_index=self._center_lick,
                     center_sol_port=CENTER_SOL_PORT)):
             self._write_serial(info.raw)
+
+    def _apply_active_liquid(self, *_args) -> None:
+        """Push the "Reward" field's liquid to the shared dispatcher so per-fire
+        volume accounting uses the matching calibration curve (docs/decisions/0091).
+
+        Called on every field edit (via a trace) and on Start. The dispatcher
+        normalizes the free text; an unknown name falls back safely in
+        reward_volume. A no-op with no dispatcher wired (headless/standalone)."""
+        if self._dispatcher is None:
+            return
+        try:
+            self._dispatcher.set_active_liquid(self._reward_type_var.get())
+        except Exception:
+            pass
 
     def note_operator_reward(self, ms: float) -> None:
         """Record one OPERATOR reward dispense (the "Solenoid test" reward-spout
@@ -364,8 +389,12 @@ class SessionControlView:
             side="left", padx=(2, 8))
         ttk.Label(meta, text="Reward",
                   font=("TkDefaultFont", 8)).pack(side="left")
-        ttk.Entry(meta, textvariable=self._reward_type_var, width=10).pack(
-            side="left", padx=(2, 8))
+        # Editable combobox pre-filled with the known reward liquids, but still
+        # free-typeable so any log label is allowed; the value also drives volume
+        # accounting via the dispatcher's active liquid (docs/decisions/0091).
+        ttk.Combobox(meta, textvariable=self._reward_type_var,
+                     values=[liquid_label(t) for t in KNOWN_LIQUIDS],
+                     width=12).pack(side="left", padx=(2, 8))
         ttk.Label(meta, text="Stage",
                   font=("TkDefaultFont", 8)).pack(side="left")
         ttk.Label(meta, textvariable=self._stage_var,
@@ -890,6 +919,10 @@ class SessionControlView:
                 "tab).\n\nThe session records the Phase 3 task, so it won't start "
                 "until Phase 3 is armed. See docs/decisions/0060.")
             return
+
+        # Make sure the dispatcher's active liquid matches the "Reward" field at
+        # the moment the session begins (docs/decisions/0091).
+        self._apply_active_liquid()
 
         raw_animal = (self._animal_text() or self._learned_animal or "").strip()
         animal, id_warning = self._resolve_animal_id(raw_animal)

@@ -12,8 +12,9 @@ principled reason. See docs/decisions/0054 (and FW-0019).
 
 This module is that single seam. ``RewardDispatcher.fire`` is the ONE place a
 reward is gated (a global rate backstop), recorded (reason + port + pulse +
-calibrated volume; ADR-0019), and sent (``R<port>1,<ms>`` - unchanged on-wire),
-so a fire is handled identically whichever task drove it. It owns no log file:
+calibrated volume for the active reward liquid; ADR-0019, ADR-0091), and sent
+(``R<port>1,<ms>`` - unchanged on-wire), so a fire is handled identically
+whichever task drove it. It owns no log file:
 ``fire`` RETURNS an immutable ``RewardRecord`` and each controller persists it
 into its own data file (the Rules track-log vs the Phase 3 session file), so the
 record shape is shared while each mode keeps its own file.
@@ -37,7 +38,8 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Optional
 
-from tmaze.core.reward.reward_volume import reward_volume_ul
+from tmaze.core.reward.reward_calibration import normalize_liquid
+from tmaze.core.reward.reward_volume import DEFAULT_REWARD_LIQUID, reward_volume_ul
 
 # Default global minimum interval (ms) between two accepted reward fires,
 # regardless of which task drove them - a last-resort guard against runaway
@@ -73,9 +75,11 @@ class RewardDispatcher:
 
     def __init__(self, send: Optional[Callable[[str], None]],
                  *, min_interval_ms: int = DEFAULT_GLOBAL_MIN_INTERVAL_MS,
+                 active_liquid: str = DEFAULT_REWARD_LIQUID,
                  clock: Callable[[], float] = time.monotonic) -> None:
         self._send = send
         self._min_interval_ms = int(min_interval_ms)
+        self._active_liquid = normalize_liquid(active_liquid)
         self._clock = clock
         self._last_fire_now: Optional[float] = None
         self._lock = threading.Lock()
@@ -89,6 +93,17 @@ class RewardDispatcher:
     @property
     def min_interval_ms(self) -> int:
         return self._min_interval_ms
+
+    def set_active_liquid(self, liquid: str) -> None:
+        """Set the reward liquid currently in the line, so each fire is scored
+        against the matching calibration curve (ADR-0091). Driven by the Session
+        panel's "Reward" field; the value is normalized to a canonical token."""
+        with self._lock:
+            self._active_liquid = normalize_liquid(liquid)
+
+    @property
+    def active_liquid(self) -> str:
+        return self._active_liquid
 
     def fire(self, port: int, ms: int, *, reason: str,
              rule_id: str) -> RewardRecord:
@@ -114,7 +129,9 @@ class RewardDispatcher:
             self._do_send(f"R{port}1,{ms}")
             return RewardRecord(
                 fired=True, reason=reason, rule_id=rule_id, port=port,
-                pulse_ms=ms, volume_ul=reward_volume_ul(ms),
+                pulse_ms=ms,
+                volume_ul=reward_volume_ul(ms, port=port,
+                                           liquid=self._active_liquid),
                 suppressed_reason=None)
 
     def _do_send(self, cmd: str) -> None:
