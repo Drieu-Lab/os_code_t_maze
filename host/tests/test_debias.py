@@ -41,12 +41,12 @@ class TestBiasMeasure(unittest.TestCase):
 class TestAutoTrigger(unittest.TestCase):
     def _ctl(self):
         return DebiasBlockController(DebiasBlockConfig(
-            window=10, min_samples=4, trigger_bias=0.3,
+            window=10, min_errors=4, trigger_bias=0.3,
             exit_consecutive=3, max_block_len=4))
 
-    def test_no_trigger_before_min_samples(self):
+    def test_no_trigger_before_min_errors(self):
         c = self._ctl()
-        c.record(RIGHT, LEFT)                      # strong bias, but only 1 sample
+        c.record(RIGHT, LEFT)                      # b = 1.0, but only 1 error
         d = c.decide()
         self.assertEqual(d.state, NORMAL)
 
@@ -96,7 +96,7 @@ class TestAutoTrigger(unittest.TestCase):
 
 class TestManualOverride(unittest.TestCase):
     def test_force_and_end_block(self):
-        c = DebiasBlockController(DebiasBlockConfig(min_samples=100))  # never auto
+        c = DebiasBlockController(DebiasBlockConfig(min_errors=100))  # never auto
         c.force_block(RIGHT)
         d = c.decide()
         self.assertEqual(d.state, INTERVENTION)
@@ -106,7 +106,7 @@ class TestManualOverride(unittest.TestCase):
         self.assertEqual(c.decide().state, NORMAL)
 
     def test_force_infers_side_from_bias(self):
-        c = DebiasBlockController(DebiasBlockConfig(min_samples=100, window=10))
+        c = DebiasBlockController(DebiasBlockConfig(min_errors=100, window=10))
         for _ in range(3):
             c.record(RIGHT, LEFT)                  # left-biased
         c.force_block()                            # no side given -> infer RIGHT
@@ -119,7 +119,7 @@ class TestManualOverride(unittest.TestCase):
 def _cfg(**kw):
     base = dict(max_trials=80, block_size=20, max_same_run=4,
                 generator=GEN_DEBIAS_BLOCKS,
-                debias=DebiasBlockConfig(window=10, min_samples=6,
+                debias=DebiasBlockConfig(window=10, min_errors=4,
                                          trigger_bias=0.3, exit_consecutive=3,
                                          max_block_len=4))
     base.update(kw)

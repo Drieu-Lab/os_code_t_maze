@@ -312,7 +312,7 @@ class TestDisarmedSnapshotStillReads(unittest.TestCase):
 def _debias_log(n=60, seed=3):
     cfg = TrialConfig(max_trials=n, block_size=20, max_same_run=4,
                       generator=GEN_DEBIAS_BLOCKS,
-                      debias=DebiasBlockConfig(window=8, min_samples=4,
+                      debias=DebiasBlockConfig(window=8, min_errors=4,
                                                trigger_bias=0.3, exit_consecutive=3,
                                                max_block_len=6))
     seq = TrialSequence(cfg, seed=seed)

@@ -252,17 +252,21 @@ def _dir_bias(rows: List[Phase3RowView]) -> Tuple[Optional[float], int, int]:
 
     A "pull" error is choosing the arm the cue told the rat NOT to: a left-pull is
     (cued RIGHT, chose LEFT), a right-pull is (cued LEFT, chose RIGHT). Returns
-    ``(b, left_pull, right_pull)`` with ``b = (left_pull - right_pull) / n`` in
-    [-1, 1] (b > 0 = left-biased), or ``(None, 0, 0)`` if empty. This is the
-    session-level twin of the sliding-window measure the debias controller acts on
-    (debias.py)."""
+    ``(b, left_pull, right_pull)`` with ``b = (left_pull - right_pull) /
+    (left_pull + right_pull)`` in [-1, 1] (b > 0 = left-biased), 0.0 when there are
+    no directional errors, or ``(None, 0, 0)`` if empty. Normalising by the error
+    count (not the trial count) keeps coincidentally-correct trials from diluting
+    it; this is the session-level twin of the sliding-window measure the debias
+    controller acts on (debias.py, ADR-0090)."""
     if not rows:
         return None, 0, 0
     left_pull = sum(1 for r in rows
                     if r.correct_arm == RIGHT_LABEL and r.chosen_arm == LEFT_LABEL)
     right_pull = sum(1 for r in rows
                      if r.correct_arm == LEFT_LABEL and r.chosen_arm == RIGHT_LABEL)
-    return (left_pull - right_pull) / len(rows), left_pull, right_pull
+    errors = left_pull + right_pull
+    b = 0.0 if errors == 0 else (left_pull - right_pull) / errors
+    return b, left_pull, right_pull
 
 
 def _block_efficacy(

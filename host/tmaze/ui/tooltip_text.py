@@ -385,13 +385,16 @@ TIPS: Dict[str, Entry] = {
     "phase3.debias_window": "Sliding window (most-recent scored trials) the side "
                             "bias is measured over. Larger = smoother/slower to "
                             "react; smaller = twitchier.",
-    "phase3.debias_min_samples": "How many scored trials must accrue before a "
-                                 "corrective block can auto-trigger (must be <= "
-                                 "window). Stops a block firing on a tiny sample.",
+    "phase3.debias_min_errors": "How many directional ERRORS (wrong-arm choices) "
+                                "must accrue in the window before a corrective block "
+                                "can auto-trigger (must be <= window). Stops a "
+                                "single early error reading as full bias.",
     "phase3.debias_trigger_bias": "The |directional-error bias| threshold (0-1) "
-                                  "that starts a corrective block. Directional bias "
-                                  "b>0 means left-biased; a block forces the "
-                                  "over-pulled side's opposite as correct.",
+                                  "that starts a corrective block. Bias is measured "
+                                  "over the window's ERRORS only (correct trials "
+                                  "don't dilute it): b = (left-pulls - right-pulls) "
+                                  "/ total errors. b>0 means left-biased; a block "
+                                  "forces the over-pulled side's opposite as correct.",
     "phase3.debias_exit_consecutive": "How many consecutive correct choices to the "
                                       "forced (non-preferred) side end a corrective "
                                       "block and revert to counterbalanced.",

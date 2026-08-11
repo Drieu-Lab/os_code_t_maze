@@ -320,14 +320,26 @@ def _params_lines(params: Dict[str, Any]) -> list:
     def g(key: str) -> Any:
         return params.get(key)
 
-    return [
-        f"  Sequence:    block {g('block_size')}   max-run {g('max_same_run')}",
+    gen = g("generator") or "balanced"
+    lines = [
+        f"  Sequence:    block {g('block_size')}   max-run {g('max_same_run')}   "
+        f"generator {gen}",
         f"  Cue:         require up-stem {g('require_up_stem')}   "
         f"min-conf {_conf(g('min_confidence'))}",
         f"  Reward:      pulse {g('reward_pulse_ms')} ms   "
         f"max top-ups {g('max_topups')}   "
         f"reward-incorrect {g('reward_incorrect')}",
     ]
+    # The closed-loop debias knobs, only when that generator is in effect (ADR-0086).
+    db = g("debias_blocks")
+    if gen != "balanced" and db:
+        lines.append(
+            f"  Debias:      window {db.get('window')}   "
+            f"min-errors {db.get('min_errors')}   "
+            f"trigger {db.get('trigger_bias')}   "
+            f"exit {db.get('exit_consecutive')}   "
+            f"cap {db.get('max_block_len')}")
+    return lines
 
 
 def _water_str(water: Optional[Dict[str, Any]]) -> str:

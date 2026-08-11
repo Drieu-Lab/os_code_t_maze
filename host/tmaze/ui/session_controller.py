@@ -1270,6 +1270,10 @@ class SessionControlView:
         return {
             "max_same_run": seq.get("max_same_run"),
             "block_size": seq.get("block_size"),
+            # Closed-loop debias generator + its knobs (ADR-0086), so the summary's
+            # params block matches the data-file header + config snapshot.
+            "generator": seq.get("generator"),
+            "debias_blocks": seq.get("debias_blocks"),
             "reward_incorrect": reward.get("reward_incorrect"),
             "reward_pulse_ms": reward.get("pulse_ms"),
             "max_topups": reward.get("max_topups"),

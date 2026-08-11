@@ -27,8 +27,14 @@ Bias signal (directional errors). Over a sliding window of the last ``window``
 scored trials, each ``(cued_side, chosen_side)``:
   - left-pull errors  = (cued RIGHT, chose LEFT)   - the animal pulled left
   - right-pull errors = (cued LEFT,  chose RIGHT)  - the animal pulled right
-  - b = (left_pull - right_pull) / len(window)     in [-1, 1]; b > 0 => left bias
+  - b = (left_pull - right_pull) / (left_pull + right_pull)  in [-1, 1]; b > 0 =>
+    left bias, and 0.0 when there are no errors.
 A block corrects the side the animal over-pulls to (b > 0 forces RIGHT correct).
+The denominator is the directional-error COUNT, not the trial count, so a trial
+the rat happens to get correct on its preferred side doesn't dilute the measured
+bias (ADR-0090, superseding the trial-count normalisation of ADR-0086). To stop a
+single early error reading as full bias, a block auto-triggers only once at least
+``min_errors`` directional errors have accrued in the window.
 
 Determinism. NORMAL sides come from the seed-deterministic spine (the caller); the
 controller only decides WHEN a block runs and which side it forces, from the
@@ -61,13 +67,14 @@ class DebiasBlockConfig:
     """Parameters of the corrective-block state machine (all operator-tunable).
 
     ``window`` is the sliding-window length (most-recent scored trials) the bias is
-    measured over; ``min_samples`` is how many scored trials must fill it before a
-    block can auto-trigger. ``trigger_bias`` is the |b| threshold that starts a
-    block. ``exit_consecutive`` correct non-preferred choices end a block;
-    ``max_block_len`` caps it as a welfare failsafe (auto-revert + flagged).
+    measured over; ``min_errors`` is how many DIRECTIONAL ERRORS must accrue in the
+    window before a block can auto-trigger (the error-count guard, ADR-0090).
+    ``trigger_bias`` is the |b| threshold that starts a block. ``exit_consecutive``
+    correct non-preferred choices end a block; ``max_block_len`` caps it as a
+    welfare failsafe (auto-revert + flagged).
     """
     window: int = 20
-    min_samples: int = 10
+    min_errors: int = 5
     trigger_bias: float = 0.3
     exit_consecutive: int = 3
     max_block_len: int = 15
@@ -133,15 +140,26 @@ class DebiasBlockController:
     def target(self) -> Optional[int]:
         return self._target
 
-    def bias(self) -> float:
-        """Signed directional-error bias over the window (b > 0 = left-biased)."""
-        if not self._hist:
-            return 0.0
+    def _pull_counts(self) -> Tuple[int, int]:
+        """(left_pull, right_pull) over the window: left_pull = (cued RIGHT, chose
+        LEFT), right_pull = (cued LEFT, chose RIGHT). In a two-choice task every
+        error is exactly one of these, so their sum is the directional-error count.
+        """
         left_pull = sum(1 for cued, chosen in self._hist
                         if cued == RIGHT and chosen == LEFT)
         right_pull = sum(1 for cued, chosen in self._hist
                          if cued == LEFT and chosen == RIGHT)
-        return (left_pull - right_pull) / len(self._hist)
+        return left_pull, right_pull
+
+    def bias(self) -> float:
+        """Signed directional-error bias over the window's ERRORS (b > 0 = left-
+        biased), normalised by the directional-error count so coincidentally-correct
+        trials don't dilute it; 0.0 when there are no errors (ADR-0090)."""
+        left_pull, right_pull = self._pull_counts()
+        errors = left_pull + right_pull
+        if errors == 0:
+            return 0.0
+        return (left_pull - right_pull) / errors
 
     # -------------------------------------------------------- operator overrides
     def force_block(self, side: Optional[int] = None) -> None:
@@ -196,8 +214,10 @@ class DebiasBlockController:
                 or self._block_len >= self.cfg.max_block_len):
             self._end_block()
 
-        # 3) Automatic trigger from NORMAL once enough evidence has accrued.
-        if self._state == NORMAL and len(self._hist) >= self.cfg.min_samples \
+        # 3) Automatic trigger from NORMAL once enough DIRECTIONAL ERRORS have
+        # accrued (the error-count guard; ADR-0090) and the bias crosses threshold.
+        left_pull, right_pull = self._pull_counts()
+        if self._state == NORMAL and (left_pull + right_pull) >= self.cfg.min_errors \
                 and abs(b) >= self.cfg.trigger_bias:
             self._start_block(AUTO)
 

@@ -399,7 +399,7 @@ class Phase3Log:
         db = getattr(c, "debias", None)
         if c.generator != "balanced" and db is not None:
             lines.append(
-                f"# debias_blocks window={db.window} min_samples={db.min_samples} "
+                f"# debias_blocks window={db.window} min_errors={db.min_errors} "
                 f"trigger_bias={db.trigger_bias} "
                 f"exit_consecutive={db.exit_consecutive} "
                 f"max_block_len={db.max_block_len} signal={db.signal}")

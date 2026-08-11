@@ -109,7 +109,7 @@ def default_config() -> dict:
             "generator": tc.generator,
             "debias_blocks": {
                 "window": db.window,
-                "min_samples": db.min_samples,
+                "min_errors": db.min_errors,
                 "trigger_bias": db.trigger_bias,
                 "exit_consecutive": db.exit_consecutive,
                 "max_block_len": db.max_block_len,
@@ -197,22 +197,22 @@ def _to_debias_config(d: dict) -> DebiasBlockConfig:
     ``sequence.debias_blocks`` sub-section (missing keys fall back to defaults)."""
     db = DebiasBlockConfig()
     window = int(d.get("window", db.window))
-    min_samples = int(d.get("min_samples", db.min_samples))
+    min_errors = int(d.get("min_errors", db.min_errors))
     trigger_bias = float(d.get("trigger_bias", db.trigger_bias))
     exit_consecutive = int(d.get("exit_consecutive", db.exit_consecutive))
     max_block_len = int(d.get("max_block_len", db.max_block_len))
     signal = str(d.get("signal", db.signal))
     if window <= 0:
         raise ValueError("sequence.debias_blocks.window must be > 0")
-    if not 0 < min_samples <= window:
-        raise ValueError("sequence.debias_blocks.min_samples must be in (0, window]")
+    if not 0 < min_errors <= window:
+        raise ValueError("sequence.debias_blocks.min_errors must be in (0, window]")
     if not 0.0 <= trigger_bias <= 1.0:
         raise ValueError("sequence.debias_blocks.trigger_bias must be in [0, 1]")
     if exit_consecutive <= 0:
         raise ValueError("sequence.debias_blocks.exit_consecutive must be > 0")
     if max_block_len <= 0:
         raise ValueError("sequence.debias_blocks.max_block_len must be > 0")
-    return DebiasBlockConfig(window=window, min_samples=min_samples,
+    return DebiasBlockConfig(window=window, min_errors=min_errors,
                              trigger_bias=trigger_bias,
                              exit_consecutive=exit_consecutive,
                              max_block_len=max_block_len, signal=signal)

@@ -22,11 +22,11 @@
     "high_tone_hz": 8000,
     "low_tone_hz": 4000,
     "seed": null,
-    "generator": "balanced",
+    "generator": "debias_blocks",
     "debias_blocks": {
       "window": 20,
-      "min_samples": 10,
-      "trigger_bias": 0.3,
+      "min_errors": 5,
+      "trigger_bias": 0.4,
       "exit_consecutive": 3,
       "max_block_len": 15,
       "signal": "directional_errors"

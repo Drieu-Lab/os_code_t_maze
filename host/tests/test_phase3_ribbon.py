@@ -155,7 +155,7 @@ class TestCorrectiveFlag(unittest.TestCase):
         # check the ribbon flags exactly those rows (sched_state == INTERVENTION).
         cfg = TrialConfig(max_trials=60, block_size=20, max_same_run=4,
                           generator=GEN_DEBIAS_BLOCKS,
-                          debias=DebiasBlockConfig(window=8, min_samples=4,
+                          debias=DebiasBlockConfig(window=8, min_errors=4,
                                                    trigger_bias=0.3,
                                                    exit_consecutive=3,
                                                    max_block_len=6))

@@ -942,7 +942,7 @@ class Phase3ControlView(VisionActuator):
     def _current_debias_dict(self) -> dict:
         """The debias-block params from the GUI fields (safe parse, defaults on a
         blank/bad entry). Range-checking is left to ``to_trial_config`` so a bad
-        combo (e.g. min_samples > window) is reported, not silently clamped."""
+        combo (e.g. min_errors > window) is reported, not silently clamped."""
         db = DebiasBlockConfig()
 
         def _i(var, default):
@@ -958,7 +958,7 @@ class Phase3ControlView(VisionActuator):
                 return default
 
         return {"window": _i(self._db_window_var, db.window),
-                "min_samples": _i(self._db_min_samples_var, db.min_samples),
+                "min_errors": _i(self._db_min_errors_var, db.min_errors),
                 "trigger_bias": _f(self._db_trigger_var, db.trigger_bias),
                 "exit_consecutive": _i(self._db_exit_var, db.exit_consecutive),
                 "max_block_len": _i(self._db_cap_var, db.max_block_len)}
@@ -1022,7 +1022,7 @@ class Phase3ControlView(VisionActuator):
         db = s.get("debias_blocks", {})
         dc = DebiasBlockConfig()
         self._db_window_var.set(str(db.get("window", dc.window)))
-        self._db_min_samples_var.set(str(db.get("min_samples", dc.min_samples)))
+        self._db_min_errors_var.set(str(db.get("min_errors", dc.min_errors)))
         self._db_trigger_var.set(str(db.get("trigger_bias", dc.trigger_bias)))
         self._db_exit_var.set(str(db.get("exit_consecutive", dc.exit_consecutive)))
         self._db_cap_var.set(str(db.get("max_block_len", dc.max_block_len)))
@@ -1250,8 +1250,8 @@ class Phase3ControlView(VisionActuator):
         # The five corrective-block knobs. (var, label, tooltip, from, to, step,
         # is_float). Kept compact in a 2-column grid under the dropdown.
         self._db_window_var = tk.StringVar(value=str(db.get("window", dc.window)))
-        self._db_min_samples_var = tk.StringVar(
-            value=str(db.get("min_samples", dc.min_samples)))
+        self._db_min_errors_var = tk.StringVar(
+            value=str(db.get("min_errors", dc.min_errors)))
         self._db_trigger_var = tk.StringVar(
             value=str(db.get("trigger_bias", dc.trigger_bias)))
         self._db_exit_var = tk.StringVar(
@@ -1261,7 +1261,7 @@ class Phase3ControlView(VisionActuator):
         spinspec = (
             ("Window (trials):", self._db_window_var, "phase3.debias_window",
              1, 500, 1, False),
-            ("Min samples:", self._db_min_samples_var, "phase3.debias_min_samples",
+            ("Min errors:", self._db_min_errors_var, "phase3.debias_min_errors",
              1, 500, 1, False),
             ("Trigger |bias|:", self._db_trigger_var, "phase3.debias_trigger_bias",
              0.0, 1.0, 0.05, True),

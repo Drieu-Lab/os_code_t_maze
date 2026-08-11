@@ -10,7 +10,9 @@
   `host/tmaze/core/session/session_summary.py`; `host/phase3.json`;
   tests `test_debias.py` (new) + `test_phase3_stats.py` / `test_phase3_log.py` /
   `test_phase3_ribbon.py`
-- **Supersedes / Superseded by:** —
+- **Supersedes / Superseded by:** Bias-signal normalization + the `min_samples`
+  trigger gate superseded by [ADR-0090](0090-debias-bias-normalized-by-errors.md)
+  (the rest of this ADR stands).
 
 ## Context
 
