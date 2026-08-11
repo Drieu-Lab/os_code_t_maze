@@ -84,6 +84,7 @@ criteria).
 | [FW-0029](#fw-0029-real-water-timestamps--hours-since-water-in-the-daily-table) | Real water timestamps + hours-since-water in the daily table | Daily husbandry table + animal_state | Proposed |
 | [FW-0030](#fw-0030-weekend-ad-libitum-water-accounting-in-the-daily-table--dashboard) | Weekend ad-libitum water accounting in the daily table + dashboard | Daily husbandry table + dashboard | Proposed |
 | [FW-0031](#fw-0031-latching-toggle-on-note-tags-that-span-subsequent-trials) | Latching (toggle-on) note tags that span subsequent trials | Note tags + session notes + summary + Session panel | Proposed |
+| [FW-0032](#fw-0032-per-port-leftright-reward-volume-calibration) | Per-port (left/right) reward-volume calibration | Reward calibration | Proposed |
 
 ## Entries
 
@@ -1573,6 +1574,45 @@ be active at once (independent toggles)?
 **ADR needed?** Yes - it adds a tag *kind* and an interval concept to the notes
 model (a small follow-up to ADR-0074), and any per-trial condition column touches
 the Phase 3 data file.
+
+### FW-0032: Per-port (left/right) reward-volume calibration
+
+- **Status:** Proposed
+- **Date added:** 2026-08-11
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** `host/tmaze/tools/reward_calibrate.py`, `host/reward_calibration.csv`, `host/tmaze/core/reward/reward_volume.py` (lookup already per-port)
+- **Related ADRs:** [ADR-0091](decisions/0091-reward-volume-curve-per-liquid.md) (measured per-liquid curves + the per-`(port, liquid)` data file this would fill), [ADR-0007](decisions/0007-reward-at-central-port.md) (v1 rewards only the central port)
+
+**Motivation / context.** ADR-0091 characterizes only the **central** spout today
+(v1 delivers reward there). The calibration file, lookup, and tool are already
+per-port, but the left/right reward valves have no measured curve, so a future
+task that dispenses at the choice arms would fall back to the central-water curve
+(possibly wrong for a different valve/line). When left/right reward comes into
+use, measure their curves too - per liquid.
+
+**Sketch of approach.** Run `python -m tmaze.tools.reward_calibrate --port left`
+and `--port right` (per liquid) exactly as for center; the tool already fires
+`R<port><sol>,<ms>` at the requested port and upserts rows keyed by
+`(port, liquid, pulse_ms)`. No code change is expected - just measured data - but
+confirm the reward-solenoid index and the physical valve mapping per port first
+(rig_config.h `CONFIRM` tags), and check the left/right lines prime/settle like
+the center one.
+
+**Evaluation / acceptance.** `host/reward_calibration.csv` has left + right rows
+per liquid; `reward_volume_ul(dur_ms, port="left"|"right", liquid=...)` returns
+the measured curve rather than the central fallback; a spot-check volume at a
+couple of widths matches the syringe.
+
+**Effort / risk.** Small (mostly bench time). Risk: the left/right valve/line may
+behave differently enough (dead volume, priming) that the same N-pulses method
+needs a larger N or an extra settle time.
+
+**Open questions.** Do left/right ever dispense in the actual task, or stay
+monitor-only? If they never dispense reward, this may not be needed at all.
+
+**ADR needed?** No - it fills existing per-port structure with data; ADR-0091
+already covers the method. Add one only if a per-port structural change is found
+necessary.
 
 ## Completed
 

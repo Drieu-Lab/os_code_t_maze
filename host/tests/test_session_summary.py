@@ -192,7 +192,10 @@ class TestEstimatedWater(unittest.TestCase):
         water = summ.estimated_water
         self.assertEqual(water["topups"], 2)
         self.assertEqual(water["pulses"], 5)          # 3 primes + 2 top-ups
-        self.assertAlmostEqual(water["ul"], reward_volume.reward_volume_ul(250) * 5)
+        # estimated_water["ul"] is rounded to 1 dp (session_summary), so compare
+        # against the same rounding rather than the raw product.
+        self.assertAlmostEqual(water["ul"],
+                               round(reward_volume.reward_volume_ul(250) * 5, 1))
 
     def test_water_none_without_cued_or_pulse(self):
         # No cued stats -> no estimate.
@@ -258,10 +261,12 @@ class TestManualWater(unittest.TestCase):
         operator_ul = summ.manual_water["ul"]
         self.assertAlmostEqual(task_ul, reward_volume.reward_volume_ul(250) * 3)
         self.assertAlmostEqual(operator_ul, round(reward_volume.reward_volume_ul(300), 1))
-        # Additive: the total is exactly task + operator, with no overlap.
+        # Additive: the total is exactly task + operator, with no overlap. Each
+        # channel is rounded to 1 dp independently (session_summary), so the
+        # expected total sums those rounded components.
         self.assertAlmostEqual(task_ul + operator_ul,
-                               reward_volume.reward_volume_ul(250) * 3
-                               + reward_volume.reward_volume_ul(300))
+                               round(reward_volume.reward_volume_ul(250) * 3, 1)
+                               + round(reward_volume.reward_volume_ul(300), 1))
 
 
 def _note_entries():
