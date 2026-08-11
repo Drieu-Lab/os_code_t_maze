@@ -235,12 +235,41 @@ class TrialSequence:
         return self._provisional_arm(index)
 
     def _provisional_arm(self, index: int) -> int:
-        """A best-effort side for an un-committed (future) trial, for display only:
-        the forced side if a block is currently open (it is assumed to continue),
-        else this index's spine value."""
+        """A best-effort correct side for an un-committed (future) trial, for DISPLAY
+        only (never commits). Predicts what :meth:`commit` would decide assuming no
+        *new* block triggers between the decision frontier and ``index``:
+
+          - if a corrective block is open, the immediate next trial continues it
+            (forced side); trials beyond it are assumed NORMAL;
+          - NORMAL trials consume the counterbalanced spine IN ORDER from the next
+            unconsumed slot (``_spine_pos``).
+
+        Crucially it walks the spine from ``_spine_pos``, NOT ``self.seq[index]``:
+        a corrective block inserts forced trials WITHOUT consuming the spine, so the
+        spine cursor trails the absolute trial index by the number of forced trials
+        once any block has run. Indexing by the absolute number showed the wrong
+        (often opposite) cue for every trial after a block, even back in NORMAL mode
+        (the ribbon display bug; see docs/decisions/0096). Trials far ahead are still
+        inherently uncertain in a closed loop - this is the aligned best guess,
+        refined as each trial actually commits."""
+        ahead = max(0, index - self._frontier)     # 0 == the next trial to commit
+        spine_pos = self._spine_pos
         if self._ctl is not None and self._ctl.target is not None:
-            return self._ctl.target
-        return self.seq[index]
+            # A block is open: the immediate next trial continues it (no spine
+            # consumption); assume trials after it are NORMAL.
+            if ahead == 0:
+                return self._ctl.target
+            spine_pos += ahead - 1
+        else:
+            spine_pos += ahead
+        return self.seq[min(spine_pos, len(self.seq) - 1)]
+
+    def is_committed(self, index: int) -> bool:
+        """True if trial ``index``'s correct side is finalized: always True in
+        balanced mode; in debias_blocks mode once :meth:`commit` has reached it.
+        Un-committed trials only have a provisional side (see :meth:`_provisional_arm`).
+        """
+        return (not self._debias) or (index in self._committed)
 
     def commit(self, index: int) -> Optional[int]:
         """Fix (and cache) the correct side for trial ``index`` and every trial

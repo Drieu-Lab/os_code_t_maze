@@ -218,6 +218,19 @@ class Phase3Log:
         if r is not None and r.trial_start_iso is None:
             r.trial_start_iso = iso
 
+    def _apply_cue(self, index: int, r: _Row) -> None:
+        """Point a row's correct-arm + choice-cue at the sequence's current reading
+        for ``index`` (committed side for a decided trial, else the aligned
+        provisional side; see TrialSequence). Display columns only - never the
+        debias-context columns, which stay blank until a trial is actually decided.
+        """
+        arm = self._sequence.correct_arm(index)
+        if arm is not None:
+            r.correct_arm = _ARM_LABEL.get(arm, r.correct_arm)
+        cue = self._sequence.choice_cue(index)
+        if cue:
+            r.choice_cue = cue
+
     def set_decision(self, index: int) -> None:
         """Refresh a trial's realized correct side + choice cue + debias context
         from the sequence, once its side has been committed (the closed-loop
@@ -229,17 +242,34 @@ class Phase3Log:
         r = self._row(index)
         if r is None:
             return
-        arm = self._sequence.correct_arm(index)
-        if arm is not None:
-            r.correct_arm = _ARM_LABEL.get(arm, r.correct_arm)
-        cue = self._sequence.choice_cue(index)
-        if cue:
-            r.choice_cue = cue
+        self._apply_cue(index, r)
         m = self._sequence.trial_meta(index)
         r.sched_state = m["sched_state"]
         r.block_id = None if not m["block_id"] else str(m["block_id"])
         r.block_trigger = m["block_trigger"] or None
         r.bias = f"{m['bias']:.4f}"
+
+    def refresh_provisional(self, current_index: int) -> None:
+        """Re-align the DISPLAY cue columns of not-yet-scored trials from
+        ``current_index`` onward to the sequence's current knowledge, so the ribbon
+        and planned-trial list stop showing stale cues after a corrective block
+        shifts the schedule (the ribbon display bug; docs/decisions/0096).
+
+        A committed trial (the one in progress) gets its finalized side + debias
+        context; each un-committed trial ahead gets the aligned provisional side
+        only (its debias-context columns stay blank until it is actually decided).
+        Already-scored rows are left untouched. No-op for the balanced generator.
+        """
+        if not self._sequence.is_debias:
+            return
+        for i in range(max(0, current_index), len(self._rows)):
+            r = self._row(i)
+            if r is None or r.outcome is not None:
+                continue
+            if self._sequence.is_committed(i):
+                self.set_decision(i)
+            else:
+                self._apply_cue(i, r)
 
     def choice_cue_started(self, index: int, iso: str) -> None:
         r = self._row(index)

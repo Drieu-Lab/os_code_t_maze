@@ -777,6 +777,11 @@ class Phase3ControlView(VisionActuator):
                 self._incorrect += 1
 
         if changed:
+            # Re-align the display cues of the current + upcoming (not-yet-run)
+            # trials to the sequence's current knowledge, so a corrective block that
+            # shifts the counterbalanced spine doesn't leave the ribbon showing stale
+            # cues for later trials (docs/decisions/0096). No-op for balanced.
+            self._log_call(lambda: self._log.refresh_provisional(self._task.index))
             self._write_log()
             self._publish_state(armed=True)
         self._publish_status(snap)

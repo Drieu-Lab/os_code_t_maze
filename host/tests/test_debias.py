@@ -176,5 +176,51 @@ class TestDebiasSequence(unittest.TestCase):
                           "block_trigger": "", "bias": 0.0})
 
 
+class TestProvisionalDisplay(unittest.TestCase):
+    """The DISPLAY-only provisional side for un-committed trials (docs/decisions/
+    0096): a corrective block inserts forced trials without consuming the spine, so
+    the provisional must walk the spine cursor, not the absolute trial index."""
+
+    def _cfg_no_auto(self):
+        # min_errors huge => never auto-triggers, so the only block is the manual
+        # one we drive, and every other trial is a clean NORMAL transition.
+        return TrialConfig(max_trials=40, block_size=20, max_same_run=4,
+                           generator=GEN_DEBIAS_BLOCKS,
+                           debias=DebiasBlockConfig(window=10, min_errors=100,
+                                                    exit_consecutive=3,
+                                                    max_block_len=50))
+
+    def test_provisional_walks_spine_cursor_after_block(self):
+        ts = TrialSequence(self._cfg_no_auto(), seed=1)
+        # 3 NORMAL trials consume spine slots 0,1,2 (spine_pos aligns with index).
+        for i in range(3):
+            self.assertEqual(ts.commit(i), ts.seq[i])
+            c = ts.correct_arm(i)
+            ts.record_outcome(i, c, c)                 # comply
+        # A manual block of 4 forced-RIGHT trials consumes NO spine.
+        ts.force_block(RIGHT)
+        for i in range(3, 7):
+            self.assertEqual(ts.commit(i), RIGHT)
+            ts.record_outcome(i, RIGHT, LEFT)          # never comply -> stays in block
+        ts.end_block()
+        # First NORMAL trial after the block takes the next UNCONSUMED spine slot (3).
+        self.assertEqual(ts.commit(7), ts.seq[3])
+        # Trial 8 is a clean NORMAL peek (no block open, no auto-trigger): its
+        # provisional side must be spine slot 4 - NOT seq[8] (the pre-fix bug) - and
+        # the peek must equal what actually commits.
+        self.assertEqual(ts.correct_arm(8), ts.seq[4])
+        self.assertEqual(ts.commit(8), ts.seq[4])
+
+    def test_open_block_provisional_forces_target_then_assumes_normal(self):
+        ts = TrialSequence(self._cfg_no_auto(), seed=2)
+        ts.commit(0)
+        ts.force_block(LEFT)
+        self.assertEqual(ts.commit(1), LEFT)           # block open, forcing LEFT
+        # While the block is open, the immediate next trial is assumed to continue
+        # it; trials beyond it are assumed NORMAL and walk the spine from _spine_pos.
+        self.assertEqual(ts.correct_arm(2), LEFT)      # next trial: continues block
+        self.assertEqual(ts.correct_arm(3), ts.seq[1])  # one past: assume NORMAL
+
+
 if __name__ == "__main__":
     unittest.main()

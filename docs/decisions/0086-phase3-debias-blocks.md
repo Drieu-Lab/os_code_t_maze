@@ -11,8 +11,10 @@
   tests `test_debias.py` (new) + `test_phase3_stats.py` / `test_phase3_log.py` /
   `test_phase3_ribbon.py`
 - **Supersedes / Superseded by:** Bias-signal normalization + the `min_samples`
-  trigger gate superseded by [ADR-0090](0090-debias-bias-normalized-by-errors.md)
-  (the rest of this ADR stands).
+  trigger gate superseded by [ADR-0090](0090-debias-bias-normalized-by-errors.md);
+  the ribbon's provisional-display half refined by
+  [ADR-0096](0096-debias-provisional-display-alignment.md) (the rest of this ADR
+  stands).
 
 ## Context
 

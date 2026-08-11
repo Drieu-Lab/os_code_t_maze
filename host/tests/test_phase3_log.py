@@ -337,6 +337,39 @@ class TestDebiasLogging(unittest.TestCase):
         self.assertEqual(snap.generator, "debias_blocks")
         self.assertGreater(snap.trigger_bias, 0.0)
 
+    def test_refresh_provisional_realigns_future_rows_after_block(self):
+        # A corrective block inserts forced trials without consuming the spine, so
+        # after it the display rows for not-yet-run trials must be re-aligned to the
+        # spine cursor - otherwise the ribbon shows stale/opposite cues even back in
+        # NORMAL mode (docs/decisions/0096).
+        cfg = TrialConfig(max_trials=40, block_size=20, max_same_run=4,
+                          generator=GEN_DEBIAS_BLOCKS,
+                          debias=DebiasBlockConfig(window=10, min_errors=100,
+                                                   exit_consecutive=3,
+                                                   max_block_len=50))
+        seq = TrialSequence(cfg, seed=1)
+        log = Phase3Log(seq, animal="RAT600", session_start_iso="t")
+        # 3 NORMAL trials, then a manual 4-trial forced-RIGHT block (no spine used).
+        for i in range(3):
+            seq.commit(i)
+            c = seq.correct_arm(i)
+            seq.record_outcome(i, c, c)
+        seq.force_block(RIGHT)
+        for i in range(3, 7):
+            seq.commit(i)
+            seq.record_outcome(i, RIGHT, LEFT)          # never comply
+        seq.end_block()
+        seq.commit(7)                                   # first NORMAL after block
+        # Re-align the display from the current trial (7) onward.
+        log.refresh_provisional(7)
+        # The current trial's row is finalized (committed side + NORMAL context).
+        self.assertEqual(log._rows[7].sched_state, "NORMAL")
+        # A future row now reflects the spine-cursor provisional, which equals the
+        # side that trial actually commits to (the fix; pre-fix it showed seq[8]).
+        row8_cue = log._rows[8].choice_cue
+        self.assertEqual(seq.commit(8), seq.seq[4])     # trial 8 == next spine slot
+        self.assertEqual(row8_cue, seq.choice_cue(8))   # displayed == committed cue
+
 
 if __name__ == "__main__":
     unittest.main()
