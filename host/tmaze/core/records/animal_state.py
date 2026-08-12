@@ -23,22 +23,27 @@ available). ``schema_version`` + ``session_id`` make the file self-describing on
 its own, matching the manifest's ``SCHEMA_VERSION`` pattern
 ([session_log.py](session_log.py)).
 
-Note on water fields: the daily table records water on/off as free text
-("6pm", "Till Monday evening"), so ``last_water_on`` / ``last_water_off`` are kept
-verbatim (not ISO-parsed) and ``hours_since_water`` is left null unless a caller
-supplies it - hardening those into real timestamps is deferred to the daily-table
-schema, not invented here.
+Note on water fields (ADR-0101 / FW-0029): the daily table records water on/off
+as tolerant free text ("6pm", "5:30PM", "17:00", or an irregular "Till Monday
+evening"). ``last_water_on`` / ``last_water_off`` are kept **verbatim** (today's
+row cells, for human reference). ``hours_since_water`` is now DERIVED when a
+caller supplies the session-start time: it is the gap from the most recent
+*parseable* water-off (typically the previous evening's - see
+:func:`resolve_last_water_off`) to session start. A cell that isn't a clock time
+leaves it null - we parse best-effort and never fight the irregular entries.
 
 Headless tests: python -m unittest test_animal_state.
 """
 
 from __future__ import annotations
 
+import datetime as dt
 from dataclasses import asdict, dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 # Bump when the animal_state.json layout changes so an offline reader can branch.
-SCHEMA_VERSION = 1
+# v2 (ADR-0101): hours_since_water may now be a real derived number.
+SCHEMA_VERSION = 2
 
 SOURCE_DAILY_TABLE = "daily_table"
 SOURCE_START_DIALOG = "start_dialog"
@@ -110,9 +115,95 @@ def _pct(weight: Optional[float], baseline: Optional[float],
     return None
 
 
+# Clock-time formats seen in the real daily log ("6pm", "5:30PM", "17:00",
+# "11:30AM"). strptime requires a whole-string match, so a free-text cell like
+# "Till Monday evening" or an ml note in the water column simply fails all of them
+# and parses to None (we never try to pull a time out of a sentence).
+_CLOCK_FORMATS = ("%I:%M%p", "%I%p", "%H:%M")
+
+
+def parse_clock_time(text: Any) -> Optional[dt.time]:
+    """A time-of-day from a water cell, or None for blank / free text.
+
+    Tolerant of the lab's shorthand: "6pm", "5:30PM", "17:00", "11:30AM". A cell
+    that isn't purely a clock time (e.g. "Till Monday evening", "8.46ml rig")
+    returns None so :func:`hours_since_water` stays honest rather than guessing.
+    """
+    if text is None:
+        return None
+    norm = str(text).strip().upper().replace(" ", "")
+    if not norm:
+        return None
+    for fmt in _CLOCK_FORMATS:
+        try:
+            return dt.datetime.strptime(norm, fmt).time()
+        except ValueError:
+            continue
+    return None
+
+
+def water_datetime(date_str: Any, time_text: Any) -> Optional[dt.datetime]:
+    """A row's date (``YYYY-MM-DD``) + a clock cell combined into a datetime, or
+    None if either the date or the time doesn't parse."""
+    t = parse_clock_time(time_text)
+    if t is None:
+        return None
+    try:
+        d = dt.date.fromisoformat(str(date_str).strip())
+    except (ValueError, TypeError):
+        return None
+    return dt.datetime.combine(d, t)
+
+
+def hours_since_water(last_off: Optional[dt.datetime],
+                      session_start: Optional[dt.datetime]) -> Optional[float]:
+    """Hours from the last water-off to session start (2 dp), or None.
+
+    None when either datetime is missing OR the gap is negative (a water-off that
+    is *after* the session start is an inconsistent pairing we decline to report).
+    """
+    if last_off is None or session_start is None:
+        return None
+    delta = (session_start - last_off).total_seconds() / 3600.0
+    return round(delta, 2) if delta >= 0 else None
+
+
+def resolve_last_water_off(rows: List[Dict[str, str]],
+                           session_start: Optional[dt.datetime]
+                           ) -> Optional[dt.datetime]:
+    """The most recent water-off datetime at/before ``session_start``.
+
+    ``rows`` are daily rows for ONE animal (any order). Each row's ``water_off``
+    clock cell is parsed against that row's own ``date``; blank / free-text cells
+    are skipped. This captures the real convention where the thirst-relevant event
+    is usually the PREVIOUS evening's water-off (today's row's water_off, if it is
+    an evening time after a morning session, is in the future and excluded).
+    Returns a datetime, or None when nothing parseable precedes the session.
+    """
+    best: Optional[dt.datetime] = None
+    for r in rows:
+        wdt = water_datetime(r.get("date"), r.get("water_off"))
+        if wdt is None:
+            continue
+        if session_start is not None and wdt > session_start:
+            continue
+        if best is None or wdt > best:
+            best = wdt
+    return best
+
+
 def from_daily_row(session_id: str, animal: str, date: str,
-                   row: Dict[str, str]) -> AnimalState:
-    """Build state prefilled from a `daily_log.csv` row (source=daily_table)."""
+                   row: Dict[str, str],
+                   session_start: Optional[dt.datetime] = None,
+                   last_water_off: Optional[dt.datetime] = None) -> AnimalState:
+    """Build state prefilled from a `daily_log.csv` row (source=daily_table).
+
+    ``last_water_on`` / ``last_water_off`` carry today's row cells verbatim.
+    ``hours_since_water`` is derived only when the caller passes ``session_start``
+    and a resolved ``last_water_off`` datetime (see :func:`resolve_last_water_off`,
+    which the Session Start shell uses to find the most recent prior water-off);
+    otherwise it stays null, preserving the old behaviour.
+    """
     weight = _num(row.get("weight_g"))
     baseline = _num(row.get("baseline_g"))
     return AnimalState(
@@ -123,6 +214,7 @@ def from_daily_row(session_id: str, animal: str, date: str,
         pct_baseline=_pct(weight, baseline, _num(row.get("pct_baseline"))),
         last_water_on=(row.get("water_on") or None),
         last_water_off=(row.get("water_off") or None),
+        hours_since_water=hours_since_water(last_water_off, session_start),
         measured_water_ml=_num(row.get("water_ml")),
         note=(row.get("notes") or ""),
     )

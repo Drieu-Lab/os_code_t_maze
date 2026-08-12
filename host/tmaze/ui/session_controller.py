@@ -824,7 +824,15 @@ class SessionControlView:
         # weight; a present-but-weightless row falls through to the Start weight
         # dialog rather than freezing an empty pre_session_weight (#4).
         if daily_log.row_has_weight(row):
-            state = animal_state.from_daily_row(self._session_id, animal, date, row)
+            # Derive hours-since-water from the most recent parseable water-off
+            # across the animal's daily rows (usually the previous evening; the
+            # session start is ~now, at Start). ADR-0101 / FW-0029.
+            session_start = datetime.now()
+            last_off = animal_state.resolve_last_water_off(
+                table.rows_for(animal), session_start)
+            state = animal_state.from_daily_row(
+                self._session_id, animal, date, row,
+                session_start=session_start, last_water_off=last_off)
             note = None
         else:
             recent = table.latest_for(animal, on_or_before=date)

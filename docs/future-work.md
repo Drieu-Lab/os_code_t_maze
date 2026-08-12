@@ -81,7 +81,7 @@ criteria).
 | [FW-0026](#fw-0026-a-mid-session-gate-reopen-should-not-restart-the-session-and-overwrite-its-file) | A mid-session gate reopen should not restart the session and overwrite its file | Phase 3 host | Proposed |
 | [FW-0027](#fw-0027-one-triggereffect-framework-behind-phases-1-2a-and-3) | One trigger/effect framework behind Phases 1, 2a and 3 | Rules engine + task-event layer + Phase 3 host | Proposed |
 | [FW-0028](#fw-0028-scope-the-session-summary-to-the-startstop-window) | Scope the session summary to the Start/Stop window | Session controller + summary + stats cores | Proposed |
-| [FW-0029](#fw-0029-real-water-timestamps--hours-since-water-in-the-daily-table) | Real water timestamps + hours-since-water in the daily table | Daily husbandry table + animal_state | Proposed |
+| [FW-0029](#fw-0029-real-water-timestamps--hours-since-water-in-the-daily-table) | Real water timestamps + hours-since-water in the daily table | Daily husbandry table + animal_state | Done (ADR-0101) |
 | [FW-0030](#fw-0030-weekend-ad-libitum-water-accounting-in-the-daily-table--dashboard) | Weekend ad-libitum water accounting in the daily table + dashboard | Daily husbandry table + dashboard | Done (ADR-0100) |
 | [FW-0031](#fw-0031-latching-toggle-on-note-tags-that-span-subsequent-trials) | Latching (toggle-on) note tags that span subsequent trials | Note tags + session notes + summary + Session panel | Proposed |
 | [FW-0032](#fw-0032-per-port-leftright-reward-volume-calibration) | Per-port (left/right) reward-volume calibration | Reward calibration | Proposed |
@@ -1409,7 +1409,14 @@ since-arm totals for transparency?
 
 ### FW-0029: Real water timestamps + hours-since-water in the daily table
 
-- **Status:** Proposed
+- **Status:** Done — implemented in
+  [ADR-0101](decisions/0101-real-water-timestamps-hours-since-water.md)
+  (2026-08-11). Deviations from the sketch below, all deliberate: the `water_on`/
+  `water_off` columns stay **tolerant free text** (no hard Entry-sheet rejection —
+  the real log has legitimate irregular entries), the time is derived
+  best-effort, and `hours_since_water` is computed from the most recent parseable
+  *prior* water-off (usually the previous evening) rather than the current row's
+  own off-time. The historical messy cells are left for the operator (ADR-0097).
 - **Date added:** 2026-08-06
 - **Author / Agent:** Agent (Cursor) on behalf of Celine
 - **Area / modules:** `os_code_t_maze_resources/records/animal/daily_log.csv` +

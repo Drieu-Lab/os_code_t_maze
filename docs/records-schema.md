@@ -19,7 +19,7 @@ provenance-labelled channels**, never summed (see the registry below).
 | `animals.json` | resources · `records/animal/` | Records Manager GUI (Roster) or hand-edited | 1 | 0075 |
 | `daily_log.csv` | resources · `records/animal/` | Records Manager GUI (Daily) or `build_daily_log.py` (from the Entry sheet) | 2 (comment line) | 0076, 0100 |
 | `session_annotations.csv` | resources · `records/animal/` | Records Manager GUI (Sessions) or `build_session_training_log.py --import-annotations` | 1 (comment line) | 0082 / 0085 |
-| `animal_state.json` | code · per-bundle `config/` | `session_controller` at Start (core `animal_state.py`) | 1 | 0077 |
+| `animal_state.json` | code · per-bundle `config/` | `session_controller` at Start (core `animal_state.py`) | 2 | 0077, 0101 |
 | `session_meta.json` | code · per-bundle `config/` | `session_controller` at Start (core `session_meta.py`) | 1 | 0079 |
 | `session_registry.csv` | code · recordings root (git-ignored) | `build_session_registry.py` (core `session_registry.py`) | 1 (comment line) | 0081 |
 | `session_registry_tags.csv` | code · recordings root (git-ignored) | `build_session_registry.py` | 1 (comment line) | 0081 |
@@ -74,7 +74,7 @@ Manager's Sessions tab. A save merges by `session_id`
 ([upsert](glossary.md#upsert-keyed-merge)) and, for a session not in the
 registry, preserves the row's existing `animal`/`date` rather than blanking them.
 
-## `animal_state.json` (v1)
+## `animal_state.json` (v2)
 
 Pre-session physiological/motivational state frozen into the bundle at Start
 (one per bundle):
@@ -84,7 +84,14 @@ baseline_g, pct_baseline, last_water_on, last_water_off, hours_since_water,
 measured_water_ml, note`.
 
 `source` ∈ `daily_table` | `start_dialog` | `manual` records where the values came
-from. `hours_since_water` is null until water times are real timestamps (FW-0029).
+from. `last_water_on` / `last_water_off` are today's daily-row cells verbatim.
+`hours_since_water` (schema v2, ADR-0101) is now DERIVED when the daily table is
+available: the gap from the most recent *parseable* water-off (typically the
+previous evening's — the resolver skips the current row's own evening off-time,
+which is in the future for a morning session) to the session start time. It stays
+null when no daily row prefills the state or the water-off cells are free text
+("Till Monday evening"); those irregular cases are left for the operator, matching
+ADR-0097's "code surfaces drift, data fixes stay the human's".
 
 ## `session_meta.json` (v1)
 

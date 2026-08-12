@@ -10,6 +10,7 @@ Run from host/:  python -m unittest test_animal_state
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import unittest
 
@@ -41,6 +42,87 @@ class TestFromDailyRow(unittest.TestCase):
         s = animal_state.from_daily_row("x", "600", "d", row)
         self.assertIsNone(s.pre_session_weight_g)
         self.assertIsNone(s.pct_baseline)
+
+
+class TestWaterTimeParsing(unittest.TestCase):
+    """Real water-cell shorthand -> time-of-day (ADR-0101 / FW-0029)."""
+
+    def test_parses_lab_shorthand(self):
+        cases = {
+            "6pm": dt.time(18, 0),
+            "5:30PM": dt.time(17, 30),
+            "3:15pm": dt.time(15, 15),
+            "11:30AM": dt.time(11, 30),
+            "17:00": dt.time(17, 0),
+            "6:50PM": dt.time(18, 50),
+        }
+        for text, want in cases.items():
+            self.assertEqual(animal_state.parse_clock_time(text), want, text)
+
+    def test_free_text_and_blank_are_none(self):
+        for text in ("", "   ", None, "Till Monday evening",
+                     "8.46ml rig; No suppl", "6:30PM till Sun"):
+            self.assertIsNone(animal_state.parse_clock_time(text), repr(text))
+
+    def test_water_datetime_combines_date_and_time(self):
+        got = animal_state.water_datetime("2026-08-04", "6:50PM")
+        self.assertEqual(got, dt.datetime(2026, 8, 4, 18, 50))
+        self.assertIsNone(animal_state.water_datetime("bad-date", "6pm"))
+        self.assertIsNone(animal_state.water_datetime("2026-08-04", "nope"))
+
+
+class TestHoursSinceWater(unittest.TestCase):
+    def test_positive_gap_rounds(self):
+        off = dt.datetime(2026, 8, 4, 18, 50)
+        start = dt.datetime(2026, 8, 5, 10, 20)          # next morning
+        self.assertEqual(animal_state.hours_since_water(off, start), 15.5)
+
+    def test_missing_or_negative_is_none(self):
+        off = dt.datetime(2026, 8, 5, 18, 0)
+        start = dt.datetime(2026, 8, 5, 9, 0)            # before the off-time
+        self.assertIsNone(animal_state.hours_since_water(off, start))
+        self.assertIsNone(animal_state.hours_since_water(None, start))
+        self.assertIsNone(animal_state.hours_since_water(off, None))
+
+
+class TestResolveLastWaterOff(unittest.TestCase):
+    _ROWS = [
+        {"date": "2026-08-03", "water_off": "6:15PM"},
+        {"date": "2026-08-04", "water_off": "6:50PM"},        # previous evening
+        {"date": "2026-08-05", "water_off": "Till Monday"},   # free text -> skip
+    ]
+
+    def test_picks_most_recent_before_start(self):
+        start = dt.datetime(2026, 8, 5, 10, 0)                # morning session
+        got = animal_state.resolve_last_water_off(self._ROWS, start)
+        self.assertEqual(got, dt.datetime(2026, 8, 4, 18, 50))
+
+    def test_excludes_future_off_times(self):
+        # A same-day evening water_off is in the future for a morning session.
+        rows = [{"date": "2026-08-05", "water_off": "7:00PM"}]
+        start = dt.datetime(2026, 8, 5, 9, 0)
+        self.assertIsNone(animal_state.resolve_last_water_off(rows, start))
+
+    def test_none_when_nothing_parseable(self):
+        rows = [{"date": "2026-08-05", "water_off": "Till Monday evening"}]
+        start = dt.datetime(2026, 8, 6, 10, 0)
+        self.assertIsNone(animal_state.resolve_last_water_off(rows, start))
+
+
+class TestFromDailyRowHours(unittest.TestCase):
+    def test_computes_hours_when_start_and_off_given(self):
+        row = {"weight_g": "330", "baseline_g": "348", "water_off": "7pm"}
+        start = dt.datetime(2026, 8, 5, 10, 0)
+        off = dt.datetime(2026, 8, 4, 19, 0)
+        s = animal_state.from_daily_row("x", "600", "2026-08-05", row,
+                                        session_start=start, last_water_off=off)
+        self.assertEqual(s.hours_since_water, 15.0)
+        self.assertEqual(s.last_water_off, "7pm")            # verbatim cell kept
+
+    def test_hours_none_without_start(self):
+        row = {"weight_g": "330", "baseline_g": "348", "water_off": "7pm"}
+        s = animal_state.from_daily_row("x", "600", "2026-08-05", row)
+        self.assertIsNone(s.hours_since_water)
 
 
 class TestFromWeightAndManual(unittest.TestCase):
