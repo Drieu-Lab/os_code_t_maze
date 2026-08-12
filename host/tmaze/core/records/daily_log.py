@@ -36,6 +36,7 @@ Headless tests: python -m unittest test_daily_log.
 from __future__ import annotations
 
 import csv
+import datetime as _dt
 import os
 from typing import Dict, List, Optional
 
@@ -198,6 +199,54 @@ def row_has_weight(row: Optional[Dict[str, str]]) -> bool:
         return True
     except (TypeError, ValueError):
         return False
+
+
+def _is_iso_date(value: str) -> bool:
+    """True if ``value`` is a real ``YYYY-MM-DD`` date (the row-key format)."""
+    try:
+        _dt.date.fromisoformat(str(value).strip())
+        return True
+    except (ValueError, TypeError):
+        return False
+
+
+# The numeric daily-entry cells a save/import must not accept as garbage. These
+# are the fields analysis joins/aggregates on (weight, baseline, cage water mL);
+# supp_water/water_on/off stay free text for now (hardening -> FW-0029).
+NUMERIC_ENTRY_FIELDS = ("weight_g", "baseline_g", "water_ml")
+
+
+def validate_entry(row: Dict[str, str]) -> List[str]:
+    """Human-readable HARD errors for one daily row ([] means OK to write).
+
+    Blank numeric cells are allowed - an incomplete row is legitimate (e.g. a
+    weight is logged before the day's water is turned off). But a *non-blank*
+    weight / baseline / water mL must parse as a number >= 0, and a present date
+    must be ISO ``YYYY-MM-DD`` (the row key), so a typo can't mint a mis-keyed or
+    non-numeric row on either surface (the Records Manager Save or the Excel
+    ``--export``; Phase B). Soft, warn-but-allow checks (an id off the roster,
+    % baseline < 90) are the caller's policy, not errors here.
+    """
+    errors: List[str] = []
+    if not str(row.get("animal_id", "")).strip():
+        errors.append("Animal id is required.")
+    date = str(row.get("date", "")).strip()
+    if not date:
+        errors.append("Date is required.")
+    elif not _is_iso_date(date):
+        errors.append(f"Date '{date}' must be in YYYY-MM-DD form.")
+    labels = {"weight_g": "Weight (g)", "baseline_g": "Baseline (g)",
+              "water_ml": "Water (mL)"}
+    for field in NUMERIC_ENTRY_FIELDS:
+        raw = str(row.get(field, "")).strip()
+        if not raw:
+            continue
+        try:
+            if float(raw) < 0:
+                errors.append(f"{labels[field]} can't be negative ({raw}).")
+        except ValueError:
+            errors.append(f"{labels[field]} must be a number, not '{raw}'.")
+    return errors
 
 
 def compute_pct_baseline(weight, baseline) -> Optional[float]:

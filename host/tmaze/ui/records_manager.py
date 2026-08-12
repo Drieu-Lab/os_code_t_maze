@@ -82,6 +82,21 @@ _ENTRY_LABELS = {
 
 _BUILDER_TIMEOUT_S = 180
 
+# A small starter vocabulary of common per-session procedures for the Sessions
+# annotation checklist (Phase B). Ticking one adds it as a line in the free-text
+# "Common procedures" box; the operator can still type anything else. This is a
+# stub the lab can refine (e.g. to match the ACUC protocol's procedure names).
+_COMMON_PROCEDURES = (
+    "Water restriction",
+    "Weighed",
+    "Handling / habituation",
+    "Behavior training",
+    "Recording",
+    "Surgery / implant",
+    "Health check",
+    "Supplemental water",
+)
+
 # Small GUI-pref file (a machine path, so git-ignored): remembers the recordings
 # folder the operator picked so it survives restarts. Precedence for the scan
 # root is this pref, else tmaze.paths.phase3_recordings_root() (which itself
@@ -133,6 +148,10 @@ class RecordsManager:
         self.annot_path = session_annotations.default_annotations_path()
         self.animals_path = animals.animals_json_path()
         self.records_dir = os.path.dirname(self.daily_path)
+        # The generated daily workbook (hand-editable Entry fallback). Its mtime
+        # vs the last sync we performed drives the Import-before-Generate warning
+        # + the staleness banner (Phase B).
+        self.daily_xlsx_path = os.path.join(self.records_dir, "daily_log.xlsx")
         # Where the rig's session bundles are SCANNED from (operator-pickable,
         # persisted). The registry CSV is READ from a fixed spot regardless of the
         # scan root (host/data/phase3_recordings; see docs/decisions/0088).
@@ -198,6 +217,14 @@ class RecordsManager:
                   foreground="#555").pack(side="left", padx=(4, 6))
         ttk.Button(recbar, text="Browse...",
                    command=self._on_pick_recordings).pack(side="left")
+
+        # Staleness banner: how many sessions are indexed + when the registry was
+        # last built, and whether the daily Excel workbook has edits not yet
+        # imported to the CSV (Phase B). Updated on every refresh.
+        self.banner_var = tk.StringVar(value="")
+        self.banner = ttk.Label(self.root, textvariable=self.banner_var,
+                                padding=(8, 2))
+        self.banner.pack(side="top", fill="x")
 
         if not os.path.isdir(self.records_dir):
             warn = ttk.Label(
@@ -363,19 +390,27 @@ class RecordsManager:
             default="no")
 
     def _save_daily(self) -> None:
-        aid = self.d_vars["animal_id"].get().strip()
-        date = self.d_vars["date"].get().strip()
-        if not aid or not date:
-            messagebox.showwarning("Missing key", "Animal and Date are required.")
-            return
-        if not _is_iso_date(date):
-            messagebox.showwarning(
-                "Bad date", f"Date '{date}' must be in YYYY-MM-DD form "
-                "(e.g. {}).".format(_today_iso()))
-            return
-        pct = daily_log.compute_pct_baseline(self.d_vars["weight_g"].get(),
-                                             self.d_vars["baseline_g"].get())
         edit = {f: self.d_vars[f].get().strip() for f in daily_log.FIELDS}
+        # Hard validation (blocks the save): required key + ISO date + numeric
+        # weight/baseline/water mL. Shared with the Excel --export path so both
+        # surfaces reject the same garbage (Phase B; #14).
+        errors = daily_log.validate_entry(edit)
+        if errors:
+            messagebox.showwarning(
+                "Can't save this row",
+                "Please fix:\n  - " + "\n  - ".join(errors))
+            return
+        aid, date = edit["animal_id"], edit["date"]
+        # Soft, warn-but-allow identity check (keeps ADR-0075's policy): an id not
+        # on the roster is allowed but confirmed, so a typo doesn't silently mint
+        # an off-roster husbandry row. Only when the roster actually loaded.
+        reg = animals.AnimalRegistry(self.roster)
+        if reg.available and not reg.is_known(aid) and not messagebox.askyesno(
+                "Unknown animal",
+                f"'{aid}' isn't in the roster (animals.json).\n"
+                "Save this row anyway?", default="no"):
+            return
+        pct = daily_log.compute_pct_baseline(edit["weight_g"], edit["baseline_g"])
         edit["pct_baseline"] = "" if pct is None else str(pct)
         try:
             # Read-for-write so a present-but-unreadable CSV aborts the save
@@ -502,6 +537,18 @@ class RecordsManager:
         right = ttk.LabelFrame(split, text="Your annotations", padding=6)
         ttk.Label(right, text="Common procedures across days").pack(
             side="top", anchor="w")
+        # Quick-tick checklist (stub vocabulary): ticking adds/removes a line in
+        # the free-text box below; the operator can still type anything else.
+        checks = ttk.Frame(right)
+        checks.pack(side="top", fill="x", pady=(0, 3))
+        self.proc_vars: Dict[str, tk.BooleanVar] = {}
+        for i, label in enumerate(_COMMON_PROCEDURES):
+            var = tk.BooleanVar(value=False)
+            self.proc_vars[label] = var
+            ttk.Checkbutton(
+                checks, text=label, variable=var,
+                command=lambda l=label: self._on_proc_toggle(l)).grid(
+                row=i // 2, column=i % 2, sticky="w", padx=(0, 10))
         self.a_proc = tk.Text(right, height=4, wrap="word")
         self.a_proc.pack(side="top", fill="x", pady=(0, 6))
         ttk.Label(right, text="Notes").pack(side="top", anchor="w")
@@ -569,6 +616,7 @@ class RecordsManager:
             if sid and sid == prev:
                 reselect = iid
         children = self.s_tree.get_children()
+        self._update_sessions_hint(len(children))
         # Selecting programmatically doesn't reliably raise <<TreeviewSelect>>,
         # so populate the detail panel explicitly. Use _show_session (not the
         # _on_session_select guard) so a programmatic refresh never prompts (#3).
@@ -581,6 +629,26 @@ class RecordsManager:
             self._show_session(self._session_row_by_item.get(children[0], {}))
         else:
             self._clear_session_detail()
+
+    def _update_sessions_hint(self, shown: int) -> None:
+        """Explicit empty-state vs a normal count line under the session list."""
+        if shown == 0:
+            filt = self.s_filter.get().strip()
+            if self.registry_rows and filt not in ("", "All"):
+                self.a_hint.configure(
+                    text=f"No sessions for rat {filt}. Clear the filter, or "
+                         "record + Generate.", foreground="#555")
+            else:
+                self.a_hint.configure(
+                    text=("No sessions indexed yet. Scanning: "
+                          f"{self.recordings_root}. Record sessions there, then "
+                          "click 'Generate files'."),
+                    foreground="#9C0006")
+        else:
+            self.a_hint.configure(
+                text=(f"{shown} session{'' if shown == 1 else 's'} from "
+                      f"session_registry.csv (built {self._registry_built_str()})."),
+                foreground="#555")
 
     def _item_for_session(self, sid: str) -> Optional[str]:
         """The Treeview item id currently showing ``sid`` (or None)."""
@@ -646,6 +714,7 @@ class RecordsManager:
         self._set_readonly(self.s_log, "Select a session to view its log.")
         self.a_proc.delete("1.0", "end")
         self.a_notes.delete("1.0", "end")
+        self._sync_proc_checks()
         self._reset_annotation_modified()
 
     def _load_annotation(self, sid: str) -> None:
@@ -656,8 +725,39 @@ class RecordsManager:
         if row:
             self.a_proc.insert("1.0", row.get("procedures", ""))
             self.a_notes.insert("1.0", row.get("notes", ""))
+        # Reflect the loaded procedures in the checklist (var.set doesn't fire the
+        # Checkbutton command, so this doesn't rewrite the text).
+        self._sync_proc_checks()
         # A freshly loaded editor is clean; edits after this mark it dirty (#3).
         self._reset_annotation_modified()
+
+    # ---- procedures checklist (Phase B) ----------------------------------
+    def _proc_items(self) -> List[str]:
+        """The procedures box as a list of non-blank lines (one procedure each)."""
+        return [ln.strip()
+                for ln in self.a_proc.get("1.0", "end").splitlines()
+                if ln.strip()]
+
+    def _set_proc_items(self, items: List[str]) -> None:
+        self.a_proc.delete("1.0", "end")
+        self.a_proc.insert("1.0", "\n".join(items))
+
+    def _on_proc_toggle(self, label: str) -> None:
+        """Ticking a checklist item adds/removes it as a line in the free-text
+        procedures box (case-insensitive; the operator's other lines are kept)."""
+        items = self._proc_items()
+        has = any(i.lower() == label.lower() for i in items)
+        if self.proc_vars[label].get() and not has:
+            items.append(label)
+        elif not self.proc_vars[label].get() and has:
+            items = [i for i in items if i.lower() != label.lower()]
+        self._set_proc_items(items)
+
+    def _sync_proc_checks(self) -> None:
+        """Tick the boxes whose label appears in the procedures text (no rewrite)."""
+        present = {i.lower() for i in self._proc_items()}
+        for label, var in self.proc_vars.items():
+            var.set(label.lower() in present)
 
     def _reset_annotation_modified(self) -> None:
         for widget in (getattr(self, "a_proc", None), getattr(self, "a_notes", None)):
@@ -1019,31 +1119,94 @@ class RecordsManager:
                            f"{last_d} {last_y:.0f}%").pack(side="top", anchor="w")
 
     # ---------------------------------------------------------------- refresh
+    def _registry_built_str(self) -> str:
+        """When session_registry.csv was last written, human-readable."""
+        m = self._file_mtime(self.registry_path)
+        if m is None:
+            return "never"
+        return dt.datetime.fromtimestamp(m).strftime("%Y-%m-%d %H:%M")
+
+    def _refresh_status_banner(self) -> None:
+        """Update the top staleness strip (session count + build time + whether
+        the daily Excel workbook holds edits not yet imported)."""
+        n = len(self.registry_rows)
+        reg = (f"Registry: {n} session{'' if n == 1 else 's'} "
+               f"\u00b7 built {self._registry_built_str()}")
+        if self._excel_has_unsynced_edits():
+            self.banner_var.set(
+                reg + "   |   Daily Excel edited since last sync \u2014 run "
+                "Import before Generate, or those edits are overwritten.")
+            self.banner.configure(foreground="#9a6700")
+        else:
+            self.banner_var.set(reg + "   |   Daily Excel in sync")
+            self.banner.configure(foreground="#555")
+
     def _refresh_all(self) -> None:
         self._refresh_daily_table()
         self._clear_daily()
         self._refresh_sessions()
         self._refresh_roster()
         self._refresh_dashboard()
+        self._refresh_status_banner()
 
-    # ------------------------------------------------------- recordings root
+    # ------------------------------------------------------- prefs / mtimes
+    def _load_prefs(self) -> dict:
+        """The small machine-local GUI-pref dict (best-effort; {} if absent)."""
+        try:
+            with open(_PREFS_PATH, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            return data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def _save_prefs(self, **updates) -> None:
+        """Merge ``updates`` into the pref file, preserving the other keys."""
+        prefs = self._load_prefs()
+        prefs.update(updates)
+        try:
+            with open(_PREFS_PATH, "w", encoding="utf-8") as fh:
+                json.dump(prefs, fh, indent=2)
+        except OSError:
+            pass
+
+    @staticmethod
+    def _file_mtime(path: str) -> Optional[float]:
+        try:
+            return os.path.getmtime(path)
+        except OSError:
+            return None
+
     def _load_recordings_root(self) -> str:
         """The recordings folder to scan: the persisted pref if present, else the
         shared default (env-overridable) from tmaze.paths (ADR-0088)."""
-        try:
-            with open(_PREFS_PATH, "r", encoding="utf-8") as fh:
-                pref = json.load(fh).get("recordings_root", "")
-        except (OSError, ValueError):
-            pref = ""
-        return pref.strip() or str(phase3_recordings_root())
+        return (self._load_prefs().get("recordings_root", "").strip()
+                or str(phase3_recordings_root()))
 
     def _save_recordings_root(self, path: str) -> None:
         """Persist the chosen recordings folder (best-effort)."""
-        try:
-            with open(_PREFS_PATH, "w", encoding="utf-8") as fh:
-                json.dump({"recordings_root": path}, fh, indent=2)
-        except OSError:
-            pass
+        self._save_prefs(recordings_root=path)
+
+    def _record_xlsx_sync(self) -> None:
+        """Remember the daily workbook's mtime right after we (re)built it from
+        the CSV, so a later hand-edit in Excel shows up as an out-of-sync edit."""
+        m = self._file_mtime(self.daily_xlsx_path)
+        if m is not None:
+            self._save_prefs(daily_xlsx_synced_mtime=m)
+
+    def _excel_has_unsynced_edits(self) -> bool:
+        """True if daily_log.xlsx changed since the last Generate/Import we ran -
+        i.e. the operator likely edited the Entry sheet in Excel and hasn't
+        Imported it yet, so a Generate (--rebuild) would overwrite those edits.
+
+        Conservative: if we've never synced it, don't cry wolf (return False)."""
+        m = self._file_mtime(self.daily_xlsx_path)
+        if m is None:
+            return False
+        synced = self._load_prefs().get("daily_xlsx_synced_mtime")
+        if synced is None:
+            return False
+        # 1s slack absorbs filesystem mtime granularity.
+        return m > float(synced) + 1.0
 
     def _on_pick_recordings(self) -> None:
         start = self.recordings_root if os.path.isdir(self.recordings_root) else None
@@ -1072,6 +1235,16 @@ class RecordsManager:
     def _on_generate(self) -> None:
         if self._has_unsaved() and not self._confirm_discard(
                 "Generate refreshes every view from disk"):
+            return
+        # Generate's --rebuild regenerates the Entry sheet from the CSV, so any
+        # hand-edits made in Excel since the last sync would be lost. Warn first
+        # (Phase B / B4).
+        if self._excel_has_unsynced_edits() and not messagebox.askyesno(
+                "Excel edits not imported",
+                "The daily Excel workbook has changed since the last sync.\n\n"
+                "Generate rebuilds the Entry sheet from daily_log.csv and will "
+                "OVERWRITE those Excel edits. To keep them, click No, then "
+                "'Import from Excel' first.\n\nGenerate anyway?", default="no"):
             return
         self._run_async("Generating files...", self._do_generate)
 
@@ -1160,6 +1333,11 @@ class RecordsManager:
         self._busy = False
         self._load_data()
         self.d_animal["values"] = self.animal_ids
+        # A successful Generate/Import leaves the workbook regenerated from the
+        # CSV, so record it as the new in-sync point (unless the builder failed,
+        # to avoid muting a real "Excel edited" warning). See _excel_has_unsynced.
+        if "FAILED" not in result and "rc=" not in result:
+            self._record_xlsx_sync()
         self._refresh_all()
         self._set_status("Done.")
         messagebox.showinfo("Result", result)

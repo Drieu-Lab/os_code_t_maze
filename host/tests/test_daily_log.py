@@ -25,6 +25,7 @@ from tmaze.core.records.daily_log import (
     load_rows_for_write,
     row_has_weight,
     upsert_rows,
+    validate_entry,
     write_rows,
 )
 
@@ -135,6 +136,48 @@ class TestRowHasWeight(unittest.TestCase):
     def test_numeric_weight_is_true(self):
         self.assertTrue(row_has_weight({"weight_g": "332"}))
         self.assertTrue(row_has_weight({"weight_g": "330.5"}))
+
+
+class TestValidateEntry(unittest.TestCase):
+    """Hard save/export validation shared by the GUI and the Excel round-trip."""
+
+    def _row(self, **over):
+        row = {"animal_id": "600", "date": "2026-08-11", "weight_g": "332",
+               "baseline_g": "348", "water_ml": "8.5"}
+        row.update(over)
+        return row
+
+    def test_valid_row_has_no_errors(self):
+        self.assertEqual(validate_entry(self._row()), [])
+
+    def test_blank_numeric_cells_are_allowed(self):
+        # An incomplete row (no weight/water yet) is legitimate.
+        row = self._row(weight_g="", baseline_g="", water_ml="")
+        self.assertEqual(validate_entry(row), [])
+
+    def test_missing_animal_and_date_required(self):
+        errors = validate_entry({"animal_id": "", "date": ""})
+        self.assertTrue(any("Animal id" in e for e in errors))
+        self.assertTrue(any("Date is required" in e for e in errors))
+
+    def test_non_iso_date_is_rejected(self):
+        self.assertTrue(any("YYYY-MM-DD" in e
+                            for e in validate_entry(self._row(date="2026-8-1"))))
+        self.assertTrue(any("YYYY-MM-DD" in e
+                            for e in validate_entry(self._row(date="08/11/2026"))))
+
+    def test_non_numeric_weight_is_rejected(self):
+        errors = validate_entry(self._row(weight_g="tbd"))
+        self.assertTrue(any("Weight" in e and "number" in e for e in errors))
+
+    def test_negative_values_are_rejected(self):
+        errors = validate_entry(self._row(baseline_g="-5", water_ml="-1"))
+        self.assertTrue(any("Baseline" in e for e in errors))
+        self.assertTrue(any("Water" in e for e in errors))
+
+    def test_supp_water_stays_free_text(self):
+        # supp_water is not a hard-numeric field (free text like "2 min").
+        self.assertEqual(validate_entry(self._row(supp_water="2 min")), [])
 
 
 class TestComputePctBaseline(unittest.TestCase):
