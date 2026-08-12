@@ -1,0 +1,10 @@
+{
+  "_schema": {
+    "note": "Session ids the records pipeline should SKIP (ADR-0097): test runs, stray start/stop-glitch folders, and mistyped-animal bundles that are not real experiment sessions. Non-destructive: the bundles stay on disk, so removing an id here brings a session back. Read by build_session_registry (this repo) and build_session_training_log (resources repo, via the OS_CODE_T_MAZE resolver). See docs/notes/Bugs.md #260810_RecordsIntegrity."
+  },
+  "schema_version": 1,
+  "ignore": [
+    "000_20260727_132752",
+    "123_20260727_104048"
+  ]
+}

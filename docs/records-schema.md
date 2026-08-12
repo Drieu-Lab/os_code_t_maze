@@ -16,8 +16,9 @@ provenance-labelled channels**, never summed (see the registry below).
 
 | Artifact | Repo / location | Written by | schema_version | ADR |
 | --- | --- | --- | --- | --- |
-| `animals.json` | resources · `records/animal/` | hand-edited | 1 | 0075 |
-| `daily_log.csv` | resources · `records/animal/` | `build_daily_log.py` (from the Entry sheet) | 1 (comment line) | 0076 |
+| `animals.json` | resources · `records/animal/` | Records Manager GUI (Roster) or hand-edited | 1 | 0075 |
+| `daily_log.csv` | resources · `records/animal/` | Records Manager GUI (Daily) or `build_daily_log.py` (from the Entry sheet) | 1 (comment line) | 0076 |
+| `session_annotations.csv` | resources · `records/animal/` | Records Manager GUI (Sessions) or `build_session_training_log.py --import-annotations` | 1 (comment line) | 0082 / 0085 |
 | `animal_state.json` | code · per-bundle `config/` | `session_controller` at Start (core `animal_state.py`) | 1 | 0077 |
 | `session_meta.json` | code · per-bundle `config/` | `session_controller` at Start (core `session_meta.py`) | 1 | 0079 |
 | `session_registry.csv` | code · recordings root (git-ignored) | `build_session_registry.py` (core `session_registry.py`) | 1 (comment line) | 0081 |
@@ -45,6 +46,25 @@ water_off, water_ml, supp_water, notes`.
 
 `water_on`/`water_off`/`supp_water` are free text today ("6pm", "2 min"); see
 FW-0029 for hardening them into real timestamps.
+
+A save merges by `(animal_id, date)` (an [upsert](glossary.md#upsert-keyed-merge),
+never a blind overwrite) and refuses to run if the file is present but
+unreadable, so a save can't clobber existing rows (ADR-0085; bug
+`#260810_RecordsIntegrity`).
+
+## `session_annotations.csv` (v1)
+
+Per-session qualitative annotations — the two hand-added fields the rig can't
+know (source of truth; ADR-0082/0085). A leading `# schema_version=1` comment
+line precedes the header. One row per `session_id`:
+
+`session_id, animal, date, procedures, notes`.
+
+`animal`/`date` are denormalised copies (handy when reading the CSV alone);
+`procedures`/`notes` are the free-text fields the operator types in the Records
+Manager's Sessions tab. A save merges by `session_id`
+([upsert](glossary.md#upsert-keyed-merge)) and, for a session not in the
+registry, preserves the row's existing `animal`/`date` rather than blanking them.
 
 ## `animal_state.json` (v1)
 

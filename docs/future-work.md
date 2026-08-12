@@ -85,6 +85,7 @@ criteria).
 | [FW-0030](#fw-0030-weekend-ad-libitum-water-accounting-in-the-daily-table--dashboard) | Weekend ad-libitum water accounting in the daily table + dashboard | Daily husbandry table + dashboard | Proposed |
 | [FW-0031](#fw-0031-latching-toggle-on-note-tags-that-span-subsequent-trials) | Latching (toggle-on) note tags that span subsequent trials | Note tags + session notes + summary + Session panel | Proposed |
 | [FW-0032](#fw-0032-per-port-leftright-reward-volume-calibration) | Per-port (left/right) reward-volume calibration | Reward calibration | Proposed |
+| [FW-0033](#fw-0033-structural-cross-reference-hardening-for-the-coordinated-records) | Structural cross-reference hardening for the coordinated records | Records cores + Records Manager | Proposed |
 
 ## Entries
 
@@ -1613,6 +1614,57 @@ monitor-only? If they never dispense reward, this may not be needed at all.
 **ADR needed?** No - it fills existing per-port structure with data; ADR-0091
 already covers the method. Add one only if a per-port structural change is found
 necessary.
+
+### FW-0033: Structural cross-reference hardening for the coordinated records
+
+- **Status:** Proposed
+- **Date added:** 2026-08-11
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** `host/tmaze/core/session/session_registry.py`, `host/tmaze/core/records/{session_annotations,dashboard}.py`, `host/tmaze/ui/records_manager.py`
+- **Related ADRs:** [ADR-0097](decisions/0097-records-integrity-guardrails.md) (the audit that surfaced these), [ADR-0075](decisions/0075-canonical-animal-identity.md) (loose id normalization), [ADR-0085](decisions/0085-records-manager-gui-reversible-surfaces.md) (annotations denormalization + deletions don't cross surfaces)
+
+**Motivation / context.** The `#260810_RecordsIntegrity` audit (ADR-0097)
+addressed the visible/active problems (non-real sessions, husbandry-gap and
+water-column reporting, legacy/rig de-dup). Three *structural* cross-reference
+weaknesses were found but deliberately left for later, being larger and lower
+urgency (finding F of the audit):
+
+- **No alias normalization at join time.** `session_registry.bundle_row` and the
+  daily-table join match `(animal, date)` by exact stripped-string equality; only
+  Session Start normalizes ids via `animals.normalize`. A bundle whose `animal`
+  is a slug/alias (e.g. from the ADR-0075 unknown-id slug fallback) silently
+  misses the `(animal, date)` daily-log join.
+- **Denormalized annotation `animal`/`date`.** `session_annotations.csv` stores
+  copies the Records Manager fills from the registry row (blank if the session
+  isn't in a stale/never-regenerated registry); they could be derived from the
+  `session_id` instead so they never disagree with the id.
+- **Ghost annotations.** Per ADR-0085 deletions don't cross surfaces, so deleting
+  a bundle leaves an annotation row with no live session; the GUI merges
+  annotation-only rows back into the Sessions list, resurfacing ghosts.
+
+**Sketch of approach.** Normalize `animal` through `animals.normalize` (falling
+back to the raw id when unknown) at the registry join seam; derive annotation
+`animal`/`date` from `session_id` (`_animal_date_from_id`) rather than the
+registry copy; add a "ghost annotation" section to `records_check` (annotation
+rows whose `session_id` is neither a live bundle nor ignored) so stale rows are
+visible before deciding whether to prune them.
+
+**Evaluation / acceptance.** A bundle with an alias animal id joins its daily-log
+row; annotation `animal`/`date` always match the id; `records_check` lists ghost
+annotation rows. No change to on-disk schemas (behaviour only), existing tests
+still pass, new headless tests cover the normalization + ghost detection.
+
+**Effort / risk.** Medium. Risk: normalizing at join time could change which
+daily row a historical bundle matches; guard with tests and keep it a
+fall-back-to-raw so an unknown id is never dropped.
+
+**Open questions.** Should ghost annotations ever be auto-pruned, or only
+reported (given ADR-0085's "never silently lose an edit")? Does deriving
+annotation `animal`/`date` from the id break any session id that contains an
+underscore in the animal part?
+
+**ADR needed?** Yes for the join-time normalization (it changes a cross-reference
+key's matching); the ghost-annotation report can fold under ADR-0097.
 
 ## Completed
 

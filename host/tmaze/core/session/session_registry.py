@@ -301,15 +301,24 @@ def _tally_tags(notes_text: str) -> Dict[str, int]:
 
 
 # --------------------------------------------------------------- build all
-def build(root: str, daily: Optional[Any] = None) -> Tuple[
+def build(root: str, daily: Optional[Any] = None,
+          ignore: Optional[Any] = None) -> Tuple[
         List[Dict[str, Any]], List[Tuple[str, str, int]]]:
     """Full idempotent rebuild: every bundle under ``root`` -> (registry rows,
     tidy tag rows). Each registry row carries its per-tag counts under the
     private ``_tags`` key so the renderer can project the current vocabulary into
-    wide columns; the tidy rows are the churn-proof source of truth."""
+    wide columns; the tidy rows are the churn-proof source of truth.
+
+    ``ignore`` is an optional collection of session ids to SKIP (non-real
+    sessions kept on disk; the ``session_ignore`` core, ADR-0097): those bundles
+    produce no registry row and no tag rows, so the whole downstream pipeline
+    (View sheets, Records Manager list) drops them without deleting anything."""
+    skip = set(ignore or ())
     rows: List[Dict[str, Any]] = []
     tag_rows: List[Tuple[str, str, int]] = []
     for bundle in scan(root):
+        if _session_id_of(bundle) in skip:
+            continue
         row, counts = bundle_row(bundle, daily=daily)
         row["_tags"] = counts
         rows.append(row)

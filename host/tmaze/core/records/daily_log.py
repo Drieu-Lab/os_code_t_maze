@@ -39,7 +39,7 @@ import csv
 import os
 from typing import Dict, List, Optional
 
-from tmaze.core.records import animals
+from tmaze.core.records import RecordsFileError, animals
 
 # Column order mirrors the resources builder (records/animal/build_daily_log.py).
 FIELDS = [
@@ -141,6 +141,31 @@ def load(path: Optional[str] = None) -> DailyLog:
     return DailyLog(load_rows(path))
 
 
+def load_rows_for_write(path: Optional[str] = None) -> List[Dict[str, str]]:
+    """Like :func:`load_rows`, but distinguish "absent" from "unreadable".
+
+    The Save path merges edits into the *current* file, so it must not treat an
+    unreadable-but-present file as empty (that would overwrite it with only the
+    edited row - see :class:`RecordsFileError` / bug #260810_RecordsIntegrity).
+
+    - File absent -> ``[]`` (creating a fresh file is safe).
+    - File present but it can't be opened/decoded -> raise
+      :class:`RecordsFileError` so the caller can abort before clobbering it.
+    """
+    p = path or default_daily_log_path()
+    if not os.path.exists(p):
+        return []
+    try:
+        with open(p, "r", encoding="utf-8", newline="") as fh:
+            lines = [ln for ln in fh if not ln.lstrip().startswith("#")]
+    except (OSError, ValueError) as exc:
+        raise RecordsFileError(
+            f"{p} exists but could not be read ({exc}); refusing to overwrite "
+            "it, which would drop the rows already in the file.") from exc
+    reader = csv.DictReader(lines)
+    return [{k: (row.get(k) or "").strip() for k in FIELDS} for row in reader]
+
+
 # --------------------------------------------------------------------------- #
 # Writing (Records Manager GUI). The CSV is the source of truth; these keep it
 # in the exact shape the resources builder emits so either surface can rebuild
@@ -155,6 +180,24 @@ def _key(row: Dict[str, str]) -> tuple:
 def _normalise(row: Dict[str, str]) -> Dict[str, str]:
     """A row projected onto FIELDS as trimmed strings (None -> "")."""
     return {f: str(row.get(f, "") or "").strip() for f in FIELDS}
+
+
+def row_has_weight(row: Optional[Dict[str, str]]) -> bool:
+    """True if a daily row carries a usable (numeric) weight.
+
+    Session Start only prefills the frozen ``animal_state`` from the daily table
+    when the row actually has a weight; a present-but-incomplete row (blank or
+    non-numeric ``weight_g``) should fall through to the Start weight dialog
+    rather than freeze an empty ``pre_session_weight_g`` (#4). Baseline is still
+    recoverable separately via :meth:`DailyLog.latest_for`.
+    """
+    if not row:
+        return False
+    try:
+        float(str(row.get("weight_g", "")).strip())
+        return True
+    except (TypeError, ValueError):
+        return False
 
 
 def compute_pct_baseline(weight, baseline) -> Optional[float]:

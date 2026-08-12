@@ -17,10 +17,11 @@ import unittest
 
 import json
 
+from tmaze.core.records import RecordsFileError
 from tmaze.core.records.animals import (
-    AnimalRegistry, animals_json_path, load_records, load_registry,
-    normalize_records, parse_registry, resources_root, validate_records,
-    write_records)
+    AnimalRegistry, animals_json_path, load_records, load_records_for_write,
+    load_registry, normalize_records, parse_registry, resources_root,
+    validate_records, write_records)
 
 _SAMPLE = (
     '{"schema_version": 1, "animals": ['
@@ -181,6 +182,47 @@ class TestRosterEditing(unittest.TestCase):
                 doc = json.load(fh)
         self.assertIn("_schema", doc)
         self.assertEqual(doc["schema_version"], 1)
+
+
+class TestLoadRecordsForWrite(unittest.TestCase):
+    """The strict roster reader that guards the Save path against clobbering a
+    present-but-corrupt animals.json (#12)."""
+
+    def test_absent_file_is_empty(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(
+                load_records_for_write(os.path.join(d, "absent.json")), [])
+
+    def test_valid_empty_roster_is_readable(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "animals.json")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write('{"schema_version": 1, "animals": []}')
+            self.assertEqual(load_records_for_write(path), [])
+
+    def test_present_valid_file_reads_records(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "animals.json")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(_SAMPLE)
+            recs = load_records_for_write(path)
+        self.assertEqual([r["id"] for r in recs], ["600", "601", "602"])
+
+    def test_present_but_invalid_json_raises(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "animals.json")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("{ this is not valid json")
+            with self.assertRaises(RecordsFileError):
+                load_records_for_write(path)
+
+    def test_present_but_wrong_structure_raises(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "animals.json")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write('{"not_animals": 1}')
+            with self.assertRaises(RecordsFileError):
+                load_records_for_write(path)
 
 
 if __name__ == "__main__":

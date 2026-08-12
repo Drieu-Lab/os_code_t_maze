@@ -31,7 +31,7 @@ import csv
 import os
 from typing import Dict, List, Optional
 
-from tmaze.core.records import animals
+from tmaze.core.records import RecordsFileError, animals
 
 # One row per session. ``session_id`` is the identity; ``animal`` and ``date`` are
 # denormalised copies (handy when reading the CSV alone); ``procedures`` and
@@ -105,6 +105,30 @@ class SessionAnnotations:
 def load(path: Optional[str] = None) -> SessionAnnotations:
     """Load the annotations table best-effort (default: the resources repo)."""
     return SessionAnnotations(load_rows(path))
+
+
+def load_rows_for_write(path: Optional[str] = None) -> List[Dict[str, str]]:
+    """Like :func:`load_rows`, but distinguish "absent" from "unreadable".
+
+    The Save path merges edits into the *current* file, so an unreadable-but-
+    present file must not be treated as empty (that would overwrite it with only
+    the edited row - see :class:`RecordsFileError` / bug #260810_RecordsIntegrity).
+
+    - File absent -> ``[]`` (a fresh file is safe to create).
+    - File present but unopenable/undecodable -> raise :class:`RecordsFileError`.
+    """
+    p = path or default_annotations_path()
+    if not os.path.exists(p):
+        return []
+    try:
+        with open(p, "r", encoding="utf-8", newline="") as fh:
+            lines = [ln for ln in fh if not ln.lstrip().startswith("#")]
+    except (OSError, ValueError) as exc:
+        raise RecordsFileError(
+            f"{p} exists but could not be read ({exc}); refusing to overwrite "
+            "it, which would drop the rows already in the file.") from exc
+    reader = csv.DictReader(lines)
+    return [{k: (row.get(k) or "").strip() for k in FIELDS} for row in reader]
 
 
 # --------------------------------------------------------------------------- #

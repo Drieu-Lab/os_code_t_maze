@@ -16,11 +16,14 @@ import os
 import tempfile
 import unittest
 
+from tmaze.core.records import RecordsFileError
 from tmaze.core.records.daily_log import (
     DailyLog,
     compute_pct_baseline,
     load,
     load_rows,
+    load_rows_for_write,
+    row_has_weight,
     upsert_rows,
     write_rows,
 )
@@ -56,6 +59,30 @@ class TestLoad(unittest.TestCase):
         self.assertEqual(len(log), 0)
 
 
+class TestLoadForWrite(unittest.TestCase):
+    """The strict reader the Save path uses to avoid clobbering (#12)."""
+
+    def test_absent_file_is_empty(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(load_rows_for_write(os.path.join(d, "absent.csv")),
+                             [])
+
+    def test_present_file_reads_rows(self):
+        with tempfile.TemporaryDirectory() as d:
+            rows = load_rows_for_write(_write(d))
+        self.assertEqual(len(rows), 3)
+
+    def test_present_but_unreadable_raises(self):
+        # Bytes that aren't valid UTF-8 -> a decode error on read. The strict
+        # reader must raise (so the save aborts) rather than return [].
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "daily_log.csv")
+            with open(path, "wb") as fh:
+                fh.write(b"# schema_version=1\n\xff\xfe garbage not utf-8\n")
+            with self.assertRaises(RecordsFileError):
+                load_rows_for_write(path)
+
+
 class TestLookups(unittest.TestCase):
     def setUp(self):
         self.log = DailyLog(load_rows_text(_CSV))
@@ -89,6 +116,25 @@ def load_rows_text(text):
         with open(path, "w", encoding="utf-8", newline="") as fh:
             fh.write(text)
         return load_rows(path)
+
+
+class TestRowHasWeight(unittest.TestCase):
+    """Session Start only prefills from a daily row that has a real weight (#4)."""
+
+    def test_none_row_is_false(self):
+        self.assertFalse(row_has_weight(None))
+
+    def test_blank_weight_is_false(self):
+        self.assertFalse(row_has_weight({"weight_g": ""}))
+        self.assertFalse(row_has_weight({"weight_g": "   "}))
+        self.assertFalse(row_has_weight({"baseline_g": "348"}))
+
+    def test_non_numeric_weight_is_false(self):
+        self.assertFalse(row_has_weight({"weight_g": "tbd"}))
+
+    def test_numeric_weight_is_true(self):
+        self.assertTrue(row_has_weight({"weight_g": "332"}))
+        self.assertTrue(row_has_weight({"weight_g": "330.5"}))
 
 
 class TestComputePctBaseline(unittest.TestCase):

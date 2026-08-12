@@ -25,8 +25,8 @@
     "generator": "debias_blocks",
     "debias_blocks": {
       "window": 20,
-      "min_errors": 5,
-      "trigger_bias": 0.4,
+      "min_errors": 8,
+      "trigger_bias": 0.6,
       "exit_consecutive": 3,
       "max_block_len": 15,
       "signal": "directional_errors"

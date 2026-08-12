@@ -16,10 +16,12 @@ import os
 import tempfile
 import unittest
 
+from tmaze.core.records import RecordsFileError
 from tmaze.core.records.session_annotations import (
     SessionAnnotations,
     load,
     load_rows,
+    load_rows_for_write,
     upsert_rows,
     write_rows,
 )
@@ -57,6 +59,28 @@ class TestLoad(unittest.TestCase):
             store = load(os.path.join(d, "absent.csv"))
         self.assertFalse(store.available)
         self.assertEqual(len(store), 0)
+
+
+class TestLoadForWrite(unittest.TestCase):
+    """The strict reader the Save path uses to avoid clobbering (#12)."""
+
+    def test_absent_file_is_empty(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(load_rows_for_write(os.path.join(d, "absent.csv")),
+                             [])
+
+    def test_present_file_reads_rows(self):
+        with tempfile.TemporaryDirectory() as d:
+            rows = load_rows_for_write(_write(d))
+        self.assertEqual(len(rows), 2)
+
+    def test_present_but_unreadable_raises(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "session_annotations.csv")
+            with open(path, "wb") as fh:
+                fh.write(b"# schema_version=1\n\xff\xfe not utf-8\n")
+            with self.assertRaises(RecordsFileError):
+                load_rows_for_write(path)
 
 
 class TestLookups(unittest.TestCase):

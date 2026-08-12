@@ -233,5 +233,29 @@ class TestTagOutputs(unittest.TestCase):
             self.assertTrue(header.startswith("session_id,animal,date,"))
 
 
+class TestIgnoreList(unittest.TestCase):
+    """Non-real sessions in the ignore-list are skipped without a trace (ADR-0097)."""
+
+    def test_ignored_bundles_skipped(self):
+        with tempfile.TemporaryDirectory() as root:
+            _make_bundle(root, "600_20260806_120000", summary=_summary())
+            _make_bundle(root, "000_20260727_132752", summary=_summary(),
+                         notes_lines=[{"id": 0, "iso": "t", "text": "",
+                                       "tag": "lift-backs", "count": 1}])
+            rows, tag_rows = session_registry.build(
+                root, ignore={"000_20260727_132752"})
+            self.assertEqual([r["session_id"] for r in rows],
+                             ["600_20260806_120000"])
+            # The ignored session contributes no tag rows either (its only tag
+            # was on the skipped bundle; the kept bundle has no notes).
+            self.assertEqual(tag_rows, [])
+
+    def test_empty_ignore_keeps_all(self):
+        with tempfile.TemporaryDirectory() as root:
+            _make_bundle(root, "600_20260806_120000", summary=_summary())
+            rows, _ = session_registry.build(root, ignore=None)
+            self.assertEqual(len(rows), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

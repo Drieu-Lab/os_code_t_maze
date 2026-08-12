@@ -820,7 +820,10 @@ class SessionControlView:
         """
         table = daily_log.load()          # best-effort; empty if resources absent
         row = table.for_date(animal, date)
-        if row is not None:
+        # Only prefill from the daily table when today's row actually has a
+        # weight; a present-but-weightless row falls through to the Start weight
+        # dialog rather than freezing an empty pre_session_weight (#4).
+        if daily_log.row_has_weight(row):
             state = animal_state.from_daily_row(self._session_id, animal, date, row)
             note = None
         else:

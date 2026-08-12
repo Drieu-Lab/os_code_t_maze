@@ -33,8 +33,11 @@ from __future__ import annotations
 import argparse
 import os
 
+from tmaze.core.records import animals
 from tmaze.core.records import daily_log
 from tmaze.core.records import note_tags
+from tmaze.core.records import records_audit
+from tmaze.core.records import session_ignore
 from tmaze.core.session import session_registry
 from tmaze.paths import host_dir, phase3_recordings_root
 
@@ -71,11 +74,14 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
 
     # Best-effort inputs: an absent daily table just skips the fallback join; the
-    # tag vocabulary shapes the wide tag_* columns (tidy file carries all tags).
+    # tag vocabulary shapes the wide tag_* columns (tidy file carries all tags);
+    # the ignore-list drops non-real bundles (test runs / stray folders) without
+    # deleting them (ADR-0097).
     daily = daily_log.load()
     vocab = note_tags.load_tags(NOTE_TAGS_PATH)
+    ignore = session_ignore.load_ignored()
 
-    rows, tag_rows = session_registry.build(args.root, daily=daily)
+    rows, tag_rows = session_registry.build(args.root, daily=daily, ignore=ignore)
 
     out_dir = args.out_dir or REGISTRY_OUTPUT_DIR
     reg_path = os.path.join(out_dir, REGISTRY_FILENAME)
@@ -86,6 +92,17 @@ def main(argv=None) -> int:
 
     print(f"session registry: {len(rows)} sessions, "
           f"{len(tag_rows)} tag rows -> {reg_path}")
+
+    # Advisory only - never fail the build (the data fixes are the operator's;
+    # bug #260810/ADR-0097). A non-canonical animal id points at a typo or an
+    # un-listed test session; `python -m tmaze.tools.records_check` reports the
+    # deeper cross-reference gaps (husbandry, water columns, churn).
+    unknown = records_audit.noncanonical_animals(
+        [r.get("animal", "") for r in rows], animals.load_registry())
+    if unknown:
+        print("  WARNING: animal ids not in animals.json: " + ", ".join(unknown))
+        print("           add them to animals.json, or list those sessions in "
+              "host/session_ignore.json.")
     return 0
 
 

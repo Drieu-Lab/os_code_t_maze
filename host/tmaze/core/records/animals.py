@@ -31,6 +31,7 @@ import json
 import os
 from typing import Dict, List, Optional
 
+from tmaze.core.records import RecordsFileError
 from tmaze.paths import repo_root
 
 # Environment override for the sibling resources repo location; when unset we use
@@ -184,6 +185,36 @@ def load_records(path: Optional[str] = None) -> List[Dict[str, object]]:
         return []
     if not isinstance(raw, dict) or not isinstance(raw.get("animals"), list):
         return []
+    return normalize_records(raw["animals"])
+
+
+def load_records_for_write(path: Optional[str] = None) -> List[Dict[str, object]]:
+    """Like :func:`load_records`, but distinguish "absent" from "unreadable".
+
+    :func:`write_records` replaces the whole roster, so it must not treat an
+    unreadable-but-present ``animals.json`` as an empty roster (saving on top of
+    that would wipe the identity source of truth - see :class:`RecordsFileError`
+    / bug #260810_RecordsIntegrity). A genuinely empty-but-valid file
+    (``{"animals": []}``) reads as ``[]`` and is fine.
+
+    - File absent -> ``[]``.
+    - File present but not valid JSON with an ``animals`` list -> raise
+      :class:`RecordsFileError`.
+    """
+    p = path or animals_json_path()
+    if not os.path.exists(p):
+        return []
+    try:
+        with open(p, "r", encoding="utf-8") as fh:
+            raw = json.load(fh)
+    except (OSError, ValueError) as exc:
+        raise RecordsFileError(
+            f"{p} exists but could not be read ({exc}); refusing to overwrite "
+            "the animal roster.") from exc
+    if not isinstance(raw, dict) or not isinstance(raw.get("animals"), list):
+        raise RecordsFileError(
+            f"{p} exists but is not a valid animals.json (no 'animals' list); "
+            "refusing to overwrite the animal roster.")
     return normalize_records(raw["animals"])
 
 

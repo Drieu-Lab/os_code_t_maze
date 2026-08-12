@@ -8,8 +8,10 @@ One window to keep the lab's *records* without hand-editing CSVs or workbooks:
   upserts the row into ``daily_log.csv`` (the source of truth) by
   ``(animal_id, date)`` - it never rewrites the whole file, so a row another
   surface added survives.
-- **Annotations** - type the qualitative "common procedures" + notes for a
-  recorded session; saving upserts ``session_annotations.csv`` by ``session_id``.
+- **Sessions** - browse the recorded sessions (from ``session_registry.csv``),
+  read each one's metrics + rendered summary, and type the qualitative "common
+  procedures" + notes for it; saving upserts ``session_annotations.csv`` by
+  ``session_id`` (ADR-0089).
 - **Roster** - add/remove rats and edit their aliases; saving validates and
   writes ``animals.json`` (the identity source of truth).
 - **Dashboard** - a read-only welfare view: a compact per-rat status strip
@@ -55,7 +57,14 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from typing import Dict, List, Optional
 
-from tmaze.core.records import animals, dashboard, daily_log, session_annotations
+from tmaze.core.records import (
+    RecordsFileError,
+    animals,
+    dashboard,
+    daily_log,
+    session_annotations,
+    session_ignore,
+)
 from tmaze.core.session import session_detail
 from tmaze.paths import host_dir, phase3_recordings_root
 from tmaze.tools import build_session_registry
@@ -87,6 +96,18 @@ _RAT_PALETTE = ("#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
 
 def _today_iso() -> str:
     return dt.date.today().isoformat()
+
+
+def _is_iso_date(value: str) -> bool:
+    """True if ``value`` is a real ``YYYY-MM-DD`` date (the record key format).
+
+    Guards against mis-keyed rows / silent dashboard misses from typos like
+    ``2026-8-1`` or ``08/11/2026`` (#14)."""
+    try:
+        dt.date.fromisoformat(str(value).strip())
+        return True
+    except (ValueError, TypeError):
+        return False
 
 
 def _read_csv_skip_comments(path: str) -> List[Dict[str, str]]:
@@ -125,9 +146,18 @@ class RecordsManager:
         # per-Treeview-item registry rows behind it).
         self.current_session_id = ""
         self._session_row_by_item: Dict[str, Dict[str, str]] = {}
+        # Unsaved-edit tracking (#3): the Daily form marks itself dirty on any
+        # user edit (suspended during programmatic fills); the annotation editor
+        # uses the Text widgets' own modified flag. Reload/Generate/Import/close
+        # and switching sessions confirm before discarding.
+        self._daily_dirty = False
+        self._suspend_dirty = False
+        self._suspend_session_select = False
         self._load_data()
         self._build_ui()
         self._refresh_all()
+        # Guard the window-close button too (unsaved edits / a running build).
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # ---------------------------------------------------------------- data
     def _load_data(self) -> None:
@@ -138,6 +168,10 @@ class RecordsManager:
         self.daily = daily_log.DailyLog(self.daily_rows)
         self.annot_rows = session_annotations.load_rows(self.annot_path)
         self.registry_rows = _read_csv_skip_comments(self.registry_path)
+        # Non-real sessions to hide from the list (test runs / stray folders kept
+        # on disk; ADR-0097). Applied to both registry and annotation-only rows so
+        # a stale registry or a leftover annotation can't resurface them.
+        self.ignored_sessions = session_ignore.load_ignored()
 
     # ---------------------------------------------------------------- ui
     def _build_ui(self) -> None:
@@ -191,6 +225,10 @@ class RecordsManager:
 
         self.d_vars: Dict[str, tk.StringVar] = {
             f: tk.StringVar() for f in daily_log.FIELDS}
+        # Any user edit to a field marks the form dirty (#3); programmatic fills
+        # wrap themselves in _suspend_dirty_tracking so they don't trip this.
+        for _f in daily_log.FIELDS:
+            self.d_vars[_f].trace_add("write", self._mark_daily_dirty)
 
         # Animal (dropdown) + Date.
         ttk.Label(form, text="Animal").grid(row=0, column=0, sticky="e", padx=4, pady=3)
@@ -291,42 +329,92 @@ class RecordsManager:
             self.d_pct.config(text=f"{pct * 100:.1f}%" + (" <90%!" if flag else ""),
                               foreground="#9C0006" if flag else "#1a7f37")
 
+    # ---- unsaved-edit tracking (#3) --------------------------------------
+    def _mark_daily_dirty(self, *_args) -> None:
+        if not self._suspend_dirty:
+            self._daily_dirty = True
+
+    @contextlib.contextmanager
+    def _suspend_dirty_tracking(self):
+        """Programmatic form fills shouldn't count as user edits."""
+        prev = self._suspend_dirty
+        self._suspend_dirty = True
+        try:
+            yield
+        finally:
+            self._suspend_dirty = prev
+
+    def _annotation_dirty(self) -> bool:
+        """True if the annotation editor has unsaved text (Text.edit_modified)."""
+        try:
+            return bool(self.a_proc.edit_modified()
+                        or self.a_notes.edit_modified())
+        except (AttributeError, tk.TclError):
+            return False
+
+    def _has_unsaved(self) -> bool:
+        return self._daily_dirty or self._annotation_dirty()
+
+    def _confirm_discard(self, what: str) -> bool:
+        """Ask before an action that would throw away unsaved edits."""
+        return messagebox.askyesno(
+            "Discard unsaved changes?",
+            f"You have unsaved changes: {what}\n\nContinue and discard them?",
+            default="no")
+
     def _save_daily(self) -> None:
         aid = self.d_vars["animal_id"].get().strip()
         date = self.d_vars["date"].get().strip()
         if not aid or not date:
             messagebox.showwarning("Missing key", "Animal and Date are required.")
             return
+        if not _is_iso_date(date):
+            messagebox.showwarning(
+                "Bad date", f"Date '{date}' must be in YYYY-MM-DD form "
+                "(e.g. {}).".format(_today_iso()))
+            return
         pct = daily_log.compute_pct_baseline(self.d_vars["weight_g"].get(),
                                              self.d_vars["baseline_g"].get())
         edit = {f: self.d_vars[f].get().strip() for f in daily_log.FIELDS}
         edit["pct_baseline"] = "" if pct is None else str(pct)
         try:
-            merged = daily_log.upsert_rows(daily_log.load_rows(self.daily_path),
-                                           [edit])
+            # Read-for-write so a present-but-unreadable CSV aborts the save
+            # rather than being overwritten with just this row (#12).
+            existing = daily_log.load_rows_for_write(self.daily_path)
+            merged = daily_log.upsert_rows(existing, [edit])
             daily_log.write_rows(merged, self.daily_path)
-        except OSError as e:
+        except RecordsFileError as e:
+            messagebox.showerror("Save refused", str(e))
+            return
+        except (OSError, ValueError) as e:
             messagebox.showerror("Save failed", str(e))
             return
         self._set_status(f"Saved {aid} {date} to daily_log.csv.")
+        self._daily_dirty = False
         self._load_data()
         self._refresh_daily_table()
         self._refresh_dashboard()
 
     def _clear_daily(self) -> None:
-        for f in daily_log.FIELDS:
-            self.d_vars[f].set("")
-        self.d_vars["date"].set(_today_iso())
-        self._update_pct()
+        with self._suspend_dirty_tracking():
+            for f in daily_log.FIELDS:
+                self.d_vars[f].set("")
+            self.d_vars["date"].set(_today_iso())
+            self._update_pct()
+        self._daily_dirty = False
 
     def _load_selected_daily(self, _event=None) -> None:
         sel = self.d_tree.selection()
         if not sel:
             return
         vals = self.d_tree.item(sel[0], "values")
-        for f, v in zip(daily_log.FIELDS, vals):
-            self.d_vars[f].set("" if v is None else str(v))
-        self._update_pct()
+        # Loading a row into the form is not itself an edit; it becomes dirty
+        # only if the operator then changes a field (#3).
+        with self._suspend_dirty_tracking():
+            for f, v in zip(daily_log.FIELDS, vals):
+                self.d_vars[f].set("" if v is None else str(v))
+            self._update_pct()
+        self._daily_dirty = False
 
     def _sync_filter_values(self) -> None:
         """Keep the Show-rat filter's options in step with the roster; if the
@@ -441,12 +529,15 @@ class RecordsManager:
         """Registry rows for the list, newest-first, narrowed by the rat filter;
         plus any annotated session absent from the registry (as a minimal
         synthetic row) so old notes stay reachable."""
+        ignored = self.ignored_sessions
         reg_ids = {r.get("session_id", "").strip() for r in self.registry_rows
                    if r.get("session_id")}
-        rows: List[Dict[str, str]] = list(self.registry_rows)
+        rows: List[Dict[str, str]] = [
+            r for r in self.registry_rows
+            if r.get("session_id", "").strip() not in ignored]
         for r in self.annot_rows:
             sid = r.get("session_id", "").strip()
-            if sid and sid not in reg_ids:
+            if sid and sid not in reg_ids and sid not in ignored:
                 rows.append({"session_id": sid, "animal": r.get("animal", ""),
                              "date": r.get("date", "")})
         sel = self.s_filter.get().strip()
@@ -461,8 +552,13 @@ class RecordsManager:
         prev = self.current_session_id
         self.s_tree.delete(*self.s_tree.get_children())
         self._session_row_by_item = {}
-        annotated = {r.get("session_id", "").strip() for r in self.annot_rows
-                     if r.get("session_id")}
+        # "Annot = yes" means the session has *content* (procedures or notes),
+        # not merely a row in the CSV - an all-blank row isn't an annotation (#5).
+        annotated = {
+            r.get("session_id", "").strip() for r in self.annot_rows
+            if r.get("session_id")
+            and ((r.get("procedures") or "").strip()
+                 or (r.get("notes") or "").strip())}
         reselect = None
         for r in self._session_rows_filtered():
             sid = str(r.get("session_id", "")).strip()
@@ -474,22 +570,54 @@ class RecordsManager:
                 reselect = iid
         children = self.s_tree.get_children()
         # Selecting programmatically doesn't reliably raise <<TreeviewSelect>>,
-        # so populate the detail panel explicitly after auto-selecting.
+        # so populate the detail panel explicitly. Use _show_session (not the
+        # _on_session_select guard) so a programmatic refresh never prompts (#3).
         if reselect:
             self.s_tree.selection_set(reselect)
             self.s_tree.see(reselect)
-            self._on_session_select()
+            self._show_session(self._session_row_by_item.get(reselect, {}))
         elif children:
             self.s_tree.selection_set(children[0])
-            self._on_session_select()
+            self._show_session(self._session_row_by_item.get(children[0], {}))
         else:
             self._clear_session_detail()
 
+    def _item_for_session(self, sid: str) -> Optional[str]:
+        """The Treeview item id currently showing ``sid`` (or None)."""
+        for iid, row in self._session_row_by_item.items():
+            if str(row.get("session_id", "")).strip() == sid:
+                return iid
+        return None
+
     def _on_session_select(self, _event=None) -> None:
+        """User picked a session row: guard an unsaved annotation on the row we're
+        leaving, then show the new one (#3)."""
+        if self._suspend_session_select:
+            return
         sel = self.s_tree.selection()
         if not sel:
             return
         row = self._session_row_by_item.get(sel[0], {})
+        new_sid = str(row.get("session_id", "")).strip()
+        if (self.current_session_id and new_sid != self.current_session_id
+                and self._annotation_dirty()
+                and not self._confirm_discard(
+                    f"the annotation for {self.current_session_id}")):
+            # Put the selection back on the session being edited, without
+            # re-triggering this guard.
+            prev = self._item_for_session(self.current_session_id)
+            if prev:
+                self._suspend_session_select = True
+                try:
+                    self.s_tree.selection_set(prev)
+                    self.s_tree.see(prev)
+                finally:
+                    self._suspend_session_select = False
+            return
+        self._show_session(row)
+
+    def _show_session(self, row: Dict[str, str]) -> None:
+        """Populate the read-only panels + annotation editor for ``row``."""
         self.current_session_id = str(row.get("session_id", "")).strip()
         self._set_readonly(self.s_metrics,
                            "\n".join(session_detail.metrics_lines(row)))
@@ -518,6 +646,7 @@ class RecordsManager:
         self._set_readonly(self.s_log, "Select a session to view its log.")
         self.a_proc.delete("1.0", "end")
         self.a_notes.delete("1.0", "end")
+        self._reset_annotation_modified()
 
     def _load_annotation(self, sid: str) -> None:
         row = session_annotations.SessionAnnotations(
@@ -527,6 +656,15 @@ class RecordsManager:
         if row:
             self.a_proc.insert("1.0", row.get("procedures", ""))
             self.a_notes.insert("1.0", row.get("notes", ""))
+        # A freshly loaded editor is clean; edits after this mark it dirty (#3).
+        self._reset_annotation_modified()
+
+    def _reset_annotation_modified(self) -> None:
+        for widget in (getattr(self, "a_proc", None), getattr(self, "a_notes", None)):
+            try:
+                widget.edit_modified(False)
+            except (AttributeError, tk.TclError):
+                pass
 
     def _save_annotation(self) -> None:
         sid = self.current_session_id.strip()
@@ -535,21 +673,34 @@ class RecordsManager:
             return
         reg = {r.get("session_id", "").strip(): r for r in self.registry_rows}
         meta = reg.get(sid, {})
+        # Denormalised animal/date: prefer the registry, but for an orphan
+        # session (annotated, not in the registry) fall back to the existing
+        # annotation row so a re-save doesn't blank those fields (#1).
+        prior = session_annotations.SessionAnnotations(
+            self.annot_rows).for_session(sid) or {}
+        animal = str(meta.get("animal") or "").strip() or prior.get("animal", "")
+        date = str(meta.get("date") or "").strip() or prior.get("date", "")
         edit = {
             "session_id": sid,
-            "animal": meta.get("animal", ""),
-            "date": meta.get("date", ""),
+            "animal": animal,
+            "date": date,
             "procedures": self.a_proc.get("1.0", "end").strip(),
             "notes": self.a_notes.get("1.0", "end").strip(),
         }
         try:
-            merged = session_annotations.upsert_rows(
-                session_annotations.load_rows(self.annot_path), [edit])
+            # Read-for-write so a present-but-unreadable CSV aborts the save
+            # rather than being overwritten with just this row (#12).
+            existing = session_annotations.load_rows_for_write(self.annot_path)
+            merged = session_annotations.upsert_rows(existing, [edit])
             session_annotations.write_rows(merged, self.annot_path)
-        except OSError as e:
+        except RecordsFileError as e:
+            messagebox.showerror("Save refused", str(e))
+            return
+        except (OSError, ValueError) as e:
             messagebox.showerror("Save failed", str(e))
             return
         self._set_status(f"Saved annotation for {sid}.")
+        self._reset_annotation_modified()
         self._load_data()
         self._refresh_sessions()
 
@@ -630,6 +781,14 @@ class RecordsManager:
 
     def _roster_save(self) -> None:
         try:
+            # Refuse to overwrite a present-but-unreadable animals.json (a save
+            # on top of a corrupt file would wipe the roster; #12). Absent is
+            # fine - write_records will create it.
+            animals.load_records_for_write(self.animals_path)
+        except RecordsFileError as e:
+            messagebox.showerror("Save refused", str(e))
+            return
+        try:
             cleaned = animals.write_records(self.roster, self.animals_path)
         except ValueError as e:
             messagebox.showerror("Invalid roster", str(e))
@@ -644,6 +803,11 @@ class RecordsManager:
         self.d_animal["values"] = self.animal_ids
         self._sync_filter_values()
         self._refresh_daily_table()
+        # A roster change also affects the Sessions rat filter and the Dashboard
+        # per-rat strip/toggles, so refresh those too (#2). (Not _refresh_all -
+        # that would clear an in-progress Daily form.)
+        self._refresh_sessions()
+        self._refresh_dashboard()
 
     # ---- Dashboard tab ----------------------------------------------------
     def _build_dashboard_tab(self) -> None:
@@ -692,6 +856,12 @@ class RecordsManager:
                 del self.dash_rat_show[aid]
 
     def _refresh_dashboard(self) -> None:
+        date = self.dash_date.get().strip() or _today_iso()
+        if not _is_iso_date(date):
+            # Keep the last good view rather than reading against a mis-typed
+            # date (which would silently show every rat as "not logged"); #14.
+            self._set_status(f"Dashboard date '{date}' must be YYYY-MM-DD.")
+            return
         self._sync_dash_toggles()
         for w in (*self.dash_strip.winfo_children(),
                   *self.dash_body.winfo_children()):
@@ -699,7 +869,6 @@ class RecordsManager:
         # Drop the previous chart canvas reference (its Tk widget was just
         # destroyed); the combined chart repopulates this per refresh.
         self._dash_canvases = []
-        date = self.dash_date.get().strip() or _today_iso()
         missing = dashboard.not_logged_today(self.daily, self.animal_ids, date)
         for aid in self.animal_ids:
             self._dashboard_status_row(self.dash_strip, aid, date,
@@ -891,6 +1060,9 @@ class RecordsManager:
 
     # ---------------------------------------------------------------- actions
     def _on_reload(self) -> None:
+        if self._has_unsaved() and not self._confirm_discard(
+                "reloading will replace the form/editor contents"):
+            return
         self._load_data()
         self.d_animal["values"] = self.animal_ids
         self._sync_filter_values()
@@ -898,10 +1070,29 @@ class RecordsManager:
         self._set_status("Reloaded from disk.")
 
     def _on_generate(self) -> None:
+        if self._has_unsaved() and not self._confirm_discard(
+                "Generate refreshes every view from disk"):
+            return
         self._run_async("Generating files...", self._do_generate)
 
     def _on_import(self) -> None:
+        if self._has_unsaved() and not self._confirm_discard(
+                "Import refreshes every view from disk"):
+            return
         self._run_async("Importing from Excel...", self._do_import)
+
+    def _on_close(self) -> None:
+        """Window-close guard: warn on a running build or unsaved edits (#3)."""
+        if self._busy:
+            if not messagebox.askyesno(
+                    "Quit?", "A build is still running. Quit anyway?",
+                    default="no"):
+                return
+        elif self._has_unsaved() and not messagebox.askyesno(
+                "Quit?", "You have unsaved changes. Quit anyway?",
+                default="no"):
+            return
+        self.root.destroy()
 
     def _do_generate(self) -> str:
         log = [self._build_registry_inprocess(),
