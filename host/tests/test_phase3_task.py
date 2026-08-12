@@ -24,16 +24,22 @@ from tmaze.core.phase3.trial_sequence import LEFT, RIGHT, TrialConfig, TrialSequ
 
 
 def frame(valid=True, choice_entered=None, outbound_used_stem=False,
-          loop_closed=None, choice_committed=None):
+          loop_closed=None, choice_committed=None, left_hub_via_stem=None):
     """A minimal TaskEventFrame stand-in (only the fields Phase3Task reads).
 
     ``choice_committed`` is the shared once-per-excursion commit edge Phase3Task
     scores off (task_events.py, FW-0020); ``choice_entered`` is retained for the
-    fields the estimator sets on the same tick."""
+    fields the estimator sets on the same tick. Phase3Task now scores on the
+    hub-departure credential ``left_hub_via_stem`` (docs/decisions/0099); it
+    defaults to mirroring ``outbound_used_stem`` (both are true on a genuine cued
+    trial) so the existing scoring tests read unchanged, and the divider-jump case
+    sets them apart explicitly."""
+    if left_hub_via_stem is None:
+        left_hub_via_stem = outbound_used_stem
     return types.SimpleNamespace(
         valid=valid, choice_entered=choice_entered,
         outbound_used_stem=outbound_used_stem, loop_closed=loop_closed,
-        choice_committed=choice_committed)
+        choice_committed=choice_committed, left_hub_via_stem=left_hub_via_stem)
 
 
 def side_of(arm):
@@ -82,6 +88,19 @@ class TestPhase3Task(unittest.TestCase):
         t = make_task()
         correct = t.current_correct_arm()
         d = t.update(frame(choice_committed=side_of(correct), outbound_used_stem=False))
+        self.assertIsNone(d.outcome)
+        self.assertFalse(d.reward)
+        self.assertEqual(t.index, 0)
+
+    def test_divider_jump_choice_is_not_scored(self):
+        # docs/decisions/0099: the trip visited the stem (outbound_used_stem) but
+        # did NOT depart the hub up the stem (left_hub_via_stem is False) - e.g. it
+        # set off up a side arm and hopped over the divider into the stem. That is
+        # not a genuine trial start, so a "correct" commit must not score/reward.
+        t = make_task()
+        correct = t.current_correct_arm()
+        d = t.update(frame(choice_committed=side_of(correct),
+                           outbound_used_stem=True, left_hub_via_stem=False))
         self.assertIsNone(d.outcome)
         self.assertFalse(d.reward)
         self.assertEqual(t.index, 0)
@@ -259,6 +278,13 @@ class IntegrationHarness:
         decision, i.e. where a stem-gated choice is scored)."""
         return self.run([P_HUB, P_STEM, P_JUNCTION, _ARM_PT[arm]])
 
+    def jump_and_choose(self, arm, via=LEFT):
+        """The divider-jump route (docs/decisions/0099): HUB -> a return arm ->
+        (hop over the divider into) stem -> junction -> the given choice arm. The
+        stem IS visited (outbound_used_stem becomes true) but the trip never
+        DEPARTED the hub up the stem (left_hub_via_stem stays false)."""
+        return self.run([P_HUB, _RET_PT[via], P_STEM, P_JUNCTION, _ARM_PT[arm]])
+
     def return_home(self, arm):
         """Choice arm -> matching return arm -> HUB (closes the lap)."""
         return self.run([_RET_PT[arm], P_HUB])
@@ -300,6 +326,26 @@ class TestPhase3Integration(unittest.TestCase):
         d = h.run([P_HUB, P_LRETURN, P_LCHOICE])
         self.assertIsNone(d.outcome)
         self.assertEqual(h.task.index, 0)
+
+    def test_divider_jump_choice_is_not_scored_then_real_trip_scores(self):
+        # docs/decisions/0099: the rat sets off up a return arm, hops over the
+        # divider into the stem, then makes the "correct" choice. The stem is
+        # visited (outbound_used_stem true) but the trip never departed the hub up
+        # the stem, so it is not a genuine trial: no score, no reward, and the
+        # trial is preserved. A subsequent genuine hub->stem trip scores that same
+        # trial.
+        h = IntegrationHarness()
+        correct = h.task.current_correct_arm()
+        d = h.jump_and_choose(correct)
+        self.assertIsNone(d.outcome)
+        self.assertFalse(d.reward)
+        self.assertEqual(h.task.index, 0)
+        # Back home, then a proper stem departure scores the preserved trial 0.
+        h.return_home(correct)
+        d = h.out_and_choose(correct)
+        self.assertEqual(d.outcome, CORRECT)
+        self.assertTrue(d.reward)
+        self.assertEqual(d.trial_index, 0)
 
     def test_runs_to_completion(self):
         h = IntegrationHarness()

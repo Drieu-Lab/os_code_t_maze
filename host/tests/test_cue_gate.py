@@ -150,12 +150,18 @@ class TestChoiceCueOutboundLeg(unittest.TestCase):
         self.assertIsNone(d.desired)
         self.assertTrue(d.stopped)
 
-    def test_credential_does_not_gate_the_return_cue(self):
-        # The two credentials are independent: a return cue on a genuine inbound
-        # leg fires even though that trip's choice credential has been cleared.
+    def test_hub_departure_credential_gates_the_return_cue(self):
+        # docs/decisions/0099 supersedes the old "credentials are independent"
+        # stance: the return cue now shares the reward's hub-departure credential,
+        # so a trip that visited the stem but never DEPARTED the hub up it (the
+        # divider-jump case: outbound_used_stem true, left_hub_via_stem false) gets
+        # no return cue.
         g = self.gate
         d = _valid(g, LEFT_RETURN, outbound=True, on_leg=False)
-        self.assertEqual(d.desired, RETURN)
+        self.assertIsNone(d.desired)
+        self.assertIsNone(d.started)
+        # Latched for the whole visit: a later frame this visit stays silent too.
+        self.assertIsNone(_valid(g, LEFT_RETURN, outbound=True, on_leg=False).desired)
 
 
 class TestReturnCue(unittest.TestCase):
@@ -227,6 +233,17 @@ class TestReturnCue(unittest.TestCase):
         # Back to the hub, then a proper stem-out lap ends in the return arm.
         _valid(g, HUB)
         self.assertEqual(_valid(g, LEFT_RETURN, outbound=True).desired, RETURN)
+
+    def test_no_fire_without_hub_departure(self):
+        # docs/decisions/0099: even with a stem-out excursion, a trip that never
+        # DEPARTED the hub up the stem (the divider-jump: outbound true, on_leg
+        # false) earns no return cue - it shares the reward's credential now.
+        for zone in (LEFT_RETURN, RIGHT_RETURN):
+            g = CueGate()
+            d = _valid(g, zone, outbound=True, on_leg=False)
+            self.assertIsNone(d.desired)
+            self.assertIsNone(d.started)
+            self.assertFalse(d.skipped_return)
 
 
 class TestReset(unittest.TestCase):

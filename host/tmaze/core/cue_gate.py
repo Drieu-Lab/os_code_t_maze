@@ -22,13 +22,15 @@ Design (see docs/decisions/0045):
     fires). RETURN fails SAFE: the onset is a one-shot decision taken when the
     rat enters the return zone - if vision is not confident THEN, that return's
     cue is skipped for the whole visit (a missed cue beats a mis-placed one).
-  - RETURN also requires an OUTWARD EXCURSION first: the tone only fires if the
-    rat reached the return arm AFTER running out via the stem, not if it started
-    a run by heading up a return arm from the hub. The caller passes the shared
-    ``outbound_used_stem`` credential (task_events: visited_since(CENTRAL_STEM,
-    HUB)) - the SAME predicate that gates a clean loop and the reward - so the
-    return cue keys off the same task-phase vocabulary as the choice cue's
-    up-stem direction gate rather than a bespoke latch (see docs/decisions/0061).
+  - RETURN also requires that the trip DEPARTED the hub up the stem: the tone
+    only fires if the rat reached the return arm on a genuine trial excursion, not
+    if it started a run by heading up a return arm from the hub NOR if it set off
+    up a side arm and later hopped into the stem over the divider. Originally this
+    used the looser ``outbound_used_stem`` (stem visited at all since the hub;
+    docs/decisions/0061), but that let a divider-jump trip earn a return cue (and
+    a reward) for a trial that never really started; the return cue now shares the
+    ``on_outbound_leg`` hub-departure credential the reward + choice cue use, so
+    all three agree on what a trial is (docs/decisions/0099).
   - CHOICE likewise requires that the trip DEPARTED the hub up the stem, via the
     shared ``on_outbound_leg`` credential (task_events: left_hub_via_stem; see
     docs/decisions/0067). Without it a rat running the lap backwards - out along a
@@ -140,18 +142,21 @@ class CueGate:
         leaving/re-entering a window. All edge logic therefore runs only on valid
         frames.
 
-        The two credentials are the caller's shared task-phase facts (task_events),
-        one per cue, and they carve the lap between them:
+        The caller's shared task-phase facts (task_events) credential the cues:
+
+        ``on_outbound_leg`` (CHOICE and RETURN) - this trip DEPARTED the hub up the
+        stem (task_events.left_hub_via_stem; docs/decisions/0067, 0099). Both cues
+        now key off it, the same credential the reward uses, so the cue, the
+        reward, and the score agree on what counts as a trial. A trip that set off
+        up a return arm - or up a side arm and then hopped into the stem over the
+        divider - gets no choice cue and no return cue. It is held for the whole
+        trip and cleared at the hub, so a rat that reverses back into the stem
+        after its choice hears the choice tone again - deliberately.
 
         ``outbound_used_stem`` (RETURN; docs/decisions/0061) - the stem was visited
-        since the hub, the same predicate that gates a clean loop / the reward. A
-        rat that starts a run by heading up a return arm gets no return cue.
-
-        ``on_outbound_leg`` (CHOICE; docs/decisions/0067) - this trip DEPARTED the
-        hub up the stem (task_events.left_hub_via_stem). A trip that set off up a
-        return arm gets no choice cue even while crossing the stem on its way home.
-        It is held for the whole trip, so a rat that reverses back into the stem
-        after its choice hears the tone again - deliberately.
+        at all since the hub. Kept as an additional guard on the return onset, but
+        it is implied by ``on_outbound_leg`` now that the return cue requires the
+        hub departure, so it no longer changes the decision on its own.
         """
         if not valid:
             return CueDecision(desired=self._active)
@@ -187,15 +192,18 @@ class CueGate:
         # --- ON: only when nothing is sounding. ---
         if self._active is None:
             if in_return and p.return_enabled:
-                # One-shot decision per visit. The return cue requires an OUTWARD
-                # EXCURSION first (outbound_used_stem; see docs/decisions/0061) -
-                # the same credential the reward/clean-loop use - so a run that
-                # starts up a return arm from the hub gets no cue. Among genuine
-                # returns it fails SAFE: confident -> fire; otherwise skip this
-                # whole return's cue (no later retry).
+                # One-shot decision per visit. The return cue requires this trip to
+                # have DEPARTED the hub up the stem (on_outbound_leg; docs/decisions/
+                # 0099) - the same credential the reward + choice cue use - so a run
+                # that starts up a return arm from the hub, or up a side arm and
+                # then hops into the stem over the divider, gets no cue. (The older
+                # outbound_used_stem guard is kept for continuity but is implied by
+                # on_outbound_leg; docs/decisions/0061.) Among genuine returns it
+                # fails SAFE: confident -> fire; otherwise skip this whole return's
+                # cue (no later retry).
                 if not self._return_visit_decided:
-                    if not outbound_used_stem:
-                        pass  # not a genuine return (no stem-out); no cue
+                    if not (outbound_used_stem and on_outbound_leg):
+                        pass  # not a genuine trial excursion (no hub->stem start)
                     elif confident:
                         self._active = RETURN
                         started = RETURN

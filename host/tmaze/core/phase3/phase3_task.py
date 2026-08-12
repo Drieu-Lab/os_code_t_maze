@@ -17,12 +17,14 @@ Division of labour (see docs/decisions/0046):
 
 This mirrors the firmware's trial FSM (task_core.h ``step``) but keyed off
 vision edges rather than beams: a choice is scored on the shared once-per-trip
-``choice_committed`` edge (task_events.py; gated by ``outbound_used_stem`` so only
-a genuine up-the-stem cued trial counts), and the trial advances on
-``loop_closed`` (the rat's return to the hub) - the same choice-then-return
-structure, resolved from continuous position instead of the ENTRY/EXIT/CHOICE/
-RETURN beam sequence. The once-per-trip guard is the shared edge, not a local
-latch (docs/decisions/0055, FW-0020).
+``choice_committed`` edge (task_events.py; gated by ``left_hub_via_stem`` so only
+a trip that actually DEPARTED the hub up the stem - a genuine trial start -
+counts), and the trial advances on ``loop_closed`` (the rat's return to the hub)
+- the same choice-then-return structure, resolved from continuous position
+instead of the ENTRY/EXIT/CHOICE/RETURN beam sequence. The once-per-trip guard is
+the shared edge, not a local latch (docs/decisions/0055, FW-0020). The scoring
+credential is the hub-departure one the choice cue also uses, so the cue, the
+reward, and the score agree on what a trial is (docs/decisions/0067, 0099).
 
 Pure and single-threaded (the Phase 3 actuation thread), like the other cores;
 no Tk/OpenCV/serial, no locks.
@@ -196,7 +198,7 @@ class Phase3Task:
         """Fold one TaskEventFrame; return the trial decision for this tick.
 
         ``frame`` is a duck-typed task_events.TaskEventFrame (fields read by name:
-        ``valid``, ``choice_committed``, ``outbound_used_stem``, ``loop_closed``).
+        ``valid``, ``choice_committed``, ``left_hub_via_stem``, ``loop_closed``).
         Invalid frames are inert (no scoring/advance), so a tracking dropout never
         fabricates a choice or advances a trial.
         """
@@ -212,13 +214,17 @@ class Phase3Task:
 
         # --- Score the choice on the SHARED once-per-excursion choice-commit edge
         # (task_events.choice_committed; docs/decisions/0055, FW-0020). A genuine
-        # cued trial is an up-the-stem excursion into a choice arm, so we still
-        # gate on outbound_used_stem; a non-stem commit yields no score and leaves
-        # the trial in place (the trip's single commit is spent, but the trial
-        # index only advances after a real score, so the sequence is preserved).
-        # _awaiting_return blocks a second score before the rat returns home. ---
+        # cued trial is a trip that DEPARTED the hub up the stem, so we gate on
+        # left_hub_via_stem - the same hub-departure credential the choice cue uses
+        # (docs/decisions/0067, 0099), not the looser outbound_used_stem (which is
+        # also true when the rat set off up a side arm and later hopped into the
+        # stem over the divider). A commit on such a non-trial excursion yields no
+        # score and leaves the trial in place (the trip's single commit is spent,
+        # but the trial index only advances after a real score, so the sequence is
+        # preserved). _awaiting_return blocks a second score before the rat returns
+        # home. ---
         choice_side = getattr(frame, "choice_committed", None)
-        if (choice_side in _ARM_OF_SIDE and getattr(frame, "outbound_used_stem", False)
+        if (choice_side in _ARM_OF_SIDE and getattr(frame, "left_hub_via_stem", False)
                 and not self._awaiting_return):
             chosen = _ARM_OF_SIDE[choice_side]
             is_correct = (chosen == correct)

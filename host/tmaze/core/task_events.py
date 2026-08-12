@@ -65,16 +65,18 @@ class TaskEventFrame:
     ``trip_id`` bumps on each commit so consumers can tell excursions apart.
 
     ``left_hub_via_stem`` and ``outbound_used_stem`` sound alike but answer
-    different questions, and the difference matters to the cues (see
-    docs/decisions/0067). ``outbound_used_stem`` asks whether the stem has been
-    visited AT ALL since the HUB, so it is true on a backwards lap too, once the
-    animal has walked into the stem from the junction; the RETURN cue can use it
-    because a return arm is a different zone. ``left_hub_via_stem`` asks how the
-    trip BEGAN - the animal stepped from the HUB into the stem - so it stays false
-    for a trip that set off up a return arm. That is what the CHOICE cue needs,
-    since its own window IS the stem. ``departed_hub_via_stem`` is the rising edge
-    of that level - true only on the single tick the departure happens - which the
-    Phase 3 controller uses to stamp a trial start once per outbound run.
+    different questions (see docs/decisions/0067). ``outbound_used_stem`` asks
+    whether the stem has been visited AT ALL since the HUB, so it is true on a
+    backwards lap too, once the animal has walked into the stem from the junction.
+    ``left_hub_via_stem`` asks how the trip BEGAN - the animal stepped from the HUB
+    into the stem - so it stays false for a trip that set off up a return arm, or
+    up a side arm and then hopped into the stem over the divider. It is the "this
+    is a genuine trial excursion" credential: the CHOICE cue needs it (its own
+    window IS the stem), and the reward + the RETURN cue now share it too, so a
+    non-trial excursion earns no cue and no reward (docs/decisions/0099).
+    ``departed_hub_via_stem`` is the rising edge of that level - true only on the
+    single tick the departure happens - which the Phase 3 controller uses to stamp
+    a trial start once per outbound run.
     """
     now: float
     valid: bool
