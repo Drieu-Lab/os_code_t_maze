@@ -18,11 +18,14 @@ import unittest
 
 from tmaze.core.records import RecordsFileError
 from tmaze.core.records.daily_log import (
+    REGIME_AD_LIB,
     DailyLog,
     compute_pct_baseline,
+    is_ad_lib,
     load,
     load_rows,
     load_rows_for_write,
+    normalize_regime,
     row_has_weight,
     upsert_rows,
     validate_entry,
@@ -179,6 +182,52 @@ class TestValidateEntry(unittest.TestCase):
         # supp_water is not a hard-numeric field (free text like "2 min").
         self.assertEqual(validate_entry(self._row(supp_water="2 min")), [])
 
+    def test_blank_and_known_regimes_are_allowed(self):
+        for regime in ("", "restriction", "ad_lib", "Ad-Lib", "adlib"):
+            self.assertEqual(validate_entry(self._row(water_regime=regime)), [],
+                             f"regime {regime!r} should be accepted")
+
+    def test_unknown_regime_is_rejected(self):
+        errors = validate_entry(self._row(water_regime="weekend?"))
+        self.assertTrue(any("regime" in e.lower() for e in errors))
+
+
+class TestWaterRegime(unittest.TestCase):
+    """ad-lib (off-restriction) day classification (ADR-0100 / FW-0030)."""
+
+    def test_normalize_regime_folds_variants(self):
+        for value in ("ad_lib", "ad-lib", "Ad Lib", "ADLIB"):
+            self.assertEqual(normalize_regime(value), REGIME_AD_LIB)
+        for value in ("", "restriction", "normal", "weird", None):
+            self.assertEqual(normalize_regime(value), "")
+
+    def test_is_ad_lib(self):
+        self.assertTrue(is_ad_lib({"water_regime": "ad_lib"}))
+        self.assertTrue(is_ad_lib({"water_regime": "Ad-Lib"}))
+        self.assertFalse(is_ad_lib({"water_regime": ""}))
+        self.assertFalse(is_ad_lib({"water_regime": "restriction"}))
+        self.assertFalse(is_ad_lib(None))
+        self.assertFalse(is_ad_lib({}))
+
+    def test_roundtrip_preserves_regime(self):
+        rows = [{"animal_id": "600", "date": "2026-08-08",
+                 "water_regime": "ad_lib"}]
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "daily_log.csv")
+            write_rows(rows, path)
+            back = load_rows(path)
+        self.assertTrue(is_ad_lib(back[0]))
+
+    def test_v1_csv_without_column_reads_as_restriction(self):
+        # A pre-v2 file (no water_regime column) still loads; the field is "".
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "daily_log.csv")
+            with open(path, "w", encoding="utf-8", newline="") as fh:
+                fh.write(_CSV)
+            back = load_rows(path)
+        self.assertFalse(any(is_ad_lib(r) for r in back))
+        self.assertEqual(back[0].get("water_regime"), "")
+
 
 class TestComputePctBaseline(unittest.TestCase):
     def test_fraction_rounded_4dp(self):
@@ -209,7 +258,7 @@ class TestWriteRows(unittest.TestCase):
             write_rows(rows, path)
             with open(path, "r", encoding="utf-8", newline="") as fh:
                 first = fh.readline()
-            self.assertEqual(first, "# schema_version=1\n")
+            self.assertEqual(first, "# schema_version=2\n")
             back = load_rows(path)
         self.assertEqual(len(back), 2)
         self.assertEqual(back[0]["animal_id"], "600")

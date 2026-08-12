@@ -107,6 +107,7 @@ def weight_status(log: daily_log.DailyLog, animal_id: str,
         "animal_id": str(animal_id).strip(),
         "date": str(date).strip(),
         "logged": row is not None,
+        "ad_lib": daily_log.is_ad_lib(row),
         "weight_g": _num((row or {}).get("weight_g")),
         "baseline_g": _num((row or {}).get("baseline_g")),
         "pct_baseline": pct,
@@ -125,12 +126,20 @@ def not_logged_today(log: daily_log.DailyLog, animal_ids: List[str],
     ``"not logged"`` when there's no row for the date; ``"not weighed"`` when a
     row exists but its weight is blank. Rats fully logged + weighed are omitted,
     so a truthy result means "something's missing".
+
+    An ad-lib (off-restriction) day is expected to have no restriction data, so a
+    row marked ``water_regime=ad_lib`` never raises the not-weighed alarm
+    (ADR-0100). A day with *no row at all* still reads as "not logged" - the
+    operator marks the weekend (e.g. via the Records Manager span helper) so the
+    ad-lib rows exist to suppress the alarm.
     """
     out: Dict[str, str] = {}
     for aid in animal_ids:
         row = log.for_date(aid, date)
         if row is None:
             out[str(aid).strip()] = "not logged"
+        elif daily_log.is_ad_lib(row):
+            continue
         elif _num(row.get("weight_g")) is None:
             out[str(aid).strip()] = "not weighed"
     return out
@@ -207,6 +216,7 @@ def weight_trend(log: daily_log.DailyLog, animal_id: str, end_date: str,
             "date": row.get("date", "").strip(),
             "weight_g": w,
             "pct_baseline": pct_baseline_of(row),
+            "ad_lib": daily_log.is_ad_lib(row),
         })
     out.sort(key=lambda r: r["date"])
     return out
@@ -223,6 +233,11 @@ def water_ml_trend(log: daily_log.DailyLog, registry_rows: List[Dict[str, Any]],
     animal within the window; ``total_ml`` is 0.0 when nothing numeric is
     recorded that day. If ``end_date`` doesn't parse, the window is unbounded.
 
+    Ad-lib (off-restriction) days are EXCLUDED: this trace is a read of the
+    *maintenance* water level (the amount holding the animal at target during
+    restriction), and a weekend of free water is a different regime that would
+    distort it (ADR-0100 / FW-0030). The % baseline trend still plots those days.
+
     This is the optional water overlay behind the dashboard's Show-water toggle;
     it stays sparse until the numeric ``water_ml``/``supp_water`` cells (or the
     registry's reward channels) are populated.
@@ -236,7 +251,8 @@ def water_ml_trend(log: daily_log.DailyLog, registry_rows: List[Dict[str, Any]],
 
     dates: set = set()
     for row in log.rows_for(animal_id):
-        if _in_window(_iso(row.get("date"))):
+        # Skip ad-lib days entirely (they aren't maintenance-level intake).
+        if _in_window(_iso(row.get("date"))) and not daily_log.is_ad_lib(row):
             dates.add(row.get("date", "").strip())
     for r in registry_rows:
         if str(r.get("animal", "")).strip() == aid and _in_window(_iso(r.get("date"))):
@@ -245,6 +261,8 @@ def water_ml_trend(log: daily_log.DailyLog, registry_rows: List[Dict[str, Any]],
     out: List[Dict[str, Any]] = []
     for ds in dates:
         drow = log.for_date(aid, ds)
+        if daily_log.is_ad_lib(drow):
+            continue
         day_reg = registry_rows_for(registry_rows, aid, ds)
         total = water_breakdown(collect_water(drow, day_reg))["total_ml"]
         out.append({"date": ds, "total_ml": total})

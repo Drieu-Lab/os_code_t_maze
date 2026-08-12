@@ -82,7 +82,7 @@ criteria).
 | [FW-0027](#fw-0027-one-triggereffect-framework-behind-phases-1-2a-and-3) | One trigger/effect framework behind Phases 1, 2a and 3 | Rules engine + task-event layer + Phase 3 host | Proposed |
 | [FW-0028](#fw-0028-scope-the-session-summary-to-the-startstop-window) | Scope the session summary to the Start/Stop window | Session controller + summary + stats cores | Proposed |
 | [FW-0029](#fw-0029-real-water-timestamps--hours-since-water-in-the-daily-table) | Real water timestamps + hours-since-water in the daily table | Daily husbandry table + animal_state | Proposed |
-| [FW-0030](#fw-0030-weekend-ad-libitum-water-accounting-in-the-daily-table--dashboard) | Weekend ad-libitum water accounting in the daily table + dashboard | Daily husbandry table + dashboard | Proposed |
+| [FW-0030](#fw-0030-weekend-ad-libitum-water-accounting-in-the-daily-table--dashboard) | Weekend ad-libitum water accounting in the daily table + dashboard | Daily husbandry table + dashboard | Done (ADR-0100) |
 | [FW-0031](#fw-0031-latching-toggle-on-note-tags-that-span-subsequent-trials) | Latching (toggle-on) note tags that span subsequent trials | Note tags + session notes + summary + Session panel | Proposed |
 | [FW-0032](#fw-0032-per-port-leftright-reward-volume-calibration) | Per-port (left/right) reward-volume calibration | Reward calibration | Proposed |
 | [FW-0033](#fw-0033-structural-cross-reference-hardening-for-the-coordinated-records) | Structural cross-reference hardening for the coordinated records | Records cores + Records Manager | Proposed |
@@ -1453,7 +1453,13 @@ covariate is derived (a small follow-up to ADR-0076/0077).
 
 ### FW-0030: Weekend ad-libitum water accounting in the daily table + dashboard
 
-- **Status:** Proposed
+- **Status:** Done — implemented in [ADR-0100](decisions/0100-ad-lib-water-regime.md)
+  (2026-08-11): a `water_regime` column (daily_log schema v1->v2) + dashboard
+  interpretation + a Records Manager Regime control and "Mark ad-lib span"
+  dialog. The chosen answers to the open questions below: a per-row
+  `water_regime` value (not a span marker), the within-day on/off boundary reuses
+  the existing `water_on`/`water_off` cells, and ad-lib days feed the % baseline
+  trend but NOT the maintenance-water trace.
 - **Date added:** 2026-08-09
 - **Author / Agent:** Agent (Cursor) on behalf of Celine
 - **Area / modules:** `os_code_t_maze_resources/records/animal/daily_log.csv` +

@@ -167,5 +167,49 @@ class TestWaterMlTrend(unittest.TestCase):
         self.assertEqual(series, [{"date": "2026-07-05", "total_ml": 4.0}])
 
 
+class TestAdLibRegime(unittest.TestCase):
+    """Ad-lib (off-restriction) days change how the signals read (ADR-0100)."""
+
+    _ROWS = [
+        {"animal_id": "600", "date": "2026-08-07", "weight_g": "340",
+         "baseline_g": "348"},                                    # restriction
+        {"animal_id": "600", "date": "2026-08-08", "weight_g": "",
+         "water_regime": "ad_lib", "water_on": "5pm"},            # ad-lib, no weight
+        {"animal_id": "600", "date": "2026-08-09", "weight_g": "345",
+         "baseline_g": "348", "water_regime": "ad_lib"},          # ad-lib, weighed
+        {"animal_id": "600", "date": "2026-08-10", "weight_g": "338",
+         "baseline_g": "348", "water_regime": "ad_lib", "water_off": "2pm"},
+    ]
+
+    def setUp(self):
+        self.log = DailyLog(self._ROWS)
+
+    def test_weight_status_flags_ad_lib(self):
+        s = dashboard.weight_status(self.log, "600", "2026-08-08")
+        self.assertTrue(s["ad_lib"])
+        self.assertFalse(dashboard.weight_status(self.log, "600",
+                                                 "2026-08-07")["ad_lib"])
+
+    def test_ad_lib_day_suppresses_not_weighed_alarm(self):
+        # 08-08 is ad-lib with no weight -> not an alarm; a plain no-row day is.
+        out = dashboard.not_logged_today(self.log, ["600"], "2026-08-08")
+        self.assertEqual(out, {})
+        missing = dashboard.not_logged_today(self.log, ["600"], "2026-08-11")
+        self.assertEqual(missing["600"], "not logged")
+
+    def test_ad_lib_days_excluded_from_water_trend(self):
+        series = dashboard.water_ml_trend(self.log, [], "600",
+                                          "2026-08-10", days=14)
+        self.assertEqual([r["date"] for r in series], ["2026-08-07"])
+
+    def test_weight_trend_keeps_ad_lib_with_flag(self):
+        series = dashboard.weight_trend(self.log, "600", "2026-08-10", days=14)
+        dates = {r["date"]: r["ad_lib"] for r in series}
+        # The ad-lib days that HAVE a weight still plot (08-08 has no weight).
+        self.assertIn("2026-08-09", dates)
+        self.assertTrue(dates["2026-08-09"])
+        self.assertFalse(dates["2026-08-07"])
+
+
 if __name__ == "__main__":
     unittest.main()

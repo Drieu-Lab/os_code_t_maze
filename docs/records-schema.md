@@ -17,7 +17,7 @@ provenance-labelled channels**, never summed (see the registry below).
 | Artifact | Repo / location | Written by | schema_version | ADR |
 | --- | --- | --- | --- | --- |
 | `animals.json` | resources · `records/animal/` | Records Manager GUI (Roster) or hand-edited | 1 | 0075 |
-| `daily_log.csv` | resources · `records/animal/` | Records Manager GUI (Daily) or `build_daily_log.py` (from the Entry sheet) | 1 (comment line) | 0076 |
+| `daily_log.csv` | resources · `records/animal/` | Records Manager GUI (Daily) or `build_daily_log.py` (from the Entry sheet) | 2 (comment line) | 0076, 0100 |
 | `session_annotations.csv` | resources · `records/animal/` | Records Manager GUI (Sessions) or `build_session_training_log.py --import-annotations` | 1 (comment line) | 0082 / 0085 |
 | `animal_state.json` | code · per-bundle `config/` | `session_controller` at Start (core `animal_state.py`) | 1 | 0077 |
 | `session_meta.json` | code · per-bundle `config/` | `session_controller` at Start (core `session_meta.py`) | 1 | 0079 |
@@ -36,16 +36,24 @@ Canonical animal identity — the join key between recordings and husbandry.
 - `animals[]` — `{id, aliases[]}`: the canonical id plus any loose spellings that
   normalize to it (ADR-0075).
 
-## `daily_log.csv` (v1)
+## `daily_log.csv` (v2)
 
 Machine-readable daily husbandry table (source of truth); a leading
-`# schema_version=1` comment line precedes the header. One row per `(animal, date)`:
+`# schema_version=2` comment line precedes the header. One row per `(animal, date)`:
 
 `animal_id, date (YYYY-MM-DD), weight_g, baseline_g, pct_baseline, water_on,
-water_off, water_ml, supp_water, notes`.
+water_off, water_ml, supp_water, notes, water_regime`.
 
 `water_on`/`water_off`/`supp_water` are free text today ("6pm", "2 min"); see
 FW-0029 for hardening them into real timestamps.
+
+`water_regime` (schema v2, ADR-0100) marks the day's regime: blank or
+`restriction` (the default, on water restriction) vs `ad_lib` (off-restriction,
+e.g. a weekend of free water). Appended last so a v1 reader ignores it and a v1
+file (no column) loads as `""` == restriction. An `ad_lib` day is excluded from
+the dashboard's water-maintenance trace and never raises a not-weighed alarm, but
+still plots on the % baseline trend; the within-day on/off boundary reuses the
+`water_on`/`water_off` cells.
 
 A save merges by `(animal_id, date)` (an [upsert](glossary.md#upsert-keyed-merge),
 never a blind overwrite) and refuses to run if the file is present but

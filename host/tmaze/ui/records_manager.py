@@ -294,8 +294,20 @@ class RecordsManager:
         ttk.Entry(form, textvariable=self.d_vars["notes"], width=48).grid(
             row=3, column=3, columnspan=3, sticky="we")
 
+        # Water regime (ADR-0100): restriction default vs ad-lib (off-restriction,
+        # e.g. weekends). The span button marks a whole Fri->Sun weekend at once.
+        ttk.Label(form, text="Water regime").grid(row=4, column=0, sticky="e",
+                                                  padx=4, pady=3)
+        self.d_regime = ttk.Combobox(
+            form, textvariable=self.d_vars["water_regime"],
+            values=["restriction", "ad_lib"], state="readonly", width=12)
+        self.d_regime.grid(row=4, column=1, sticky="w")
+        ttk.Button(form, text="Mark ad-lib span...",
+                   command=self._mark_adlib_span).grid(
+            row=4, column=2, columnspan=2, sticky="w", padx=4)
+
         btns = ttk.Frame(form)
-        btns.grid(row=4, column=0, columnspan=6, sticky="w", pady=(8, 0))
+        btns.grid(row=5, column=0, columnspan=6, sticky="w", pady=(8, 0))
         ttk.Button(btns, text="Save row", command=self._save_daily).pack(side="left")
         ttk.Button(btns, text="Clear form", command=self._clear_daily).pack(
             side="left", padx=(6, 0))
@@ -412,6 +424,9 @@ class RecordsManager:
             return
         pct = daily_log.compute_pct_baseline(edit["weight_g"], edit["baseline_g"])
         edit["pct_baseline"] = "" if pct is None else str(pct)
+        # Store the canonical regime ("ad_lib" or "" for restriction) so the
+        # column stays blank except on ad-lib days (ADR-0100).
+        edit["water_regime"] = daily_log.normalize_regime(edit["water_regime"])
         try:
             # Read-for-write so a present-but-unreadable CSV aborts the save
             # rather than being overwritten with just this row (#12).
@@ -435,6 +450,8 @@ class RecordsManager:
             for f in daily_log.FIELDS:
                 self.d_vars[f].set("")
             self.d_vars["date"].set(_today_iso())
+            # Show the default regime rather than a blank dropdown.
+            self.d_vars["water_regime"].set("restriction")
             self._update_pct()
         self._daily_dirty = False
 
@@ -448,8 +465,112 @@ class RecordsManager:
         with self._suspend_dirty_tracking():
             for f, v in zip(daily_log.FIELDS, vals):
                 self.d_vars[f].set("" if v is None else str(v))
+            # A blank regime cell means the restriction default; show it as such.
+            if not self.d_vars["water_regime"].get().strip():
+                self.d_vars["water_regime"].set("restriction")
             self._update_pct()
         self._daily_dirty = False
+
+    def _mark_adlib_span(self) -> None:
+        """Mark a date span (e.g. a Fri->Sun weekend) as ad-lib for one animal,
+        writing one ad_lib row per day (ADR-0100). Optional on/off times land on
+        the boundary days (water_on on the first day, water_off on the last), so
+        the within-day ad-lib start/end is captured in the existing time columns;
+        the middle days are fully ad-lib. Existing rows are upserted (weight etc.
+        preserved)."""
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Mark ad-lib span")
+        dlg.transient(self.root)
+        dlg.grab_set()
+        default_animal = (self.d_vars["animal_id"].get().strip()
+                          or (self.animal_ids[0] if self.animal_ids else ""))
+        v_animal = tk.StringVar(value=default_animal)
+        v_start = tk.StringVar(value=_today_iso())
+        v_start_t = tk.StringVar()
+        v_end = tk.StringVar(value=_today_iso())
+        v_end_t = tk.StringVar()
+        rows = [
+            ("Animal", v_animal, None),
+            ("Start date (YYYY-MM-DD)", v_start, None),
+            ("  on-time (optional, e.g. 5pm)", v_start_t, None),
+            ("End date (YYYY-MM-DD)", v_end, None),
+            ("  off-time (optional, e.g. 2pm)", v_end_t, None),
+        ]
+        for i, (label, var, _x) in enumerate(rows):
+            ttk.Label(dlg, text=label).grid(row=i, column=0, sticky="e",
+                                            padx=6, pady=3)
+            if label == "Animal":
+                ttk.Combobox(dlg, textvariable=var, values=self.animal_ids,
+                             width=14).grid(row=i, column=1, sticky="w", padx=6)
+            else:
+                ttk.Entry(dlg, textvariable=var, width=16).grid(
+                    row=i, column=1, sticky="w", padx=6)
+        result: Dict[str, str] = {}
+
+        def _ok():
+            result.update(animal=v_animal.get().strip(),
+                          start=v_start.get().strip(), start_t=v_start_t.get().strip(),
+                          end=v_end.get().strip(), end_t=v_end_t.get().strip())
+            dlg.destroy()
+
+        btns = ttk.Frame(dlg)
+        btns.grid(row=len(rows), column=0, columnspan=2, pady=(8, 6))
+        ttk.Button(btns, text="Mark ad-lib", command=_ok).pack(side="left")
+        ttk.Button(btns, text="Cancel", command=dlg.destroy).pack(
+            side="left", padx=(6, 0))
+        dlg.wait_window()
+        if not result:
+            return
+        self._apply_adlib_span(result)
+
+    def _apply_adlib_span(self, spec: Dict[str, str]) -> None:
+        aid = spec["animal"]
+        start, end = spec["start"], spec["end"]
+        if not aid:
+            messagebox.showwarning("Missing animal", "Pick an animal.")
+            return
+        if not _is_iso_date(start) or not _is_iso_date(end):
+            messagebox.showwarning(
+                "Bad date", "Start and End must both be YYYY-MM-DD.")
+            return
+        d0 = dt.date.fromisoformat(start)
+        d1 = dt.date.fromisoformat(end)
+        if d1 < d0:
+            messagebox.showwarning("Bad range", "End date is before Start date.")
+            return
+        if (d1 - d0).days > 31:
+            messagebox.showwarning("Range too long",
+                                   "Span is over 31 days - mark a shorter range.")
+            return
+        edits: List[Dict[str, str]] = []
+        n = (d1 - d0).days + 1
+        for i in range(n):
+            day = (d0 + dt.timedelta(days=i)).isoformat()
+            row = dict(self.daily.for_date(aid, day) or
+                       {"animal_id": aid, "date": day})
+            row["animal_id"], row["date"] = aid, day
+            row["water_regime"] = daily_log.REGIME_AD_LIB
+            if i == 0 and spec.get("start_t"):
+                row["water_on"] = spec["start_t"]
+            if i == n - 1 and spec.get("end_t"):
+                row["water_off"] = spec["end_t"]
+            edits.append(row)
+        try:
+            existing = daily_log.load_rows_for_write(self.daily_path)
+            merged = daily_log.upsert_rows(existing, edits)
+            daily_log.write_rows(merged, self.daily_path)
+        except RecordsFileError as e:
+            messagebox.showerror("Save refused", str(e))
+            return
+        except (OSError, ValueError) as e:
+            messagebox.showerror("Save failed", str(e))
+            return
+        self._set_status(f"Marked {n} day(s) ad-lib for {aid} "
+                         f"({start} \u2192 {end}).")
+        self._load_data()
+        self._refresh_daily_table()
+        self._refresh_dashboard()
+        self._refresh_status_banner()
 
     def _sync_filter_values(self) -> None:
         """Keep the Show-rat filter's options in step with the roster; if the
@@ -988,14 +1109,24 @@ class RecordsManager:
         ttk.Label(row, text=f"Rat {aid}", width=9).pack(side="left")
 
         status = dashboard.weight_status(self.daily, aid, date)
-        if missing:
+        pct_val = status["pct_baseline"]
+        if missing and not status["ad_lib"]:
             line = f"ALARM: {missing} today ({date})"
             fg = "#9C0006"
-        elif status["pct_baseline"] is None:
+        elif status["ad_lib"]:
+            # Off-restriction day: no not-weighed alarm; show the weight if it
+            # happens to be recorded (ADR-0100).
+            if pct_val is None:
+                line = "ad-lib (off restriction)"
+            else:
+                flag = " <90% FLAG" if status["below_threshold"] else ""
+                line = f"ad-lib \u00b7 % baseline: {pct_val * 100:.1f}%{flag}"
+            fg = "#9C0006" if status["below_threshold"] else "#2451b3"
+        elif pct_val is None:
             line = "no weight recorded today"
             fg = "#9C0006"
         else:
-            pct = status["pct_baseline"] * 100
+            pct = pct_val * 100
             flag = " <90% FLAG" if status["below_threshold"] else ""
             deficit = status["grams_to_threshold"] or 0.0
             need = f" (needs +{deficit:.1f} g to reach 90%)" if deficit else ""

@@ -43,13 +43,46 @@ from typing import Dict, List, Optional
 from tmaze.core.records import RecordsFileError, animals
 
 # Column order mirrors the resources builder (records/animal/build_daily_log.py).
+# ``water_regime`` (schema v2, ADR-0100) is appended LAST so older readers that
+# project onto their own FIELDS just ignore it and column letters of the existing
+# fields don't shift in the Excel Entry sheet.
 FIELDS = [
     "animal_id", "date", "weight_g", "baseline_g", "pct_baseline",
     "water_on", "water_off", "water_ml", "supp_water", "notes",
+    "water_regime",
 ]
 
-# Bumped in lockstep with the resources builder's schema (docs/decisions/0076).
-SCHEMA_VERSION = 1
+# Bumped in lockstep with the resources builder's schema. v2 adds water_regime
+# (docs/decisions/0076 + 0100); readers stay backward-compatible (a v1 row with
+# no water_regime column reads as "" == restriction).
+SCHEMA_VERSION = 2
+
+# Water regime for a (animal, date): blank/"restriction" is the default
+# (on water restriction), "ad_lib" marks an off-restriction day (typically a
+# weekend when water is freely available). See docs/decisions/0100 (FW-0030).
+REGIME_AD_LIB = "ad_lib"
+_AD_LIB_TOKENS = {"ad_lib", "adlib"}
+_RESTRICTION_TOKENS = {"", "restriction", "restrict", "normal"}
+
+
+def _regime_token(value) -> str:
+    """A regime cell folded to a comparison token (lowercased, -/space -> _)."""
+    return str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+
+
+def normalize_regime(value) -> str:
+    """Canonicalise a regime cell to ``"ad_lib"`` or ``""`` (restriction default).
+
+    Loose so "ad-lib"/"Ad Lib"/"adlib" all resolve to ``ad_lib`` and any
+    restriction synonym (or blank/unknown) collapses to ``""``; a save/export
+    stores this normalised form so the column stays blank except on ad-lib days.
+    """
+    return REGIME_AD_LIB if _regime_token(value) in _AD_LIB_TOKENS else ""
+
+
+def is_ad_lib(row: Optional[Dict[str, str]]) -> bool:
+    """Whether a daily row marks an ad-lib (off-restriction) day (ADR-0100)."""
+    return _regime_token((row or {}).get("water_regime")) in _AD_LIB_TOKENS
 
 # The two columns that identify a row; edits/writes dedup + sort on this key.
 KEY_FIELDS = ("animal_id", "date")
@@ -246,6 +279,11 @@ def validate_entry(row: Dict[str, str]) -> List[str]:
                 errors.append(f"{labels[field]} can't be negative ({raw}).")
         except ValueError:
             errors.append(f"{labels[field]} must be a number, not '{raw}'.")
+    regime = str(row.get("water_regime", "")).strip()
+    if (regime and _regime_token(regime) not in _AD_LIB_TOKENS
+            and _regime_token(regime) not in _RESTRICTION_TOKENS):
+        errors.append(
+            f"Water regime '{regime}' must be blank/'restriction' or 'ad_lib'.")
     return errors
 
 
