@@ -19,12 +19,14 @@ import unittest
 from tmaze.core.records import RecordsFileError
 from tmaze.core.records.daily_log import (
     REGIME_AD_LIB,
+    WATER_METHODS,
     DailyLog,
     compute_pct_baseline,
     is_ad_lib,
     load,
     load_rows,
     load_rows_for_write,
+    normalize_method,
     normalize_regime,
     row_has_weight,
     upsert_rows,
@@ -191,6 +193,16 @@ class TestValidateEntry(unittest.TestCase):
         errors = validate_entry(self._row(water_regime="weekend?"))
         self.assertTrue(any("regime" in e.lower() for e in errors))
 
+    def test_blank_and_known_methods_are_allowed(self):
+        for method in ("", "timed_access", "measured_bottle", "task_earned",
+                       "bottle", "Task", "timed"):
+            self.assertEqual(validate_entry(self._row(water_method=method)), [],
+                             f"method {method!r} should be accepted")
+
+    def test_unknown_method_is_rejected(self):
+        errors = validate_entry(self._row(water_method="hose?"))
+        self.assertTrue(any("method" in e.lower() for e in errors))
+
 
 class TestWaterRegime(unittest.TestCase):
     """ad-lib (off-restriction) day classification (ADR-0100 / FW-0030)."""
@@ -229,6 +241,57 @@ class TestWaterRegime(unittest.TestCase):
         self.assertEqual(back[0].get("water_regime"), "")
 
 
+class TestWaterMethod(unittest.TestCase):
+    """Water-delivery method classification (schema v3, ADR-0104)."""
+
+    def test_normalize_method_folds_variants(self):
+        cases = {
+            "timed_access": ("timed_access", "timed", "Timed-Access", "timed adlib"),
+            "measured_bottle": ("measured_bottle", "measured", "Bottle"),
+            "task_earned": ("task_earned", "task", "Earned", "task water"),
+        }
+        for canonical, variants in cases.items():
+            for value in variants:
+                self.assertEqual(normalize_method(value), canonical,
+                                 f"{value!r} -> {canonical}")
+
+    def test_normalize_method_blank_or_unknown_is_empty(self):
+        for value in ("", "  ", "hose", "whatever", None):
+            self.assertEqual(normalize_method(value), "")
+
+    def test_methods_vocab_is_canonical(self):
+        for m in WATER_METHODS:
+            self.assertEqual(normalize_method(m), m)
+
+    def test_roundtrip_preserves_method_and_is_v3(self):
+        rows = [{"animal_id": "600", "date": "2026-08-08",
+                 "water_method": "task_earned"}]
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "daily_log.csv")
+            write_rows(rows, path)
+            with open(path, "r", encoding="utf-8", newline="") as fh:
+                first = fh.readline()
+            back = load_rows(path)
+        self.assertEqual(first, "# schema_version=3\n")
+        self.assertEqual(back[0].get("water_method"), "task_earned")
+
+    def test_v2_csv_without_method_column_reads_blank(self):
+        # A pre-v3 file (has water_regime but no water_method) still loads.
+        csv_v2 = (
+            "# schema_version=2\n"
+            "animal_id,date,weight_g,baseline_g,pct_baseline,water_on,"
+            "water_off,water_ml,supp_water,notes,water_regime\n"
+            "600,2026-08-08,,,,,,,,,ad_lib\n"
+        )
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "daily_log.csv")
+            with open(path, "w", encoding="utf-8", newline="") as fh:
+                fh.write(csv_v2)
+            back = load_rows(path)
+        self.assertEqual(back[0].get("water_method"), "")
+        self.assertTrue(is_ad_lib(back[0]))
+
+
 class TestComputePctBaseline(unittest.TestCase):
     def test_fraction_rounded_4dp(self):
         self.assertEqual(compute_pct_baseline(330, 348), round(330 / 348, 4))
@@ -258,7 +321,7 @@ class TestWriteRows(unittest.TestCase):
             write_rows(rows, path)
             with open(path, "r", encoding="utf-8", newline="") as fh:
                 first = fh.readline()
-            self.assertEqual(first, "# schema_version=2\n")
+            self.assertEqual(first, "# schema_version=3\n")
             back = load_rows(path)
         self.assertEqual(len(back), 2)
         self.assertEqual(back[0]["animal_id"], "600")

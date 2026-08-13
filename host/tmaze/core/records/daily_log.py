@@ -43,19 +43,21 @@ from typing import Dict, List, Optional
 from tmaze.core.records import RecordsFileError, animals
 
 # Column order mirrors the resources builder (records/animal/build_daily_log.py).
-# ``water_regime`` (schema v2, ADR-0100) is appended LAST so older readers that
-# project onto their own FIELDS just ignore it and column letters of the existing
-# fields don't shift in the Excel Entry sheet.
+# ``water_regime`` (schema v2, ADR-0100) and ``water_method`` (schema v3,
+# ADR-0104) are appended LAST, in that order, so older readers that project onto
+# their own FIELDS just ignore them and the column letters of the existing fields
+# don't shift in the Excel Entry sheet.
 FIELDS = [
     "animal_id", "date", "weight_g", "baseline_g", "pct_baseline",
     "water_on", "water_off", "water_ml", "supp_water", "notes",
-    "water_regime",
+    "water_regime", "water_method",
 ]
 
 # Bumped in lockstep with the resources builder's schema. v2 adds water_regime
-# (docs/decisions/0076 + 0100); readers stay backward-compatible (a v1 row with
-# no water_regime column reads as "" == restriction).
-SCHEMA_VERSION = 2
+# (docs/decisions/0076 + 0100); v3 adds water_method (docs/decisions/0104).
+# Readers stay backward-compatible: a v1/v2 row with no water_method column reads
+# as "" (unspecified method).
+SCHEMA_VERSION = 3
 
 # Water regime for a (animal, date): blank/"restriction" is the default
 # (on water restriction), "ad_lib" marks an off-restriction day (typically a
@@ -83,6 +85,42 @@ def normalize_regime(value) -> str:
 def is_ad_lib(row: Optional[Dict[str, str]]) -> bool:
     """Whether a daily row marks an ad-lib (off-restriction) day (ADR-0100)."""
     return _regime_token((row or {}).get("water_regime")) in _AD_LIB_TOKENS
+
+
+# Water METHOD (schema v3, ADR-0104): HOW restricted water was delivered that
+# day. Orthogonal to water_regime (which says whether the day was on/off
+# restriction) - a restriction day can be delivered by any of these; blank means
+# unspecified. The three the lab uses:
+#   - timed_access:   free water at the bottle for a set duration (e.g. 30 min)
+#   - measured_bottle: a measured volume provided in a bottle
+#   - task_earned:    water earned by running the task (reward only)
+METHOD_TIMED_ACCESS = "timed_access"
+METHOD_MEASURED_BOTTLE = "measured_bottle"
+METHOD_TASK_EARNED = "task_earned"
+# Canonical values, in display order (the GUI/Excel dropdowns render these).
+WATER_METHODS = (METHOD_TIMED_ACCESS, METHOD_MEASURED_BOTTLE, METHOD_TASK_EARNED)
+
+# Loose synonyms -> canonical, so hand-typed variants ("timed", "bottle",
+# "task", "measured", spaces/hyphens) resolve rather than error.
+_METHOD_TOKENS = {
+    "timed_access": METHOD_TIMED_ACCESS, "timed": METHOD_TIMED_ACCESS,
+    "timed_ad_lib": METHOD_TIMED_ACCESS, "timed_adlib": METHOD_TIMED_ACCESS,
+    "measured_bottle": METHOD_MEASURED_BOTTLE, "measured": METHOD_MEASURED_BOTTLE,
+    "bottle": METHOD_MEASURED_BOTTLE,
+    "task_earned": METHOD_TASK_EARNED, "task": METHOD_TASK_EARNED,
+    "task_water": METHOD_TASK_EARNED, "earned": METHOD_TASK_EARNED,
+}
+
+
+def _method_token(value) -> str:
+    """A method cell folded to a comparison token (lowercased, -/space -> _)."""
+    return str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+
+
+def normalize_method(value) -> str:
+    """Canonicalise a water-method cell to one of :data:`WATER_METHODS`, or ``""``
+    (unspecified) for blank/unknown. Loose, mirroring :func:`normalize_regime`."""
+    return _METHOD_TOKENS.get(_method_token(value), "")
 
 # The two columns that identify a row; edits/writes dedup + sort on this key.
 KEY_FIELDS = ("animal_id", "date")
@@ -284,6 +322,11 @@ def validate_entry(row: Dict[str, str]) -> List[str]:
             and _regime_token(regime) not in _RESTRICTION_TOKENS):
         errors.append(
             f"Water regime '{regime}' must be blank/'restriction' or 'ad_lib'.")
+    method = str(row.get("water_method", "")).strip()
+    if method and normalize_method(method) == "":
+        errors.append(
+            f"Water method '{method}' must be blank or one of: "
+            + ", ".join(WATER_METHODS) + ".")
     return errors
 
 

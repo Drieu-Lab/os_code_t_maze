@@ -129,13 +129,18 @@ _DAILY_TREE_COLUMNS = (
     ("water_off", "Water off", 76, "center"),
     ("water_ml", "Water mL", 70, "center"),
     ("supp_water", "Supp", 60, "center"),
-    ("water_regime", "Regime", 80, "center"),
-    ("notes", "Notes", 220, "w"),
+    ("water_regime", "Regime", 78, "center"),
+    ("water_method", "Method", 100, "center"),
+    ("notes", "Notes", 200, "w"),
 )
 
 # How many days back (ending today) the Daily table flags as missing-entry gaps
 # for a single selected rat. Bounded so old history doesn't fill with placeholders.
 _DAILY_MISSING_LOOKBACK_DAYS = 14
+
+# Sentinel in the "Mark span" dialog's regime/method dropdowns meaning "don't
+# touch this field over the span" (so a bulk regime mark doesn't clear methods).
+_SPAN_LEAVE = "(leave unchanged)"
 
 
 def _today_iso() -> str:
@@ -329,16 +334,24 @@ class RecordsManager:
             row=3, column=3, columnspan=3, sticky="we")
 
         # Water regime (ADR-0100): restriction default vs ad-lib (off-restriction,
-        # e.g. weekends). The span button marks a whole Fri->Sun weekend at once.
+        # e.g. weekends). Water method (ADR-0104) is orthogonal: HOW the day's
+        # (restricted) water was delivered. The span button bulk-marks a range.
         ttk.Label(form, text="Water regime").grid(row=4, column=0, sticky="e",
                                                   padx=4, pady=3)
         self.d_regime = ttk.Combobox(
             form, textvariable=self.d_vars["water_regime"],
             values=["restriction", "ad_lib"], state="readonly", width=12)
         self.d_regime.grid(row=4, column=1, sticky="w")
-        ttk.Button(form, text="Mark ad-lib span...",
-                   command=self._mark_adlib_span).grid(
-            row=4, column=2, columnspan=2, sticky="w", padx=4)
+        ttk.Label(form, text="Water method").grid(row=4, column=2, sticky="e",
+                                                  padx=4)
+        self.d_method = ttk.Combobox(
+            form, textvariable=self.d_vars["water_method"],
+            values=[""] + list(daily_log.WATER_METHODS), state="readonly",
+            width=14)
+        self.d_method.grid(row=4, column=3, sticky="w")
+        ttk.Button(form, text="Mark span...",
+                   command=self._mark_span).grid(
+            row=4, column=4, columnspan=2, sticky="w", padx=4)
 
         btns = ttk.Frame(form)
         btns.grid(row=5, column=0, columnspan=6, sticky="w", pady=(8, 0))
@@ -478,8 +491,10 @@ class RecordsManager:
         pct = daily_log.compute_pct_baseline(edit["weight_g"], edit["baseline_g"])
         edit["pct_baseline"] = "" if pct is None else str(pct)
         # Store the canonical regime ("ad_lib" or "" for restriction) so the
-        # column stays blank except on ad-lib days (ADR-0100).
+        # column stays blank except on ad-lib days (ADR-0100), and the canonical
+        # water method ("" when unspecified/unknown; ADR-0104).
         edit["water_regime"] = daily_log.normalize_regime(edit["water_regime"])
+        edit["water_method"] = daily_log.normalize_method(edit["water_method"])
         try:
             # Read-for-write so a present-but-unreadable CSV aborts the save
             # rather than being overwritten with just this row (#12).
@@ -528,15 +543,17 @@ class RecordsManager:
             self._update_pct()
         self._daily_dirty = False
 
-    def _mark_adlib_span(self) -> None:
-        """Mark a date span (e.g. a Fri->Sun weekend) as ad-lib for one animal,
-        writing one ad_lib row per day (ADR-0100). Optional on/off times land on
-        the boundary days (water_on on the first day, water_off on the last), so
-        the within-day ad-lib start/end is captured in the existing time columns;
-        the middle days are fully ad-lib. Existing rows are upserted (weight etc.
-        preserved)."""
+    def _mark_span(self) -> None:
+        """Bulk-mark a date span for one animal: set the water REGIME and/or the
+        water METHOD across every day in the range at once, writing one row per
+        day (ADR-0100/0104). Each of regime/method can be left unchanged, so the
+        same dialog handles "mark this weekend ad-lib" (regime=ad_lib, method
+        left) and "this training block was task-earned" (regime left,
+        method=task_earned). Optional on/off times land on the boundary days
+        (water_on on the first, water_off on the last) - the within-day ad-lib
+        window. Existing rows are upserted (weight etc. preserved)."""
         dlg = tk.Toplevel(self.root)
-        dlg.title("Mark ad-lib span")
+        dlg.title("Mark span")
         dlg.transient(self.root)
         dlg.grab_set()
         default_animal = (self.d_vars["animal_id"].get().strip()
@@ -546,41 +563,58 @@ class RecordsManager:
         v_start_t = tk.StringVar()
         v_end = tk.StringVar(value=_today_iso())
         v_end_t = tk.StringVar()
-        rows = [
-            ("Animal", v_animal, None),
-            ("Start date (YYYY-MM-DD)", v_start, None),
-            ("  on-time (optional, e.g. 5pm)", v_start_t, None),
-            ("End date (YYYY-MM-DD)", v_end, None),
-            ("  off-time (optional, e.g. 2pm)", v_end_t, None),
-        ]
-        for i, (label, var, _x) in enumerate(rows):
-            ttk.Label(dlg, text=label).grid(row=i, column=0, sticky="e",
+        # Regime defaults to ad_lib (the common "mark a weekend" case); method
+        # defaults to leave-unchanged so it isn't clobbered unless chosen.
+        v_regime = tk.StringVar(value=daily_log.REGIME_AD_LIB)
+        v_method = tk.StringVar(value=_SPAN_LEAVE)
+
+        r = 0
+        ttk.Label(dlg, text="Animal").grid(row=r, column=0, sticky="e",
+                                           padx=6, pady=3)
+        ttk.Combobox(dlg, textvariable=v_animal, values=self.animal_ids,
+                     width=16).grid(row=r, column=1, sticky="w", padx=6)
+        for label, var in (("Start date (YYYY-MM-DD)", v_start),
+                           ("  on-time (optional, e.g. 5pm)", v_start_t),
+                           ("End date (YYYY-MM-DD)", v_end),
+                           ("  off-time (optional, e.g. 2pm)", v_end_t)):
+            r += 1
+            ttk.Label(dlg, text=label).grid(row=r, column=0, sticky="e",
                                             padx=6, pady=3)
-            if label == "Animal":
-                ttk.Combobox(dlg, textvariable=var, values=self.animal_ids,
-                             width=14).grid(row=i, column=1, sticky="w", padx=6)
-            else:
-                ttk.Entry(dlg, textvariable=var, width=16).grid(
-                    row=i, column=1, sticky="w", padx=6)
+            ttk.Entry(dlg, textvariable=var, width=18).grid(
+                row=r, column=1, sticky="w", padx=6)
+        r += 1
+        ttk.Label(dlg, text="Set regime").grid(row=r, column=0, sticky="e",
+                                               padx=6, pady=3)
+        ttk.Combobox(dlg, textvariable=v_regime, state="readonly", width=16,
+                     values=[_SPAN_LEAVE, "restriction", "ad_lib"]).grid(
+            row=r, column=1, sticky="w", padx=6)
+        r += 1
+        ttk.Label(dlg, text="Set method").grid(row=r, column=0, sticky="e",
+                                               padx=6, pady=3)
+        ttk.Combobox(dlg, textvariable=v_method, state="readonly", width=16,
+                     values=[_SPAN_LEAVE] + list(daily_log.WATER_METHODS)).grid(
+            row=r, column=1, sticky="w", padx=6)
         result: Dict[str, str] = {}
 
         def _ok():
             result.update(animal=v_animal.get().strip(),
-                          start=v_start.get().strip(), start_t=v_start_t.get().strip(),
-                          end=v_end.get().strip(), end_t=v_end_t.get().strip())
+                          start=v_start.get().strip(),
+                          start_t=v_start_t.get().strip(),
+                          end=v_end.get().strip(), end_t=v_end_t.get().strip(),
+                          regime=v_regime.get(), method=v_method.get())
             dlg.destroy()
 
         btns = ttk.Frame(dlg)
-        btns.grid(row=len(rows), column=0, columnspan=2, pady=(8, 6))
-        ttk.Button(btns, text="Mark ad-lib", command=_ok).pack(side="left")
+        btns.grid(row=r + 1, column=0, columnspan=2, pady=(8, 6))
+        ttk.Button(btns, text="Apply", command=_ok).pack(side="left")
         ttk.Button(btns, text="Cancel", command=dlg.destroy).pack(
             side="left", padx=(6, 0))
         dlg.wait_window()
         if not result:
             return
-        self._apply_adlib_span(result)
+        self._apply_span(result)
 
-    def _apply_adlib_span(self, spec: Dict[str, str]) -> None:
+    def _apply_span(self, spec: Dict[str, str]) -> None:
         aid = spec["animal"]
         start, end = spec["start"], spec["end"]
         if not aid:
@@ -599,6 +633,15 @@ class RecordsManager:
             messagebox.showwarning("Range too long",
                                    "Span is over 31 days - mark a shorter range.")
             return
+        set_regime = spec.get("regime", _SPAN_LEAVE) != _SPAN_LEAVE
+        set_method = spec.get("method", _SPAN_LEAVE) != _SPAN_LEAVE
+        if not set_regime and not set_method:
+            messagebox.showwarning(
+                "Nothing to set",
+                "Choose a regime and/or a method to apply over the span.")
+            return
+        regime_val = daily_log.normalize_regime(spec.get("regime", ""))
+        method_val = daily_log.normalize_method(spec.get("method", ""))
         edits: List[Dict[str, str]] = []
         n = (d1 - d0).days + 1
         for i in range(n):
@@ -606,7 +649,10 @@ class RecordsManager:
             row = dict(self.daily.for_date(aid, day) or
                        {"animal_id": aid, "date": day})
             row["animal_id"], row["date"] = aid, day
-            row["water_regime"] = daily_log.REGIME_AD_LIB
+            if set_regime:
+                row["water_regime"] = regime_val
+            if set_method:
+                row["water_method"] = method_val
             if i == 0 and spec.get("start_t"):
                 row["water_on"] = spec["start_t"]
             if i == n - 1 and spec.get("end_t"):
@@ -622,8 +668,13 @@ class RecordsManager:
         except (OSError, ValueError) as e:
             messagebox.showerror("Save failed", str(e))
             return
-        self._set_status(f"Marked {n} day(s) ad-lib for {aid} "
-                         f"({start} \u2192 {end}).")
+        what = []
+        if set_regime:
+            what.append(f"regime={regime_val or 'restriction'}")
+        if set_method:
+            what.append(f"method={method_val or 'unspecified'}")
+        self._set_status(f"Marked {n} day(s) for {aid} ({start} \u2192 {end}): "
+                         + ", ".join(what) + ".")
         self._load_data()
         self._refresh_daily_table()
         self._refresh_dashboard()
