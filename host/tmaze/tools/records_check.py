@@ -13,11 +13,14 @@ ADR-0097). The fixes are the operator's - this just makes the drift visible:
 - near-zero-duration bundles that look like start/stop churn.
 
 Sessions listed in ``host/session_ignore.json`` are excluded throughout, the same
-as the registry build.
+as the registry build. Findings acknowledged in ``host/records_audit_ack.json``
+(via the Records Manager's integrity panel) are dismissed from the active count
+and hidden by default (ADR-0105); ``--show-acknowledged`` lists them.
 
 Run (conda env drieu_t_maze; from anywhere):
     python -m tmaze.tools.records_check
     python -m tmaze.tools.records_check --registry PATH   # a custom session_registry.csv
+    python -m tmaze.tools.records_check --show-acknowledged  # include dismissed findings
 """
 
 from __future__ import annotations
@@ -31,6 +34,7 @@ from tmaze.core.records import (
     animals,
     daily_log,
     records_audit,
+    records_audit_ack,
     session_annotations,
     session_ignore,
 )
@@ -47,20 +51,28 @@ def _read_csv_skip_comments(path: str) -> List[Dict[str, str]]:
     return list(csv.DictReader(lines))
 
 
-def _print_section(section: records_audit.AuditSection) -> int:
-    """Print one report block; return its flagged-item count (0 -> 'none' or,
-    when the check was skipped, the skip note)."""
+def _print_section(section: records_audit.AuditSection,
+                   show_acknowledged: bool = False) -> int:
+    """Print one report block; return its ACTIVE flagged-item count (0 -> 'none'
+    or, when the check was skipped, the skip note). Acknowledged findings are
+    dismissed from the active list; their count is noted (and listed under
+    ``--show-acknowledged``)."""
     print(f"== {section.title} ==")
     if section.skipped:
         print(f"  ({section.note})")
         return 0
     if not section.items:
         print("  none")
-        return 0
-    for line in section.items:
-        print(f"  {line}")
-    if section.fix:
-        print(f"  Fix: {section.fix}")
+    else:
+        for line in section.items:
+            print(f"  {line}")
+        if section.fix:
+            print(f"  Fix: {section.fix}")
+    if section.acknowledged_count:
+        print(f"  ({section.acknowledged_count} acknowledged, hidden)")
+        if show_acknowledged:
+            for f in section.acknowledged:
+                print(f"    - {f.text}")
     return section.count
 
 
@@ -69,6 +81,9 @@ def main(argv=None) -> int:
     ap.add_argument("--registry", default=None,
                     help="path to session_registry.csv (default: "
                          "host/data/phase3_recordings/session_registry.csv)")
+    ap.add_argument("--show-acknowledged", action="store_true",
+                    help="also list the individual acknowledged (dismissed) "
+                         "findings under each section")
     args = ap.parse_args(argv)
 
     reg_path = args.registry or os.path.join(
@@ -81,6 +96,7 @@ def main(argv=None) -> int:
     daily = daily_log.DailyLog(daily_rows)
     registry = animals.load_registry()
     ignore = session_ignore.load_ignored()
+    acknowledged = records_audit_ack.load_acked_keys()
 
     triples = records_audit.session_triples(registry_rows, annot_rows, ignore)
     kept_registry = [r for r in registry_rows
@@ -94,11 +110,15 @@ def main(argv=None) -> int:
               "duration/animal columns; annotation-only checks still run)")
 
     sections = records_audit.build_report(
-        triples, daily_rows, kept_registry, daily, registry)
-    problems = sum(_print_section(s) for s in sections)
+        triples, daily_rows, kept_registry, daily, registry, acknowledged)
+    problems = sum(_print_section(s, args.show_acknowledged) for s in sections)
+    acked = records_audit.total_acknowledged(sections)
 
-    print(f"\n{problems} item(s) flagged. Nothing was changed "
+    tail = f" ({acked} acknowledged and hidden)" if acked else ""
+    print(f"\n{problems} item(s) flagged{tail}. Nothing was changed "
           "(this is a read-only report).")
+    if acked and not args.show_acknowledged:
+        print("Re-run with --show-acknowledged to see the dismissed findings.")
     return 0
 
 

@@ -46,6 +46,18 @@ class TestSuspectWaterCells(unittest.TestCase):
         ])
 
 
+class TestSuspectWaterMethods(unittest.TestCase):
+    def test_flags_only_unknown_nonblank_methods(self):
+        rows = [
+            {"animal_id": "600", "date": "2026-08-07", "water_method": "task_earned"},
+            {"animal_id": "600", "date": "2026-08-08", "water_method": "Bottle"},  # synonym ok
+            {"animal_id": "600", "date": "2026-08-09", "water_method": ""},         # blank ok
+            {"animal_id": "601", "date": "2026-08-09", "water_method": "hose"},     # unknown
+        ]
+        got = records_audit.suspect_water_methods(rows)
+        self.assertEqual(got, [("601", "2026-08-09", "hose")])
+
+
 class TestSessionsMissingDaily(unittest.TestCase):
     def setUp(self):
         self.daily = DailyLog([
@@ -136,6 +148,43 @@ class TestBuildReport(unittest.TestCase):
         by = self._sections_by_title(sections)
         self.assertTrue(by["Animal ids not in animals.json"].skipped)
         self.assertEqual(records_audit.total_flagged(sections), 0)
+
+    def test_findings_have_stable_section_prefixed_keys(self):
+        reg = AnimalRegistry([{"id": "600"}])
+        daily = DailyLog([{"animal_id": "600", "date": "2026-08-07"}])
+        triples = [("123_b", "123", "2026-08-09")]
+        sections = records_audit.build_report(triples, [], [], daily, reg)
+        by = {s.id: s for s in sections}
+        keys = [f.key for f in by["noncanonical_animals"].findings]
+        self.assertEqual(keys, ["noncanonical_animals:123"])
+
+    def test_flags_unknown_water_method_section(self):
+        reg = AnimalRegistry([{"id": "600"}])
+        daily_rows = [{"animal_id": "600", "date": "2026-08-07",
+                       "water_method": "hose"}]
+        daily = DailyLog(daily_rows)
+        sections = records_audit.build_report(
+            [("600_a", "600", "2026-08-07")], daily_rows, [], daily, reg)
+        by = {s.id: s for s in sections}
+        self.assertIn("suspect_water_methods", by)
+        self.assertEqual([f.key for f in by["suspect_water_methods"].findings],
+                         ["suspect_water_methods:600:2026-08-07"])
+
+    def test_acknowledged_findings_are_partitioned_out(self):
+        reg = AnimalRegistry([{"id": "600"}])
+        daily = DailyLog([{"animal_id": "600", "date": "2026-08-07"}])
+        triples = [("123_b", "123", "2026-08-09")]      # unknown + missing daily
+        kept = [{"session_id": "600_a", "duration_s": "12"}]   # short
+        acked = {"short_sessions:600_a"}
+        sections = records_audit.build_report(
+            triples, [], kept, daily, reg, acknowledged=acked)
+        by = {s.id: s for s in sections}
+        short = by["short_sessions"]
+        self.assertEqual(short.count, 0)                 # dismissed from active
+        self.assertEqual(short.acknowledged_count, 1)
+        self.assertEqual(records_audit.total_acknowledged(sections), 1)
+        # The still-active unknown-animal finding is untouched.
+        self.assertEqual(by["noncanonical_animals"].count, 1)
 
 
 if __name__ == "__main__":

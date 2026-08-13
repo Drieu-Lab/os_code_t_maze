@@ -54,7 +54,7 @@ import subprocess
 import sys
 import threading
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 from typing import Any, Dict, List, Optional
 
 from tmaze.core.records import (
@@ -63,6 +63,7 @@ from tmaze.core.records import (
     dashboard,
     daily_log,
     records_audit,
+    records_audit_ack,
     session_annotations,
     session_ignore,
 )
@@ -1112,62 +1113,155 @@ class RecordsManager:
     def _integrity_check(self) -> None:
         """Show the read-only cross-record integrity report (bug #260810;
         ADR-0097): typo'd animal ids, sessions with no husbandry row, water-time
-        cells holding a volume/note, and start/stop churn. Uses the records
-        currently in memory and changes nothing - the fixes are the operator's."""
+        cells holding a volume/note, an unknown water_method, and start/stop
+        churn. Uses the records currently in memory and changes nothing - the
+        fixes are the operator's. Findings acknowledged in
+        host/records_audit_ack.json are dismissed from the active list but shown
+        as a dismissed count (ADR-0105)."""
         registry = animals.load_registry(self.animals_path)
         triples = records_audit.session_triples(
             self.registry_rows, self.annot_rows, self.ignored_sessions)
         kept = [r for r in self.registry_rows
                 if str(r.get("session_id", "")).strip()
                 not in self.ignored_sessions]
+        acknowledged = records_audit_ack.load_acked_keys()
         sections = records_audit.build_report(
-            triples, self.daily_rows, kept, self.daily, registry)
+            triples, self.daily_rows, kept, self.daily, registry, acknowledged)
         total = records_audit.total_flagged(sections)
         self._show_integrity_dialog(sections, total, len(triples))
-
-    @staticmethod
-    def _format_integrity(
-            sections: "List[records_audit.AuditSection]") -> str:
-        """Render the report sections as plain text (mirrors records_check)."""
-        out: List[str] = []
-        for s in sections:
-            out.append(f"== {s.title} ==")
-            if s.skipped:
-                out.append(f"  ({s.note})")
-            elif not s.items:
-                out.append("  none")
-            else:
-                out.extend(f"  {item}" for item in s.items)
-                if s.fix:
-                    out.append(f"  Fix: {s.fix}")
-            out.append("")
-        return "\n".join(out).rstrip() + "\n"
 
     def _show_integrity_dialog(
             self, sections: "List[records_audit.AuditSection]",
             total: int, n_sessions: int) -> None:
+        """Interactive report: active findings grouped by section in a tree the
+        operator can select and ACKNOWLEDGE (dismiss). Acknowledging writes the
+        finding's stable key to host/records_audit_ack.json so it stays hidden
+        next run; "Manage dismissed..." restores. Read-only w.r.t. the records
+        themselves - only the acknowledgement store is written (ADR-0105)."""
         dlg = tk.Toplevel(self.root)
         dlg.title("Records integrity")
         dlg.transient(self.root)
-        header = ("No problems found." if total == 0
+        acked_n = records_audit.total_acknowledged(sections)
+        header = ("No active problems found." if total == 0
                   else f"{total} item(s) flagged.")
+        if acked_n:
+            header += f"  ({acked_n} dismissed and hidden.)"
         ttk.Label(
             dlg,
             text=(f"{header}  Checked {n_sessions} session(s). "
-                  "Read-only report - nothing is changed."),
+                  "Read-only report - the records are not changed."),
             foreground=("#2e7d32" if total == 0 else "#9C0006")).pack(
+            side="top", anchor="w", padx=8, pady=(8, 4))
+
+        wrap = ttk.Frame(dlg)
+        wrap.pack(side="top", fill="both", expand=True, padx=8)
+        tree = ttk.Treeview(wrap, show="tree", height=22, selectmode="browse")
+        vsb = ttk.Scrollbar(wrap, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=vsb.set)
+        tree.column("#0", width=680, stretch=True)
+        tree.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+
+        # iid -> finding key, so a selected leaf can be acknowledged.
+        iid_to_key: Dict[str, str] = {}
+        for s in sections:
+            if s.skipped:
+                label = f"{s.title}  -  ({s.note})"
+            elif not s.items:
+                extra = (f"  ({s.acknowledged_count} dismissed)"
+                         if s.acknowledged_count else "")
+                label = f"{s.title}  -  none{extra}"
+            else:
+                extra = (f", {s.acknowledged_count} dismissed"
+                         if s.acknowledged_count else "")
+                label = f"{s.title}  ({s.count}{extra})"
+            parent = tree.insert("", "end", text=label, open=True)
+            for finding in s.findings:
+                leaf = tree.insert(parent, "end", text=finding.text)
+                iid_to_key[leaf] = finding.key
+            if s.fix and s.items:
+                tree.insert(parent, "end", text=f"Fix: {s.fix}")
+
+        btns = ttk.Frame(dlg)
+        btns.pack(side="bottom", fill="x", padx=8, pady=8)
+
+        def acknowledge_selected() -> None:
+            sel = tree.selection()
+            key = iid_to_key.get(sel[0]) if sel else None
+            if not key:
+                messagebox.showinfo(
+                    "Acknowledge finding",
+                    "Select a single flagged item (not a section heading) to "
+                    "dismiss it from future checks.", parent=dlg)
+                return
+            reason = simpledialog.askstring(
+                "Acknowledge finding",
+                "Why is this finding OK to dismiss? (optional note)\n\n"
+                f"{tree.item(sel[0], 'text')}", parent=dlg)
+            if reason is None:      # cancelled
+                return
+            records_audit_ack.acknowledge(key, reason)
+            dlg.destroy()
+            self._integrity_check()     # reopen, refreshed
+
+        ttk.Button(btns, text="Acknowledge selected...",
+                   command=acknowledge_selected).pack(side="left")
+        ttk.Button(btns, text="Manage dismissed...",
+                   command=lambda: self._manage_acknowledged(dlg)).pack(
+            side="left", padx=(6, 0))
+        ttk.Button(btns, text="Close", command=dlg.destroy).pack(side="right")
+
+    def _manage_acknowledged(self, parent: tk.Toplevel) -> None:
+        """List the acknowledged (dismissed) findings and let the operator RESTORE
+        one (un-acknowledge it, bringing it back into the active report)."""
+        acked = records_audit_ack.load_ack()
+        dlg = tk.Toplevel(parent)
+        dlg.title("Dismissed findings")
+        dlg.transient(parent)
+        if not acked:
+            ttk.Label(dlg, text="No findings have been dismissed.").pack(
+                padx=12, pady=12)
+            ttk.Button(dlg, text="Close", command=dlg.destroy).pack(pady=(0, 10))
+            return
+        ttk.Label(
+            dlg, text="Dismissed findings hidden from the integrity report. "
+            "Restore one to bring it back.").pack(
             side="top", anchor="w", padx=8, pady=(8, 4))
         wrap = ttk.Frame(dlg)
         wrap.pack(side="top", fill="both", expand=True, padx=8)
-        txt = tk.Text(wrap, wrap="word", width=90, height=26)
-        vsb = ttk.Scrollbar(wrap, orient="vertical", command=txt.yview)
-        txt.configure(yscrollcommand=vsb.set)
-        txt.pack(side="left", fill="both", expand=True)
+        cols = ("finding", "reason", "date")
+        tree = ttk.Treeview(wrap, columns=cols, show="headings", height=14,
+                            selectmode="browse")
+        for col, txt, w in (("finding", "Finding (key)", 380),
+                            ("reason", "Reason", 220), ("date", "Date", 90)):
+            tree.heading(col, text=txt)
+            tree.column(col, width=w, stretch=(col != "date"))
+        vsb = ttk.Scrollbar(wrap, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=vsb.set)
+        tree.pack(side="left", fill="both", expand=True)
         vsb.pack(side="right", fill="y")
-        txt.insert("1.0", self._format_integrity(sections))
-        txt.configure(state="disabled")
-        ttk.Button(dlg, text="Close", command=dlg.destroy).pack(
-            side="bottom", anchor="e", padx=8, pady=8)
+        iid_to_key: Dict[str, str] = {}
+        for key in sorted(acked):
+            meta = acked[key]
+            iid = tree.insert("", "end", values=(
+                key, meta.get("reason", ""), meta.get("date", "")))
+            iid_to_key[iid] = key
+
+        def restore_selected() -> None:
+            sel = tree.selection()
+            key = iid_to_key.get(sel[0]) if sel else None
+            if not key:
+                return
+            records_audit_ack.unacknowledge(key)
+            dlg.destroy()
+            parent.destroy()
+            self._integrity_check()     # reopen the report, refreshed
+
+        btns = ttk.Frame(dlg)
+        btns.pack(side="bottom", fill="x", padx=8, pady=8)
+        ttk.Button(btns, text="Restore selected",
+                   command=restore_selected).pack(side="left")
+        ttk.Button(btns, text="Close", command=dlg.destroy).pack(side="right")
 
     def _clear_session_detail(self) -> None:
         self.current_session_id = ""
