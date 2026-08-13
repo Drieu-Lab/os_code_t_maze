@@ -211,5 +211,105 @@ class TestAdLibRegime(unittest.TestCase):
         self.assertFalse(dates["2026-08-07"])
 
 
+class TestExplicitStartWindow(unittest.TestCase):
+    """weight_trend / water_ml_trend honour an explicit start_date override."""
+
+    _ROWS = [
+        {"animal_id": "600", "date": "2026-07-01", "weight_g": "340",
+         "baseline_g": "348"},
+        {"animal_id": "600", "date": "2026-07-05", "weight_g": "342",
+         "baseline_g": "348"},
+        {"animal_id": "600", "date": "2026-07-10", "weight_g": "345",
+         "baseline_g": "348"},
+    ]
+
+    def setUp(self):
+        self.log = DailyLog(self._ROWS)
+
+    def test_start_date_overrides_days(self):
+        # days would say 07-04..07-10, but the explicit start clips to 07-05.
+        series = dashboard.weight_trend(self.log, "600", "2026-07-10", days=7,
+                                        start_date="2026-07-05")
+        self.assertEqual([r["date"] for r in series],
+                         ["2026-07-05", "2026-07-10"])
+
+    def test_water_trend_start_date_override(self):
+        series = dashboard.water_ml_trend(
+            DailyLog([{"animal_id": "600", "date": "2026-07-01", "water_ml": "5"},
+                      {"animal_id": "600", "date": "2026-07-09", "water_ml": "7"}]),
+            [], "600", "2026-07-10", days=3, start_date="2026-07-05")
+        self.assertEqual([r["date"] for r in series], ["2026-07-09"])
+
+
+class TestWeeklySpans(unittest.TestCase):
+    # 2026-08-07 is a Friday; 08-08 Sat, 08-09 Sun, 08-10 Mon.
+    _ROWS = [
+        {"animal_id": "600", "date": "2026-08-08", "water_regime": "ad_lib"},
+        {"animal_id": "600", "date": "2026-08-09", "water_regime": "ad_lib"},
+        {"animal_id": "601", "date": "2026-08-06", "water_regime": "ad_lib"},  # Thu deviation
+    ]
+
+    def setUp(self):
+        self.log = DailyLog(self._ROWS)
+
+    def test_ad_lib_spans_contiguous_run(self):
+        spans = dashboard.ad_lib_spans(self.log, ["600"],
+                                       "2026-08-05", "2026-08-11")
+        import datetime as dt
+        self.assertEqual(spans, [(dt.date(2026, 8, 8), dt.date(2026, 8, 9))])
+
+    def test_ad_lib_spans_union_across_rats_and_deviation(self):
+        import datetime as dt
+        spans = dashboard.ad_lib_spans(self.log, ["600", "601"],
+                                       "2026-08-05", "2026-08-11")
+        # 601's Thu (08-06) is separate; 600's Sat-Sun is its own run.
+        self.assertEqual(spans, [(dt.date(2026, 8, 6), dt.date(2026, 8, 6)),
+                                 (dt.date(2026, 8, 8), dt.date(2026, 8, 9))])
+
+    def test_ad_lib_spans_empty_when_none_or_bad_range(self):
+        self.assertEqual(dashboard.ad_lib_spans(self.log, ["602"],
+                                                "2026-08-05", "2026-08-11"), [])
+        self.assertEqual(dashboard.ad_lib_spans(self.log, ["600"],
+                                                "2026-08-11", "2026-08-05"), [])
+
+    def test_weekend_spans_runs_and_clamping(self):
+        import datetime as dt
+        spans = dashboard.weekend_spans("2026-08-05", "2026-08-11")
+        self.assertEqual(spans, [(dt.date(2026, 8, 8), dt.date(2026, 8, 9))])
+        # A window starting on Sunday clips the Sat-Sun run to just Sunday.
+        self.assertEqual(dashboard.weekend_spans("2026-08-09", "2026-08-12"),
+                         [(dt.date(2026, 8, 9), dt.date(2026, 8, 9))])
+
+
+class TestTableHelpers(unittest.TestCase):
+    _ROWS = [
+        {"animal_id": "600", "date": "2026-08-07", "weight_g": "340"},
+        {"animal_id": "600", "date": "2026-08-08", "weight_g": ""},   # unweighed gap
+        {"animal_id": "600", "date": "2026-08-10", "weight_g": "346"},
+    ]
+
+    def setUp(self):
+        self.log = DailyLog(self._ROWS)
+
+    def test_weekday_label(self):
+        self.assertEqual(dashboard.weekday_label("2026-08-08"), "Sat")
+        self.assertEqual(dashboard.weekday_label("nope"), "")
+
+    def test_weight_delta_skips_unweighed_prior(self):
+        # 08-10 compares to the last real weight (08-07), skipping the blank 08-08.
+        self.assertEqual(dashboard.weight_delta(self.log, "600", "2026-08-10"),
+                         6.0)
+        # No earlier weighed day -> None; unweighed day -> None.
+        self.assertIsNone(dashboard.weight_delta(self.log, "600", "2026-08-07"))
+        self.assertIsNone(dashboard.weight_delta(self.log, "600", "2026-08-08"))
+
+    def test_missing_days_gaps_in_range(self):
+        gaps = dashboard.missing_days(self.log, "600", "2026-08-07", "2026-08-10")
+        self.assertEqual(gaps, ["2026-08-09"])   # 07,08,10 exist; 09 missing
+        self.assertEqual(
+            dashboard.missing_days(self.log, "600", "2026-08-10", "2026-08-07"),
+            [])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -109,6 +109,11 @@ _PREFS_PATH = os.path.join(str(host_dir()), "records_manager.json")
 _RAT_PALETTE = ("#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
                 "#8c564b", "#e377c2", "#17becf", "#bcbd22", "#7f7f7f")
 
+# Dashboard trend window bounds: a sane default span and a cap so a mistyped
+# (or huge) From/To range can't try to draw thousands of days at once.
+_DASH_DEFAULT_SPAN_DAYS = 14
+_DASH_MAX_SPAN_DAYS = 180
+
 
 def _today_iso() -> str:
     return dt.date.today().isoformat()
@@ -1208,10 +1213,28 @@ class RecordsManager:
         self.nb.add(tab, text="Dashboard")
         head = ttk.Frame(tab)
         head.pack(side="top", fill="x")
-        ttk.Label(head, text="As of").pack(side="left")
-        self.dash_date = tk.StringVar(value=_today_iso())
-        ttk.Entry(head, textvariable=self.dash_date, width=12).pack(side="left", padx=4)
-        ttk.Button(head, text="Refresh", command=self._refresh_dashboard).pack(side="left")
+        # Explicit From/To date range for the trend. The To date doubles as the
+        # "as of" anchor for each rat's status row. The window length (not the
+        # absolute dates) is what persists: on open we re-anchor To to today so
+        # the dashboard never opens on a stale week (see docs/decisions).
+        span = self._dash_span_pref()
+        today = dt.date.today()
+        self.dash_from = tk.StringVar(
+            value=(today - dt.timedelta(days=span - 1)).isoformat())
+        self.dash_to = tk.StringVar(value=today.isoformat())
+        ttk.Label(head, text="From").pack(side="left")
+        ttk.Entry(head, textvariable=self.dash_from, width=12).pack(
+            side="left", padx=4)
+        ttk.Label(head, text="To").pack(side="left")
+        ttk.Entry(head, textvariable=self.dash_to, width=12).pack(
+            side="left", padx=4)
+        ttk.Button(head, text="Refresh",
+                   command=self._refresh_dashboard).pack(side="left")
+        # Quick-fill: last N days ending today (a convenience over the raw range).
+        for n in (7, 14, 28):
+            ttk.Button(head, text=f"{n}d", width=4,
+                       command=lambda days=n: self._dash_quick_fill(days)).pack(
+                side="left", padx=(4, 0))
         # Optional water overlay: off by default (the water records still have
         # gaps/mislabels, so it isn't informative yet - see docs/decisions/0087)
         # and only meaningful for a single rat, so it draws when exactly one rat
@@ -1248,13 +1271,55 @@ class RecordsManager:
             if aid not in self.animal_ids:
                 del self.dash_rat_show[aid]
 
+    def _dash_span_pref(self) -> int:
+        """Persisted trend-window length in days (clamped to [1, cap]); default
+        14. Only the length persists - _build re-anchors To to today so we never
+        reopen on a stale week."""
+        try:
+            span = int(self._load_prefs().get("dash_span_days",
+                                              _DASH_DEFAULT_SPAN_DAYS))
+        except (TypeError, ValueError):
+            span = _DASH_DEFAULT_SPAN_DAYS
+        return max(1, min(span, _DASH_MAX_SPAN_DAYS))
+
+    def _dash_quick_fill(self, days: int) -> None:
+        """Set the range to the last ``days`` ending today, then refresh."""
+        today = dt.date.today()
+        self.dash_from.set((today - dt.timedelta(days=days - 1)).isoformat())
+        self.dash_to.set(today.isoformat())
+        self._refresh_dashboard()
+
+    def _dash_window(self) -> Optional[tuple]:
+        """Validated ``(from_iso, to_iso)`` from the entries, or None (with a
+        status message) if either isn't a date, From > To, or the span exceeds
+        the cap. Persists the span length on success."""
+        start = self.dash_from.get().strip()
+        end = self.dash_to.get().strip()
+        for label, value in (("From", start), ("To", end)):
+            if not _is_iso_date(value):
+                self._set_status(f"Dashboard {label} '{value}' must be "
+                                 "YYYY-MM-DD.")
+                return None
+        d0 = dt.date.fromisoformat(start)
+        d1 = dt.date.fromisoformat(end)
+        if d0 > d1:
+            self._set_status("Dashboard From date must be on or before To.")
+            return None
+        span = (d1 - d0).days + 1
+        if span > _DASH_MAX_SPAN_DAYS:
+            self._set_status(f"Dashboard range {span} days exceeds the "
+                             f"{_DASH_MAX_SPAN_DAYS}-day cap; narrow it.")
+            return None
+        self._save_prefs(dash_span_days=span)
+        return start, end
+
     def _refresh_dashboard(self) -> None:
-        date = self.dash_date.get().strip() or _today_iso()
-        if not _is_iso_date(date):
+        window = self._dash_window()
+        if window is None:
             # Keep the last good view rather than reading against a mis-typed
-            # date (which would silently show every rat as "not logged"); #14.
-            self._set_status(f"Dashboard date '{date}' must be YYYY-MM-DD.")
+            # range (which would silently show every rat as "not logged"); #14.
             return
+        start, end = window
         self._sync_dash_toggles()
         for w in (*self.dash_strip.winfo_children(),
                   *self.dash_body.winfo_children()):
@@ -1262,11 +1327,12 @@ class RecordsManager:
         # Drop the previous chart canvas reference (its Tk widget was just
         # destroyed); the combined chart repopulates this per refresh.
         self._dash_canvases = []
-        missing = dashboard.not_logged_today(self.daily, self.animal_ids, date)
+        # The To date is the "as of" anchor for each rat's current status.
+        missing = dashboard.not_logged_today(self.daily, self.animal_ids, end)
         for aid in self.animal_ids:
-            self._dashboard_status_row(self.dash_strip, aid, date,
+            self._dashboard_status_row(self.dash_strip, aid, end,
                                        missing.get(aid))
-        self._trend_chart_combined(self.dash_body, date)
+        self._trend_chart_combined(self.dash_body, start, end)
 
     def _dashboard_status_row(self, parent, aid: str, date: str,
                               missing: Optional[str]) -> None:
@@ -1321,16 +1387,20 @@ class RecordsManager:
         return [aid for aid in self.animal_ids
                 if self.dash_rat_show.get(aid) and self.dash_rat_show[aid].get()]
 
-    def _trend_chart_combined(self, parent, date: str) -> None:
-        """One shared chart overlaying each enabled rat's 14-day % baseline line
-        (per-rat colour, markers, red where <90%, endpoint label) over a single
-        dashed 90% line. The optional water-mL overlay draws only when exactly one
-        rat is enabled (see docs/decisions/0087). Falls back to text if matplotlib
-        is unavailable."""
+    def _trend_chart_combined(self, parent, start: str, end: str) -> None:
+        """One shared chart overlaying each enabled rat's % baseline line over the
+        ``[start, end]`` window on a TRUE date x-axis (so the 7-day rhythm reads
+        as even spacing, gaps show as gaps). Two shading layers sit behind the
+        lines: a faint calendar-weekend reference and solid ad-lib bands where
+        the data marks off-restriction (union across enabled rats; ADR-0100).
+        Per-rat colour, markers, red where <90%, endpoint label, one dashed 90%
+        line. The optional water-mL overlay draws only for a solo rat (see
+        docs/decisions/0087). Falls back to text if matplotlib is unavailable."""
         enabled = self._enabled_dash_rats()
         series = {}
         for aid in enabled:
-            trend = dashboard.weight_trend(self.daily, aid, date, days=14)
+            trend = dashboard.weight_trend(self.daily, aid, end,
+                                           start_date=start)
             pts = [(t["date"], t["pct_baseline"] * 100.0) for t in trend
                    if t.get("pct_baseline") is not None]
             if pts:
@@ -1338,37 +1408,56 @@ class RecordsManager:
         if not series:
             msg = ("no rats selected" if not enabled
                    else "not enough data to plot")
-            ttk.Label(parent, text=f"14-day % baseline:  ({msg})",
+            ttk.Label(parent, text=f"% baseline {start} to {end}:  ({msg})",
                       foreground="#555").pack(side="top", anchor="w", pady=(4, 0))
             return
         try:
             from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
             from matplotlib.figure import Figure
+            import matplotlib.dates as mdates
         except ImportError:
             self._trend_text_fallback(parent, series)
             return
 
         thr = dashboard.BELOW_THRESHOLD * 100.0
-        # Shared x-axis: the union of dates across the enabled rats, oldest first.
         all_dates = sorted({d for pts in series.values() for d, _ in pts})
-        pos = {d: i for i, d in enumerate(all_dates)}
-        n = len(all_dates)
 
         fig = Figure(figsize=(6.4, 3.0), dpi=100)
-        fig.subplots_adjust(left=0.10, right=0.88, top=0.93, bottom=0.14)
+        fig.subplots_adjust(left=0.10, right=0.88, top=0.93, bottom=0.16)
         ax = fig.add_subplot(111)
+        ax.xaxis_date()
+
+        def _num(d: dt.date) -> float:
+            return mdates.date2num(d)
+
+        # Two-layer shading behind everything (bands centred on their days, so
+        # extend half a day each side). Only the first band of each kind carries
+        # a legend label to avoid duplicate legend entries.
+        first = True
+        for s, e in dashboard.weekend_spans(start, end):
+            ax.axvspan(_num(s) - 0.5, _num(e) + 0.5, color="#000000",
+                       alpha=0.05, lw=0, zorder=0,
+                       label="weekend" if first else None)
+            first = False
+        first = True
+        for s, e in dashboard.ad_lib_spans(self.daily, enabled, start, end):
+            ax.axvspan(_num(s) - 0.5, _num(e) + 0.5, color="#ff7f0e",
+                       alpha=0.15, lw=0, zorder=0,
+                       label="ad-lib" if first else None)
+            first = False
 
         # Water overlay only makes sense for one rat (twin-axis bars for several
         # would be unreadable), so require an exact solo selection.
         if self.dash_show_water.get() and len(enabled) == 1:
             aid = enabled[0]
             wt = dashboard.water_ml_trend(self.daily, self.registry_rows, aid,
-                                          date, days=14)
+                                          end, start_date=start)
             wmap = {r["date"]: r["total_ml"] for r in wt}
+            xs = [_num(dt.date.fromisoformat(d)) for d in all_dates]
             bars = [wmap.get(d, 0.0) for d in all_dates]
             if any(bars):
                 axw = ax.twinx()
-                axw.bar(range(n), bars, color="#7fb3d5", alpha=0.30, width=0.6,
+                axw.bar(xs, bars, color="#7fb3d5", alpha=0.30, width=0.6,
                         zorder=0)
                 axw.set_ylabel("water mL", fontsize=8, color="#4a789c")
                 axw.tick_params(axis="y", labelsize=7, colors="#4a789c")
@@ -1378,7 +1467,7 @@ class RecordsManager:
         all_y = [y for pts in series.values() for _, y in pts]
         for aid, pts in series.items():
             colour = self._rat_color(aid)
-            xs = [pos[d] for d, _ in pts]
+            xs = [dt.date.fromisoformat(d) for d, _ in pts]
             ys = [y for _, y in pts]
             ax.plot(xs, ys, color=colour, lw=1.6, marker="o", ms=3.5,
                     label=f"Rat {aid}", zorder=2)
@@ -1395,13 +1484,22 @@ class RecordsManager:
         ax.set_ylim(lo, hi)
         ax.set_ylabel("% baseline", fontsize=8)
         ax.tick_params(axis="y", labelsize=7)
-        ticks = sorted({0, n // 2, n - 1}) if n > 1 else [0]
-        ax.set_xticks(ticks)
-        ax.set_xticklabels([all_dates[i][5:] for i in ticks], fontsize=7)
-        ax.set_xlim(-0.5, max(n - 0.5, 0.5))
+        # Honour the requested window (not just the data range) and pad half a
+        # day each side so end markers/bands aren't clipped.
+        ax.set_xlim(_num(dt.date.fromisoformat(start)) - 0.5,
+                    _num(dt.date.fromisoformat(end)) + 0.5)
+        ax.xaxis.set_major_locator(mdates.AutoDateLocator(maxticks=8))
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d"))
+        for lbl in ax.get_xticklabels():
+            lbl.set_fontsize(7)
         ax.grid(True, axis="y", alpha=0.15)
-        if len(series) > 1:
-            ax.legend(fontsize=7, loc="lower left", framealpha=0.6)
+        ax.legend(fontsize=7, loc="lower left", framealpha=0.6, ncol=2)
+
+        # Caption so the shading is self-explanatory without a manual.
+        ttk.Label(parent,
+                  text="Shaded: grey = calendar weekend, orange = ad-lib "
+                       "(off-restriction) days.",
+                  foreground="#777").pack(side="bottom", anchor="w")
 
         canvas = FigureCanvasTkAgg(fig, master=parent)
         canvas.draw()

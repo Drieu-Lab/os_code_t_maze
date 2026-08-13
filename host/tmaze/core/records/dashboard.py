@@ -194,23 +194,26 @@ def water_breakdown(by_source: Dict[str, float]) -> Dict[str, Any]:
 # Signal 4: weight / % baseline trend over the last N days
 # --------------------------------------------------------------------------- #
 def weight_trend(log: daily_log.DailyLog, animal_id: str, end_date: str,
-                 days: int = 14) -> List[Dict[str, Any]]:
-    """Oldest-first ``[{date, weight_g, pct_baseline}]`` over the window ending
-    (inclusive) at ``end_date``, spanning ``days`` calendar days.
+                 days: int = 14,
+                 start_date: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Oldest-first ``[{date, weight_g, pct_baseline}]`` over a date window.
 
-    Only rows with a parseable date and a weight are included. If ``end_date``
-    doesn't parse, all dated+weighed rows for the animal are returned (still
-    oldest-first) so the caller still gets a trend.
+    The window is ``[start, end]``: ``end`` is ``end_date``; ``start`` is
+    ``start_date`` when given (the dashboard's explicit From date), else
+    ``end - (days - 1)``. Only rows with a parseable date and a weight are
+    included. If a bound doesn't parse it is treated as open, so a bad
+    ``end_date`` with no ``start_date`` returns all dated+weighed rows.
     """
     end = _iso(end_date)
-    start = end - dt.timedelta(days=max(days, 1) - 1) if end else None
+    start = (_iso(start_date) if start_date
+             else (end - dt.timedelta(days=max(days, 1) - 1) if end else None))
     out: List[Dict[str, Any]] = []
     for row in log.rows_for(animal_id):
         d = _iso(row.get("date"))
         w = _num(row.get("weight_g"))
         if d is None or w is None:
             continue
-        if start is not None and not (start <= d <= end):
+        if (start is not None and d < start) or (end is not None and d > end):
             continue
         out.append({
             "date": row.get("date", "").strip(),
@@ -224,10 +227,12 @@ def weight_trend(log: daily_log.DailyLog, animal_id: str, end_date: str,
 
 def water_ml_trend(log: daily_log.DailyLog, registry_rows: List[Dict[str, Any]],
                    animal_id: str, end_date: str,
-                   days: int = 14) -> List[Dict[str, Any]]:
+                   days: int = 14,
+                   start_date: Optional[str] = None) -> List[Dict[str, Any]]:
     """Oldest-first ``[{date, total_ml}]`` of each day's total water (all four
-    channels summed by :func:`collect_water`) over the window ending (inclusive)
-    at ``end_date``, spanning ``days`` calendar days.
+    channels summed by :func:`collect_water`) over the window ``[start, end]``:
+    ``end`` is ``end_date``; ``start`` is ``start_date`` when given, else
+    ``end - (days - 1)``.
 
     A date is included when it has a daily row *or* any registry row for the
     animal within the window; ``total_ml`` is 0.0 when nothing numeric is
@@ -243,11 +248,14 @@ def water_ml_trend(log: daily_log.DailyLog, registry_rows: List[Dict[str, Any]],
     registry's reward channels) are populated.
     """
     end = _iso(end_date)
-    start = end - dt.timedelta(days=max(days, 1) - 1) if end else None
+    start = (_iso(start_date) if start_date
+             else (end - dt.timedelta(days=max(days, 1) - 1) if end else None))
     aid = str(animal_id).strip()
 
     def _in_window(d: Optional[dt.date]) -> bool:
-        return d is not None and (start is None or start <= d <= end)
+        return (d is not None
+                and (start is None or d >= start)
+                and (end is None or d <= end))
 
     dates: set = set()
     for row in log.rows_for(animal_id):
@@ -268,3 +276,105 @@ def water_ml_trend(log: daily_log.DailyLog, registry_rows: List[Dict[str, Any]],
         out.append({"date": ds, "total_ml": total})
     out.sort(key=lambda r: r["date"])
     return out
+
+
+# --------------------------------------------------------------------------- #
+# Signal 5: weekly-structure spans + Daily-table helpers
+# --------------------------------------------------------------------------- #
+# These support the weekly-rhythm view: the Dashboard trend shades the weekend
+# ad-lib window (and a faint calendar-weekend reference) over a true date axis,
+# and the Daily table gets a weekday column, a day-over-day weight delta, and a
+# missing-day (gap) indicator. All are pure date math over the daily table, so
+# they stay headlessly testable. Windows are an explicit inclusive
+# ``[start_date, end_date]`` (the dashboard drives it from From/To dates).
+def _date_range(start: Optional[dt.date],
+                end: Optional[dt.date]) -> List[dt.date]:
+    """Every ``dt.date`` from ``start`` to ``end`` inclusive; ``[]`` if either is
+    None or the range is inverted."""
+    if start is None or end is None or end < start:
+        return []
+    out: List[dt.date] = []
+    day = start
+    while day <= end:
+        out.append(day)
+        day += dt.timedelta(days=1)
+    return out
+
+
+def _contiguous_spans(dates: Any) -> List[Tuple[dt.date, dt.date]]:
+    """Collapse an iterable of ``dt.date`` into sorted inclusive ``(start, end)``
+    runs of consecutive calendar days."""
+    spans: List[Tuple[dt.date, dt.date]] = []
+    for d in sorted(set(dates)):
+        if spans and d == spans[-1][1] + dt.timedelta(days=1):
+            spans[-1] = (spans[-1][0], d)
+        else:
+            spans.append((d, d))
+    return spans
+
+
+def ad_lib_spans(log: daily_log.DailyLog, animal_ids: List[str],
+                 start_date: str,
+                 end_date: str) -> List[Tuple[dt.date, dt.date]]:
+    """Inclusive ``(start, end)`` runs of contiguous days in
+    ``[start_date, end_date]`` where ANY of ``animal_ids`` is marked ``ad_lib``.
+
+    Union across rats: the weekend free-water window is shared, so one band
+    reads for the whole chart, while a lone per-rat deviation still shows
+    (ADR-0100). Empty when the range is invalid."""
+    start, end = _iso(start_date), _iso(end_date)
+    ids = [str(a).strip() for a in (animal_ids or [])]
+    marked: List[dt.date] = []
+    for day in _date_range(start, end):
+        ds = day.isoformat()
+        if any(daily_log.is_ad_lib(log.for_date(aid, ds)) for aid in ids):
+            marked.append(day)
+    return _contiguous_spans(marked)
+
+
+def weekend_spans(start_date: str,
+                  end_date: str) -> List[Tuple[dt.date, dt.date]]:
+    """Inclusive ``(Sat, Sun)`` date runs within ``[start_date, end_date]`` - the
+    calendar 'norm' reference, independent of the data (Mon=0 .. Sun=6)."""
+    start, end = _iso(start_date), _iso(end_date)
+    weekend = [d for d in _date_range(start, end) if d.weekday() >= 5]
+    return _contiguous_spans(weekend)
+
+
+def weekday_label(date_str: Any) -> str:
+    """A date's weekday abbreviation (``Mon`` .. ``Sun``); ``""`` if it doesn't
+    parse. Display-only helper for the Daily table's Day column."""
+    d = _iso(date_str)
+    return d.strftime("%a") if d else ""
+
+
+def weight_delta(log: daily_log.DailyLog, animal_id: str,
+                 date: str) -> Optional[float]:
+    """This day's weight minus the most recent EARLIER weighed day's weight for
+    the animal (day-over-day change, rounded to 0.1 g).
+
+    None when this day has no weight or there's no earlier weighed day;
+    intervening unweighed days are skipped (compares to the last real weight)."""
+    d = _iso(date)
+    this = _num((log.for_date(animal_id, str(date).strip()) or {}).get("weight_g"))
+    if d is None or this is None:
+        return None
+    prior: Optional[float] = None
+    prior_d: Optional[dt.date] = None
+    for row in log.rows_for(animal_id):
+        rd, w = _iso(row.get("date")), _num(row.get("weight_g"))
+        if rd is None or w is None or rd >= d:
+            continue
+        if prior_d is None or rd > prior_d:
+            prior_d, prior = rd, w
+    return None if prior is None else round(this - prior, 1)
+
+
+def missing_days(log: daily_log.DailyLog, animal_id: str, start_date: str,
+                 end_date: str) -> List[str]:
+    """ISO dates in ``[start_date, end_date]`` with no daily row for the animal -
+    the weekly-adherence gaps. Empty when the range is invalid."""
+    start, end = _iso(start_date), _iso(end_date)
+    aid = str(animal_id).strip()
+    return [d.isoformat() for d in _date_range(start, end)
+            if log.for_date(aid, d.isoformat()) is None]
