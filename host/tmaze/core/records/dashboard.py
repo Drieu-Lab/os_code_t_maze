@@ -14,7 +14,9 @@ stays headlessly testable):
 3. **Daily water intake by source** - task-earned + operator-manual reward (summed
    from that day's ``session_registry`` rows) plus supplemental and cage water
    (from the daily row), as a labelled breakdown + total. Totals only; there is no
-   target/adequacy flag (that's a human judgement).
+   target/adequacy flag (that's a human judgement). On a ``task_earned`` day the
+   entered ``water_ml`` is the same water as the rig reward, so it's counted once
+   (ADR-0106) rather than added on top.
 4. **Weight / % baseline trend** - the last ~7-14 days of weight and % baseline
    per rat, oldest-first, for a sparkline/trend view.
 
@@ -167,11 +169,23 @@ def collect_water(daily_row: Optional[Dict[str, str]],
     ``registry_rows`` (see :func:`registry_rows_for`); ``supplemental`` and
     ``cage`` come from the daily row's ``supp_water`` / ``water_ml`` cells, read
     as mL when numeric and 0 otherwise (those cells may hold a time or be blank).
+
+    On a ``task_earned`` day (``water_method``; ADR-0104) the entered ``water_ml``
+    records the SAME water the rig already measures as task/manual reward, so
+    counting both double-counts it (ADR-0106). There the entered ``water_ml``
+    wins - it's reported as the ``cage`` amount and the rig reward is dropped -
+    UNLESS ``water_ml`` is blank, in which case the rig reward stands so a session
+    day with no typed amount isn't lost. ``supplemental`` (a separate hand-given
+    source) always counts. Other methods are unchanged.
     """
     task = sum(_num(r.get("task_reward_ml")) or 0.0 for r in registry_rows)
     manual = sum(_num(r.get("manual_reward_ml")) or 0.0 for r in registry_rows)
     supp = _num((daily_row or {}).get("supp_water")) or 0.0
     cage = _num((daily_row or {}).get("water_ml")) or 0.0
+    method = daily_log.normalize_method((daily_row or {}).get("water_method", ""))
+    if method == daily_log.METHOD_TASK_EARNED and cage > 0.0:
+        task = 0.0
+        manual = 0.0
     return {"task": task, "manual": manual, "supplemental": supp, "cage": cage}
 
 

@@ -100,6 +100,41 @@ class TestSignal3(unittest.TestCase):
         self.assertEqual(water["supplemental"], 0.0)
         self.assertEqual(water["cage"], 0.0)
 
+    def test_task_earned_day_counts_entered_water_once(self):
+        # ADR-0106: on a task_earned day the entered water_ml IS the rig reward,
+        # so the rig task/manual are dropped (no double count). supp still counts.
+        reg = [{"animal": "602", "date": "2026-08-10",
+                "task_reward_ml": "4.4", "manual_reward_ml": "0.12"}]
+        day = dashboard.registry_rows_for(reg, "602", "2026-08-10")
+        water = dashboard.collect_water(
+            {"water_ml": "4.52", "supp_water": "1.0",
+             "water_method": "task_earned"}, day)
+        self.assertEqual(water, {"task": 0.0, "manual": 0.0,
+                                 "supplemental": 1.0, "cage": 4.52})
+        self.assertEqual(dashboard.water_breakdown(water)["total_ml"], 5.52)
+
+    def test_task_earned_blank_water_ml_falls_back_to_rig_reward(self):
+        # No typed amount on a session day -> keep the rig reward so it isn't lost.
+        reg = [{"animal": "602", "date": "2026-08-10",
+                "task_reward_ml": "4.4", "manual_reward_ml": "0.12"}]
+        day = dashboard.registry_rows_for(reg, "602", "2026-08-10")
+        water = dashboard.collect_water(
+            {"water_ml": "", "water_method": "task_earned"}, day)
+        self.assertEqual(water["task"], 4.4)
+        self.assertEqual(water["manual"], 0.12)
+        self.assertEqual(water["cage"], 0.0)
+
+    def test_measured_bottle_day_still_sums_cage_and_reward(self):
+        # A non-task_earned method leaves the summing behaviour unchanged.
+        reg = [{"animal": "602", "date": "2026-08-10",
+                "task_reward_ml": "2.0", "manual_reward_ml": "0.0"}]
+        day = dashboard.registry_rows_for(reg, "602", "2026-08-10")
+        water = dashboard.collect_water(
+            {"water_ml": "5.0", "water_method": "measured_bottle"}, day)
+        self.assertEqual(water["task"], 2.0)
+        self.assertEqual(water["cage"], 5.0)
+        self.assertEqual(dashboard.water_breakdown(water)["total_ml"], 7.0)
+
 
 class TestSignal4(unittest.TestCase):
     def setUp(self):
