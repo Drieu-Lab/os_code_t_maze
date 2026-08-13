@@ -86,6 +86,7 @@ criteria).
 | [FW-0031](#fw-0031-latching-toggle-on-note-tags-that-span-subsequent-trials) | Latching (toggle-on) note tags that span subsequent trials | Note tags + session notes + summary + Session panel | Proposed |
 | [FW-0032](#fw-0032-per-port-leftright-reward-volume-calibration) | Per-port (left/right) reward-volume calibration | Reward calibration | Proposed |
 | [FW-0033](#fw-0033-structural-cross-reference-hardening-for-the-coordinated-records) | Structural cross-reference hardening for the coordinated records | Records cores + Records Manager | Proposed |
+| [FW-0034](#fw-0034-frozen-identity-columns-in-the-daily-table) | Frozen (pinned) identity columns in the Daily table | Records Manager Daily tab | Deferred |
 
 ## Entries
 
@@ -1678,6 +1679,48 @@ underscore in the animal part?
 
 **ADR needed?** Yes for the join-time normalization (it changes a cross-reference
 key's matching); the ghost-annotation report can fold under ADR-0097.
+
+### FW-0034: Frozen (pinned) identity columns in the Daily table
+
+- **Status:** Deferred
+- **Date added:** 2026-08-13
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** `host/tmaze/ui/records_manager.py` (Daily tab table)
+- **Related ADRs:** [ADR-0103](decisions/0103-daily-table-weekly-cues.md) (the
+  Daily-table weekly cues this would extend), [ADR-0102](decisions/0102-dashboard-weekly-structure-view.md)
+
+**Motivation / context.** The Daily table now has 13 columns (identity + derived
+Day/delta + husbandry + notes). On a narrow window the operator may scroll right
+and lose sight of which `animal_id`/`date`/`day` a cell belongs to. Pinning those
+identity columns so they stay visible while the rest scrolls horizontally would
+keep the context anchored. Deferred during Phase 2 of the weekly-structure work
+(the operator chose to skip it for now; the identity columns are placed leftmost
+as a lighter mitigation).
+
+**Sketch of approach.** Tkinter's `ttk.Treeview` has no native frozen columns, so
+the usual pattern is two side-by-side Treeviews: a left one holding the frozen
+identity columns and a right one with the remaining columns, sharing one vertical
+scrollbar (a `yview` proxy that drives both), with selection mirrored between the
+two, row tints applied to both halves, and the double-click-to-load handler
+working from either. The `_DAILY_TREE_COLUMNS` spec already lists the columns in
+order, so it can be split at a "freeze index". An alternative is a third-party
+widget (e.g. `tksheet`), which supports frozen columns natively but adds a
+dependency.
+
+**Evaluation / acceptance.** Horizontal scroll keeps `animal_id`/`date`/`day`
+visible; row selection, tints, missing-entry placeholders, and double-click-load
+behave identically to the single-table version; vertical scroll stays in sync
+across both halves.
+
+**Effort / risk.** Medium; mostly fragile GUI glue (scroll/selection sync, tint
+mirroring) that is easy to get subtly wrong and adds comprehension debt for a
+modest benefit - the reason it was deferred rather than built.
+
+**Open questions.** Is the added GUI complexity worth it versus just trimming
+columns, or adopting a table widget with native freeze support?
+
+**ADR needed?** No (UI-only); a short note in a follow-up ADR or an update
+referencing ADR-0103 suffices if it is built.
 
 ## Completed
 
