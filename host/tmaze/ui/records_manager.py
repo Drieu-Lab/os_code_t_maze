@@ -55,13 +55,14 @@ import sys
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from tmaze.core.records import (
     RecordsFileError,
     animals,
     dashboard,
     daily_log,
+    records_audit,
     session_annotations,
     session_ignore,
 )
@@ -202,6 +203,8 @@ class RecordsManager:
                    command=self._on_import).pack(side="left", padx=(6, 0))
         ttk.Button(bar, text="Reload",
                    command=self._on_reload).pack(side="left", padx=(6, 0))
+        ttk.Button(bar, text="Integrity check",
+                   command=self._integrity_check).pack(side="left", padx=(6, 0))
         self.status_var = tk.StringVar(value="Ready.")
         ttk.Label(bar, textvariable=self.status_var,
                   foreground="#555").pack(side="right")
@@ -636,6 +639,21 @@ class RecordsManager:
         split.pack(side="top", fill="both", expand=True, pady=(8, 0))
 
         left = ttk.LabelFrame(split, text="Session log (read-only)", padding=6)
+        # Which metric lines to show in the block (persisted per machine); the
+        # operator picks via "Choose metrics..." (default: all).
+        raw_metrics = self._load_prefs().get("sessions_metrics")
+        self._metric_ids = (session_detail.default_metric_ids()
+                            if raw_metrics is None
+                            else self._sanitize_metric_ids(raw_metrics))
+        self._current_session_row: Optional[Dict[str, str]] = None
+        mrow = ttk.Frame(left)
+        mrow.pack(side="top", fill="x")
+        ttk.Button(mrow, text="Choose metrics...",
+                   command=self._choose_metrics).pack(side="right")
+        self._open_bundle_btn = ttk.Button(
+            mrow, text="Open bundle folder", command=self._open_bundle_folder,
+            state="disabled")
+        self._open_bundle_btn.pack(side="left")
         # A compact metrics block folded from the registry row (works for every
         # session, even old bundles without a rendered summary).
         self.s_metrics = tk.Text(left, height=8, wrap="none",
@@ -805,11 +823,70 @@ class RecordsManager:
             return
         self._show_session(row)
 
+    def _sanitize_metric_ids(self, ids: Any) -> List[str]:
+        """Keep only known metric ids, in the catalog's display order. A saved
+        selection that predates a metric-catalog change stays valid."""
+        if not isinstance(ids, list):
+            return session_detail.default_metric_ids()
+        chosen = set(ids)
+        return [mid for mid, _label in session_detail.available_metrics()
+                if mid in chosen]
+
+    def _render_metrics(self, row: Optional[Dict[str, str]]) -> None:
+        """Draw the metrics block for ``row`` using the current selection."""
+        lines = session_detail.metrics_lines(row or {}, self._metric_ids)
+        self._set_readonly(self.s_metrics, "\n".join(lines))
+
+    def _choose_metrics(self) -> None:
+        """Pick which metric lines the session block shows (persisted)."""
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Choose session metrics")
+        dlg.transient(self.root)
+        dlg.grab_set()
+        ttk.Label(dlg, text="Show these metrics in the session block:").pack(
+            side="top", anchor="w", padx=8, pady=(8, 4))
+        body = ttk.Frame(dlg)
+        body.pack(side="top", fill="both", expand=True, padx=8)
+        current = set(self._metric_ids)
+        vars_by_id: Dict[str, tk.BooleanVar] = {}
+        for mid, label in session_detail.available_metrics():
+            var = tk.BooleanVar(value=(mid in current))
+            vars_by_id[mid] = var
+            ttk.Checkbutton(body, text=label, variable=var).pack(
+                side="top", anchor="w")
+        applied = {"ok": False}
+
+        def _ok():
+            applied["ok"] = True
+            dlg.destroy()
+
+        def _set_all(value: bool):
+            for var in vars_by_id.values():
+                var.set(value)
+
+        btns = ttk.Frame(dlg)
+        btns.pack(side="top", fill="x", padx=8, pady=8)
+        ttk.Button(btns, text="Apply", command=_ok).pack(side="left")
+        ttk.Button(btns, text="Cancel", command=dlg.destroy).pack(
+            side="left", padx=(6, 0))
+        ttk.Button(btns, text="All", command=lambda: _set_all(True)).pack(
+            side="right")
+        ttk.Button(btns, text="None", command=lambda: _set_all(False)).pack(
+            side="right", padx=(0, 6))
+        dlg.wait_window()
+        if not applied["ok"]:
+            return
+        self._metric_ids = [mid for mid, _label in session_detail.available_metrics()
+                            if vars_by_id[mid].get()]
+        self._save_prefs(sessions_metrics=self._metric_ids)
+        self._render_metrics(self._current_session_row)
+
     def _show_session(self, row: Dict[str, str]) -> None:
         """Populate the read-only panels + annotation editor for ``row``."""
         self.current_session_id = str(row.get("session_id", "")).strip()
-        self._set_readonly(self.s_metrics,
-                           "\n".join(session_detail.metrics_lines(row)))
+        self._current_session_row = row
+        self._render_metrics(row)
+        self._update_bundle_button(row)
         text = session_detail.summary_text(
             str(row.get("bundle", "")).strip() or None)
         if not text:
@@ -829,8 +906,103 @@ class RecordsManager:
         widget.insert("1.0", text)
         widget.configure(state="disabled")
 
+    def _update_bundle_button(self, row: Optional[Dict[str, str]]) -> None:
+        """Enable 'Open bundle folder' only when the row points at a folder that
+        exists on disk (annotation-only / stale rows have no openable bundle)."""
+        path = str((row or {}).get("bundle", "") or "").strip()
+        ok = bool(path) and os.path.isdir(path)
+        self._open_bundle_btn.configure(state=("normal" if ok else "disabled"))
+
+    def _open_bundle_folder(self) -> None:
+        """Open the selected session's bundle folder in the OS file browser."""
+        row = self._current_session_row or {}
+        path = str(row.get("bundle", "") or "").strip()
+        if not path or not os.path.isdir(path):
+            messagebox.showinfo(
+                "Open bundle folder",
+                "This session has no bundle folder on disk to open.")
+            return
+        try:
+            self._open_in_file_browser(path)
+        except OSError as exc:
+            messagebox.showerror(
+                "Open bundle folder", f"Couldn't open the folder:\n{exc}")
+
+    @staticmethod
+    def _open_in_file_browser(path: str) -> None:
+        """Reveal ``path`` in the platform's file browser (Explorer/Finder/xdg)."""
+        if sys.platform.startswith("win"):
+            os.startfile(path)  # type: ignore[attr-defined]
+        elif sys.platform == "darwin":
+            subprocess.run(["open", path], check=False)
+        else:
+            subprocess.run(["xdg-open", path], check=False)
+
+    # ------------------------------------------------------------- integrity
+    def _integrity_check(self) -> None:
+        """Show the read-only cross-record integrity report (bug #260810;
+        ADR-0097): typo'd animal ids, sessions with no husbandry row, water-time
+        cells holding a volume/note, and start/stop churn. Uses the records
+        currently in memory and changes nothing - the fixes are the operator's."""
+        registry = animals.load_registry(self.animals_path)
+        triples = records_audit.session_triples(
+            self.registry_rows, self.annot_rows, self.ignored_sessions)
+        kept = [r for r in self.registry_rows
+                if str(r.get("session_id", "")).strip()
+                not in self.ignored_sessions]
+        sections = records_audit.build_report(
+            triples, self.daily_rows, kept, self.daily, registry)
+        total = records_audit.total_flagged(sections)
+        self._show_integrity_dialog(sections, total, len(triples))
+
+    @staticmethod
+    def _format_integrity(
+            sections: "List[records_audit.AuditSection]") -> str:
+        """Render the report sections as plain text (mirrors records_check)."""
+        out: List[str] = []
+        for s in sections:
+            out.append(f"== {s.title} ==")
+            if s.skipped:
+                out.append(f"  ({s.note})")
+            elif not s.items:
+                out.append("  none")
+            else:
+                out.extend(f"  {item}" for item in s.items)
+                if s.fix:
+                    out.append(f"  Fix: {s.fix}")
+            out.append("")
+        return "\n".join(out).rstrip() + "\n"
+
+    def _show_integrity_dialog(
+            self, sections: "List[records_audit.AuditSection]",
+            total: int, n_sessions: int) -> None:
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Records integrity")
+        dlg.transient(self.root)
+        header = ("No problems found." if total == 0
+                  else f"{total} item(s) flagged.")
+        ttk.Label(
+            dlg,
+            text=(f"{header}  Checked {n_sessions} session(s). "
+                  "Read-only report - nothing is changed."),
+            foreground=("#2e7d32" if total == 0 else "#9C0006")).pack(
+            side="top", anchor="w", padx=8, pady=(8, 4))
+        wrap = ttk.Frame(dlg)
+        wrap.pack(side="top", fill="both", expand=True, padx=8)
+        txt = tk.Text(wrap, wrap="word", width=90, height=26)
+        vsb = ttk.Scrollbar(wrap, orient="vertical", command=txt.yview)
+        txt.configure(yscrollcommand=vsb.set)
+        txt.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+        txt.insert("1.0", self._format_integrity(sections))
+        txt.configure(state="disabled")
+        ttk.Button(dlg, text="Close", command=dlg.destroy).pack(
+            side="bottom", anchor="e", padx=8, pady=8)
+
     def _clear_session_detail(self) -> None:
         self.current_session_id = ""
+        self._current_session_row = None
+        self._update_bundle_button(None)
         self._set_readonly(self.s_metrics, "")
         self._set_readonly(self.s_log, "Select a session to view its log.")
         self.a_proc.delete("1.0", "end")

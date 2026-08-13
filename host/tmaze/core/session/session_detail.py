@@ -95,35 +95,94 @@ def session_time(row: Dict[str, Any]) -> str:
 
 
 # ------------------------------------------------------------- metrics block
-def metrics_lines(row: Dict[str, Any]) -> List[str]:
+def _g(row: Dict[str, Any], key: str) -> str:
+    """A cell shown in the block: the trimmed value, or ``-`` when blank."""
+    return _s(row, key) or "-"
+
+
+def tag_tally(row: Dict[str, Any]) -> str:
+    """The session's note-tag counts as ``name x n, ...`` (intervention history),
+    read from the registry row's wide ``tag_<name>`` columns (0/blank skipped);
+    ``-`` when the session carries no tags. The tidy ``session_registry_tags.csv``
+    is the source of truth; these wide columns are its convenience view
+    (ADR-0081)."""
+    tallies: List[str] = []
+    for key in sorted(row):
+        if not str(key).startswith("tag_"):
+            continue
+        n = _num(_s(row, key))
+        if n and n > 0:
+            tallies.append(f"{str(key)[4:]} x {int(n)}")
+    return ", ".join(tallies) if tallies else "-"
+
+
+# Each selectable metric is one labelled line. ``id`` is the stable key persisted
+# in the GUI's prefs; ``label`` names it in the picker; ``fn`` renders the line
+# for a registry row. Order here is the display order. Grouped so each line stays
+# a useful at-a-glance unit (mirrors the summary's sections) while still being
+# individually show/hideable (docs/decisions/0089; the selectable UI is FW-work).
+_METRICS: List[Tuple[str, str, Any]] = [
+    ("session", "Session id",
+     lambda r: f"Session:  {_g(r, 'session_id')}"),
+    ("identity", "Animal / date / time",
+     lambda r: f"Animal:   {_g(r, 'animal')}    Date: {_g(r, 'date')}"
+               f"    Time: {session_time(r)}"),
+    ("duration", "Duration / stage",
+     lambda r: f"Duration: {_duration(_s(r, 'duration_s'))}    "
+               f"Stage: {_g(r, 'stage')} ({_g(r, 'stage_source')})"),
+    ("weight", "Weight / baseline",
+     lambda r: f"Weight:   {_g(r, 'weight_g')} g   baseline {_g(r, 'baseline_g')}"
+               f" g   ({_pct(_s(r, 'pct_baseline'))} baseline)"),
+    ("hours_since_water", "Hours since water",
+     lambda r: f"Hrs since water: {_g(r, 'hours_since_water')}"),
+    ("trials", "Trials / accuracy",
+     lambda r: f"Trials:   {_g(r, 'completed')}/{_g(r, 'trials_total')} completed"
+               f"   correct {_g(r, 'correct')} / incorrect {_g(r, 'incorrect')}"
+               f"   acc {_pct(_s(r, 'accuracy_cum'))}"),
+    ("side_bias", "Side bias / stem compliance",
+     lambda r: f"Side bias: L {_pct(_s(r, 'side_bias_left'))} / "
+               f"R {_pct(_s(r, 'side_bias_right'))}   "
+               f"stem-compliance {_pct(_s(r, 'stem_compliance'))}"),
+    ("water", "Water (task / manual / supp)",
+     lambda r: f"Water:    task {_g(r, 'task_reward_ml')} mL   "
+               f"manual {_g(r, 'manual_reward_ml')} mL   supp {_g(r, 'supp_water')}"),
+    ("trainer", "Trainer / reward",
+     lambda r: f"Trainer:  {_g(r, 'trainer')}   Reward: {_g(r, 'reward_type')}"),
+    ("tags", "Note tags (tally)",
+     lambda r: f"Tags:     {tag_tally(r)}"),
+]
+
+_METRIC_IDS: Tuple[str, ...] = tuple(mid for mid, _label, _fn in _METRICS)
+_METRIC_FNS = {mid: fn for mid, _label, fn in _METRICS}
+
+
+def available_metrics() -> List[Tuple[str, str]]:
+    """``[(id, label)]`` for every selectable metric, in display order (for a
+    picker UI)."""
+    return [(mid, label) for mid, label, _fn in _METRICS]
+
+
+def default_metric_ids() -> List[str]:
+    """The default selection: every metric, in display order."""
+    return list(_METRIC_IDS)
+
+
+def metrics_lines(row: Dict[str, Any],
+                  selected: Optional[List[str]] = None) -> List[str]:
     """A compact, labelled metrics block for one registry row (blanks tolerated,
-    shown as ``-``). Groups mirror the summary's sections at a glance so the block
-    is useful even for older bundles that have no ``.txt`` log."""
-    def g(key: str) -> str:
-        return _s(row, key) or "-"
+    shown as ``-``).
 
-    weight = g("weight_g")
-    baseline = g("baseline_g")
-    pctb = _pct(_s(row, "pct_baseline"))
-    left = _pct(_s(row, "side_bias_left"))
-    right = _pct(_s(row, "side_bias_right"))
-    supp = g("supp_water")
-
-    return [
-        f"Session:  {g('session_id')}",
-        f"Animal:   {g('animal')}    Date: {g('date')}    Time: {session_time(row)}",
-        f"Duration: {_duration(_s(row, 'duration_s'))}    Stage: {g('stage')}"
-        f" ({g('stage_source')})",
-        f"Weight:   {weight} g   baseline {baseline} g   ({pctb} baseline)",
-        f"Trials:   {g('completed')}/{g('trials_total')} completed   "
-        f"correct {g('correct')} / incorrect {g('incorrect')}   "
-        f"acc {_pct(_s(row, 'accuracy_cum'))}",
-        f"Side bias: L {left} / R {right}   "
-        f"stem-compliance {_pct(_s(row, 'stem_compliance'))}",
-        f"Water:    task {g('task_reward_ml')} mL   "
-        f"manual {g('manual_reward_ml')} mL   supp {supp}",
-        f"Trainer:  {g('trainer')}   Reward: {g('reward_type')}",
-    ]
+    ``selected`` is an iterable of metric ids to include; unknown ids are ignored
+    and the result always follows the catalog's display order (not the caller's).
+    ``None`` means "all metrics" (the default block), preserving the original
+    behaviour for callers that don't choose.
+    """
+    if selected is None:
+        ids: List[str] = list(_METRIC_IDS)
+    else:
+        chosen = set(selected)
+        ids = [mid for mid in _METRIC_IDS if mid in chosen]
+    return [_METRIC_FNS[mid](row) for mid in ids]
 
 
 # ----------------------------------------------------------------- list view

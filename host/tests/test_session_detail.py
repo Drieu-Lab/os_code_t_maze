@@ -65,6 +65,49 @@ class TestMetricsLines(unittest.TestCase):
         self.assertIn("acc -", block)
         self.assertIn("Animal:   -", block)
 
+    def test_hours_since_water_line(self):
+        row = dict(_FULL_ROW, hours_since_water="15.5")
+        block = "\n".join(session_detail.metrics_lines(row))
+        self.assertIn("Hrs since water: 15.5", block)
+
+    def test_tag_tally_reads_wide_tag_columns(self):
+        row = dict(_FULL_ROW, tag_seizure="2", tag_health="1", tag_none="0")
+        self.assertEqual(session_detail.tag_tally(row), "health x 1, seizure x 2")
+        line = session_detail.metrics_lines(row, selected=["tags"])[0]
+        self.assertIn("Tags:", line)
+        self.assertIn("seizure x 2", line)
+
+    def test_tag_tally_dash_when_no_tags(self):
+        self.assertEqual(session_detail.tag_tally(_FULL_ROW), "-")
+
+
+class TestSelectableMetrics(unittest.TestCase):
+    def test_available_and_default_align(self):
+        ids = [mid for mid, _label in session_detail.available_metrics()]
+        self.assertEqual(ids, session_detail.default_metric_ids())
+        # Every id has a non-empty human label.
+        self.assertTrue(all(label for _mid, label in
+                            session_detail.available_metrics()))
+
+    def test_selection_filters_and_keeps_catalog_order(self):
+        # Ask out of order; result must follow the catalog order, not the request.
+        lines = session_detail.metrics_lines(
+            _FULL_ROW, selected=["water", "session"])
+        self.assertEqual(len(lines), 2)
+        self.assertTrue(lines[0].startswith("Session:"))   # catalog order
+        self.assertTrue(lines[1].startswith("Water:"))
+
+    def test_unknown_ids_ignored_and_empty_selection(self):
+        self.assertEqual(
+            session_detail.metrics_lines(_FULL_ROW, selected=["nope"]), [])
+        self.assertEqual(
+            session_detail.metrics_lines(_FULL_ROW, selected=[]), [])
+
+    def test_none_selection_is_all(self):
+        self.assertEqual(
+            len(session_detail.metrics_lines(_FULL_ROW, selected=None)),
+            len(session_detail.default_metric_ids()))
+
 
 class TestSessionTime(unittest.TestCase):
     def test_prefers_start_iso(self):
