@@ -303,6 +303,10 @@ class RecordsManager:
                                      values=self.animal_ids, width=10)
         self.d_animal.grid(row=0, column=1, sticky="w")
         self.d_animal.bind("<<ComboboxSelected>>", self._on_form_animal)
+        # The animal the form's baseline was last prefilled for, so re-selecting
+        # the same animal doesn't clobber a baseline the operator just typed
+        # while switching to a DIFFERENT animal does re-prefill it.
+        self._last_form_animal = ""
 
         ttk.Label(form, text="Date").grid(row=0, column=2, sticky="e", padx=4)
         self.d_vars["date"].set(_today_iso())
@@ -408,22 +412,34 @@ class RecordsManager:
         self.d_tree.bind("<Double-1>", self._load_selected_daily)
 
     def _on_form_animal(self, _event=None) -> None:
-        """Picking an animal in the form prefills its baseline and narrows the
-        recent-rows table to that rat (single-rat focus during data entry)."""
-        self._prefill_baseline()
+        """Picking an animal in the form re-prefills its baseline (replacing the
+        previous animal's) and narrows the recent-rows table to that rat
+        (single-rat focus during data entry). Re-selecting the SAME animal
+        doesn't touch a baseline the operator just typed."""
         aid = self.d_vars["animal_id"].get().strip()
+        if aid != self._last_form_animal:
+            self._prefill_baseline(force=True)
+            self._last_form_animal = aid
         if aid:
             self.d_filter.set(aid)
             self._refresh_daily_table()
 
-    def _prefill_baseline(self) -> None:
-        """When picking an animal, prefill baseline from its most recent row."""
+    def _prefill_baseline(self, force: bool = False) -> None:
+        """Prefill baseline from the animal's most recent row (on/before the
+        form's date). Without ``force`` an already-filled baseline is left alone;
+        with it (an animal change) the field is REPLACED with the selected
+        animal's latest baseline, or cleared when that animal has no known
+        baseline - so a stale value from the previous animal never lingers."""
         aid = self.d_vars["animal_id"].get().strip()
-        if not aid or self.d_vars["baseline_g"].get().strip():
+        if not aid:
             return
-        latest = self.daily.latest_for(aid)
-        if latest and latest.get("baseline_g"):
-            self.d_vars["baseline_g"].set(latest["baseline_g"])
+        if not force and self.d_vars["baseline_g"].get().strip():
+            return
+        latest = self.daily.latest_for(
+            aid, self.d_vars["date"].get().strip() or None)
+        baseline = str((latest or {}).get("baseline_g", "")) if latest else ""
+        if force or baseline:
+            self.d_vars["baseline_g"].set(baseline)
 
     def _update_pct(self) -> None:
         pct = daily_log.compute_pct_baseline(self.d_vars["weight_g"].get(),
@@ -522,6 +538,7 @@ class RecordsManager:
             # Show the default regime rather than a blank dropdown.
             self.d_vars["water_regime"].set("restriction")
             self._update_pct()
+        self._last_form_animal = ""
         self._daily_dirty = False
 
     def _load_selected_daily(self, _event=None) -> None:
@@ -542,6 +559,9 @@ class RecordsManager:
             if not self.d_vars["water_regime"].get().strip():
                 self.d_vars["water_regime"].set("restriction")
             self._update_pct()
+        # Loading sets the animal directly (no combobox event); track it so a
+        # later re-pick of the same animal won't overwrite the loaded baseline.
+        self._last_form_animal = str(row.get("animal_id", "")).strip()
         self._daily_dirty = False
 
     def _mark_span(self) -> None:
