@@ -93,5 +93,50 @@ class TestShortSessions(unittest.TestCase):
         self.assertEqual(got, [("s_short", 12.0), ("s_zero", 0.0)])
 
 
+class TestSessionTriples(unittest.TestCase):
+    def test_registry_first_then_annot_only_skip_ignored_and_dups(self):
+        registry = [{"session_id": "a", "animal": "600", "date": "2026-08-07"},
+                    {"session_id": "dup", "animal": "601", "date": "2026-08-08"}]
+        annot = [{"session_id": "dup", "animal": "601", "date": "x"},  # dup skip
+                 {"session_id": "b", "animal": "602", "date": "2026-08-09"},
+                 {"session_id": "ig", "animal": "600", "date": "2026-08-10"}]
+        got = records_audit.session_triples(registry, annot, {"ig"})
+        self.assertEqual(got, [
+            ("a", "600", "2026-08-07"),
+            ("dup", "601", "2026-08-08"),
+            ("b", "602", "2026-08-09"),
+        ])
+
+
+class TestBuildReport(unittest.TestCase):
+    def _sections_by_title(self, sections):
+        return {s.title: s for s in sections}
+
+    def test_flags_across_sections(self):
+        reg = AnimalRegistry([{"id": "600"}])
+        daily_rows = [{"animal_id": "600", "date": "2026-08-07",
+                       "water_on": "8ml note", "water_off": "6pm"}]
+        daily = DailyLog(daily_rows)
+        triples = [("600_a", "600", "2026-08-07"),   # has daily
+                   ("123_b", "123", "2026-08-09")]    # unknown + missing daily
+        kept = [{"session_id": "600_a", "duration_s": "12"},   # short
+                {"session_id": "600_a2", "duration_s": "900"}]
+        sections = records_audit.build_report(
+            triples, daily_rows, kept, daily, reg)
+        by = self._sections_by_title(sections)
+        self.assertIn("123", by["Animal ids not in animals.json"].items)
+        self.assertEqual(
+            records_audit.total_flagged(sections),
+            sum(s.count for s in sections))
+        self.assertGreaterEqual(records_audit.total_flagged(sections), 3)
+
+    def test_skips_sections_when_sources_unavailable(self):
+        sections = records_audit.build_report(
+            [("s", "600", "2026-08-07")], [], [], DailyLog([]), AnimalRegistry())
+        by = self._sections_by_title(sections)
+        self.assertTrue(by["Animal ids not in animals.json"].skipped)
+        self.assertEqual(records_audit.total_flagged(sections), 0)
+
+
 if __name__ == "__main__":
     unittest.main()
