@@ -114,6 +114,29 @@ _RAT_PALETTE = ("#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
 _DASH_DEFAULT_SPAN_DAYS = 14
 _DASH_MAX_SPAN_DAYS = 180
 
+# The Daily-tab table columns: (source id, heading, width, anchor). Most ids map
+# straight to a daily_log field; "day" and "wt_delta" are DERIVED (weekday label
+# and day-over-day weight change) - display-only, computed from the pure core.
+_DAILY_TREE_COLUMNS = (
+    ("animal_id", "Animal", 68, "center"),
+    ("date", "Date", 90, "center"),
+    ("day", "Day", 46, "center"),
+    ("weight_g", "Weight", 64, "center"),
+    ("wt_delta", "\u0394 g", 54, "center"),      # day-over-day change
+    ("baseline_g", "Baseline", 66, "center"),
+    ("pct_baseline", "% base", 62, "center"),
+    ("water_on", "Water on", 76, "center"),
+    ("water_off", "Water off", 76, "center"),
+    ("water_ml", "Water mL", 70, "center"),
+    ("supp_water", "Supp", 60, "center"),
+    ("water_regime", "Regime", 80, "center"),
+    ("notes", "Notes", 220, "w"),
+)
+
+# How many days back (ending today) the Daily table flags as missing-entry gaps
+# for a single selected rat. Bounded so old history doesn't fill with placeholders.
+_DAILY_MISSING_LOOKBACK_DAYS = 14
+
 
 def _today_iso() -> str:
     return dt.date.today().isoformat()
@@ -171,6 +194,9 @@ class RecordsManager:
         # per-Treeview-item registry rows behind it).
         self.current_session_id = ""
         self._session_row_by_item: Dict[str, Dict[str, str]] = {}
+        # Daily table: maps each Treeview item to its source row (real rows only;
+        # missing-entry placeholders are absent) so a double-click loads it.
+        self._daily_row_by_iid: Dict[str, Dict[str, str]] = {}
         # Unsaved-edit tracking (#3): the Daily form marks itself dirty on any
         # user edit (suspended during programmatic fills); the annotation editor
         # uses the Text widgets' own modified flag. Reload/Generate/Import/close
@@ -334,14 +360,33 @@ class RecordsManager:
         self.d_filter_box.bind("<<ComboboxSelected>>",
                                lambda _e: self._refresh_daily_table())
 
+        # A one-line legend for the row colours, so the tints are self-explaining.
+        legend = ttk.Frame(tab)
+        legend.pack(side="top", fill="x", pady=(4, 0))
+        ttk.Label(legend, text="Rows:", foreground="#555").pack(side="left")
+        for text, bg, fg in (("weekend", "#f2f2f2", "#000"),
+                             ("ad-lib", "#fde7d0", "#000"),
+                             ("<90%", "#ffffff", "#9C0006"),
+                             ("missing entry", "#fde0e0", "#9a6700")):
+            tk.Label(legend, text=f" {text} ", background=bg, foreground=fg).pack(
+                side="left", padx=(6, 0))
+
         table = ttk.Frame(tab)
         table.pack(side="top", fill="both", expand=True, pady=(4, 0))
-        cols = list(daily_log.FIELDS)
-        self.d_tree = ttk.Treeview(table, columns=cols, show="headings", height=12)
-        for c in cols:
-            self.d_tree.heading(c, text=c)
-            self.d_tree.column(c, width=90, anchor="center")
-        self.d_tree.column("notes", width=220, anchor="w")
+        cols = [c[0] for c in _DAILY_TREE_COLUMNS]
+        self.d_tree = ttk.Treeview(table, columns=cols, show="headings",
+                                   height=12)
+        for cid, label, width, anchor in _DAILY_TREE_COLUMNS:
+            self.d_tree.heading(cid, text=label)
+            self.d_tree.column(cid, width=width, anchor=anchor)
+        # Row tints (ADR-0103): weekend/ad-lib set the background (ad-lib wins if
+        # both), <90% sets a red foreground (independent of background), and a
+        # missing-entry placeholder row gets its own pink row.
+        self.d_tree.tag_configure("weekend", background="#f2f2f2")
+        self.d_tree.tag_configure("adlib", background="#fde7d0")
+        self.d_tree.tag_configure("below", foreground="#9C0006")
+        self.d_tree.tag_configure("missing", background="#fde0e0",
+                                  foreground="#9a6700")
         vsb = ttk.Scrollbar(table, orient="vertical", command=self.d_tree.yview)
         self.d_tree.configure(yscrollcommand=vsb.set)
         self.d_tree.pack(side="left", fill="both", expand=True)
@@ -467,12 +512,16 @@ class RecordsManager:
         sel = self.d_tree.selection()
         if not sel:
             return
-        vals = self.d_tree.item(sel[0], "values")
+        # A missing-entry placeholder has no source row; loading it would clear
+        # the form, so ignore it (nothing to edit yet).
+        row = self._daily_row_by_iid.get(sel[0])
+        if row is None:
+            return
         # Loading a row into the form is not itself an edit; it becomes dirty
         # only if the operator then changes a field (#3).
         with self._suspend_dirty_tracking():
-            for f, v in zip(daily_log.FIELDS, vals):
-                self.d_vars[f].set("" if v is None else str(v))
+            for f in daily_log.FIELDS:
+                self.d_vars[f].set(str(row.get(f, "")))
             # A blank regime cell means the restriction default; show it as such.
             if not self.d_vars["water_regime"].get().strip():
                 self.d_vars["water_regime"].set("restriction")
@@ -589,15 +638,80 @@ class RecordsManager:
 
     def _refresh_daily_table(self) -> None:
         self.d_tree.delete(*self.d_tree.get_children())
+        # Map each Treeview item back to its source row so editing loads the real
+        # record (the table now shows derived columns, so positional zip is out).
+        self._daily_row_by_iid: Dict[str, Dict[str, str]] = {}
         sel = self.d_filter.get().strip()
-        rows = [r for r in self.daily_rows
+        rows = [dict(r) for r in self.daily_rows
                 if sel in ("", "All") or r.get("animal_id", "") == sel]
+        # Missing-entry gaps only read for a single selected rat (per-rat, over a
+        # bounded recent window); interleaved as placeholder rows.
+        if sel not in ("", "All"):
+            have = {r.get("date", "") for r in rows}
+            end = _today_iso()
+            start = (dt.date.today()
+                     - dt.timedelta(days=_DAILY_MISSING_LOOKBACK_DAYS - 1)
+                     ).isoformat()
+            for md in dashboard.missing_days(self.daily, sel, start, end):
+                if md not in have:
+                    rows.append({"animal_id": sel, "date": md, "_missing": True})
         rows = sorted(rows,
                       key=lambda r: (r.get("date", ""), r.get("animal_id", "")),
                       reverse=True)
         for r in rows:
-            self.d_tree.insert("", "end",
-                               values=[r.get(f, "") for f in daily_log.FIELDS])
+            values = [self._daily_cell(r, cid) for cid, *_ in _DAILY_TREE_COLUMNS]
+            iid = self.d_tree.insert("", "end", values=values,
+                                     tags=self._daily_row_tags(r))
+            if not r.get("_missing"):
+                self._daily_row_by_iid[iid] = r
+
+    def _daily_cell(self, row: Dict[str, str], col_id: str) -> str:
+        """The display string for one table cell - a raw daily_log field, or a
+        derived value for the "day"/"wt_delta"/"pct_baseline" columns."""
+        if row.get("_missing"):
+            if col_id == "day":
+                return dashboard.weekday_label(row.get("date", ""))
+            if col_id == "notes":
+                return "\u2014 no entry logged \u2014"
+            if col_id in ("animal_id", "date"):
+                return row.get(col_id, "")
+            return ""
+        if col_id == "day":
+            return dashboard.weekday_label(row.get("date", ""))
+        if col_id == "wt_delta":
+            dv = dashboard.weight_delta(self.daily, row.get("animal_id", ""),
+                                        row.get("date", ""))
+            return "" if dv is None else f"{dv:+.1f}"
+        if col_id == "pct_baseline":
+            pct = daily_log.compute_pct_baseline(row.get("weight_g", ""),
+                                                 row.get("baseline_g", ""))
+            if pct is None:
+                raw = str(row.get("pct_baseline", "")).strip()
+                try:
+                    pct = float(raw)
+                except ValueError:
+                    return ""
+            return f"{pct * 100:.1f}%"
+        return str(row.get(col_id, ""))
+
+    def _daily_row_tags(self, row: Dict[str, str]) -> tuple:
+        """Tint tags for a row: weekend/ad-lib background, <90% red foreground,
+        or the missing-entry placeholder tint (see docs/decisions/0103)."""
+        if row.get("_missing"):
+            return ("missing",)
+        tags: List[str] = []
+        try:
+            if dt.date.fromisoformat(row.get("date", "")).weekday() >= 5:
+                tags.append("weekend")
+        except ValueError:
+            pass
+        if daily_log.is_ad_lib(row):     # after weekend so ad-lib bg wins
+            tags.append("adlib")
+        pct = daily_log.compute_pct_baseline(row.get("weight_g", ""),
+                                             row.get("baseline_g", ""))
+        if pct is not None and pct < dashboard.BELOW_THRESHOLD:
+            tags.append("below")
+        return tuple(tags)
 
     # ---- Sessions tab (browse recordings + view logs + annotate) ---------
     def _build_sessions_tab(self) -> None:
