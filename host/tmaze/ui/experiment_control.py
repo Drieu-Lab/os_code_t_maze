@@ -855,8 +855,13 @@ def main() -> int:
                 "restart": _restart,
                 "pause": _toggle_pause,
                 # Manual override of the closed-loop debias scheduler (no-op unless
-                # the debias_blocks generator is active). See debias.py / ADR.
+                # the debias_blocks / intervention_blocks generator is active). See
+                # debias.py / ADR.
                 "debias": _p3_call("toggle_debias_block"),
+                # Manual override of the de-alternation block (no-op unless
+                # intervention_blocks is active with the alternation child enabled).
+                # See alternation.py / intervention_stack.py / ADR.
+                "alt": _p3_call("toggle_alternation_block"),
             }
             ctrl_bar = TrialControlBar(
                 upper, callbacks=controls, state_getter=phase3_state,

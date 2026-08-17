@@ -173,7 +173,8 @@ class TestDebiasSequence(unittest.TestCase):
         self.assertEqual([ts.correct_arm(i) for i in range(40)], ts.seq)
         self.assertEqual(ts.trial_meta(0),
                          {"sched_state": NORMAL, "block_id": 0,
-                          "block_trigger": "", "bias": 0.0})
+                          "block_trigger": "", "bias": 0.0,
+                          "block_kind": "", "alt_rate": None})
 
 
 class TestProvisionalDisplay(unittest.TestCase):

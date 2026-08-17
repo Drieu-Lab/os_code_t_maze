@@ -54,11 +54,13 @@ COLUMNS = (
     "trial_start_iso", "choice_cue_on_iso", "choice_cue_off_iso",
     "choice_time_iso", "reward_cmd_iso", "return_cue_on_iso",
     "return_cue_off_iso", "trial_end_iso", "lick_time_iso", "lick_fw_ms",
-    # Closed-loop debias context (debias_blocks generator; blank for balanced).
-    # sched_state = NORMAL/INTERVENTION, block_id = 1-based within a block (blank
-    # in NORMAL), block_trigger = auto/manual, bias = signed directional-error
-    # bias at this trial's decision. See debias.py and the ADR.
-    "sched_state", "block_id", "block_trigger", "bias",
+    # Closed-loop intervention context (debias_blocks / intervention_blocks
+    # generators; blank for balanced). sched_state = NORMAL/INTERVENTION, block_id =
+    # 1-based within a block (blank in NORMAL), block_trigger = auto/manual, bias =
+    # signed directional-error bias at this trial's decision, block_kind = which
+    # intervention owns the block (side_bias/alternation), alt_rate = cue-aware
+    # alternation rate at this trial's decision. See debias.py / alternation.py.
+    "sched_state", "block_id", "block_trigger", "bias", "block_kind", "alt_rate",
 )
 
 
@@ -92,12 +94,14 @@ class _Row:
     trial_end_iso: Optional[str] = None
     lick_time_iso: Optional[str] = None
     lick_fw_ms: Optional[str] = None
-    # Closed-loop debias context, set when the trial's side is decided (blank for
-    # the balanced generator). See :meth:`Phase3Log.set_decision`.
+    # Closed-loop intervention context, set when the trial's side is decided (blank
+    # for the balanced generator). See :meth:`Phase3Log.set_decision`.
     sched_state: Optional[str] = None
     block_id: Optional[str] = None
     block_trigger: Optional[str] = None
     bias: Optional[str] = None
+    block_kind: Optional[str] = None
+    alt_rate: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -132,6 +136,8 @@ class Phase3RowView:
     block_id: Optional[str]
     block_trigger: Optional[str]
     bias: Optional[str]
+    block_kind: Optional[str]
+    alt_rate: Optional[str]
 
 
 @dataclass(frozen=True)
@@ -165,6 +171,15 @@ class Phase3StateSnapshot:
     # tracking accuracy - panels suppress that line rather than show a misleading
     # figure (docs/decisions/0094).
     reward_incorrect: bool = False
+    # De-alternation intervention context (intervention_blocks generator with the
+    # alternation child enabled; 0/"" otherwise). ``alt_rate`` is the CURRENT
+    # cue-aware alternation rate at snapshot time; ``active_kind`` is which
+    # intervention owns the running block ("side_bias"/"alternation"; "" in NORMAL);
+    # ``alt_max_block_len`` is the alternation block's welfare cap. See
+    # alternation.py / intervention_stack.py.
+    alt_rate: float = 0.0
+    active_kind: str = ""
+    alt_max_block_len: int = 0
 
 
 class Phase3Log:
@@ -248,6 +263,9 @@ class Phase3Log:
         r.block_id = None if not m["block_id"] else str(m["block_id"])
         r.block_trigger = m["block_trigger"] or None
         r.bias = f"{m['bias']:.4f}"
+        r.block_kind = m.get("block_kind") or None
+        alt = m.get("alt_rate")
+        r.alt_rate = None if alt is None else f"{alt:.4f}"
 
     def refresh_provisional(self, current_index: int) -> None:
         """Re-align the DISPLAY cue columns of not-yet-scored trials from
@@ -403,6 +421,7 @@ class Phase3Log:
         )
         c = self.cfg
         db = getattr(c, "debias", None)
+        al = getattr(c, "alternation", None)
         seq = self._sequence
         return Phase3StateSnapshot(
             rows=rows, current_index=current_index, total=len(self._rows),
@@ -413,7 +432,9 @@ class Phase3Log:
             trigger_bias=(db.trigger_bias if db is not None else 0.0),
             exit_consecutive=(db.exit_consecutive if db is not None else 0),
             max_block_len=(db.max_block_len if db is not None else 0),
-            reward_incorrect=self.reward_incorrect)
+            reward_incorrect=self.reward_incorrect,
+            alt_rate=seq.alt_rate(), active_kind=seq.active_kind(),
+            alt_max_block_len=(al.max_block_len if al is not None else 0))
 
     # ------------------------------------------------------------- render
     def _header_comment(self) -> List[str]:
@@ -433,14 +454,23 @@ class Phase3Log:
         # the seed ALONE no longer reproduces the schedule (it also depends on the
         # animal's realized choices + any operator overrides). See debias.py.
         db = getattr(c, "debias", None)
-        if c.generator != "balanced" and db is not None:
+        al = getattr(c, "alternation", None)
+        if c.generator != "balanced" and (db is not None or al is not None):
+            if db is not None:
+                lines.append(
+                    f"# debias_blocks window={db.window} "
+                    f"min_errors={db.min_errors} trigger_bias={db.trigger_bias} "
+                    f"exit_consecutive={db.exit_consecutive} "
+                    f"max_block_len={db.max_block_len} signal={db.signal}")
+            if al is not None:
+                lines.append(
+                    f"# alternation_blocks window={al.window} "
+                    f"min_samples={al.min_samples} trigger_rate={al.trigger_rate} "
+                    f"exit_rate={al.exit_rate} "
+                    f"exit_min_samples={al.exit_min_samples} "
+                    f"max_block_len={al.max_block_len} signal={al.signal}")
             lines.append(
-                f"# debias_blocks window={db.window} min_errors={db.min_errors} "
-                f"trigger_bias={db.trigger_bias} "
-                f"exit_consecutive={db.exit_consecutive} "
-                f"max_block_len={db.max_block_len} signal={db.signal}")
-            lines.append(
-                "# note: debias schedule is closed-loop - seed alone does NOT "
+                "# note: intervention schedule is closed-loop - seed alone does NOT "
                 "reproduce it; it also depends on realized choices + overrides")
         lines += [
             f"# session_start_iso={self.session_start_iso}",

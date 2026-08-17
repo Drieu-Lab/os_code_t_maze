@@ -408,6 +408,41 @@ TIPS: Dict[str, Entry] = {
                             "forces the non-preferred side and is flagged "
                             "'manual' in the log; it still ends on the normal exit "
                             "criteria. Applies on the next trial.",
+    "phase3.debias_enabled": "Run the side-bias debias block under the "
+                             "'intervention_blocks' generator. Untick to disable "
+                             "just this intervention while keeping others.",
+    "phase3.alt_enabled": "Run the de-alternation block under the "
+                          "'intervention_blocks' generator. It forces the animal's "
+                          "LAST choice as correct (must repeat to earn reward) when "
+                          "it alternates too much, using a cue-aware rate so a "
+                          "cue-follower is never flagged. Untick to disable it.",
+    "phase3.alt_window": "Sliding window (most-recent scored trials) the cue-aware "
+                         "alternation rate is measured over. Larger = "
+                         "smoother/slower to react; smaller = twitchier.",
+    "phase3.alt_min_samples": "How many 'repeat-cued' trials (the cue told the rat "
+                              "to repeat its last choice) must accrue in the window "
+                              "before a de-alternation block can auto-trigger (must "
+                              "be <= window). Stops a couple of early switches "
+                              "reading as certainty.",
+    "phase3.alt_trigger_rate": "The cue-aware alternation rate (0-1) that starts a "
+                               "de-alternation block: P(switch | cue said to repeat "
+                               "the last choice). 1.0 = always switches when told to "
+                               "repeat (a pure alternator).",
+    "phase3.alt_exit_rate": "The in-block alternation rate (0-1, <= trigger) at/"
+                            "below which the block ends: the animal is repeating "
+                            "again. Kept under the trigger for hysteresis.",
+    "phase3.alt_exit_min_samples": "How many in-block repeat-cued trials must accrue "
+                                   "before the relaxed-rate exit can fire (so a "
+                                   "block isn't ended on one lucky repeat).",
+    "phase3.alt_max_block_len": "Welfare failsafe: the maximum trials a "
+                                "de-alternation block may run before it auto-reverts "
+                                "(flagged as capped) even if the animal never "
+                                "complies.",
+    "phase3.alt_toggle": "Manually start or end a de-alternation block, overriding "
+                         "the closed-loop scheduler (only active under the "
+                         "'intervention_blocks' generator with the de-alternation "
+                         "block enabled). A manual block forces the last choice and "
+                         "is flagged 'manual' in the log. Applies on the next trial.",
 
     # ---- maze_state_view.py: Maze state tab ----
     "maze.define_zones": "Draw the maze zones (central reward HUB, stem, "

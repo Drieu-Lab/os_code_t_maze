@@ -45,10 +45,15 @@ _BUTTONS = (
     ("extend", "+Trials", "phase3.extend"),
     ("restart", "Restart", "phase3.restart"),
     ("pause", "Pause", "phase3.pause"),
-    # Manual override of the closed-loop debias scheduler (debias_blocks generator
-    # only): toggles a corrective block on/off. Label + enable are set in _refresh
-    # from the published scheduler state (like Pause/Resume). See debias.py.
+    # Manual override of the closed-loop debias scheduler (debias_blocks /
+    # intervention_blocks generators): toggles a side-bias corrective block on/off.
+    # Label + enable are set in _refresh from the published scheduler state (like
+    # Pause/Resume). See debias.py.
     ("debias", "Start debias block", "phase3.debias_toggle"),
+    # Manual override of the de-alternation block (intervention_blocks generator
+    # only): toggles a corrective block that forces the last choice. See
+    # alternation.py / intervention_stack.py.
+    ("alt", "Start alt block", "phase3.alt_toggle"),
 )
 
 
@@ -134,12 +139,15 @@ class TrialControlBar:
         has_state = state is not None
         armed = bool(has_state and state.armed)
         current = state.current_index if has_state else 0
-        # The debias toggle is live only under the debias_blocks generator (the
-        # snapshot carries the generator + current scheduler state).
-        debias_on = bool(has_state
-                         and getattr(state, "generator", "balanced") != "balanced")
+        # The debias toggle is live under any closed-loop generator; the alt toggle
+        # only under intervention_blocks (the snapshot carries the generator, the
+        # current scheduler state, and which kind owns the active block).
+        generator = getattr(state, "generator", "balanced") if has_state else "balanced"
+        debias_on = bool(has_state and generator != "balanced")
+        alt_on = bool(has_state and generator == "intervention_blocks")
         in_block = bool(has_state
                         and getattr(state, "debias_state", "NORMAL") == "INTERVENTION")
+        active_kind = getattr(state, "active_kind", "") if has_state else ""
         enabled = {
             "skip": armed,
             "repeat": armed,
@@ -148,6 +156,7 @@ class TrialControlBar:
             "restart": has_state,
             "pause": armed,
             "debias": armed and debias_on,
+            "alt": armed and alt_on,
         }
         for key, b in self._buttons.items():
             b.configure(state=("normal" if enabled.get(key) else "disabled"))
@@ -158,8 +167,13 @@ class TrialControlBar:
                 paused = False
             self._buttons["pause"].configure(
                 text="Resume" if paused else "Pause")
-        # Toggle the debias button label to match the current scheduler state, so it
-        # reads "End debias block" while a corrective block is running.
+        # Toggle each intervention button's label to match the running block's kind,
+        # so only the button whose kind is active reads "End ... block".
         if "debias" in self._buttons:
+            db_active = in_block and active_kind in ("side_bias", "")
             self._buttons["debias"].configure(
-                text="End debias block" if in_block else "Start debias block")
+                text="End debias block" if db_active else "Start debias block")
+        if "alt" in self._buttons:
+            alt_active = in_block and active_kind == "alternation"
+            self._buttons["alt"].configure(
+                text="End alt block" if alt_active else "Start alt block")

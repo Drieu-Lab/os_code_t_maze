@@ -71,10 +71,12 @@ class Phase3Decision:
     completed (index moved on); ``complete`` is true once all trials are done.
     ``trial_index`` / ``correct_arm`` describe the trial CURRENTLY in progress.
 
-    ``sched_state`` / ``block_id`` / ``block_trigger`` / ``bias`` carry the
-    closed-loop debias context of ``trial_index`` (from the TrialSequence's debias
-    metadata; NORMAL/0/""/0.0 for the balanced generator), so the controller can
-    log and display it.
+    ``sched_state`` / ``block_id`` / ``block_trigger`` / ``bias`` / ``block_kind`` /
+    ``alt_rate`` carry the closed-loop context of ``trial_index`` (from the
+    TrialSequence's metadata; NORMAL/0/""/0.0/""/None for the balanced generator),
+    so the controller can log and display it. ``block_kind`` names the active
+    intervention ("side_bias"/"alternation"); ``alt_rate`` is the cue-aware
+    alternation rate (None when no alternation detector is running).
     """
     trial_index: int
     correct_arm: Optional[int]
@@ -87,6 +89,8 @@ class Phase3Decision:
     block_id: int = 0
     block_trigger: str = ""
     bias: float = 0.0
+    block_kind: str = ""
+    alt_rate: Optional[float] = None
 
 
 class Phase3Task:
@@ -183,11 +187,23 @@ class Phase3Task:
     def end_debias_block(self) -> None:
         self.seq.end_block()
 
+    def force_alternation_block(self) -> None:
+        self.seq.force_alternation_block()
+
+    def end_alternation_block(self) -> None:
+        self.seq.end_alternation_block()
+
     def debias_state(self) -> str:
         return self.seq.debias_state()
 
     def debias_bias(self) -> float:
         return self.seq.debias_bias()
+
+    def alt_rate(self) -> float:
+        return self.seq.alt_rate()
+
+    def active_kind(self) -> str:
+        return self.seq.active_kind()
 
     @property
     def is_debias(self) -> bool:

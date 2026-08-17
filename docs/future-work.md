@@ -87,6 +87,8 @@ criteria).
 | [FW-0032](#fw-0032-per-port-leftright-reward-volume-calibration) | Per-port (left/right) reward-volume calibration | Reward calibration | Proposed |
 | [FW-0033](#fw-0033-structural-cross-reference-hardening-for-the-coordinated-records) | Structural cross-reference hardening for the coordinated records | Records cores + Records Manager | Proposed |
 | [FW-0034](#fw-0034-frozen-identity-columns-in-the-daily-table) | Frozen (pinned) identity columns in the Daily table | Records Manager Daily tab | Deferred |
+| [FW-0035](#fw-0035-alternation-intervention-block-step-1-toward-an-adversarial-schedule) | Alternation intervention block (step 1 toward an adversarial schedule) | Phase 3 host (`core/phase3/`) | Done ([ADR-0107](decisions/0107-phase3-alternation-intervention-stack.md)) |
+| [FW-0036](#fw-0036-retire-the-reward_incorrect-phase-3-shaping-aid-candidate-for-removal) | Retire the `reward_incorrect` Phase 3 shaping aid (candidate for removal) | Phase 3 host + config | Proposed |
 
 ## Entries
 
@@ -1721,6 +1723,139 @@ columns, or adopting a table widget with native freeze support?
 
 **ADR needed?** No (UI-only); a short note in a follow-up ADR or an update
 referencing ADR-0103 suffices if it is built.
+
+### FW-0035: Alternation intervention block (step 1 toward an adversarial schedule)
+
+- **Status:** Done — implemented as [ADR-0107](decisions/0107-phase3-alternation-intervention-stack.md)
+  (`intervention_blocks` generator: `alternation.py` + `intervention_stack.py`,
+  concurrent with the side-bias `debias_blocks`). One change from the sketch
+  below: the detector is **cue-aware** (condition on repeat-cued trials), not the
+  cue-independent switch rate first sketched — that resolves the "false positives
+  on a real cue-user" open question. Exit is the relaxed in-block `alt_rate`
+  (+ welfare cap), as preferred below.
+- **Date added:** 2026-08-17
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** `host/tmaze/core/phase3/` (a new sibling to `debias.py`, e.g. `alternation.py`); wired through `trial_sequence.py` (`decide`/`record_outcome`, `sequence.generator` selector); `phase3_config.py` + `host/phase3.json` (config dataclass); `phase3_log.py` (per-trial `sched_state`/block columns); `host/tests/` (headless test mirroring `test_debias.py`)
+- **Related ADRs:** [ADR-0086](decisions/0086-phase3-debias-blocks.md) (closed-loop side-bias correction via `debias_blocks` — this is the same idea aimed at a different habit), [ADR-0090](decisions/0090-debias-bias-normalized-by-errors.md) (error-count evidence gate, the pattern the switch-rate gate mirrors)
+
+**Motivation / context.** Rats on the cued T-maze climb a ladder of "cheat"
+strategies — side arms → side bias → alternation → [cue use] — and stall at
+**alternation**, never stepping up to actually using the tone. The eventual fix
+is an *adversarial* schedule that predicts the rat's next choice from its own
+history and rewards the side it is predicted **not** to pick, so no history-based
+habit wins and the (history-independent) cue becomes the only reliable way to
+earn reward. The existing side-bias `debias_blocks` (ADR-0086) is that idea for
+one habit (order-0: side bias). This item is the **next single rung**: an
+intervention block that counters **alternation** (order-1: the switch habit),
+built as a near-twin of `DebiasBlockController` so we can **beta-test the
+intervention-block mechanism and its welfare tolerance on rats before building
+the full adversarial predictor**. Success for this step is *not* "rats start
+using the cue" (one block only closes one rung); it is "the block reliably
+detects alternation, changes behaviour, and is welfare-tolerable."
+
+**Sketch of approach.** A sibling pure-core controller (`AlternationBlockController`),
+composed alongside — not merged into — the existing side-bias controller:
+
+- *Detector (order-1 statistic).* Over a rolling window of the rat's **chosen**
+  sides (cue-independent), compute the switch rate
+  `p_switch = #switches / #transitions`. This is the maximum-likelihood estimate
+  of P(switch | previous choice); the alternation strategy is the corner
+  `p_switch → 1` (chance = 0.5, perseveration ≈ 0). Auto-trigger a block when a
+  `min_transitions` evidence gate is met **and** `p_switch >= trigger_switch_rate`
+  (≈ 0.8). A high threshold keeps a genuine cue-follower (whose switch rate
+  inherits the schedule's ~0.5, bounded by `max_same_run`) from tripping it.
+- *Intervention (adversarial placement).* Predict the alternator's next choice =
+  **opposite of its last choice**, so place reward where it *won't* go: **forced
+  correct side = the rat's last choice** (it must *repeat* to be rewarded). Unlike
+  the fixed-side debias block, this target is **recomputed each trial** from the
+  last scored choice (still fits the `decide()`/`record()` contract).
+- *Exit.* Prefer **"switch rate returned to normal" (+ `max_block_len` welfare
+  cap)** over "`exit_consecutive` correct in a row." Key finding: because a
+  correct trial here *means* the rat repeated, and the next forced side is that
+  same side, N-consecutive-correct is by construction N repeats on **one** side —
+  so the naive exit *guarantees* the escape hatch is one-sided perseveration, and
+  ~half the time on the rat's already-preferred side (reinforcing the very bias we
+  fight). Decoupling exit from perseveration avoids this.
+- *Guarding the bias slide via composition.* A cornered alternator's cheapest
+  escape is to slide to win-stay/perseveration (a side bias). Rather than
+  entangle two contingencies in one block, **run the existing `debias_blocks`
+  side-bias controller concurrently** so it catches any resulting bias on the next
+  window. This keeps each controller single-responsibility and independently
+  testable, and doubles as the first test of the "stack the experts" composition
+  that the full adversarial scheduler needs.
+
+**Evaluation / acceptance.** Headless unit test mirroring `test_debias.py`
+(synthetic alternator → block triggers, forces repeats, exits on normalized
+switch rate or cap; balanced/cue-following stream → never triggers). Beta in
+training sessions: log per-trial `p_switch`, block enter/exit reason, and where
+the rat goes next (cue vs. new habit vs. disengage). Wins to look for: switch
+rate drops inside/after blocks; blocks exit on the success criterion more than
+the welfare cap; late-session drop-off stays bounded.
+
+**Effort / risk.** Small-to-medium (a focused twin of an existing, tested core).
+Risks: (a) **welfare** — an adversarial block pushes a committed alternator's
+reward toward zero, not 50%, so the `max_block_len` cap + a manual-water floor
+are load-bearing; (b) **false positives on a real cue-user** if the threshold is
+set too low or the counterbalanced spine has a locally-alternating stretch;
+(c) **closed-loop non-reproducibility** — like debias, the session is
+reproducible only from (seed + realized choices + operator overrides), so the log
+is the record of truth.
+
+**Open questions.** Exit criterion — switch-rate-normalized (preferred) vs.
+consecutive-correct vs. the self-contained two-phase "chain into a bias-guard
+debias block" variant (considered, deferred in favour of concurrent composition).
+Concurrency-vs-single-controller. Thresholds (`window`, `min_transitions`,
+`trigger_switch_rate`, `max_block_len`). Whether to also make the detector
+explicitly cue-independent (discount alternation that coincides with correct
+cue-following).
+
+**ADR needed?** Yes — when built, as a sibling/generalisation of ADR-0086
+(record the switch-rate detector, the dynamic last-choice forced side, the
+exit-criterion choice, and the concurrent-composition decision).
+
+### FW-0036: Retire the `reward_incorrect` Phase 3 shaping aid (candidate for removal)
+
+- **Status:** Proposed
+- **Date added:** 2026-08-17
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** `host/phase3.json` (`reward.reward_incorrect`), `host/tmaze/core/phase3/phase3_config.py` (`to_phase3_config`), `host/tmaze/core/phase3/phase3_task.py` (`Phase3Config.reward_incorrect` + the scoring/reward branch), `host/tmaze/core/phase3/phase3_stats.py` + the session summary (the reward-rate-hiding special case), any Phase 3 tab control
+- **Related ADRs:** [ADR-0046](decisions/0046-host-owned-phase3.md) (host-owned Phase 3), [ADR-0070](decisions/0070-config-driven-phase3-parameters.md) (config-driven Phase 3 params), [ADR-0094](decisions/0094-trim-misleading-phase3-readouts.md) (added the reward-rate-hiding when this aid is on)
+
+**Motivation / context.** `reward_incorrect` rewards every completed trial
+regardless of correctness - an early-shaping aid to keep a not-yet-engaged rat
+running the maze. It is **unused in practice** (the operator runs correct-choice-
+gated reward), it pins the reward rate near 100% (so it needs a special case in
+the stats/summary to avoid a misleading readout, ADR-0094), and it is
+conceptually at odds with the intervention / adversarial-schedule work ([FW-0035](#fw-0035-alternation-intervention-block-step-1-toward-an-adversarial-schedule)),
+whose whole mechanism is *withholding* reward from a habit-driven choice - with
+this aid on, an intervention block has no teeth. It is one of several
+experimental features added during development that the codebase will eventually
+want pruned to limit comprehension debt (see `AGENTS.md`). Kept for now because it
+is a plausible early-shaping tool for future cohorts, not obviously obsolete -
+this entry just tracks the decision so it is not forgotten.
+
+**Sketch of approach (if/when removed).** Drop `reward.reward_incorrect` from the
+`phase3.json` default + `to_phase3_config`; remove the `reward_incorrect` field
+and its scoring/reward branch in `phase3_task`; remove the reward-rate-hiding
+special case in `phase3_stats` and the session summary (and any GUI toggle);
+confirm nothing else keys on it. Record the reasoning in a new ADR, superseding
+the `reward_incorrect`-specific part of ADR-0094.
+
+**Evaluation / acceptance (criteria to actually remove).** Still unused after the
+next 1-2 training cohorts and no early-shaping need arises for upcoming animals;
+removal then validated by the Phase 3 tests passing and the stats/summary
+remaining correct without the special case.
+
+**Effort / risk.** Small-to-medium; low technical risk (isolated flag, not a hot
+path). Main risk is losing a shaping tool a future animal might need - mitigated
+by git history + the ADR.
+
+**Open questions.** Any early-shaping scenario for the next animals that still
+wants it? Should its removal be bundled into a broader "prune experimental
+Phase 3 features" audit rather than done piecemeal?
+
+**ADR needed?** Yes at removal time (record why; supersede the relevant part of
+ADR-0094). None needed to merely keep tracking it here.
 
 ## Completed
 

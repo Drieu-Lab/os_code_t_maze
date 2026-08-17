@@ -40,6 +40,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 if TYPE_CHECKING:               # avoid a runtime import cycle (debias imports us)
+    from tmaze.core.phase3.alternation import AlternationBlockConfig
     from tmaze.core.phase3.debias import DebiasBlockConfig
 
 # 32-bit mask so the LCG matches the firmware's uint32_t wraparound exactly.
@@ -54,11 +55,16 @@ HIGH = "HIGH"
 LOW = "LOW"
 
 # Trial-sequence generators (the ``sequence.generator`` selector, ADR/docs):
-#   "balanced"      - the counterbalanced, open-loop schedule (default, unchanged);
-#   "debias_blocks" - counterbalanced by default + closed-loop corrective blocks
-#                     when a side bias develops (see debias.py).
+#   "balanced"           - the counterbalanced, open-loop schedule (default);
+#   "debias_blocks"      - counterbalanced + closed-loop corrective blocks when a
+#                          side bias develops (see debias.py);
+#   "intervention_blocks"- counterbalanced + a stack of independently-enable-able
+#                          closed-loop interventions (side-bias debias AND/OR
+#                          de-alternation) run concurrently, one active at a time
+#                          (see intervention_stack.py, alternation.py).
 GEN_BALANCED = "balanced"
 GEN_DEBIAS_BLOCKS = "debias_blocks"
+GEN_INTERVENTION_BLOCKS = "intervention_blocks"
 
 
 @dataclass(frozen=True)
@@ -71,10 +77,12 @@ class TrialConfig:
     arm to a frequency via :func:`cue_for`.
 
     ``generator`` selects the schedule: ``"balanced"`` (default, the original
-    counterbalanced generator) or ``"debias_blocks"`` (counterbalanced by default
-    plus closed-loop corrective blocks, whose parameters are ``debias``; see
-    debias.py). ``debias`` is a ``DebiasBlockConfig`` and only consulted when
-    ``generator == "debias_blocks"``.
+    counterbalanced generator), ``"debias_blocks"`` (counterbalanced plus the
+    closed-loop side-bias corrective blocks in ``debias``; see debias.py), or
+    ``"intervention_blocks"`` (counterbalanced plus a concurrent stack of the
+    interventions whose configs are non-None: ``debias`` for side-bias and
+    ``alternation`` for de-alternation; see intervention_stack.py / alternation.py).
+    ``debias`` / ``alternation`` are only consulted for their respective generators.
     """
     max_trials: int = 200
     block_size: int = 20
@@ -84,6 +92,7 @@ class TrialConfig:
     low_tone_hz: int = 4000
     generator: str = GEN_BALANCED
     debias: Optional["DebiasBlockConfig"] = None
+    alternation: Optional["AlternationBlockConfig"] = None
 
 
 def lcg(state: int) -> int:
@@ -202,20 +211,27 @@ class TrialSequence:
         self._return_bits = {LEFT: left_bits, RIGHT: right_bits}
         self._rng = rng
 
-        # Closed-loop debias state (only used in "debias_blocks" mode). The correct
-        # side of a trial is then decided lazily, IN ORDER, the first time it is
-        # committed (commit()), so it can depend on the animal's realized choices;
-        # committed sides + their metadata are cached, and the spine is consumed
-        # only by NORMAL trials (blocks insert, they do not consume the spine).
-        self._debias = self.cfg.generator == GEN_DEBIAS_BLOCKS
+        # Closed-loop state (used in "debias_blocks" / "intervention_blocks" mode).
+        # The correct side of a trial is then decided lazily, IN ORDER, the first
+        # time it is committed (commit()), so it can depend on the animal's realized
+        # choices; committed sides + their metadata are cached, and the spine is
+        # consumed only by NORMAL trials (blocks insert, they do not consume it).
+        self._closed_loop = self.cfg.generator in (
+            GEN_DEBIAS_BLOCKS, GEN_INTERVENTION_BLOCKS)
         self._committed: Dict[int, int] = {}
         self._meta: Dict[int, object] = {}
         self._frontier = 0        # next index to commit (== len(committed))
         self._spine_pos = 0       # how many NORMAL trials have consumed the spine
         self._ctl = None
-        if self._debias:
+        if self.cfg.generator == GEN_DEBIAS_BLOCKS:
             from tmaze.core.phase3.debias import DebiasBlockController
             self._ctl = DebiasBlockController(self.cfg.debias)
+        elif self.cfg.generator == GEN_INTERVENTION_BLOCKS:
+            from tmaze.core.phase3.intervention_stack import (
+                InterventionStackController,
+            )
+            self._ctl = InterventionStackController(
+                self.cfg.debias, self.cfg.alternation)
 
     def __len__(self) -> int:
         return len(self.seq)
@@ -228,7 +244,7 @@ class TrialSequence:
         :meth:`commit`)."""
         if not (0 <= index < len(self.seq)):
             return None
-        if not self._debias:
+        if not self._closed_loop:
             return self.seq[index]
         if index in self._committed:
             return self._committed[index]
@@ -269,7 +285,7 @@ class TrialSequence:
         balanced mode; in debias_blocks mode once :meth:`commit` has reached it.
         Un-committed trials only have a provisional side (see :meth:`_provisional_arm`).
         """
-        return (not self._debias) or (index in self._committed)
+        return (not self._closed_loop) or (index in self._committed)
 
     def commit(self, index: int) -> Optional[int]:
         """Fix (and cache) the correct side for trial ``index`` and every trial
@@ -283,7 +299,7 @@ class TrialSequence:
         range)."""
         if not (0 <= index < len(self.seq)):
             return None
-        if not self._debias:
+        if not self._closed_loop:
             return self.seq[index]
         while self._frontier <= index:
             self._commit_one(self._frontier)
@@ -301,48 +317,105 @@ class TrialSequence:
         self._frontier = i + 1
 
     def record_outcome(self, index: int, cued_side: int, chosen_side: int) -> None:
-        """Feed a scored trial's (cued, chosen) back to the debias controller so the
-        next :meth:`commit` reflects it. No-op in "balanced" mode."""
+        """Feed a scored trial's (cued, chosen) back to the closed-loop controller
+        so the next :meth:`commit` reflects it. No-op in "balanced" mode."""
         if self._ctl is not None:
             self._ctl.record(cued_side, chosen_side)
 
     def trial_meta(self, index: int):
-        """The debias metadata for trial ``index`` as a dict:
-        ``{sched_state, block_id, block_trigger, bias}``. For a committed trial
-        these are its decided values; otherwise a provisional read of the current
-        controller state. In "balanced" mode every trial is NORMAL."""
-        if not self._debias or self._ctl is None:
-            return {"sched_state": "NORMAL", "block_id": 0,
-                    "block_trigger": "", "bias": 0.0}
+        """The closed-loop metadata for trial ``index`` as a dict:
+        ``{sched_state, block_id, block_trigger, bias, block_kind, alt_rate}``. For
+        a committed trial these are its decided values; otherwise a provisional read
+        of the current controller state. ``block_kind`` names the active
+        intervention ("side_bias"/"alternation"; "" when NORMAL) and ``alt_rate`` is
+        the cue-aware alternation rate (None when no alternation detector is running).
+        In "balanced" mode every trial is NORMAL."""
+        if not self._closed_loop or self._ctl is None:
+            return {"sched_state": "NORMAL", "block_id": 0, "block_trigger": "",
+                    "bias": 0.0, "block_kind": "", "alt_rate": None}
         dec = self._meta.get(index)
         if dec is not None:
+            kind = getattr(dec, "kind", None)
+            if kind is None:                       # single DebiasBlockController
+                kind = "side_bias" if dec.state == "INTERVENTION" else ""
             return {"sched_state": dec.state, "block_id": dec.block_id,
-                    "block_trigger": dec.trigger, "bias": dec.bias}
+                    "block_trigger": dec.trigger, "bias": dec.bias,
+                    "block_kind": kind, "alt_rate": getattr(dec, "alt_rate", None)}
+        active_kind = getattr(self._ctl, "active_kind", None)
+        if active_kind is None:                    # single DebiasBlockController
+            active_kind = "side_bias" if self._ctl.state == "INTERVENTION" else ""
+        alt_rate = self._ctl.alt_rate() if hasattr(self._ctl, "alt_rate") else None
         return {"sched_state": self._ctl.state, "block_id": self._ctl.block_id,
-                "block_trigger": "", "bias": self._ctl.bias()}
+                "block_trigger": "", "bias": self._ctl.bias(),
+                "block_kind": active_kind, "alt_rate": alt_rate}
 
     # ------------------------------------------------- operator overrides
     def force_block(self, side: Optional[int] = None) -> None:
-        """Operator: start a corrective block on the next committed trial."""
+        """Operator: start a side-bias corrective block on the next committed trial.
+
+        Under "intervention_blocks" this routes to the side-bias child (the default
+        the stack's ``force_block`` uses), matching the existing single-button UX."""
         if self._ctl is not None:
             self._ctl.force_block(side)
 
     def end_block(self) -> None:
-        """Operator: end the current corrective block on the next committed trial."""
+        """Operator: end the current corrective block on the next committed trial.
+
+        Under "intervention_blocks" this ends whichever block is active."""
         if self._ctl is not None:
             self._ctl.end_block()
 
+    def force_alternation_block(self) -> None:
+        """Operator: start a de-alternation block on the next committed trial.
+
+        Only meaningful under "intervention_blocks" with the alternation child
+        enabled; a no-op otherwise."""
+        if self._ctl is not None and self.cfg.generator == GEN_INTERVENTION_BLOCKS:
+            self._ctl.force_block(kind="alternation")
+
+    def end_alternation_block(self) -> None:
+        """Operator: end the current de-alternation block on the next committed
+        trial (only meaningful under "intervention_blocks")."""
+        if self._ctl is not None and self.cfg.generator == GEN_INTERVENTION_BLOCKS:
+            self._ctl.end_block(kind="alternation")
+
     def debias_state(self) -> str:
-        """Current scheduler state (NORMAL/INTERVENTION); NORMAL if not debias."""
+        """Current scheduler state (NORMAL/INTERVENTION); NORMAL if open-loop."""
         return self._ctl.state if self._ctl is not None else "NORMAL"
 
     def debias_bias(self) -> float:
-        """Current signed directional-error bias (0.0 if not debias)."""
+        """Current signed directional-error bias (0.0 if no side-bias detector)."""
         return self._ctl.bias() if self._ctl is not None else 0.0
+
+    def alt_rate(self) -> float:
+        """Current cue-aware alternation rate (0.0 if no alternation detector)."""
+        if self._ctl is not None and hasattr(self._ctl, "alt_rate"):
+            return self._ctl.alt_rate()
+        return 0.0
+
+    def active_kind(self) -> str:
+        """Which intervention owns the active block ("side_bias"/"alternation"; ""
+        when NORMAL or open-loop)."""
+        if self._ctl is None:
+            return ""
+        kind = getattr(self._ctl, "active_kind", None)
+        if kind is None:                           # single DebiasBlockController
+            return "side_bias" if self._ctl.state == "INTERVENTION" else ""
+        return kind
 
     @property
     def is_debias(self) -> bool:
-        return self._debias
+        """True in any closed-loop mode (debias_blocks or intervention_blocks).
+
+        Kept under the historical name for back-compat: the log/task shells gate
+        their closed-loop paths on it, and those paths are identical for either
+        closed-loop generator."""
+        return self._closed_loop
+
+    @property
+    def is_closed_loop(self) -> bool:
+        """Clearer alias for :attr:`is_debias` (any closed-loop generator)."""
+        return self._closed_loop
 
     def reset_debias(self) -> None:
         """Rewind the closed-loop state to a fresh session (Restart button)."""

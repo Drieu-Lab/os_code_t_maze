@@ -283,9 +283,10 @@ def _debias_seq(n=40, seed=3):
 
 class TestDebiasLogging(unittest.TestCase):
     def test_new_columns_exist_in_order(self):
-        # The four closed-loop columns are appended at the end of the schema.
-        self.assertEqual(COLUMNS[-4:],
-                         ("sched_state", "block_id", "block_trigger", "bias"))
+        # The six closed-loop columns are appended at the end of the schema.
+        self.assertEqual(COLUMNS[-6:],
+                         ("sched_state", "block_id", "block_trigger", "bias",
+                          "block_kind", "alt_rate"))
 
     def test_header_bumped_to_proto7_with_generator(self):
         header = [ln for ln in _log().render_csv().split("\n") if ln.startswith("#")]

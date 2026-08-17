@@ -39,10 +39,11 @@ import json
 from typing import Optional
 
 from tmaze.core.cue_gate import CueParams
+from tmaze.core.phase3.alternation import AlternationBlockConfig
 from tmaze.core.phase3.debias import DebiasBlockConfig
 from tmaze.core.phase3.phase3_task import Phase3Config
 from tmaze.core.phase3.trial_sequence import (
-    GEN_BALANCED, GEN_DEBIAS_BLOCKS, TrialConfig,
+    GEN_BALANCED, GEN_DEBIAS_BLOCKS, GEN_INTERVENTION_BLOCKS, TrialConfig,
 )
 
 # Default number of lick top-ups at the well after the correct-choice prime
@@ -63,12 +64,15 @@ _SECTIONS = ("reward", "cue", "sequence")
 _SCHEMA = {
     "note": ("Host-owned Phase 3 config (FW-0024, ADR-0070). Delete this file to "
              "reset to built-in defaults. 'reward' + 'cue' + the sequence "
-             "'generator'/'debias_blocks' are editable from the Phase 3 tab (Save "
-             "settings); the rest of 'sequence' holds scientific schedule params - "
-             "hand-edit here only. seed: null = fresh random each launch, an "
-             "integer pins the schedule. generator: 'balanced' (counterbalanced, "
-             "default) or 'debias_blocks' (counterbalanced + closed-loop corrective "
-             "blocks when a side bias develops; params in 'debias_blocks')."),
+             "'generator'/'debias_blocks'/'alternation_blocks' are editable from "
+             "the Phase 3 tab (Save settings); the rest of 'sequence' holds "
+             "scientific schedule params - hand-edit here only. seed: null = fresh "
+             "random each launch, an integer pins the schedule. generator: "
+             "'balanced' (counterbalanced, default), 'debias_blocks' "
+             "(counterbalanced + closed-loop side-bias corrective blocks; params in "
+             "'debias_blocks'), or 'intervention_blocks' (counterbalanced + the "
+             "'enabled' interventions in 'debias_blocks' and/or 'alternation_blocks' "
+             "run concurrently, one active at a time)."),
 }
 
 
@@ -82,6 +86,7 @@ def default_config() -> dict:
     file.
     """
     pc, cp, tc, db = Phase3Config(), CueParams(), TrialConfig(), DebiasBlockConfig()
+    al = AlternationBlockConfig()
     return {
         "_schema": dict(_SCHEMA),
         "reward": {
@@ -104,16 +109,30 @@ def default_config() -> dict:
             "high_tone_hz": tc.high_tone_hz,
             "low_tone_hz": tc.low_tone_hz,
             "seed": None,
-            # Trial-sequence generator + the closed-loop debias-block params it uses
-            # (only when generator == "debias_blocks"; see debias.py, ADR).
+            # Trial-sequence generator + the closed-loop block params it uses. The
+            # side-bias params ("debias_blocks") apply under "debias_blocks" or, when
+            # "enabled", under "intervention_blocks"; the de-alternation params
+            # ("alternation_blocks") apply only under "intervention_blocks" when
+            # "enabled" (see debias.py, alternation.py, intervention_stack.py, ADR).
             "generator": tc.generator,
             "debias_blocks": {
+                "enabled": True,
                 "window": db.window,
                 "min_errors": db.min_errors,
                 "trigger_bias": db.trigger_bias,
                 "exit_consecutive": db.exit_consecutive,
                 "max_block_len": db.max_block_len,
                 "signal": db.signal,
+            },
+            "alternation_blocks": {
+                "enabled": True,
+                "window": al.window,
+                "min_samples": al.min_samples,
+                "trigger_rate": al.trigger_rate,
+                "exit_rate": al.exit_rate,
+                "exit_min_samples": al.exit_min_samples,
+                "max_block_len": al.max_block_len,
+                "signal": al.signal,
             },
         },
     }
@@ -218,6 +237,43 @@ def _to_debias_config(d: dict) -> DebiasBlockConfig:
                              max_block_len=max_block_len, signal=signal)
 
 
+def _to_alternation_config(d: dict) -> AlternationBlockConfig:
+    """Build + range-check the closed-loop `AlternationBlockConfig` from the
+    ``sequence.alternation_blocks`` sub-section (missing keys fall back to
+    defaults). ``exit_rate <= trigger_rate`` is enforced so the block keeps the
+    hysteresis (trigger high, relax to a lower exit) it was designed around."""
+    al = AlternationBlockConfig()
+    window = int(d.get("window", al.window))
+    min_samples = int(d.get("min_samples", al.min_samples))
+    trigger_rate = float(d.get("trigger_rate", al.trigger_rate))
+    exit_rate = float(d.get("exit_rate", al.exit_rate))
+    exit_min_samples = int(d.get("exit_min_samples", al.exit_min_samples))
+    max_block_len = int(d.get("max_block_len", al.max_block_len))
+    signal = str(d.get("signal", al.signal))
+    if window <= 0:
+        raise ValueError("sequence.alternation_blocks.window must be > 0")
+    if not 0 < min_samples <= window:
+        raise ValueError(
+            "sequence.alternation_blocks.min_samples must be in (0, window]")
+    if not 0.0 <= trigger_rate <= 1.0:
+        raise ValueError(
+            "sequence.alternation_blocks.trigger_rate must be in [0, 1]")
+    if not 0.0 <= exit_rate <= 1.0:
+        raise ValueError("sequence.alternation_blocks.exit_rate must be in [0, 1]")
+    if exit_rate > trigger_rate:
+        raise ValueError(
+            "sequence.alternation_blocks.exit_rate must be <= trigger_rate")
+    if exit_min_samples <= 0:
+        raise ValueError(
+            "sequence.alternation_blocks.exit_min_samples must be > 0")
+    if max_block_len <= 0:
+        raise ValueError("sequence.alternation_blocks.max_block_len must be > 0")
+    return AlternationBlockConfig(window=window, min_samples=min_samples,
+                                  trigger_rate=trigger_rate, exit_rate=exit_rate,
+                                  exit_min_samples=exit_min_samples,
+                                  max_block_len=max_block_len, signal=signal)
+
+
 def to_trial_config(config: dict) -> TrialConfig:
     """Build the schedule/tone `TrialConfig` from the ``sequence`` section."""
     s = config.get("sequence", {})
@@ -235,19 +291,33 @@ def to_trial_config(config: dict) -> TrialConfig:
         raise ValueError("sequence.max_same_run must be >= 0")
     if high_hz <= 0 or low_hz <= 0:
         raise ValueError("sequence tone Hz must be > 0")
-    if generator not in (GEN_BALANCED, GEN_DEBIAS_BLOCKS):
+    if generator not in (GEN_BALANCED, GEN_DEBIAS_BLOCKS, GEN_INTERVENTION_BLOCKS):
         raise ValueError(
-            f"sequence.generator must be {GEN_BALANCED!r} or {GEN_DEBIAS_BLOCKS!r}")
-    # Always validate the debias params (so a bad value is caught on Save even if
-    # not currently selected), but only ATTACH them when the debias generator is
-    # active - so the balanced default stays debias=None (identical to TrialConfig).
-    debias_cfg = _to_debias_config(s.get("debias_blocks", {}))
-    debias = debias_cfg if generator == GEN_DEBIAS_BLOCKS else None
+            f"sequence.generator must be {GEN_BALANCED!r}, {GEN_DEBIAS_BLOCKS!r}, "
+            f"or {GEN_INTERVENTION_BLOCKS!r}")
+    # Always validate BOTH block params (so a bad value is caught on Save even if
+    # not currently selected/enabled), then attach only what the active generator
+    # uses - the balanced default stays debias=alternation=None (identical to a
+    # bare TrialConfig). Under "intervention_blocks" each child is attached only
+    # when its "enabled" flag is set, so the two tab checkboxes map 1:1 onto the
+    # constructed stack (see intervention_stack.py).
+    db_sub = s.get("debias_blocks", {})
+    al_sub = s.get("alternation_blocks", {})
+    debias_cfg = _to_debias_config(db_sub)
+    alternation_cfg = _to_alternation_config(al_sub)
+    debias = alternation = None
+    if generator == GEN_DEBIAS_BLOCKS:
+        debias = debias_cfg
+    elif generator == GEN_INTERVENTION_BLOCKS:
+        if bool(db_sub.get("enabled", True)):
+            debias = debias_cfg
+        if bool(al_sub.get("enabled", True)):
+            alternation = alternation_cfg
     return TrialConfig(max_trials=max_trials, block_size=block_size,
                        max_same_run=max_same_run,
                        high_tone_is_left=bool(s.get("high_tone_is_left", True)),
                        high_tone_hz=high_hz, low_tone_hz=low_hz,
-                       generator=generator, debias=debias)
+                       generator=generator, debias=debias, alternation=alternation)
 
 
 def resolve_seed(config: dict) -> Optional[int]:

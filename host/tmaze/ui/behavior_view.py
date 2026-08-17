@@ -451,11 +451,20 @@ class BehaviorView:
         # surface the live scheduler state + the corrective-block efficacy). See
         # phase3_stats / debias.py.
         if st.generator != "balanced":
-            self._p3_vars["debias"].set(
-                f"Debias [{st.sched_state}] live b={_signed(st.live_bias)}"
-                f"/{st.trigger_bias:.2f}   blocks {st.n_blocks} "
-                f"(ok {st.blocks_success}/cap {st.blocks_capped})   "
-                f"in-block acc {_pct(st.inblock_accuracy)} [{st.inblock_completed}]")
+            line = (f"Debias [{st.sched_state}] live b={_signed(st.live_bias)}"
+                    f"/{st.trigger_bias:.2f}   blocks {st.n_blocks} "
+                    f"(ok {st.blocks_success}/cap {st.blocks_capped})")
+            # Under intervention_blocks also surface the de-alternation readout: the
+            # live cue-aware alternation rate + its block count (see phase3_stats /
+            # alternation.py).
+            if st.generator == "intervention_blocks":
+                line += (f"   alt r={st.alt_rate:.2f}  "
+                         f"alt-blocks {st.n_alt_blocks}")
+            if st.active_kind:
+                line += f"   active={st.active_kind}"
+            line += (f"   in-block acc {_pct(st.inblock_accuracy)} "
+                     f"[{st.inblock_completed}]")
+            self._p3_vars["debias"].set(line)
         else:
             self._p3_vars["debias"].set("Debias: off (balanced generator)")
         # Right column: the live locomotor/compliance group over ALL excursions

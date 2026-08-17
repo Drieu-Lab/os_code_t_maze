@@ -148,11 +148,21 @@ class Phase3Stats:
     inblock_accuracy: Optional[float] = None
     inblock_reward_rate: Optional[float] = None
     inblock_fraction: Optional[float] = None    # in-block / all completed
-    # ---- corrective-block efficacy ----
+    # ---- corrective-block efficacy (SIDE-BIAS blocks only; see _block_efficacy) ----
     n_blocks: int = 0
     blocks_success: int = 0                      # ended by the consecutive-correct exit
     blocks_capped: int = 0                       # hit the max-length failsafe
     block_mean_len: Optional[float] = None       # mean completed trials per block
+    # ---- de-alternation block summary (intervention_blocks; 0/None otherwise) ----
+    # Kept as a plain count + mean length for the beta rather than a success/capped
+    # split: the alternation exit is a relaxed-rate test, not consecutive-correct,
+    # so its efficacy is read from the per-trial ``alt_rate`` in the CSV instead.
+    n_alt_blocks: int = 0
+    alt_block_mean_len: Optional[float] = None
+    # Live cue-aware alternation rate + which intervention owns the active block
+    # ("side_bias"/"alternation"; "" in NORMAL), for the readout header.
+    alt_rate: float = 0.0
+    active_kind: str = ""
 
 
 def _int_or_zero(x: Optional[str]) -> int:
@@ -231,8 +241,15 @@ def compute(snapshot: Optional[Phase3StateSnapshot], *,
     inblock_fraction = (len(inb) / ncomp) if ncomp else None
     exit_consecutive = snapshot.exit_consecutive if snapshot is not None else 0
     max_block_len = snapshot.max_block_len if snapshot is not None else 0
+    # Split in-block trials by which intervention forced them. Side-bias blocks get
+    # the consecutive-correct success/capped efficacy; de-alternation blocks (whose
+    # exit is a relaxed-rate test) are reported as a count + mean length only. A
+    # legacy/unset kind is treated as side-bias (the only pre-existing block type).
+    side_inb = [r for r in inb if (r.block_kind or "side_bias") == "side_bias"]
+    alt_inb = [r for r in inb if r.block_kind == "alternation"]
     n_blocks, succ, capped, mean_len = _block_efficacy(
-        inb, exit_consecutive, max_block_len)
+        side_inb, exit_consecutive, max_block_len)
+    n_alt_blocks, alt_mean_len = _alt_block_summary(alt_inb)
 
     return Phase3Stats(
         window_n=n, total=total, current_index=current_index,
@@ -256,7 +273,10 @@ def compute(snapshot: Optional[Phase3StateSnapshot], *,
         inblock_accuracy=inblock_accuracy, inblock_reward_rate=inblock_reward_rate,
         inblock_fraction=inblock_fraction,
         n_blocks=n_blocks, blocks_success=succ, blocks_capped=capped,
-        block_mean_len=mean_len)
+        block_mean_len=mean_len,
+        n_alt_blocks=n_alt_blocks, alt_block_mean_len=alt_mean_len,
+        alt_rate=(snapshot.alt_rate if snapshot is not None else 0.0),
+        active_kind=(snapshot.active_kind if snapshot is not None else ""))
 
 
 def _dir_bias(rows: List[Phase3RowView]) -> Tuple[Optional[float], int, int]:
@@ -309,6 +329,25 @@ def _block_efficacy(
             capped += 1
     mean_len = sum(len(g) for g in groups.values()) / len(groups)
     return len(groups), succ, capped, mean_len
+
+
+def _alt_block_summary(
+        alt_inb: List[Phase3RowView]
+) -> Tuple[int, Optional[float]]:
+    """Summarize the de-alternation blocks over their in-block completed trials.
+
+    Returns ``(n_alt_blocks, mean_len)``: the number of distinct alternation blocks
+    (grouped by ``block_id``) and their mean completed length, or ``(0, None)`` when
+    none. A success/capped split is deliberately omitted (see ``Phase3Stats``): the
+    alternation exit is a relaxed-rate test, best judged from the per-trial
+    ``alt_rate`` in the CSV rather than a single ended-how flag."""
+    groups: "dict[str, int]" = {}
+    for r in alt_inb:
+        if r.block_id:
+            groups[r.block_id] = groups.get(r.block_id, 0) + 1
+    if not groups:
+        return 0, None
+    return len(groups), sum(groups.values()) / len(groups)
 
 
 def _win_stay_lose_shift(

@@ -62,11 +62,13 @@ from typing import Callable, Optional
 
 from tmaze.core import protocol
 from tmaze.core.cue_gate import CHOICE, RETURN, CueGate, CueParams
+from tmaze.core.phase3.alternation import AlternationBlockConfig
 from tmaze.core.phase3.debias import DebiasBlockConfig
 from tmaze.core.phase3.phase3_config import (
     DEFAULT_MAX_TOPUPS, default_config, load_phase3_config, resolve_seed,
     save_phase3_config, to_trial_config, validate_phase3_config)
-from tmaze.core.phase3.trial_sequence import GEN_BALANCED, GEN_DEBIAS_BLOCKS
+from tmaze.core.phase3.trial_sequence import (
+    GEN_BALANCED, GEN_DEBIAS_BLOCKS, GEN_INTERVENTION_BLOCKS)
 from tmaze.core.phase3.phase3_log import Phase3Log, Phase3StateSnapshot
 from tmaze.core.phase3.phase3_task import ABANDONED, CORRECT, INCORRECT, Phase3Config, Phase3Task
 from tmaze.core.reward.reward_dispenser import WellDispenser
@@ -454,16 +456,41 @@ class Phase3ControlView(VisionActuator):
         self._enqueue_act(("cmd", "debias_end"))
 
     def toggle_debias_block(self) -> None:
-        """Flip between a corrective block and normal counterbalanced trials, based
-        on the currently published scheduler state."""
+        """Flip between a side-bias corrective block and normal trials, based on the
+        currently published scheduler state. Under "intervention_blocks" a block of
+        a DIFFERENT kind (alternation) is left to its own toggle: end here only when
+        a side-bias block is the one running."""
         st = self._state
-        if st is not None and st.debias_state == "INTERVENTION":
+        active = getattr(st, "active_kind", "") if st is not None else ""
+        if (st is not None and st.debias_state == "INTERVENTION"
+                and active in ("side_bias", "")):
             self.end_debias_block()
         else:
             self.start_debias_block()
 
+    # The de-alternation corrective-block override (second Rig-view button). Only
+    # meaningful under the "intervention_blocks" generator with the alternation
+    # child enabled; enqueued like the debias override (applied on the next
+    # committed trial). See alternation.py / intervention_stack.py.
+    def start_alternation_block(self) -> None:
+        """Operator: force a de-alternation block to start (forces the last choice)."""
+        self._enqueue_act(("cmd", "alt_start"))
+
+    def end_alternation_block(self) -> None:
+        """Operator: end the current de-alternation block early."""
+        self._enqueue_act(("cmd", "alt_end"))
+
+    def toggle_alternation_block(self) -> None:
+        """Flip a de-alternation block on/off from the published scheduler state."""
+        st = self._state
+        active = getattr(st, "active_kind", "") if st is not None else ""
+        if active == "alternation":
+            self.end_alternation_block()
+        else:
+            self.start_alternation_block()
+
     def debias_active(self) -> bool:
-        """Whether the debias_blocks generator is in effect this session (so the
+        """Whether a closed-loop generator is in effect this session (so the
         control bar can enable/disable its toggle)."""
         st = self._state
         return st is not None and st.generator != "balanced"
@@ -560,14 +587,18 @@ class Phase3ControlView(VisionActuator):
             return
         idx = self._task.index
         iso = _now_iso()
-        if name in ("debias_start", "debias_end"):
-            # Operator override of the closed-loop scheduler (debias.py). Latched on
-            # the controller, applied on the next committed trial; publish so the
-            # panel/control-bar reflect the request promptly.
+        if name in ("debias_start", "debias_end", "alt_start", "alt_end"):
+            # Operator override of the closed-loop scheduler (debias.py /
+            # alternation.py). Latched on the task, applied on the next committed
+            # trial; publish so the panel/control-bar reflect the request promptly.
             if name == "debias_start":
                 self._task.force_debias_block(None)
-            else:
+            elif name == "debias_end":
                 self._task.end_debias_block()
+            elif name == "alt_start":
+                self._task.force_alternation_block()
+            else:
+                self._task.end_alternation_block()
             self._publish_state(armed=snap.gate_open)
             return
         if name == "skip":
@@ -962,16 +993,42 @@ class Phase3ControlView(VisionActuator):
             except (tk.TclError, ValueError):
                 return default
 
-        return {"window": _i(self._db_window_var, db.window),
+        return {"enabled": bool(self._db_enabled_var.get()),
+                "window": _i(self._db_window_var, db.window),
                 "min_errors": _i(self._db_min_errors_var, db.min_errors),
                 "trigger_bias": _f(self._db_trigger_var, db.trigger_bias),
                 "exit_consecutive": _i(self._db_exit_var, db.exit_consecutive),
                 "max_block_len": _i(self._db_cap_var, db.max_block_len)}
 
+    def _current_alternation_dict(self) -> dict:
+        """The de-alternation-block params from the GUI fields (safe parse; range
+        checking is left to ``to_trial_config`` so a bad combo is reported)."""
+        al = AlternationBlockConfig()
+
+        def _i(var, default):
+            try:
+                return int(float(var.get()))
+            except (tk.TclError, ValueError):
+                return default
+
+        def _f(var, default):
+            try:
+                return float(var.get())
+            except (tk.TclError, ValueError):
+                return default
+
+        return {"enabled": bool(self._alt_enabled_var.get()),
+                "window": _i(self._alt_window_var, al.window),
+                "min_samples": _i(self._alt_min_samples_var, al.min_samples),
+                "trigger_rate": _f(self._alt_trigger_var, al.trigger_rate),
+                "exit_rate": _f(self._alt_exit_var, al.exit_rate),
+                "exit_min_samples": _i(self._alt_exit_min_var, al.exit_min_samples),
+                "max_block_len": _i(self._alt_cap_var, al.max_block_len)}
+
     def _current_trial_config(self) -> TrialConfig:
         """Resolve the schedule config for the NEXT arm, overlaying the GUI
-        generator + debias fields onto the file's ``sequence`` section. On an
-        invalid debias edit it records the error and falls back to the last valid
+        generator + intervention fields onto the file's ``sequence`` section. On an
+        invalid edit it records the error and falls back to the last valid
         (loaded/saved) config, so the Tk poll never crashes on a half-typed field.
         """
         if not hasattr(self, "_gen_var"):
@@ -980,6 +1037,8 @@ class Phase3ControlView(VisionActuator):
         seq["generator"] = self._gen_var.get()
         seq["debias_blocks"] = {**seq.get("debias_blocks", {}),
                                 **self._current_debias_dict()}
+        seq["alternation_blocks"] = {**seq.get("alternation_blocks", {}),
+                                     **self._current_alternation_dict()}
         try:
             tc = to_trial_config({"sequence": seq})
             self._debias_error = ""
@@ -1026,11 +1085,22 @@ class Phase3ControlView(VisionActuator):
         self._gen_var.set(s.get("generator", GEN_BALANCED))
         db = s.get("debias_blocks", {})
         dc = DebiasBlockConfig()
+        self._db_enabled_var.set(bool(db.get("enabled", True)))
         self._db_window_var.set(str(db.get("window", dc.window)))
         self._db_min_errors_var.set(str(db.get("min_errors", dc.min_errors)))
         self._db_trigger_var.set(str(db.get("trigger_bias", dc.trigger_bias)))
         self._db_exit_var.set(str(db.get("exit_consecutive", dc.exit_consecutive)))
         self._db_cap_var.set(str(db.get("max_block_len", dc.max_block_len)))
+        al = s.get("alternation_blocks", {})
+        ac = AlternationBlockConfig()
+        self._alt_enabled_var.set(bool(al.get("enabled", True)))
+        self._alt_window_var.set(str(al.get("window", ac.window)))
+        self._alt_min_samples_var.set(str(al.get("min_samples", ac.min_samples)))
+        self._alt_trigger_var.set(str(al.get("trigger_rate", ac.trigger_rate)))
+        self._alt_exit_var.set(str(al.get("exit_rate", ac.exit_rate)))
+        self._alt_exit_min_var.set(
+            str(al.get("exit_min_samples", ac.exit_min_samples)))
+        self._alt_cap_var.set(str(al.get("max_block_len", ac.max_block_len)))
         self._sync_debias_enabled()
 
     def _save_settings(self) -> None:
@@ -1055,6 +1125,8 @@ class Phase3ControlView(VisionActuator):
         cfg["sequence"]["generator"] = self._gen_var.get()
         cfg["sequence"].setdefault("debias_blocks", {}).update(
             self._current_debias_dict())
+        cfg["sequence"].setdefault("alternation_blocks", {}).update(
+            self._current_alternation_dict())
         try:
             validate_phase3_config(cfg)
         except Exception as e:
@@ -1071,9 +1143,9 @@ class Phase3ControlView(VisionActuator):
         self._refresh_seq_info()
         messagebox.showinfo(
             "Save Phase 3 settings",
-            "Saved reward + cue + debias settings to phase3.json. (The scientific "
-            "schedule params - trials/block/tones/seed - are edited in the file.) "
-            "New settings apply on the next arm.")
+            "Saved reward + cue + intervention (debias / de-alternation) settings "
+            "to phase3.json. (The scientific schedule params - trials/block/tones/"
+            "seed - are edited in the file.) New settings apply on the next arm.")
 
     def _reload_settings(self) -> None:
         """Re-read phase3.json from disk into the tab (Reload button), e.g. after
@@ -1102,16 +1174,49 @@ class Phase3ControlView(VisionActuator):
             f"{s['low_tone_hz']} Hz (HIGH={left}) \u00b7 seed {seed_txt}")
 
     def _sync_debias_enabled(self) -> None:
-        """Enable the debias param spinboxes only under the debias_blocks generator
-        (they are inert for the balanced schedule)."""
+        """Enable each intervention's controls to match the generator + its enable
+        checkbox (they are inert for the balanced schedule).
+
+        The side-bias debias spinboxes are live under ``debias_blocks`` always, and
+        under ``intervention_blocks`` only when its enable box is ticked; the
+        alternation spinboxes are live only under ``intervention_blocks`` with its
+        box ticked; the two enable checkboxes themselves are live only under
+        ``intervention_blocks``. Also refreshes the reward-incorrect warning."""
         if not hasattr(self, "_debias_spinboxes"):
             return
-        on = self._gen_var.get() == GEN_DEBIAS_BLOCKS
-        for sb in self._debias_spinboxes:
-            try:
-                sb.configure(state=("normal" if on else "disabled"))
-            except tk.TclError:
-                pass
+        gen = self._gen_var.get()
+        is_interv = gen == GEN_INTERVENTION_BLOCKS
+        db_on = gen == GEN_DEBIAS_BLOCKS or (
+            is_interv and bool(self._db_enabled_var.get()))
+        alt_on = is_interv and bool(self._alt_enabled_var.get())
+
+        def _set(widgets, on):
+            for w in widgets:
+                try:
+                    w.configure(state=("normal" if on else "disabled"))
+                except tk.TclError:
+                    pass
+
+        _set(self._debias_spinboxes, db_on)
+        _set(getattr(self, "_alt_spinboxes", []), alt_on)
+        _set(getattr(self, "_intervention_checks", []), is_interv)
+        self._refresh_reward_incorrect_warning()
+
+    def _refresh_reward_incorrect_warning(self) -> None:
+        """Show a light caution when a closed-loop generator is selected while the
+        reward-incorrect shaping aid is on: rewarding every choice defeats an
+        intervention block (the animal earns reward whether or not it complies).
+        Non-blocking - just a visible note (the operator confirmed they don't use
+        the aid; FW-0036)."""
+        if not hasattr(self, "_reward_incorrect_warn_var"):
+            return
+        closed_loop = self._gen_var.get() in (
+            GEN_DEBIAS_BLOCKS, GEN_INTERVENTION_BLOCKS)
+        on = closed_loop and bool(self._reward_incorrect_var.get())
+        self._reward_incorrect_warn_var.set(
+            "\u26a0 Reward-incorrect is ON: it rewards every choice, so an "
+            "intervention block can't push the animal. Turn it off for the block "
+            "to work." if on else "")
 
     # -------------------------------------------------------------------- UI
     def _build_ui(self) -> None:
@@ -1148,7 +1253,8 @@ class Phase3ControlView(VisionActuator):
         self._reward_incorrect_var = tk.BooleanVar(
             value=self._config["reward"]["reward_incorrect"])
         ri = ttk.Checkbutton(root, text="Reward incorrect choices (shaping)",
-                             variable=self._reward_incorrect_var)
+                             variable=self._reward_incorrect_var,
+                             command=self._refresh_reward_incorrect_warning)
         ri.grid(row=4, column=0, columnspan=2, sticky="w", **pad)
         tip(ri, "phase3.reward_incorrect")
 
@@ -1226,34 +1332,76 @@ class Phase3ControlView(VisionActuator):
         reload_btn.pack(side=tk.LEFT, padx=(6, 0))
         tip(reload_btn, "phase3.reload_config")
 
+    def _build_spin_grid(self, parent: ttk.Frame, spinspec) -> list:
+        """Lay a list of ``(label, var, tooltip, lo, hi, step, is_float)`` knobs out
+        in a compact 2-column spinbox grid; return the created Spinbox widgets (so
+        the caller can enable/disable them as a group)."""
+        boxes = []
+        for i, (label, var, tkey, lo, hi, step, is_float) in enumerate(spinspec):
+            r = i // 2
+            c = (i % 2) * 2
+            ttk.Label(parent, text=label).grid(
+                row=r, column=c, sticky="w", padx=(0, 4), pady=2)
+            sb = ttk.Spinbox(parent, from_=lo, to=hi, increment=step, width=7,
+                             textvariable=var,
+                             format=("%.2f" if is_float else "%.0f"))
+            sb.grid(row=r, column=c + 1, sticky="w", padx=(0, 12), pady=2)
+            tip(sb, tkey)
+            boxes.append(sb)
+        return boxes
+
     def _build_debias_ui(self, parent: ttk.Frame, *, row: int) -> None:
         """The GUI-editable slice of the otherwise file-only ``sequence`` section:
-        the trial-sequence generator + the closed-loop corrective-block params
-        (ADR-0070 carve-out; see debias.py). The generator dropdown picks
-        ``balanced`` (counterbalanced, unchanged) or ``debias_blocks``
-        (counterbalanced + corrective blocks when a side bias develops); the
-        spinboxes are the block state-machine knobs and are enabled only under the
-        debias generator. All apply on the NEXT arm (like the seed), and are saved
-        to phase3.json by Save settings."""
+        the trial-sequence generator + the closed-loop intervention-block params
+        (ADR-0070 carve-out; see debias.py / alternation.py). The generator dropdown
+        picks ``balanced`` (counterbalanced, unchanged), ``debias_blocks``
+        (counterbalanced + side-bias corrective blocks), or ``intervention_blocks``
+        (counterbalanced + the two ENABLED interventions run concurrently, one active
+        at a time). The two enable checkboxes + the per-block spinboxes are live only
+        where they apply. All apply on the NEXT arm (like the seed) and are saved to
+        phase3.json by Save settings."""
         s = self._config["sequence"]
         dc = DebiasBlockConfig()
+        ac = AlternationBlockConfig()
         db = s.get("debias_blocks", {})
+        al = s.get("alternation_blocks", {})
 
         frame = ttk.Frame(parent)
         frame.grid(row=row, column=0, columnspan=2, sticky="ew", padx=6, pady=(2, 4))
+        frame.columnconfigure(0, weight=1)
 
-        ttk.Label(frame, text="Generator:").grid(
+        top = ttk.Frame(frame)
+        top.grid(row=0, column=0, sticky="w")
+        ttk.Label(top, text="Generator:").grid(
             row=0, column=0, sticky="w", padx=(0, 4), pady=2)
         self._gen_var = tk.StringVar(value=s.get("generator", GEN_BALANCED))
-        gen = ttk.Combobox(frame, width=15, state="readonly",
+        gen = ttk.Combobox(top, width=18, state="readonly",
                            textvariable=self._gen_var,
-                           values=(GEN_BALANCED, GEN_DEBIAS_BLOCKS))
-        gen.grid(row=0, column=1, columnspan=3, sticky="w", pady=2)
+                           values=(GEN_BALANCED, GEN_DEBIAS_BLOCKS,
+                                   GEN_INTERVENTION_BLOCKS))
+        gen.grid(row=0, column=1, sticky="w", pady=2)
         gen.bind("<<ComboboxSelected>>", lambda _e: self._sync_debias_enabled())
         tip(gen, "phase3.generator")
 
-        # The five corrective-block knobs. (var, label, tooltip, from, to, step,
-        # is_float). Kept compact in a 2-column grid under the dropdown.
+        # The two intervention enable checkboxes (live only under
+        # intervention_blocks; each maps 1:1 onto a stack child).
+        self._db_enabled_var = tk.BooleanVar(value=bool(db.get("enabled", True)))
+        self._alt_enabled_var = tk.BooleanVar(value=bool(al.get("enabled", True)))
+        checks = ttk.Frame(frame)
+        checks.grid(row=1, column=0, sticky="w", pady=(2, 0))
+        dbc = ttk.Checkbutton(checks, text="Side-bias debias",
+                              variable=self._db_enabled_var,
+                              command=self._sync_debias_enabled)
+        dbc.grid(row=0, column=0, sticky="w", padx=(0, 12))
+        tip(dbc, "phase3.debias_enabled")
+        altc = ttk.Checkbutton(checks, text="De-alternation",
+                               variable=self._alt_enabled_var,
+                               command=self._sync_debias_enabled)
+        altc.grid(row=0, column=1, sticky="w")
+        tip(altc, "phase3.alt_enabled")
+        self._intervention_checks = [dbc, altc]
+
+        # Side-bias debias knobs.
         self._db_window_var = tk.StringVar(value=str(db.get("window", dc.window)))
         self._db_min_errors_var = tk.StringVar(
             value=str(db.get("min_errors", dc.min_errors)))
@@ -1263,7 +1411,9 @@ class Phase3ControlView(VisionActuator):
             value=str(db.get("exit_consecutive", dc.exit_consecutive)))
         self._db_cap_var = tk.StringVar(
             value=str(db.get("max_block_len", dc.max_block_len)))
-        spinspec = (
+        db_box = ttk.LabelFrame(frame, text="Side-bias debias block")
+        db_box.grid(row=2, column=0, sticky="ew", pady=(4, 2))
+        self._debias_spinboxes = self._build_spin_grid(db_box, (
             ("Window (trials):", self._db_window_var, "phase3.debias_window",
              1, 500, 1, False),
             ("Min errors:", self._db_min_errors_var, "phase3.debias_min_errors",
@@ -1274,19 +1424,42 @@ class Phase3ControlView(VisionActuator):
              "phase3.debias_exit_consecutive", 1, 20, 1, False),
             ("Max block length:", self._db_cap_var, "phase3.debias_max_block_len",
              1, 200, 1, False),
-        )
-        self._debias_spinboxes = []
-        for i, (label, var, tkey, lo, hi, step, is_float) in enumerate(spinspec):
-            r = 1 + i // 2
-            c = (i % 2) * 2
-            ttk.Label(frame, text=label).grid(
-                row=r, column=c, sticky="w", padx=(0, 4), pady=2)
-            sb = ttk.Spinbox(frame, from_=lo, to=hi, increment=step, width=7,
-                             textvariable=var,
-                             format=("%.2f" if is_float else "%.0f"))
-            sb.grid(row=r, column=c + 1, sticky="w", padx=(0, 12), pady=2)
-            tip(sb, tkey)
-            self._debias_spinboxes.append(sb)
+        ))
+
+        # De-alternation knobs.
+        self._alt_window_var = tk.StringVar(value=str(al.get("window", ac.window)))
+        self._alt_min_samples_var = tk.StringVar(
+            value=str(al.get("min_samples", ac.min_samples)))
+        self._alt_trigger_var = tk.StringVar(
+            value=str(al.get("trigger_rate", ac.trigger_rate)))
+        self._alt_exit_var = tk.StringVar(
+            value=str(al.get("exit_rate", ac.exit_rate)))
+        self._alt_exit_min_var = tk.StringVar(
+            value=str(al.get("exit_min_samples", ac.exit_min_samples)))
+        self._alt_cap_var = tk.StringVar(
+            value=str(al.get("max_block_len", ac.max_block_len)))
+        al_box = ttk.LabelFrame(frame, text="De-alternation block")
+        al_box.grid(row=3, column=0, sticky="ew", pady=(4, 2))
+        self._alt_spinboxes = self._build_spin_grid(al_box, (
+            ("Window (trials):", self._alt_window_var, "phase3.alt_window",
+             1, 500, 1, False),
+            ("Min samples:", self._alt_min_samples_var, "phase3.alt_min_samples",
+             1, 500, 1, False),
+            ("Trigger rate:", self._alt_trigger_var, "phase3.alt_trigger_rate",
+             0.0, 1.0, 0.05, True),
+            ("Exit rate:", self._alt_exit_var, "phase3.alt_exit_rate",
+             0.0, 1.0, 0.05, True),
+            ("Exit min samples:", self._alt_exit_min_var,
+             "phase3.alt_exit_min_samples", 1, 100, 1, False),
+            ("Max block length:", self._alt_cap_var, "phase3.alt_max_block_len",
+             1, 200, 1, False),
+        ))
+
+        # Non-blocking caution: the reward-incorrect shaping aid defeats any block.
+        self._reward_incorrect_warn_var = tk.StringVar(value="")
+        ttk.Label(frame, textvariable=self._reward_incorrect_warn_var,
+                  foreground="#b00", wraplength=440, justify="left").grid(
+            row=4, column=0, sticky="w", pady=(2, 0))
         self._sync_debias_enabled()
 
     def _build_reward_ui(self, root: ttk.Frame, *, row: int) -> None:
