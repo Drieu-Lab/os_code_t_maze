@@ -20,6 +20,8 @@ from tmaze.core.phase3.alternation import (
     AlternationBlockConfig, AlternationBlockController,
 )
 from tmaze.core.phase3.debias import AUTO, INTERVENTION, MANUAL, NORMAL
+from tmaze.core.phase3.phase3_log import Phase3Log
+from tmaze.core.phase3.phase3_stats import compute
 from tmaze.core.phase3.trial_sequence import (
     LEFT, RIGHT, GEN_INTERVENTION_BLOCKS, TrialConfig, TrialSequence,
 )
@@ -48,6 +50,21 @@ class TestAltRateMeasure(unittest.TestCase):
 
     def test_empty_is_zero(self):
         self.assertEqual(AlternationBlockController().alt_rate(), 0.0)
+
+    def test_window_samples_counts_repeat_cued_only(self):
+        c = AlternationBlockController(AlternationBlockConfig(window=10))
+        self.assertEqual(c.window_samples(), 0)
+        # A cue-follower on an alternating schedule generates NO repeat-cued samples.
+        for cued in (LEFT, RIGHT, LEFT, RIGHT):
+            c.record(cued, cued)
+        self.assertEqual(c.window_samples(), 0)
+        # A pure alternator: every trial after the first is a repeat-cued sample.
+        c.reset()
+        chosen = [LEFT, RIGHT, LEFT, RIGHT, LEFT]
+        for i, ch in enumerate(chosen):
+            cued = chosen[i - 1] if i else LEFT
+            c.record(cued, ch)
+        self.assertEqual(c.window_samples(), 4)   # 4 repeat-cued samples
 
 
 def _prime_alternator(c, n):
@@ -187,6 +204,22 @@ class TestAlternationSequence(unittest.TestCase):
         sa, _sta, _ka, _ca = _drive_alternator(a, 60)
         sb, _stb, _kb, _cb = _drive_alternator(b, 60)
         self.assertEqual(sa, sb)
+
+    def test_alt_gate_fields_surface_in_stats(self):
+        # The de-alternation gate-progress readout: with only the alternation child
+        # enabled, the snapshot->stats carries its enabled flag, trigger_rate,
+        # min_samples and the live window sample count (for "samples N/min").
+        ts = TrialSequence(_cfg(), seed=42)
+        log = Phase3Log(ts, animal="RAT600",
+                        session_start_iso="2026-08-18T12:00:00")
+        _drive_alternator(ts, 30)
+        st = compute(log.snapshot(30, armed=True))
+        self.assertTrue(st.alt_enabled)
+        self.assertAlmostEqual(st.alt_trigger_rate, 0.8)
+        self.assertEqual(st.alt_min_samples, 4)
+        self.assertGreaterEqual(st.alt_window_samples, 0)
+        # No side-bias child in this config.
+        self.assertFalse(st.debias_enabled)
 
 
 if __name__ == "__main__":

@@ -70,6 +70,22 @@ class TestArbitration(unittest.TestCase):
         self.assertNotEqual(s.bias(), 0.0)                   # side-bias child saw it
         self.assertNotEqual(s.alt_rate(), 0.0)               # alternation child too
 
+    def test_window_gate_counts_delegate_to_children(self):
+        s = _both()
+        _arm_both(s)
+        # Both detectors' gate counts are surfaced from their children (the stream
+        # arms both), for the readout's "errors N/min" / "samples N/min" progress.
+        self.assertGreater(s.window_errors(), 0)
+        self.assertGreater(s.window_samples(), 0)
+
+    def test_window_gate_counts_zero_when_child_disabled(self):
+        # Alternation only: no side-bias child, so its window_errors() is 0.
+        s = InterventionStackController(
+            None, AlternationBlockConfig(window=10, min_samples=3))
+        s.record(LEFT, LEFT)
+        self.assertEqual(s.window_errors(), 0)
+        self.assertEqual(InterventionStackController(None, None).window_samples(), 0)
+
 
 class TestAlternationOnly(unittest.TestCase):
     def test_alternation_child_triggers_when_debias_disabled(self):

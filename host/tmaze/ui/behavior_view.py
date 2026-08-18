@@ -124,7 +124,10 @@ class BehaviorView:
         # live locomotor/compliance group from self._p3_stats (docs/decisions/0071).
         self._p3_vars = {k: tk.StringVar(value="-") for k in (
             "session", "trials", "accuracy", "bycue", "bias", "reward",
-            "strategy", "debias",
+            "strategy",
+            # Interventions column (middle): one line each, filled per generator.
+            "iv_state", "iv_sidebias", "iv_side_blocks", "iv_alt", "iv_alt_blocks",
+            "iv_inblock",
             "compliance", "nonstem", "run", "throughput", "distance")}
         self._window = tk.IntVar(value=self._stats.snapshot().window_n)
 
@@ -213,17 +216,19 @@ class BehaviorView:
             lbl.pack(side=tk.TOP, anchor="w", **pad)
             tip(lbl, f"behavior.{_TIP_KEY.get(key, key)}")
 
-        # Phase 3 stat lines (filled by _refresh_phase3). Two columns so the
-        # panel uses the empty right-hand space without adding height: the
-        # cued-task lines on the left, the live locomotor/compliance group
-        # (docs/decisions/0071) on the right. The "session" clock spans the top.
+        # Phase 3 stat lines (filled by _refresh_phase3). THREE columns so the panel
+        # uses the empty middle + right space without adding height (docs/decisions/
+        # 0052): the cued-task lines on the left (col 0), the closed-loop
+        # intervention group in the middle (col 2, ADR-0086/0107), and the live
+        # locomotor/compliance group (col 4, docs/decisions/0071) on the right, split
+        # by vertical separators. The "session" clock spans the top.
         session3_lbl = ttk.Label(self._p3_box, textvariable=self._p3_vars["session"],
                                  anchor="w", font=("TkDefaultFont", 10))
-        session3_lbl.grid(row=0, column=0, columnspan=3, sticky="w", **pad)
+        session3_lbl.grid(row=0, column=0, columnspan=5, sticky="w", **pad)
         tip(session3_lbl, "behavior.phase3.session")
 
         for r, key in enumerate(("trials", "accuracy", "bycue", "bias", "reward",
-                                 "strategy", "debias"), start=1):
+                                 "strategy"), start=1):
             lbl = ttk.Label(self._p3_box, textvariable=self._p3_vars[key], anchor="w",
                             font=("TkDefaultFont", 10))
             lbl.grid(row=r, column=0, sticky="w", **pad)
@@ -232,18 +237,36 @@ class BehaviorView:
         ttk.Separator(self._p3_box, orient="vertical").grid(
             row=1, column=1, rowspan=7, sticky="ns", padx=8, pady=1)
 
-        # Right column: the locomotor/compliance "excursions" group. A static
-        # heading distinguishes these all-excursion counts from the cued trials.
-        excursions_lbl = ttk.Label(self._p3_box, text="Excursions",
-                                   foreground="#666666", anchor="w")
-        excursions_lbl.grid(row=1, column=2, sticky="w", **pad)
-        for r, key in enumerate(("compliance", "nonstem", "run", "throughput",
-                                 "distance"), start=2):
+        # Middle column: the closed-loop intervention group (side-bias debias +
+        # de-alternation). A static heading distinguishes it; the lines are filled
+        # per generator, incl. the auto-trigger gate progress (errors/samples vs the
+        # min-count each block needs before its score can fire). See ADR-0086/0107.
+        interv_lbl = ttk.Label(self._p3_box, text="Interventions",
+                               foreground="#666666", anchor="w")
+        interv_lbl.grid(row=1, column=2, sticky="w", **pad)
+        tip(interv_lbl, "behavior.phase3.interventions")
+        for r, key in enumerate(("iv_state", "iv_sidebias", "iv_side_blocks",
+                                 "iv_alt", "iv_alt_blocks", "iv_inblock"), start=2):
             lbl = ttk.Label(self._p3_box, textvariable=self._p3_vars[key], anchor="w",
                             font=("TkDefaultFont", 10))
             lbl.grid(row=r, column=2, sticky="w", **pad)
             tip(lbl, f"behavior.phase3.{key}")
-        self._p3_box.grid_columnconfigure(2, weight=1)
+
+        ttk.Separator(self._p3_box, orient="vertical").grid(
+            row=1, column=3, rowspan=7, sticky="ns", padx=8, pady=1)
+
+        # Right column: the locomotor/compliance "excursions" group. A static
+        # heading distinguishes these all-excursion counts from the cued trials.
+        excursions_lbl = ttk.Label(self._p3_box, text="Excursions",
+                                   foreground="#666666", anchor="w")
+        excursions_lbl.grid(row=1, column=4, sticky="w", **pad)
+        for r, key in enumerate(("compliance", "nonstem", "run", "throughput",
+                                 "distance"), start=2):
+            lbl = ttk.Label(self._p3_box, textvariable=self._p3_vars[key], anchor="w",
+                            font=("TkDefaultFont", 10))
+            lbl.grid(row=r, column=4, sticky="w", **pad)
+            tip(lbl, f"behavior.phase3.{key}")
+        self._p3_box.grid_columnconfigure(4, weight=1)
 
     # ------------------------------------------------------------- controls
     def _toggle_run(self) -> None:
@@ -446,27 +469,8 @@ class BehaviorView:
                 f"[{st.oob_rewarded}/{st.oob_completed}]")
         self._p3_vars["strategy"].set(
             f"Win-stay: {_pct(st.win_stay)}   Lose-shift: {_pct(st.lose_shift)}")
-        # Closed-loop debias line: only meaningful under the debias_blocks
-        # generator (learning measures above are over out-of-block trials; here we
-        # surface the live scheduler state + the corrective-block efficacy). See
-        # phase3_stats / debias.py.
-        if st.generator != "balanced":
-            line = (f"Debias [{st.sched_state}] live b={_signed(st.live_bias)}"
-                    f"/{st.trigger_bias:.2f}   blocks {st.n_blocks} "
-                    f"(ok {st.blocks_success}/cap {st.blocks_capped})")
-            # Under intervention_blocks also surface the de-alternation readout: the
-            # live cue-aware alternation rate + its block count (see phase3_stats /
-            # alternation.py).
-            if st.generator == "intervention_blocks":
-                line += (f"   alt r={st.alt_rate:.2f}  "
-                         f"alt-blocks {st.n_alt_blocks}")
-            if st.active_kind:
-                line += f"   active={st.active_kind}"
-            line += (f"   in-block acc {_pct(st.inblock_accuracy)} "
-                     f"[{st.inblock_completed}]")
-            self._p3_vars["debias"].set(line)
-        else:
-            self._p3_vars["debias"].set("Debias: off (balanced generator)")
+        # Middle column: the closed-loop intervention group (its own helper).
+        self._refresh_intervention_column(st)
         # Right column: the live locomotor/compliance group over ALL excursions
         # during the Phase 3 session (denied non-stem trips included), from the
         # session-scoped accumulator (docs/decisions/0071). Same formatting as
@@ -478,6 +482,53 @@ class BehaviorView:
         self._p3_vars["run"].set(self._run_text(loco))
         self._p3_vars["throughput"].set(self._throughput_text(loco))
         self._p3_vars["distance"].set(self._distance_text(loco))
+
+    def _refresh_intervention_column(self, st) -> None:
+        """Fill the middle Interventions column from the Phase 3 stats.
+
+        Learning measures (left column) are over out-of-block trials; here we
+        surface the live closed-loop scheduler: its state, each enabled detector's
+        live score vs its trigger AND its auto-trigger GATE PROGRESS (how many
+        directional errors / repeat-cued samples are in the window vs the min-count a
+        block needs before its score can fire - so a score sitting over threshold
+        with no block is explained), the per-kind block tallies, and the in-block
+        accuracy. Blank for the balanced (open-loop) generator. See ADR-0086/0107.
+        """
+        keys = ("iv_state", "iv_sidebias", "iv_side_blocks", "iv_alt",
+                "iv_alt_blocks", "iv_inblock")
+        if st.generator == "balanced":
+            self._p3_vars["iv_state"].set("off (balanced generator)")
+            for k in keys[1:]:
+                self._p3_vars[k].set("")
+            return
+
+        active = f" ({st.active_kind})" if st.active_kind else ""
+        self._p3_vars["iv_state"].set(f"State: {st.sched_state}{active}")
+
+        # Side-bias debias detector: live |bias| vs trigger + the error-count gate.
+        if st.debias_enabled:
+            self._p3_vars["iv_sidebias"].set(
+                f"Side-bias b={_signed(st.live_bias)}/{st.trigger_bias:.2f}   "
+                f"err {st.debias_window_errors}/{st.debias_min_errors}")
+            self._p3_vars["iv_side_blocks"].set(
+                f"blocks {st.n_blocks} (ok {st.blocks_success}/"
+                f"cap {st.blocks_capped})")
+        else:
+            self._p3_vars["iv_sidebias"].set("")
+            self._p3_vars["iv_side_blocks"].set("")
+
+        # De-alternation detector: live alt_rate vs trigger + the sample-count gate.
+        if st.alt_enabled:
+            self._p3_vars["iv_alt"].set(
+                f"Alt r={st.alt_rate:.2f}/{st.alt_trigger_rate:.2f}   "
+                f"samp {st.alt_window_samples}/{st.alt_min_samples}")
+            self._p3_vars["iv_alt_blocks"].set(f"alt-blocks {st.n_alt_blocks}")
+        else:
+            self._p3_vars["iv_alt"].set("")
+            self._p3_vars["iv_alt_blocks"].set("")
+
+        self._p3_vars["iv_inblock"].set(
+            f"in-block acc {_pct(st.inblock_accuracy)} [{st.inblock_completed}]")
 
     def _refresh_phase2a(self) -> None:
         snap = self._stats.snapshot()

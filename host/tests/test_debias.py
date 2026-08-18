@@ -37,6 +37,28 @@ class TestBiasMeasure(unittest.TestCase):
     def test_empty_is_zero(self):
         self.assertEqual(DebiasBlockController().bias(), 0.0)
 
+    def test_window_errors_counts_directional_errors_only(self):
+        c = DebiasBlockController(DebiasBlockConfig(window=10))
+        self.assertEqual(c.window_errors(), 0)
+        for _ in range(3):
+            c.record(RIGHT, LEFT)    # left-pull errors
+        for _ in range(5):
+            c.record(LEFT, LEFT)     # correct - not an error
+        self.assertEqual(c.window_errors(), 3)   # only the 3 directional errors
+
+    def test_window_errors_clears_after_block_exit(self):
+        c = DebiasBlockController(DebiasBlockConfig(
+            window=10, min_errors=4, trigger_bias=0.3,
+            exit_consecutive=3, max_block_len=10))
+        for _ in range(4):
+            c.record(RIGHT, LEFT)
+        self.assertEqual(c.window_errors(), 4)
+        self.assertEqual(c.decide().state, INTERVENTION)
+        for _ in range(3):           # comply -> success exit clears the window
+            c.record(RIGHT, RIGHT)
+            c.decide()
+        self.assertEqual(c.window_errors(), 0)
+
 
 class TestAutoTrigger(unittest.TestCase):
     def _ctl(self):

@@ -393,6 +393,22 @@ class TrialSequence:
             return self._ctl.alt_rate()
         return 0.0
 
+    def debias_errors(self) -> int:
+        """Directional errors currently in the side-bias detector's window - the
+        count its auto-trigger gates on (``min_errors``); 0 if no side-bias
+        detector. For readout gate-progress (errors N/min)."""
+        if self._ctl is not None and hasattr(self._ctl, "window_errors"):
+            return self._ctl.window_errors()
+        return 0
+
+    def alt_samples(self) -> int:
+        """Repeat-cued samples currently in the alternation detector's window - the
+        count its auto-trigger gates on (``min_samples``); 0 if no alternation
+        detector. For readout gate-progress (samples N/min)."""
+        if self._ctl is not None and hasattr(self._ctl, "window_samples"):
+            return self._ctl.window_samples()
+        return 0
+
     def active_kind(self) -> str:
         """Which intervention owns the active block ("side_bias"/"alternation"; ""
         when NORMAL or open-loop)."""

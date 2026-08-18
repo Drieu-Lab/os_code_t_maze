@@ -161,6 +161,14 @@ class DebiasBlockController:
             return 0.0
         return (left_pull - right_pull) / errors
 
+    def window_errors(self) -> int:
+        """Directional errors currently in the window - the count the auto-trigger
+        gates on (a block needs >= ``min_errors`` of these before |bias| can fire
+        one). Surfaced so the readout can show gate progress (errors N/min_errors),
+        explaining why a high |bias| hasn't yet triggered a block."""
+        left_pull, right_pull = self._pull_counts()
+        return left_pull + right_pull
+
     # -------------------------------------------------------- operator overrides
     def force_block(self, side: Optional[int] = None) -> None:
         """Request a corrective block on the next decision (operator button).

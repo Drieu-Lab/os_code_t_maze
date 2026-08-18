@@ -427,6 +427,28 @@ class TestDebiasPartition(unittest.TestCase):
         self.assertEqual(st.oob_correct, st.correct)
         self.assertEqual(st.oob_rewarded, st.rewarded)
 
+    def test_gate_progress_fields_surface_for_debias(self):
+        # The new gate-progress readout: the side-bias detector is enabled, its
+        # min_errors threshold is carried, and the live window error count is a
+        # non-negative int <= that threshold+window (for "errors N/min" display).
+        st, _log, _seq = self._stats()
+        self.assertTrue(st.debias_enabled)
+        self.assertEqual(st.debias_min_errors, 4)       # from _debias_log's config
+        self.assertGreaterEqual(st.debias_window_errors, 0)
+        # No alternation child under the debias_blocks generator.
+        self.assertFalse(st.alt_enabled)
+        self.assertEqual(st.alt_min_samples, 0)
+
+    def test_gate_progress_fields_neutral_for_balanced(self):
+        log = _log(n=10, block=10)
+        for i in range(4):
+            _resolve(log, i, _side_for(log, i, True), CORRECT)
+        st = compute(log.snapshot(4, armed=True))
+        self.assertFalse(st.debias_enabled)
+        self.assertFalse(st.alt_enabled)
+        self.assertEqual(st.debias_window_errors, 0)
+        self.assertEqual(st.alt_window_samples, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

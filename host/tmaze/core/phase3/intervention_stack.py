@@ -116,6 +116,16 @@ class InterventionStackController:
         """The alternation child's cue-aware alternation rate (0.0 if disabled)."""
         return self._alt_ctl.alt_rate() if self._alt_ctl is not None else 0.0
 
+    def window_errors(self) -> int:
+        """The side-bias child's window directional-error count (0 if disabled) -
+        the count its auto-trigger gates on (``min_errors``)."""
+        return self._debias_ctl.window_errors() if self._debias_ctl is not None else 0
+
+    def window_samples(self) -> int:
+        """The alternation child's window repeat-cued sample count (0 if disabled) -
+        the count its auto-trigger gates on (``min_samples``)."""
+        return self._alt_ctl.window_samples() if self._alt_ctl is not None else 0
+
     # -------------------------------------------------------- operator overrides
     def force_block(self, side: Optional[int] = None,
                     kind: str = KIND_SIDE_BIAS) -> None:

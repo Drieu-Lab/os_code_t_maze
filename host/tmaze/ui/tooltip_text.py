@@ -565,17 +565,57 @@ TIPS: Dict[str, Entry] = {
                                 "one. High values flag a rat repeating/alternating "
                                 "on its own result instead of following the cue. "
                                 "-- until the conditioning outcome has occurred.",
-    "behavior.phase3.debias": "Closed-loop debias readout (only under the "
-                              "'debias_blocks' generator). Shows the current "
-                              "scheduler state (NORMAL/INTERVENTION), the live "
-                              "sliding-window directional bias vs its trigger "
-                              "threshold (b>0 = left-biased), the number of "
-                              "corrective blocks so far (ok = ended by the "
-                              "consecutive-correct exit, cap = hit the length "
-                              "failsafe), and accuracy on the forced in-block "
-                              "trials. The learning measures above are computed over "
-                              "out-of-block (counterbalanced) trials only, so a "
-                              "block never distorts them.",
+    # ---- behavior_view.py: Phase 3 'Interventions' column - the live closed-loop
+    #      scheduler group (side-bias debias + de-alternation; ADR-0086/0107). Only
+    #      populated under the 'debias_blocks' / 'intervention_blocks' generators;
+    #      blank/off for the balanced (open-loop) schedule. The learning measures in
+    #      the left column are over out-of-block trials, so a block never distorts
+    #      them. ----
+    "behavior.phase3.interventions": "Live closed-loop intervention scheduler "
+                                     "(side-bias debias + de-alternation). Off for "
+                                     "the balanced generator; otherwise shows each "
+                                     "enabled detector's live score vs its trigger, "
+                                     "its auto-trigger sample gate, and the "
+                                     "corrective-block tallies. The learning "
+                                     "measures at left are over out-of-block trials, "
+                                     "so a block never distorts them.",
+    "behavior.phase3.iv_state": "Current scheduler state: NORMAL (handing out the "
+                                "counterbalanced schedule) or INTERVENTION (a "
+                                "corrective block is running), with which "
+                                "intervention owns the active block in parentheses "
+                                "(side_bias / alternation).",
+    "behavior.phase3.iv_sidebias": "Side-bias debias detector. 'b=' is the live "
+                                   "sliding-window directional bias vs its trigger "
+                                   "threshold (b>0 = left-biased). 'err N/min' is "
+                                   "the auto-trigger GATE: a block needs at least "
+                                   "'min' directional errors in the window before "
+                                   "the bias can fire one - so if |b| is over "
+                                   "threshold but err hasn't reached min, no block "
+                                   "starts yet (that's why). See debias.py / "
+                                   "ADR-0090.",
+    "behavior.phase3.iv_side_blocks": "Side-bias corrective blocks so far: total, "
+                                      "then ok = ended by the consecutive-correct "
+                                      "exit, cap = hit the max-length welfare "
+                                      "failsafe.",
+    "behavior.phase3.iv_alt": "De-alternation detector. 'r=' is the live cue-aware "
+                              "alternation rate vs its trigger threshold "
+                              "(P(switch | cue said to repeat the last choice); "
+                              "1.0 = pure alternator, ~0 = cue-follower). 'samp "
+                              "N/min' is the auto-trigger GATE: a block needs at "
+                              "least 'min' repeat-cued samples in the window before "
+                              "the rate can fire one - so if r is over threshold but "
+                              "samp hasn't reached min, no block starts yet (that's "
+                              "why). See alternation.py / ADR-0107.",
+    "behavior.phase3.iv_alt_blocks": "De-alternation corrective blocks so far "
+                                     "(count). Unlike side-bias blocks there is no "
+                                     "ok/cap split: the alternation exit is a "
+                                     "relaxed-rate test, best read from the "
+                                     "per-trial alt_rate in the CSV.",
+    "behavior.phase3.iv_inblock": "Accuracy on the forced in-block (corrective) "
+                                  "trials, with the completed in-block trial count "
+                                  "in brackets - across both intervention kinds. "
+                                  "Kept separate from the out-of-block learning "
+                                  "measures at left.",
 
     # ---- behavior_view.py: Phase 3 'Excursions' column - the same live
     #      locomotor/compliance group as Phase 2a, but over ALL excursions during

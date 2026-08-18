@@ -166,6 +166,13 @@ class Phase3StateSnapshot:
     trigger_bias: float = 0.0
     exit_consecutive: int = 0
     max_block_len: int = 0
+    # Whether the side-bias debias child is enabled this run (a child exists), its
+    # auto-trigger evidence gate (``min_errors``) and how many directional errors
+    # are CURRENTLY in its window - so a panel can show gate progress (errors N/min)
+    # and explain why a high |bias| hasn't yet fired a block. See debias.py.
+    debias_enabled: bool = False
+    debias_min_errors: int = 0
+    debias_window_errors: int = 0
     # Whether the reward-incorrect shaping aid is on this run: with it on every
     # completed trial is rewarded, so the reward rate pins at ~100% and stops
     # tracking accuracy - panels suppress that line rather than show a misleading
@@ -180,6 +187,15 @@ class Phase3StateSnapshot:
     alt_rate: float = 0.0
     active_kind: str = ""
     alt_max_block_len: int = 0
+    # Whether the alternation child is enabled this run (a child exists), its
+    # auto-trigger threshold (``trigger_rate``) + evidence gate (``min_samples``)
+    # and how many repeat-cued samples are CURRENTLY in its window - so a panel can
+    # show gate progress (samples N/min) and explain why a high alt_rate hasn't yet
+    # fired a block. See alternation.py.
+    alt_enabled: bool = False
+    alt_trigger_rate: float = 0.0
+    alt_min_samples: int = 0
+    alt_window_samples: int = 0
 
 
 class Phase3Log:
@@ -432,9 +448,16 @@ class Phase3Log:
             trigger_bias=(db.trigger_bias if db is not None else 0.0),
             exit_consecutive=(db.exit_consecutive if db is not None else 0),
             max_block_len=(db.max_block_len if db is not None else 0),
+            debias_enabled=(db is not None),
+            debias_min_errors=(db.min_errors if db is not None else 0),
+            debias_window_errors=seq.debias_errors(),
             reward_incorrect=self.reward_incorrect,
             alt_rate=seq.alt_rate(), active_kind=seq.active_kind(),
-            alt_max_block_len=(al.max_block_len if al is not None else 0))
+            alt_max_block_len=(al.max_block_len if al is not None else 0),
+            alt_enabled=(al is not None),
+            alt_trigger_rate=(al.trigger_rate if al is not None else 0.0),
+            alt_min_samples=(al.min_samples if al is not None else 0),
+            alt_window_samples=seq.alt_samples())
 
     # ------------------------------------------------------------- render
     def _header_comment(self) -> List[str]:

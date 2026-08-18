@@ -171,6 +171,14 @@ class AlternationBlockController:
         samples, switched = self._sample_counts()
         return (switched / samples) if samples else 0.0
 
+    def window_samples(self) -> int:
+        """Repeat-cued samples currently in the window - the count the auto-trigger
+        gates on (a block needs >= ``min_samples`` of these before ``alt_rate`` can
+        fire one). Surfaced so the readout can show gate progress (samples N/
+        min_samples), explaining why a high alt_rate hasn't yet triggered a block."""
+        samples, _switched = self._sample_counts()
+        return samples
+
     def _block_rate(self) -> float:
         """In-block ``alt_rate`` (switched / samples since the block started); 0.0
         until the first in-block sample. This is what the success exit reads."""

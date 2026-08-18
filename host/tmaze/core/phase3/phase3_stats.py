@@ -142,6 +142,13 @@ class Phase3Stats:
     dir_bias_right_pull: int = 0
     live_bias: float = 0.0                       # controller's sliding-window bias
     trigger_bias: float = 0.0                    # |b| threshold that starts a block
+    # Side-bias auto-trigger evidence gate: a block needs >= ``debias_min_errors``
+    # directional errors in the window before |bias| can fire it; ``debias_window_
+    # errors`` is how many are there now (so the readout shows gate progress and why
+    # a high |bias| hasn't triggered). ``debias_enabled`` = the child exists.
+    debias_enabled: bool = False
+    debias_min_errors: int = 0
+    debias_window_errors: int = 0
     # ---- in-block vs out-of-block split ----
     oob_completed: int = 0
     inblock_completed: int = 0
@@ -163,6 +170,14 @@ class Phase3Stats:
     # ("side_bias"/"alternation"; "" in NORMAL), for the readout header.
     alt_rate: float = 0.0
     active_kind: str = ""
+    # Alternation auto-trigger threshold + evidence gate: a block needs >= ``alt_min_
+    # samples`` repeat-cued samples in the window before ``alt_rate`` >= ``alt_trigger_
+    # rate`` can fire it; ``alt_window_samples`` is how many are there now (gate
+    # progress). ``alt_enabled`` = the child exists.
+    alt_enabled: bool = False
+    alt_trigger_rate: float = 0.0
+    alt_min_samples: int = 0
+    alt_window_samples: int = 0
 
 
 def _int_or_zero(x: Optional[str]) -> int:
@@ -269,6 +284,11 @@ def compute(snapshot: Optional[Phase3StateSnapshot], *,
         dir_bias=dir_bias, dir_bias_left_pull=lpull, dir_bias_right_pull=rpull,
         live_bias=(snapshot.debias_bias if snapshot is not None else 0.0),
         trigger_bias=(snapshot.trigger_bias if snapshot is not None else 0.0),
+        debias_enabled=(snapshot.debias_enabled if snapshot is not None else False),
+        debias_min_errors=(snapshot.debias_min_errors
+                           if snapshot is not None else 0),
+        debias_window_errors=(snapshot.debias_window_errors
+                              if snapshot is not None else 0),
         oob_completed=noob, inblock_completed=len(inb),
         inblock_accuracy=inblock_accuracy, inblock_reward_rate=inblock_reward_rate,
         inblock_fraction=inblock_fraction,
@@ -276,7 +296,12 @@ def compute(snapshot: Optional[Phase3StateSnapshot], *,
         block_mean_len=mean_len,
         n_alt_blocks=n_alt_blocks, alt_block_mean_len=alt_mean_len,
         alt_rate=(snapshot.alt_rate if snapshot is not None else 0.0),
-        active_kind=(snapshot.active_kind if snapshot is not None else ""))
+        active_kind=(snapshot.active_kind if snapshot is not None else ""),
+        alt_enabled=(snapshot.alt_enabled if snapshot is not None else False),
+        alt_trigger_rate=(snapshot.alt_trigger_rate if snapshot is not None else 0.0),
+        alt_min_samples=(snapshot.alt_min_samples if snapshot is not None else 0),
+        alt_window_samples=(snapshot.alt_window_samples
+                            if snapshot is not None else 0))
 
 
 def _dir_bias(rows: List[Phase3RowView]) -> Tuple[Optional[float], int, int]:
