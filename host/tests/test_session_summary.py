@@ -138,7 +138,7 @@ class TestRenderJson(unittest.TestCase):
         self.assertIsNone(data["cued_task"])
         self.assertIsNone(data["locomotion"])
         # Later additions default to empty / None when nothing was provided.
-        self.assertEqual(data["schema_version"], 5)
+        self.assertEqual(data["schema_version"], 6)
         self.assertEqual(data["task_params"], {})
         self.assertIsNone(data["estimated_water"])
         # manual_water is always a definite figure (0 when no manual dispenses).
@@ -208,6 +208,43 @@ class TestEstimatedWater(unittest.TestCase):
             session_id="s", animal="a", t0=_T0, t_end=_T_END, cued=cued)
         self.assertIsNone(summ2.estimated_water)
         self.assertIn("Water (est): --", summ2.render_text())
+
+
+class TestEstimatedWaterPerWidth(unittest.TestCase):
+    """docs/decisions/0110: when the cued stats carry the per-width pulse tally,
+    estimated_water sums volume PER WIDTH (exact under a mid-run width change),
+    not by multiplying one configured width by the pulse count."""
+
+    def _cued_widths(self):
+        # Two rewarded trials at DIFFERENT prime widths (500 + 400 ms) plus two
+        # 300 ms top-ups on trial 0, so the tally spans three widths.
+        log = Phase3Log(_seq(n=6), animal="RAT600",
+                        session_start_iso="2026-07-31T12:00:00")
+        log.choice_scored(0, _side_for(log, 0, True), CORRECT, "t0")
+        log.reward_fired(0, "r0", 500)
+        log.topup_fired(0, 300)
+        log.topup_fired(0, 300)
+        log.choice_scored(1, _side_for(log, 1, True), CORRECT, "t1")
+        log.reward_fired(1, "r1", 400)
+        return phase3_stats.compute(log.snapshot(2, armed=True))
+
+    def test_per_width_sum_is_exact(self):
+        cued = self._cued_widths()
+        summ = session_summary.build_summary(
+            session_id="s1", animal="RAT600", t0=_T0, t_end=_T_END,
+            cued=cued, params=_PARAMS)
+        water = summ.estimated_water
+        expected = (reward_volume.reward_volume_ul(500)
+                    + reward_volume.reward_volume_ul(400)
+                    + 2 * reward_volume.reward_volume_ul(300))
+        self.assertEqual(water["pulses"], 4)          # 2 primes + 2 top-ups
+        self.assertAlmostEqual(water["ul"], round(expected, 1))
+        # The per-width breakdown is exposed, and pulse_ms lists the widths - NOT
+        # the single configured 250 ms from _PARAMS (which the fallback would use).
+        self.assertEqual(water["by_ms"], {"300": 2, "400": 1, "500": 1})
+        self.assertNotEqual(water["pulse_ms"], 250)
+        data = json.loads(summ.render_json())
+        self.assertEqual(data["estimated_water"]["by_ms"]["300"], 2)
 
 
 class TestManualWater(unittest.TestCase):
@@ -291,7 +328,7 @@ class TestNotes(unittest.TestCase):
         summ = session_summary.build_summary(
             session_id="s", animal="a", t0=_T0, t_end=_T_END, notes=entries)
         data = json.loads(summ.render_json())
-        self.assertEqual(data["schema_version"], 5)
+        self.assertEqual(data["schema_version"], 6)
         self.assertEqual(data["notes"], entries)          # verbatim list
 
     def test_notes_render_timestamped_list(self):

@@ -565,6 +565,18 @@ TIPS: Dict[str, Entry] = {
                                 "one. High values flag a rat repeating/alternating "
                                 "on its own result instead of following the cue. "
                                 "-- until the conditioning outcome has occurred.",
+    "behavior.phase3.dwell": "Cue-zone dwell = median/mean of (choice time - "
+                             "choice-cue-on time) over completed trials (n = how "
+                             "many). A RELATIVE within-animal signal, NOT a "
+                             "reaction time: both stamps are host wall-clock "
+                             "actuation times carrying uncharacterized serial/"
+                             "actuation latency (why the old 'Choice RT' was "
+                             "removed, ADR-0094), so only its CHANGE is meaningful "
+                             "- e.g. whether the animal lingers longer at the cue "
+                             "after a stem speedbump. The cue fires as the rat "
+                             "enters the stem, so this is its cue-zone / stem-"
+                             "traversal dwell. See ADR-0108. -- until a stamped "
+                             "trial exists.",
     # ---- behavior_view.py: Phase 3 'Interventions' column - the live closed-loop
     #      scheduler group (side-bias debias + de-alternation; ADR-0086/0107). Only
     #      populated under the 'debias_blocks' / 'intervention_blocks' generators;

@@ -61,6 +61,11 @@ COLUMNS = (
     # intervention owns the block (side_bias/alternation), alt_rate = cue-aware
     # alternation rate at this trial's decision. See debias.py / alternation.py.
     "sched_state", "block_id", "block_trigger", "bias", "block_kind", "alt_rate",
+    # Per-trial reward magnitude (docs/decisions/0110): the RAW prime pulse width
+    # (ms) delivered on a rewarded trial, and the SUM of this trial's lick top-up
+    # pulse widths (ms). Blank until the corresponding pulse fires. Raw ms only -
+    # no calibration in the pure log; volume is computed downstream.
+    "prime_ms", "topup_ms_total",
 )
 
 
@@ -102,6 +107,11 @@ class _Row:
     bias: Optional[str] = None
     block_kind: Optional[str] = None
     alt_rate: Optional[str] = None
+    # Per-trial reward magnitude (docs/decisions/0110): the prime pulse width (ms)
+    # and the running SUM of this trial's top-up pulse widths (ms). None until the
+    # matching pulse fires. See :meth:`reward_fired` / :meth:`topup_fired`.
+    prime_ms: Optional[str] = None
+    topup_ms_total: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -138,6 +148,8 @@ class Phase3RowView:
     bias: Optional[str]
     block_kind: Optional[str]
     alt_rate: Optional[str]
+    prime_ms: Optional[str]
+    topup_ms_total: Optional[str]
 
 
 @dataclass(frozen=True)
@@ -328,23 +340,34 @@ class Phase3Log:
         if r.rewarded is None:
             r.rewarded = "0"
 
-    def reward_fired(self, index: int, iso: str) -> None:
+    def reward_fired(self, index: int, iso: str,
+                     pulse_ms: Optional[int] = None) -> None:
+        """Record the correct-choice prime fire. ``pulse_ms`` (when supplied by the
+        shell) records the RAW prime pulse width for the per-trial reward magnitude
+        (docs/decisions/0110); omitted -> the ``prime_ms`` cell stays blank (a
+        pre-magnitude reader/caller)."""
         r = self._row(index)
         if r is None:
             return
         r.rewarded = "1"
         r.reward_cmd_iso = iso
+        if pulse_ms is not None:
+            r.prime_ms = str(int(pulse_ms))
         self._pending_lick_index = index      # this trial now awaits its lick
 
-    def topup_fired(self, index: int) -> None:
+    def topup_fired(self, index: int, pulse_ms: Optional[int] = None) -> None:
         """Record one lick-triggered top-up pulse at the well for ``index`` (an
         extra beyond the prime; docs/decisions/0069). Increments the trial's
-        running top-up count."""
+        running top-up count and, when ``pulse_ms`` is supplied, its running SUM of
+        top-up pulse widths for the reward-magnitude readout (docs/decisions/0110)."""
         r = self._row(index)
         if r is None:
             return
         cur = int(r.topups) if r.topups is not None else 0
         r.topups = str(cur + 1)
+        if pulse_ms is not None:
+            prev = int(r.topup_ms_total) if r.topup_ms_total is not None else 0
+            r.topup_ms_total = str(prev + int(pulse_ms))
 
     def return_cue_started(self, index: int, arm: str, cue: Optional[str],
                            iso: str) -> None:

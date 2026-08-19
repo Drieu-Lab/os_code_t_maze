@@ -106,6 +106,36 @@ class TestLifecycle(unittest.TestCase):
         log.reset_trial(0)               # Repeat/Back clears live fields
         self.assertIsNone(log._rows[0].topups)
 
+    def test_reward_magnitude_records_prime_and_topup_widths(self):
+        # docs/decisions/0110: reward_fired/topup_fired also record the RAW pulse
+        # widths (ms), appended as prime_ms + topup_ms_total (a running sum).
+        log = _log()
+        log.reward_fired(0, "t_reward", 500)
+        self.assertEqual(log._rows[0].prime_ms, "500")
+        self.assertIsNone(log._rows[0].topup_ms_total)
+        log.topup_fired(0, 300)
+        log.topup_fired(0, 300)
+        self.assertEqual(log._rows[0].topups, "2")
+        self.assertEqual(log._rows[0].topup_ms_total, "600")   # 300 + 300
+
+    def test_reward_magnitude_columns_blank_without_widths(self):
+        # A caller that omits pulse_ms (a pre-magnitude path) leaves the two new
+        # cells blank while still counting the pulse/top-ups (back-compat).
+        log = _log()
+        log.reward_fired(0, "t_reward")
+        log.topup_fired(0)
+        self.assertIsNone(log._rows[0].prime_ms)
+        self.assertIsNone(log._rows[0].topup_ms_total)
+        self.assertEqual(log._rows[0].topups, "1")
+
+    def test_reset_trial_clears_reward_magnitude(self):
+        log = _log()
+        log.reward_fired(0, "t_reward", 500)
+        log.topup_fired(0, 300)
+        log.reset_trial(0)
+        self.assertIsNone(log._rows[0].prime_ms)
+        self.assertIsNone(log._rows[0].topup_ms_total)
+
     def test_trial_start_keeps_first(self):
         log = _log()
         log.trial_started(0, "first")
@@ -283,10 +313,11 @@ def _debias_seq(n=40, seed=3):
 
 class TestDebiasLogging(unittest.TestCase):
     def test_new_columns_exist_in_order(self):
-        # The six closed-loop columns are appended at the end of the schema.
-        self.assertEqual(COLUMNS[-6:],
+        # The six closed-loop columns, then the two reward-magnitude columns
+        # (docs/decisions/0110), are appended at the end of the schema, in order.
+        self.assertEqual(COLUMNS[-8:],
                          ("sched_state", "block_id", "block_trigger", "bias",
-                          "block_kind", "alt_rate"))
+                          "block_kind", "alt_rate", "prime_ms", "topup_ms_total"))
 
     def test_header_bumped_to_proto7_with_generator(self):
         header = [ln for ln in _log().render_csv().split("\n") if ln.startswith("#")]

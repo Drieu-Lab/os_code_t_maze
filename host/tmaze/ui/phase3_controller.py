@@ -793,7 +793,11 @@ class Phase3ControlView(VisionActuator):
                 if fired is not None and self._dispatch_fire(fired):
                     self._reward_count += 1
                     self._reward_trial_index = dec.trial_index
-                    self._log_call(lambda: self._log.reward_fired(dec.trial_index, iso))
+                    # Record the RAW prime width for the per-trial reward magnitude
+                    # (ADR-0110); bind locals so the deferred call captures values.
+                    ti, prime_ms = dec.trial_index, fired.ms
+                    self._log_call(
+                        lambda: self._log.reward_fired(ti, iso, prime_ms))
                     changed = True
             # Advance the well-visit lifecycle every tick so licks can top up on
             # arrival (credential mode fires nothing here; ADR-0068).
@@ -830,8 +834,11 @@ class Phase3ControlView(VisionActuator):
                 if self._dispatch_fire(fire):
                     self._reward_count += 1
                     if self._reward_trial_index is not None:
-                        ti = self._reward_trial_index
-                        self._log_call(lambda: self._log.topup_fired(ti))
+                        # Record the RAW top-up width too (ADR-0110); bind locals so
+                        # the deferred call captures this pulse's values.
+                        ti, topup_ms = self._reward_trial_index, fire.ms
+                        self._log_call(
+                            lambda: self._log.topup_fired(ti, topup_ms))
                     changed = True
         if changed:
             self._write_log()

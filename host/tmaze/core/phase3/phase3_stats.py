@@ -39,9 +39,24 @@ Measure definitions (all over the COMPLETED trials only):
     in-block trial (or any trial that intervened) breaks the pair rather than
     being skipped over, so the transition is always the rat's own trial-to-next-
     trial choice (docs/decisions/0093).
-
-    (The cue-onset->choice reaction time was removed - see the ``Phase3Stats``
-    note - pending hardware-latency characterization; docs/decisions/0094.)
+  - cue-zone dwell (``cue_dwell_mean_s`` / ``cue_dwell_median_s`` / ``cue_dwell_n``)
+    is the per-trial interval ``choice_time_iso - choice_cue_on_iso`` reduced over
+    the completed trials that carry both stamps (see docs/decisions/0108). It is a
+    RELATIVE within-animal signal - how long the animal lingers between the choice
+    cue turning on and its choice being scored - NOT an absolute reaction time:
+    both stamps are HOST wall-clock actuation-decision times carrying
+    uncharacterized serial/actuation latency (the same reason the bare "Choice RT"
+    was removed in docs/decisions/0094), so only its CHANGE within an animal (e.g.
+    before vs after a physical cue-zone speedbump) is interpretable. In the current
+    rig the choice cue fires as the animal enters the stem
+    (``choice_cue_on_iso`` == ``trial_start_iso``), so this is effectively its
+    cue-zone / stem-traversal dwell. ADR-0108 relates to (does not supersede) 0094.
+  - reward magnitude (``reward_pulses_by_ms``) is a calibration-free per-width tally
+    of the reward pulses delivered over the completed trials (prime + top-ups),
+    keyed by pulse width in ms. Because dispensed volume is NON-linear in pulse
+    width, the water estimate downstream sums ``reward_volume_ul(width) * count``
+    per width rather than converting a summed-ms total - exact even under a mid-run
+    pulse-width change (docs/decisions/0110). Empty for a pre-magnitude session.
 
 Pure stdlib, headless-testable over deterministic snapshots (build a Phase3Log,
 fill it via its public methods, ``.snapshot(idx, armed=...)``):
@@ -50,8 +65,9 @@ fill it via its public methods, ``.snapshot(idx, armed=...)``):
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Dict, List, Optional, Tuple
 
 from tmaze.core.phase3.phase3_log import Phase3RowView, Phase3StateSnapshot
 from tmaze.core.phase3.phase3_task import CORRECT, INCORRECT
@@ -178,6 +194,22 @@ class Phase3Stats:
     alt_trigger_rate: float = 0.0
     alt_min_samples: int = 0
     alt_window_samples: int = 0
+    # ---- cue-zone dwell (RELATIVE host-clock interval; see module docstring) ----
+    # ``choice_time_iso - choice_cue_on_iso`` reduced over the completed trials that
+    # carry both stamps: mean + median seconds and the sample count ``n``. None /
+    # 0 until at least one such trial exists. Labeled as a relative dwell (not a
+    # reaction time) because the stamps carry uncharacterized latency; only its
+    # within-animal CHANGE is interpretable (docs/decisions/0108, relates to 0094).
+    cue_dwell_mean_s: Optional[float] = None
+    cue_dwell_median_s: Optional[float] = None
+    cue_dwell_n: int = 0
+    # ---- per-width reward pulse tally (calibration-free; see docs/decisions/0110) --
+    # Maps a pulse width in ms (as a string key, e.g. "500") to the number of pulses
+    # delivered at that width over the completed trials (primes + lick top-ups).
+    # Empty when no width was recorded (a pre-magnitude session). Volume is NON-
+    # linear in ms, so downstream water math sums reward_volume_ul(width) * count per
+    # width rather than converting a summed-ms total. See session_summary.
+    reward_pulses_by_ms: Dict[str, int] = field(default_factory=dict)
 
 
 def _int_or_zero(x: Optional[str]) -> int:
@@ -194,6 +226,71 @@ def _accuracy(rows: List[Phase3RowView]) -> Optional[float]:
     if not rows:
         return None
     return sum(1 for r in rows if r.outcome == CORRECT) / len(rows)
+
+
+def _parse_iso(iso: Optional[str]) -> Optional[datetime]:
+    """Parse one host wall-clock ISO stamp (as phase3_log writes them), or None if
+    absent/blank/unparseable. Reintroduced for the cue-zone dwell readout after
+    docs/decisions/0094 removed the reaction-time helper; the raw stamps it reads
+    (``choice_cue_on_iso`` / ``choice_time_iso``) were always retained in the CSV."""
+    if not iso:
+        return None
+    try:
+        return datetime.fromisoformat(iso)
+    except (TypeError, ValueError):
+        return None
+
+
+def _cue_dwells(rows: List[Phase3RowView]) -> List[float]:
+    """Per-trial cue-zone dwell seconds (``choice_time_iso - choice_cue_on_iso``)
+    over ``rows`` that carry both parseable stamps. A negative interval (a clock
+    anomaly - the choice can't precede its own cue) is dropped rather than folded
+    into the mean/median. See the module docstring / docs/decisions/0108."""
+    out: List[float] = []
+    for r in rows:
+        on = _parse_iso(r.choice_cue_on_iso)
+        choice = _parse_iso(r.choice_time_iso)
+        if on is None or choice is None:
+            continue
+        dwell = (choice - on).total_seconds()
+        if dwell >= 0.0:
+            out.append(dwell)
+    return out
+
+
+def _reward_pulses_by_ms(rows: List[Phase3RowView]) -> Dict[str, int]:
+    """Tally delivered reward pulses by width (ms) over ``rows`` (completed trials).
+
+    A rewarded trial contributes ONE prime pulse at ``prime_ms``; its top-ups
+    contribute ``topups`` pulses whose per-pulse width is reconstructed from the
+    running ``topup_ms_total`` sum (top-ups within a trial share the run's pulse
+    width, so ``total / count`` recovers it exactly). Widths are kept as string
+    keys so a mid-run pulse-width change is representable. Rows without the width
+    columns (a pre-magnitude session) simply contribute nothing - the tally is
+    then empty and downstream water math falls back (docs/decisions/0110)."""
+    tally: Dict[str, int] = {}
+    for r in rows:
+        if r.rewarded == "1" and r.prime_ms:
+            tally[r.prime_ms] = tally.get(r.prime_ms, 0) + 1
+        n = _int_or_zero(r.topups)
+        total = _int_or_zero(r.topup_ms_total)
+        if n > 0 and total > 0:
+            width = str(int(round(total / n)))
+            tally[width] = tally.get(width, 0) + n
+    return tally
+
+
+def _median(values: List[float]) -> Optional[float]:
+    """Median of ``values`` (mean of the two middle elements for an even count),
+    or None when empty. A tiny local helper so the core stays stdlib-only."""
+    if not values:
+        return None
+    s = sorted(values)
+    n = len(s)
+    mid = n // 2
+    if n % 2 == 1:
+        return s[mid]
+    return (s[mid - 1] + s[mid]) / 2.0
 
 
 def compute(snapshot: Optional[Phase3StateSnapshot], *,
@@ -245,8 +342,19 @@ def compute(snapshot: Optional[Phase3StateSnapshot], *,
     rewarded_oob = sum(1 for r in oob if r.rewarded == "1")
     reward_rate = (rewarded_oob / noob) if noob else None
     topups = sum(_int_or_zero(r.topups) for r in completed)
+    # Per-width pulse tally over completed trials (calibration-free; ADR-0110), so
+    # downstream water math can sum non-linear per-width volumes exactly even under
+    # a mid-run pulse-width change.
+    reward_pulses_by_ms = _reward_pulses_by_ms(completed)
 
     win_stay, lose_shift = _win_stay_lose_shift(completed)
+
+    # Cue-zone dwell (RELATIVE host-clock interval; docs/decisions/0108). Over the
+    # completed trials that carry both the cue-on and choice stamps - a within-
+    # animal before/after signal, deliberately not headlined as a reaction time.
+    dwells = _cue_dwells(completed)
+    cue_dwell_mean = (sum(dwells) / len(dwells)) if dwells else None
+    cue_dwell_median = _median(dwells)
 
     # Headline directional-error bias (over out-of-block trials) + the block split.
     dir_bias, lpull, rpull = _dir_bias(oob)
@@ -301,7 +409,9 @@ def compute(snapshot: Optional[Phase3StateSnapshot], *,
         alt_trigger_rate=(snapshot.alt_trigger_rate if snapshot is not None else 0.0),
         alt_min_samples=(snapshot.alt_min_samples if snapshot is not None else 0),
         alt_window_samples=(snapshot.alt_window_samples
-                            if snapshot is not None else 0))
+                            if snapshot is not None else 0),
+        cue_dwell_mean_s=cue_dwell_mean, cue_dwell_median_s=cue_dwell_median,
+        cue_dwell_n=len(dwells), reward_pulses_by_ms=reward_pulses_by_ms)
 
 
 def _dir_bias(rows: List[Phase3RowView]) -> Tuple[Optional[float], int, int]:

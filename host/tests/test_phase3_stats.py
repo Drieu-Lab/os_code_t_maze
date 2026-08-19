@@ -38,17 +38,18 @@ def _log(**kw):
 
 
 def _resolve(log, index, chosen, outcome, *, rewarded=None,
-             cue_on=None, choice=None):
+             cue_on=None, choice=None, prime_ms=None):
     """Fill trial ``index`` the way the controller does: optionally a cue-onset
     stamp, then the scored choice, then (if rewarded) a reward fire. ``rewarded``
-    defaults to True on CORRECT (mirrors the correct-only reward policy)."""
+    defaults to True on CORRECT (mirrors the correct-only reward policy);
+    ``prime_ms`` records the prime pulse width for the reward-magnitude tally."""
     if cue_on is not None:
         log.choice_cue_started(index, cue_on)
     log.choice_scored(index, chosen, outcome, choice or f"t_choice{index}")
     if rewarded is None:
         rewarded = outcome == CORRECT
     if rewarded:
-        log.reward_fired(index, f"t_reward{index}")
+        log.reward_fired(index, f"t_reward{index}", prime_ms)
 
 
 def _side_for(log, index, correct):
@@ -315,6 +316,108 @@ class TestWinStayAdjacency(unittest.TestCase):
         win_stay, lose_shift = _win_stay_lose_shift(rows)
         self.assertAlmostEqual(win_stay, 1.0)
         self.assertAlmostEqual(lose_shift, 1.0)
+
+
+class TestCueDwell(unittest.TestCase):
+    """Cue-zone dwell (docs/decisions/0108): the RELATIVE per-trial interval
+    ``choice_time_iso - choice_cue_on_iso`` reduced to mean/median/n over the
+    completed trials that carry both stamps."""
+
+    def test_mean_median_and_n_over_stamped_trials(self):
+        log = _log(n=20)
+        # Three trials with cue-on -> choice dwells of 1.0, 2.0, 6.0 s.
+        _resolve(log, 0, "left", CORRECT,
+                 cue_on="2026-07-23T12:00:00", choice="2026-07-23T12:00:01")
+        _resolve(log, 1, "left", CORRECT,
+                 cue_on="2026-07-23T12:00:10", choice="2026-07-23T12:00:12")
+        _resolve(log, 2, "right", CORRECT,
+                 cue_on="2026-07-23T12:00:20", choice="2026-07-23T12:00:26")
+        s = compute(log.snapshot(3, armed=True))
+        self.assertEqual(s.cue_dwell_n, 3)
+        self.assertAlmostEqual(s.cue_dwell_mean_s, 3.0)   # (1+2+6)/3
+        self.assertAlmostEqual(s.cue_dwell_median_s, 2.0)  # middle of [1,2,6]
+
+    def test_median_even_count_averages_two_middle(self):
+        log = _log(n=20)
+        for i, (a, b) in enumerate([("12:00:00", "12:00:01"),   # 1 s
+                                    ("12:01:00", "12:01:03"),   # 3 s
+                                    ("12:02:00", "12:02:05"),   # 5 s
+                                    ("12:03:00", "12:03:11")]):  # 11 s
+            _resolve(log, i, "left", CORRECT,
+                     cue_on=f"2026-07-23T{a}", choice=f"2026-07-23T{b}")
+        s = compute(log.snapshot(4, armed=True))
+        self.assertEqual(s.cue_dwell_n, 4)
+        self.assertAlmostEqual(s.cue_dwell_median_s, 4.0)  # (3+5)/2
+
+    def test_trials_without_both_stamps_are_excluded(self):
+        # A trial scored without a cue-on stamp (no cue-on iso) contributes no
+        # dwell; only the fully-stamped trial counts.
+        log = _log(n=20)
+        _resolve(log, 0, "left", CORRECT,
+                 cue_on="2026-07-23T12:00:00", choice="2026-07-23T12:00:02")
+        _resolve(log, 1, "left", CORRECT)   # default non-ISO choice, no cue_on
+        s = compute(log.snapshot(2, armed=True))
+        self.assertEqual(s.cue_dwell_n, 1)
+        self.assertAlmostEqual(s.cue_dwell_mean_s, 2.0)
+
+    def test_negative_interval_is_dropped(self):
+        # A choice stamp before its own cue-on is a clock anomaly; it must not fold
+        # into the mean/median (the one good trial is all that remains).
+        log = _log(n=20)
+        _resolve(log, 0, "left", CORRECT,
+                 cue_on="2026-07-23T12:00:05", choice="2026-07-23T12:00:00")  # -5 s
+        _resolve(log, 1, "left", CORRECT,
+                 cue_on="2026-07-23T12:01:00", choice="2026-07-23T12:01:04")  # 4 s
+        s = compute(log.snapshot(2, armed=True))
+        self.assertEqual(s.cue_dwell_n, 1)
+        self.assertAlmostEqual(s.cue_dwell_mean_s, 4.0)
+
+    def test_empty_when_no_stamped_trials(self):
+        s = compute(_log(n=20).snapshot(0, armed=True))
+        self.assertIsNone(s.cue_dwell_mean_s)
+        self.assertIsNone(s.cue_dwell_median_s)
+        self.assertEqual(s.cue_dwell_n, 0)
+        # A None snapshot is likewise empty.
+        self.assertEqual(compute(None).cue_dwell_n, 0)
+        self.assertIsNone(compute(None).cue_dwell_mean_s)
+
+
+class TestRewardPulsesByMs(unittest.TestCase):
+    """Per-width reward pulse tally (docs/decisions/0110): primes + reconstructed
+    top-up widths over completed trials, keyed by width in ms."""
+
+    def test_prime_tally_over_rewarded_trials(self):
+        log = _log(n=20)
+        _resolve(log, 0, "left", CORRECT, prime_ms=500)
+        _resolve(log, 1, "left", CORRECT, prime_ms=500)
+        _resolve(log, 2, "right", INCORRECT, rewarded=False)   # no pulse
+        s = compute(log.snapshot(3, armed=True))
+        self.assertEqual(s.reward_pulses_by_ms, {"500": 2})
+
+    def test_topups_reconstruct_per_pulse_width(self):
+        log = _log(n=20)
+        _resolve(log, 0, "left", CORRECT, prime_ms=500)
+        log.topup_fired(0, 300)
+        log.topup_fired(0, 300)          # 2 top-ups of 300 ms -> total 600
+        s = compute(log.snapshot(1, armed=True))
+        # One 500 ms prime + two 300 ms top-ups (600/2 = 300 per pulse).
+        self.assertEqual(s.reward_pulses_by_ms, {"500": 1, "300": 2})
+
+    def test_mid_run_width_change_is_representable(self):
+        log = _log(n=20)
+        _resolve(log, 0, "left", CORRECT, prime_ms=500)
+        _resolve(log, 1, "left", CORRECT, prime_ms=400)   # operator changed width
+        s = compute(log.snapshot(2, armed=True))
+        self.assertEqual(s.reward_pulses_by_ms, {"500": 1, "400": 1})
+
+    def test_empty_without_recorded_widths(self):
+        # A pre-magnitude session (reward_fired without a width) tallies nothing, so
+        # downstream water math falls back to the single-width path.
+        log = _log(n=20)
+        _resolve(log, 0, "left", CORRECT)      # no prime_ms
+        s = compute(log.snapshot(1, armed=True))
+        self.assertEqual(s.reward_pulses_by_ms, {})
+        self.assertEqual(compute(None).reward_pulses_by_ms, {})
 
 
 class TestDisarmedSnapshotStillReads(unittest.TestCase):

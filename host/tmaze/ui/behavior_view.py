@@ -124,7 +124,7 @@ class BehaviorView:
         # live locomotor/compliance group from self._p3_stats (docs/decisions/0071).
         self._p3_vars = {k: tk.StringVar(value="-") for k in (
             "session", "trials", "accuracy", "bycue", "bias", "reward",
-            "strategy",
+            "strategy", "dwell",
             # Interventions column (middle): one line each, filled per generator.
             "iv_state", "iv_sidebias", "iv_side_blocks", "iv_alt", "iv_alt_blocks",
             "iv_inblock",
@@ -228,7 +228,7 @@ class BehaviorView:
         tip(session3_lbl, "behavior.phase3.session")
 
         for r, key in enumerate(("trials", "accuracy", "bycue", "bias", "reward",
-                                 "strategy"), start=1):
+                                 "strategy", "dwell"), start=1):
             lbl = ttk.Label(self._p3_box, textvariable=self._p3_vars[key], anchor="w",
                             font=("TkDefaultFont", 10))
             lbl.grid(row=r, column=0, sticky="w", **pad)
@@ -469,6 +469,10 @@ class BehaviorView:
                 f"[{st.oob_rewarded}/{st.oob_completed}]")
         self._p3_vars["strategy"].set(
             f"Win-stay: {_pct(st.win_stay)}   Lose-shift: {_pct(st.lose_shift)}")
+        # Cue-zone dwell: a RELATIVE within-animal cue-on->choice interval (host
+        # clock; NOT a reaction time), surfaced for the speedbump before/after
+        # comparison (docs/decisions/0108, relates to 0094).
+        self._p3_vars["dwell"].set(self._dwell_text(st))
         # Middle column: the closed-loop intervention group (its own helper).
         self._refresh_intervention_column(st)
         # Right column: the live locomotor/compliance group over ALL excursions
@@ -558,6 +562,18 @@ class BehaviorView:
         if snap.nonstem_choices:
             base += f"   [{snap.nonstem_left}L/{snap.nonstem_right}R]"
         return base
+
+    @staticmethod
+    def _dwell_text(st) -> str:
+        """The cue-zone dwell line: median + mean seconds + n, or '--' until a
+        stamped trial exists. Labeled 'rel.' because it is a RELATIVE host-clock
+        interval, not an absolute reaction time (docs/decisions/0108/0094)."""
+        med = st.cue_dwell_median_s
+        mean = st.cue_dwell_mean_s
+        if st.cue_dwell_n == 0 or med is None or mean is None:
+            return "Cue dwell (rel.): --"
+        return (f"Cue dwell (rel.): med {med:.2f}s  mean {mean:.2f}s  "
+                f"[n={st.cue_dwell_n}]")
 
     @staticmethod
     def _run_text(snap) -> str:

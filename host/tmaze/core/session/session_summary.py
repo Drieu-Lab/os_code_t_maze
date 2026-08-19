@@ -78,8 +78,12 @@ if TYPE_CHECKING:  # type-only imports - no runtime coupling to the stats cores
 # GUI-button reward dispenses, collected at their source, so it is disjoint from
 # and additive with the task estimate. v4 wrongly counted task reward too, because
 # the firmware echoes task and operator fires identically as REWARD,MANUAL
-# (docs/decisions/0084, supersedes 0078).
-SCHEMA_VERSION = 5
+# (docs/decisions/0084, supersedes 0078). v6 makes ``estimated_water`` exact under a
+# mid-run pulse-width change: when the Phase 3 stats carry the per-width pulse tally
+# (``reward_pulses_by_ms``) the block sums volume PER WIDTH and gains a ``by_ms``
+# breakdown (``pulse_ms`` then lists the widths); a pre-magnitude session still uses
+# the single configured width (docs/decisions/0110).
+SCHEMA_VERSION = 6
 
 # Both inputs are measured from the Phase 3 arm edge, not Session Start (see the
 # module docstring + docs/future-work.md FW-0028); recorded so a reader knows what
@@ -144,14 +148,49 @@ class SessionSummary:
 
         Counts the correct-choice prime pulses (``cued.rewarded``) plus the lick
         top-up pulses (``cued.topups``) - both from the Phase 3 stats core, not
-        recomputed here - each at the configured reward pulse width, converted to
-        microliters via the shared ``reward_volume`` bench calibration
-        (docs/decisions/0019). This is an ESTIMATE of task-delivered reward only:
-        operator/manual pulses are not counted here - they are the separate
-        ``manual_water`` channel (docs/decisions/0073/0084) - so on its own it can
-        undercount the day's true intake."""
+        recomputed here - converted to microliters via the shared ``reward_volume``
+        bench calibration (docs/decisions/0019). This is an ESTIMATE of
+        task-delivered reward only: operator/manual pulses are not counted here -
+        they are the separate ``manual_water`` channel (docs/decisions/0073/0084) -
+        so on its own it can undercount the day's true intake.
+
+        When the stats core carries the PER-WIDTH pulse tally
+        (``cued.reward_pulses_by_ms``; docs/decisions/0110), the volume is summed
+        per width (``reward_volume_ul(width) * count``) - EXACT even under a mid-run
+        pulse-width change, since dispensed volume is non-linear in width. A
+        pre-magnitude session (empty tally) falls back to the single configured
+        ``reward_pulse_ms`` for every pulse, the pre-0110 behaviour."""
         if self.cued is None:
             return None
+        rewarded = int(getattr(self.cued, "rewarded", 0) or 0)
+        topups = int(getattr(self.cued, "topups", 0) or 0)
+        by_ms = getattr(self.cued, "reward_pulses_by_ms", None) or {}
+
+        if by_ms:
+            total_ul = 0.0
+            pulses = 0
+            widths = sorted(by_ms.items(), key=lambda kv: _as_float(kv[0]))
+            for width_str, count in widths:
+                w = _as_float(width_str)
+                if w <= 0 or count <= 0:
+                    continue
+                total_ul += reward_volume.reward_volume_ul(w) * count
+                pulses += count
+            if pulses == 0:
+                return None
+            display = (widths[0][0] if len(widths) == 1
+                       else ",".join(w for w, _ in widths))
+            return {
+                "ul": round(total_ul, 1),
+                "pulses": pulses,
+                "rewarded": rewarded,
+                "topups": topups,
+                "pulse_ms": display,
+                "per_pulse_ul": round(total_ul / pulses, 1),
+                "by_ms": {w: c for w, c in widths},
+            }
+
+        # Fallback (pre-magnitude session): one configured width for every pulse.
         pulse_raw = self.params.get("reward_pulse_ms")
         try:
             pulse_ms = float(pulse_raw)
@@ -159,8 +198,6 @@ class SessionSummary:
             return None
         if pulse_ms <= 0:
             return None
-        rewarded = int(getattr(self.cued, "rewarded", 0) or 0)
-        topups = int(getattr(self.cued, "topups", 0) or 0)
         pulses = rewarded + topups
         per_pulse = reward_volume.reward_volume_ul(pulse_ms)
         return {
@@ -482,6 +519,27 @@ def _signed(x: Optional[float]) -> str:
     return "--" if x is None else f"{x:+.2f}"
 
 
+def _as_float(x: Any) -> float:
+    """Best-effort float (a bad pulse-width key sorts/scales as 0)."""
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _dwell_str(st) -> str:
+    """The cue-zone dwell as a one-line string (median/mean seconds + n), or '--'
+    when no trial carried both stamps. A RELATIVE host-clock interval, not a
+    reaction time (docs/decisions/0108, relates to 0094); the raw per-trial
+    ``choice_cue_on_iso`` / ``choice_time_iso`` stay in the Phase 3 CSV."""
+    med = getattr(st, "cue_dwell_median_s", None)
+    mean = getattr(st, "cue_dwell_mean_s", None)
+    n = getattr(st, "cue_dwell_n", 0)
+    if not n or med is None or mean is None:
+        return "--"
+    return f"med {med:.2f}s  mean {mean:.2f}s   [n={n}; relative, host-clock]"
+
+
 def _cued_lines(st: Optional["Phase3Stats"]) -> list:
     """Human-readable Phase 3 cued-task lines (docs/decisions/0052 measures).
 
@@ -515,6 +573,7 @@ def _cued_lines(st: Optional["Phase3Stats"]) -> list:
     lines.append(
         f"  Win-stay:    {_pct(st.win_stay)}   "
         f"Lose-shift: {_pct(st.lose_shift)}")
+    lines.append(f"  Cue dwell:   {_dwell_str(st)}")
     if getattr(st, "generator", "balanced") != "balanced":
         lines.append(
             f"  Debias:      dir-bias {_signed(st.dir_bias)} "
