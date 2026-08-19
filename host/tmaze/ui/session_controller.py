@@ -83,6 +83,7 @@ Module contract (like the other modules):
 from __future__ import annotations
 
 import os
+import queue
 import time
 import tkinter as tk
 from datetime import datetime
@@ -261,6 +262,20 @@ class SessionControlView:
         # The open notes popup (Toplevel), if any, so a second click focuses the
         # existing one instead of stacking duplicates.
         self._notes_win: Optional[tk.Toplevel] = None
+        # Auto-event seam (docs/decisions/0111): Phase 3's trial-control overrides
+        # (debias / de-alternation block edges, Back / Skip / Repeat) fire on its
+        # ACTUATION thread, so they hand us intervention events through this
+        # thread-safe queue rather than touching the note log directly. We drain it
+        # on the Tk-thread session poll (_resolve_paths) and fold each into the note
+        # log as an ``auto:`` NoteEntry. Manual rewards are handled at their own Tk
+        # seam (note_operator_reward), so they don't go through this queue.
+        self._intervention_q: "queue.Queue[dict]" = queue.Queue()
+        if self._phase3 is not None and hasattr(self._phase3,
+                                                 "set_intervention_sink"):
+            try:
+                self._phase3.set_intervention_sink(self._on_intervention_event)
+            except Exception:
+                pass
 
         # Sticky per-session metadata: trainer + reward type are set-and-forget,
         # remembered across sessions in host/session_meta.json; the stage is
@@ -333,9 +348,16 @@ class SessionControlView:
         the old double-count: task and operator fires are the same R<port>1,<ms>
         command and echo identically as REWARD,MANUAL on the wire, so they can
         only be told apart here. A no-op unless a session is active. Runs on the
-        Tk thread like the button handler, so no locking is needed."""
+        Tk thread like the button handler, so no locking is needed.
+
+        Also drops an ``auto:manual_reward`` marker on the note timeline (source=
+        "auto"; docs/decisions/0111), so each manual boost is recoverable with its
+        timestamp + trial linkage - distinct from and additive with the manual_water
+        volume total (which is what _operator_pulses_ms feeds; ADR-0084)."""
         if self._active:
             self._operator_pulses_ms.append(float(ms))
+            self._add_auto_note(session_notes.AUTO_MANUAL_REWARD,
+                                f"manual reward {float(ms):.0f} ms")
 
     def close(self) -> None:
         self._closed = True
@@ -448,6 +470,50 @@ class SessionControlView:
         self._persist_notes()
         self._refresh_notes_button()
         return entry
+
+    def _add_auto_note(self, tag: str, text: str, *, iso: Optional[str] = None,
+                       mono: Optional[float] = None,
+                       trial_index: Optional[int] = None):
+        """Append one machine-emitted auto event to the note log (source="auto" +
+        an ``auto:`` tag), persist, and refresh - the auto counterpart of
+        :meth:`_add_note` (docs/decisions/0111). Stamps default to the current Tk
+        clocks / trial when a caller (the manual-reward Tk seam) doesn't supply
+        them; the actuation-thread seam supplies the event's own stamps."""
+        entry = self._notelog.add_auto(
+            tag, text,
+            iso=iso if iso is not None else self._now_iso(),
+            mono=mono if mono is not None else time.monotonic(),
+            trial_index=(trial_index if trial_index is not None
+                         else self._current_trial_index()))
+        self._persist_notes()
+        self._refresh_notes_button()
+        return entry
+
+    def _on_intervention_event(self, event: dict) -> None:
+        """Thread-safe sink handed to Phase 3 (docs/decisions/0111). Called on the
+        ACTUATION thread, so it only enqueues; the Tk-thread poll drains it. Never
+        touch Tk / the note log here."""
+        try:
+            self._intervention_q.put_nowait(event)
+        except Exception:
+            pass
+
+    def _drain_interventions(self) -> None:
+        """Fold any queued Phase 3 intervention events into the note log as auto
+        entries (docs/decisions/0111). Runs on the Tk thread from _resolve_paths,
+        so it is the sole note-log writer alongside the operator's own notes."""
+        while True:
+            try:
+                event = self._intervention_q.get_nowait()
+            except queue.Empty:
+                break
+            tag = event.get("tag")
+            if not tag:
+                continue
+            self._add_auto_note(
+                tag, str(event.get("text", "")),
+                iso=event.get("iso"), mono=event.get("mono"),
+                trial_index=event.get("trial_index"))
 
     def _persist_notes(self) -> None:
         """Atomically rewrite the whole notes JSONL file (docs/decisions/0074).
@@ -1107,6 +1173,9 @@ class SessionControlView:
         the manifest when something changes; re-poll while the session is active."""
         if self._manifest is None:
             return
+        # Fold any Phase 3 intervention events queued since the last poll into the
+        # note log (docs/decisions/0111) - this poll is the Tk-thread drain point.
+        self._drain_interventions()
         changed = False
 
         video = self._camera_path()

@@ -13,7 +13,15 @@ from __future__ import annotations
 
 import unittest
 
-from tmaze.core.session.session_notes import NoteEntry, NoteLog, parse_jsonl
+from tmaze.core.session.session_notes import (
+    AUTO_MANUAL_REWARD,
+    AUTO_SOURCE,
+    OPERATOR_SOURCE,
+    NoteEntry,
+    NoteLog,
+    is_auto_tag,
+    parse_jsonl,
+)
 
 
 class TestAddAndStamp(unittest.TestCase):
@@ -101,6 +109,51 @@ class TestJsonlRoundTrip(unittest.TestCase):
     def test_empty_log_renders_empty_string(self):
         self.assertEqual(NoteLog().render_jsonl(), "")
         self.assertEqual(len(parse_jsonl("")), 0)
+
+
+class TestAutoSource(unittest.TestCase):
+    """The origin field + reserved auto: tag namespace (docs/decisions/0111)."""
+
+    def test_operator_is_the_default_source(self):
+        e = NoteLog().add("human note", iso="i")
+        self.assertEqual(e.source, OPERATOR_SOURCE)
+        self.assertFalse(e.is_auto())
+
+    def test_add_auto_sets_source_and_tag(self):
+        log = NoteLog()
+        e = log.add_auto(AUTO_MANUAL_REWARD, "manual reward 80 ms",
+                         iso="i", mono=2.0, trial_index=4)
+        self.assertEqual(e.source, AUTO_SOURCE)
+        self.assertEqual(e.tag, AUTO_MANUAL_REWARD)
+        self.assertTrue(e.is_auto())
+        self.assertEqual(e.trial_index, 4)
+
+    def test_is_auto_tag_helper(self):
+        self.assertTrue(is_auto_tag(AUTO_MANUAL_REWARD))
+        self.assertTrue(is_auto_tag("auto:anything"))
+        self.assertFalse(is_auto_tag("lift-backs"))
+        self.assertFalse(is_auto_tag(None))
+
+    def test_source_survives_round_trip(self):
+        log = NoteLog()
+        log.add("human", iso="i1")
+        log.add_auto(AUTO_MANUAL_REWARD, "boost", iso="i2")
+        back = parse_jsonl(log.render_jsonl())
+        self.assertEqual([e.source for e in back.entries()],
+                         [OPERATOR_SOURCE, AUTO_SOURCE])
+        self.assertEqual(back.as_list(), log.as_list())
+
+    def test_legacy_record_without_source_defaults_operator(self):
+        # A pre-0111 line has no "source" key; it is a human note.
+        e = NoteEntry.from_dict({"id": 0, "iso": "i", "text": "old note"})
+        self.assertEqual(e.source, OPERATOR_SOURCE)
+        self.assertFalse(e.is_auto())
+
+    def test_auto_tag_alone_reads_as_auto(self):
+        # An entry carrying an auto: tag is auto even if source got dropped.
+        e = NoteEntry(id=0, iso="i", text="", tag=AUTO_MANUAL_REWARD,
+                      source=OPERATOR_SOURCE)
+        self.assertTrue(e.is_auto())
 
 
 class TestCrashTolerantParse(unittest.TestCase):

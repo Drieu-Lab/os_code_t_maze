@@ -35,6 +35,33 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+# Note ORIGIN (docs/decisions/0111). ``operator`` = a human free-text note / tag
+# press (the default, so every pre-0111 record reads as operator on load);
+# ``auto`` = a machine-emitted intervention event (a manual reward, a debias / alt
+# block edge, a Back/Skip/Repeat) recorded on the SAME timeline so it is recoverable
+# per session yet stays distinguishable from a human note.
+OPERATOR_SOURCE = "operator"
+AUTO_SOURCE = "auto"
+
+# Reserved tag namespace for auto events. A machine event always carries both
+# ``source="auto"`` AND an ``auto:`` tag, so either channel distinguishes it from a
+# human note; the tag names WHICH intervention. Kept as constants so the emitting
+# shell and any reader agree on the exact tokens. See docs/decisions/0111.
+AUTO_TAG_PREFIX = "auto:"
+AUTO_MANUAL_REWARD = "auto:manual_reward"
+AUTO_DEBIAS_START = "auto:debias_start"
+AUTO_DEBIAS_END = "auto:debias_end"
+AUTO_ALT_START = "auto:alt_start"
+AUTO_ALT_END = "auto:alt_end"
+AUTO_REPEAT = "auto:repeat"
+AUTO_SKIP = "auto:skip"
+AUTO_BACK = "auto:back"
+
+
+def is_auto_tag(tag: Optional[str]) -> bool:
+    """Whether ``tag`` is in the reserved auto-event namespace (docs/decisions/0111)."""
+    return bool(tag) and tag.startswith(AUTO_TAG_PREFIX)
+
 
 @dataclass
 class NoteEntry:
@@ -46,7 +73,9 @@ class NoteEntry:
     ``tag`` names the intervention tag when the entry came from a tag press;
     ``count`` is that press's increment (1 for an event tag, +N accumulates across
     presses for a counter tag). ``edited_iso`` records a later text edit, leaving
-    the original ``iso`` / ``mono`` / ``trial_index`` untouched.
+    the original ``iso`` / ``mono`` / ``trial_index`` untouched. ``source`` is the
+    entry ORIGIN - ``operator`` (a human note, the default) vs ``auto`` (a
+    machine-emitted intervention event; docs/decisions/0111).
     """
     id: int
     iso: str
@@ -56,6 +85,11 @@ class NoteEntry:
     tag: Optional[str] = None
     count: int = 1
     edited_iso: Optional[str] = None
+    source: str = OPERATOR_SOURCE
+
+    def is_auto(self) -> bool:
+        """Whether this entry is a machine-emitted auto event (docs/decisions/0111)."""
+        return self.source == AUTO_SOURCE or is_auto_tag(self.tag)
 
     def as_dict(self) -> Dict[str, Any]:
         """The entry as a plain JSON-ready dict (field names preserved)."""
@@ -68,12 +102,15 @@ class NoteEntry:
             "tag": self.tag,
             "count": self.count,
             "edited_iso": self.edited_iso,
+            "source": self.source,
         }
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "NoteEntry":
         """Rebuild an entry from a parsed dict, tolerating missing keys (an older
-        record or a partially-written line) by falling back to the defaults."""
+        record or a partially-written line) by falling back to the defaults. A
+        record without ``source`` predates docs/decisions/0111 and is a human note,
+        so it defaults to ``operator``."""
         return cls(
             id=int(d["id"]),
             iso=str(d.get("iso", "")),
@@ -83,6 +120,7 @@ class NoteEntry:
             tag=d.get("tag"),
             count=int(d.get("count", 1) or 1),
             edited_iso=d.get("edited_iso"),
+            source=str(d.get("source", OPERATOR_SOURCE) or OPERATOR_SOURCE),
         )
 
 
@@ -106,15 +144,26 @@ class NoteLog:
     # --------------------------------------------------------------- mutate
     def add(self, text: str, *, iso: str, mono: Optional[float] = None,
             trial_index: Optional[int] = None, tag: Optional[str] = None,
-            count: int = 1) -> NoteEntry:
+            count: int = 1, source: str = OPERATOR_SOURCE) -> NoteEntry:
         """Append a new stamped entry and return it. ``text`` may be empty (a bare
         quick-stamp marks the moment; its text can be filled in later via
-        :meth:`edit`)."""
+        :meth:`edit`). ``source`` is the entry origin (``operator`` by default;
+        ``auto`` for a machine-emitted event, docs/decisions/0111)."""
         entry = NoteEntry(id=self._next_id, iso=iso, text=text, mono=mono,
-                          trial_index=trial_index, tag=tag, count=count)
+                          trial_index=trial_index, tag=tag, count=count,
+                          source=source)
         self._next_id += 1
         self._entries.append(entry)
         return entry
+
+    def add_auto(self, tag: str, text: str, *, iso: str,
+                 mono: Optional[float] = None,
+                 trial_index: Optional[int] = None) -> NoteEntry:
+        """Append a machine-emitted auto event (``source="auto"`` + an ``auto:``
+        tag), for the intervention seams in docs/decisions/0111. A convenience over
+        :meth:`add` so every auto event is tagged + sourced consistently."""
+        return self.add(text, iso=iso, mono=mono, trial_index=trial_index,
+                        tag=tag, source=AUTO_SOURCE)
 
     def edit(self, entry_id: int, text: str, *,
              edited_iso: str) -> Optional[NoteEntry]:

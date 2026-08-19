@@ -72,6 +72,9 @@ from tmaze.core.phase3.trial_sequence import (
 from tmaze.core.phase3.excursion_log import (
     ExcursionLog, OUTCOME_DENIED, OUTCOME_SCORED, TYPE_NON_STEM, TYPE_UP_STEM)
 from tmaze.core.phase3.phase3_log import Phase3Log, Phase3StateSnapshot
+from tmaze.core.session.session_notes import (
+    AUTO_ALT_END, AUTO_ALT_START, AUTO_BACK, AUTO_DEBIAS_END,
+    AUTO_DEBIAS_START, AUTO_REPEAT, AUTO_SKIP)
 from tmaze.core.phase3.phase3_task import ABANDONED, CORRECT, INCORRECT, Phase3Config, Phase3Task
 from tmaze.core.reward.reward_dispenser import WellDispenser
 from tmaze.core.reward.reward_volume import format_volume, reward_volume_ul
@@ -192,6 +195,13 @@ class Phase3ControlView(VisionActuator):
         # The single host-side animal-id source (the Task tab's shared field;
         # docs/decisions/0053). None -> no id (manual arms fall back to "unknown").
         self._animal_id = animal_id
+        # Auto-event sink (docs/decisions/0111): a thread-safe callable(event: dict)
+        # the Session controller attaches (set_intervention_sink) to receive an
+        # operator-intervention record whenever a trial-control override fires on
+        # this actuation thread (debias / de-alternation edges, Back / Skip /
+        # Repeat). Enqueue-only on the callee's side; None when unattached (a manual
+        # arm, or a standalone tab) -> the events are simply not recorded.
+        self._on_intervention: Optional[Callable[[dict], None]] = None
         self.frame = ttk.Frame(parent)
         self._mode = ""                   # last firmware MODE token
         self._closed = False
@@ -296,6 +306,14 @@ class Phase3ControlView(VisionActuator):
     # ------------------------------------------------------------ module API
     def widget(self) -> tk.Widget:
         return self.frame
+
+    def set_intervention_sink(
+            self, cb: Optional[Callable[[dict], None]]) -> None:
+        """Attach (or clear) the auto-event sink the Session controller drains
+        (docs/decisions/0111). ``cb`` MUST be thread-safe / enqueue-only: it is
+        called on this tab's actuation thread. Set on the Tk thread before a run,
+        mirroring the other injected seams (animal_id/dispatcher)."""
+        self._on_intervention = cb
 
     def apply(self, info) -> None:
         """Track the firmware mode (Tk) and reflect CUE echoes for status.
@@ -612,28 +630,63 @@ class Phase3ControlView(VisionActuator):
             # trial; publish so the panel/control-bar reflect the request promptly.
             if name == "debias_start":
                 self._task.force_debias_block(None)
+                self._emit_intervention(AUTO_DEBIAS_START,
+                                        "debias block started", idx, iso)
             elif name == "debias_end":
                 self._task.end_debias_block()
+                self._emit_intervention(AUTO_DEBIAS_END,
+                                        "debias block ended", idx, iso)
             elif name == "alt_start":
                 self._task.force_alternation_block()
+                self._emit_intervention(AUTO_ALT_START,
+                                        "de-alternation block started", idx, iso)
             else:
                 self._task.end_alternation_block()
+                self._emit_intervention(AUTO_ALT_END,
+                                        "de-alternation block ended", idx, iso)
             self._publish_state(armed=snap.gate_open)
             return
         if name == "skip":
             self._log_call(lambda: self._log.trial_abandoned(idx, iso))
             self._task.abandon_current()
+            self._emit_intervention(AUTO_SKIP, "trial skipped (abandoned)",
+                                    idx, iso)
         elif name == "repeat":
             self._log_call(lambda: self._log.reset_trial(idx))
             self._task.repeat_current()
+            self._emit_intervention(AUTO_REPEAT, "trial repeated", idx, iso)
         elif name == "back":
             new_idx = self._task.step_back()
             self._log_call(lambda: self._log.reset_trial(new_idx))
+            self._emit_intervention(AUTO_BACK, "stepped back a trial",
+                                    new_idx, iso)
         else:
             return
         self._silence_and_rearm()
         self._write_log()
         self._publish_state(armed=snap.gate_open)
+
+    def _emit_intervention(self, tag: str, text: str, trial_index: int,
+                           iso: str) -> None:
+        """Hand one operator-intervention event to the attached sink (the Session
+        controller's note-log drain; docs/decisions/0111). Runs on the actuation
+        thread, so it only builds the event + calls the enqueue-only sink; a
+        missing sink (manual arm / standalone) or a raising sink is swallowed so a
+        note never disturbs the task."""
+        cb = self._on_intervention
+        if cb is None:
+            return
+        event = {
+            "tag": tag,
+            "text": text,
+            "iso": iso,
+            "mono": time.monotonic(),
+            "trial_index": trial_index,
+        }
+        try:
+            cb(event)
+        except Exception:
+            pass
 
     def _silence_and_rearm(self) -> None:
         """Cut any sounding tone and reset the per-trip cue/gate state, so the next
