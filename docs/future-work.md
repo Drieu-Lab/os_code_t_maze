@@ -89,6 +89,9 @@ criteria).
 | [FW-0034](#fw-0034-frozen-identity-columns-in-the-daily-table) | Frozen (pinned) identity columns in the Daily table | Records Manager Daily tab | Deferred |
 | [FW-0035](#fw-0035-alternation-intervention-block-step-1-toward-an-adversarial-schedule) | Alternation intervention block (step 1 toward an adversarial schedule) | Phase 3 host (`core/phase3/`) | Done ([ADR-0107](decisions/0107-phase3-alternation-intervention-stack.md)) |
 | [FW-0036](#fw-0036-retire-the-reward_incorrect-phase-3-shaping-aid-candidate-for-removal) | Retire the `reward_incorrect` Phase 3 shaping aid (candidate for removal) | Phase 3 host + config | Proposed |
+| [FW-0037](#fw-0037-zone-dwell--consummatory-well-time-from-tracking--licks) | Zone dwell + consummatory well time from tracking + licks | Behavior stats + session summary | Proposed |
+| [FW-0038](#fw-0038-join-the-days-baseline--water-context-into-the-session-summary) | Join the day's %baseline / water context into the session summary | Session summary + records cores | Proposed |
+| [FW-0039](#fw-0039-firmwarehost-git-sha-provenance-stamp-in-the-session-data) | Firmware/host git-SHA provenance stamp in the session data | Session log + data-file headers | Proposed |
 
 ## Entries
 
@@ -1856,6 +1859,151 @@ Phase 3 features" audit rather than done piecemeal?
 
 **ADR needed?** Yes at removal time (record why; supersede the relevant part of
 ADR-0094). None needed to merely keep tracking it here.
+
+### FW-0037: Zone dwell + consummatory well time from tracking + licks
+
+- **Status:** Proposed
+- **Date added:** 2026-08-18
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** `host/tmaze/core/behavior_stats.py`,
+  `host/tmaze/core/phase3/phase3_stats.py`,
+  `host/tmaze/core/session/session_summary.py`; the tracker/maze-state pipeline
+  (zone occupancy) + the center-well lick stream
+- **Related ADRs:** [ADR-0108](decisions/0108-cue-zone-dwell-readout.md)
+  (relative cue-zone dwell),
+  [ADR-0052](decisions/0052-phase-aware-behavior-readout-and-phase3-stats.md)
+  (Phase 3 stats),
+  [ADR-0048](decisions/0048-host-session-orchestration-and-manifest.md)
+  (host timeline)
+
+**Motivation / context.** ADR-0108 surfaced a RELATIVE cue-zone dwell derived
+from two host-clock actuation stamps (`choice_cue_on_iso` -> `choice_time_iso`),
+explicitly NOT a true time-in-zone: it carries uncharacterized actuation latency
+and only measures cue-on -> choice, not how long the animal actually sat in the
+cue zone or at the reward well. The tracker already computes zone occupancy each
+frame and the center well already logs lick edges, so a *geometry-grounded* dwell
+(frames the body centroid spent inside a named zone) and a *consummatory* well
+time (first-to-last lick within a reward visit) are both recoverable and would be
+more directly interpretable than the actuation-stamp proxy.
+
+**Sketch of approach.** In the maze-state pipeline / `behavior_stats`, accumulate
+per-zone dwell from frame occupancy (enter/exit edges x frame dt) and expose
+per-trial or aggregate zone-dwell measures; derive a consummatory well time from
+the center-well lick timestamps bracketing each reward visit (reuse the top-up
+lick stream the `WellDispenser` already sees). Surface aggregates through
+`phase3_stats` -> the summary alongside the ADR-0108 relative dwell, clearly
+labeled as tracking-derived (frame-rate limited) vs actuation-stamp-derived.
+
+**Evaluation / acceptance.** For a recorded session, the tracking-derived cue-zone
+dwell should track the ADR-0108 relative dwell in shape but differ in absolute
+value; the well time should match hand-scored video for a few trials. Headless
+tests over synthetic occupancy/lick sequences.
+
+**Effort / risk.** Medium. Risk: frame-rate + tracking dropout bound the
+resolution; zone definitions must be stable (config snapshot, ADR-0072). Keep the
+core calibration/geometry-free where possible (occupancy in, dwell out).
+
+**Open questions.** Per-trial vs session-aggregate first? Which zones matter
+(cue zone, choice arms, well)? Reconcile with the excursion log
+([ADR-0109](decisions/0109-phase3-excursion-event-log.md)) so dwell attaches to
+excursions rather than a parallel accounting?
+
+**ADR needed?** Yes (a new measure with a geometry/latency interpretation to
+pin down; cross-link ADR-0108).
+
+### FW-0038: Join the day's %baseline / water context into the session summary
+
+- **Status:** Proposed
+- **Date added:** 2026-08-18
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** `host/tmaze/core/session/session_summary.py`,
+  `host/tmaze/core/records/daily_log.py` / `animal_state.py`; the session
+  registry builder (`os_code_t_maze_resources` `build_session_training_log.py`)
+- **Related ADRs:** [ADR-0071](decisions/0071-session-behavioral-summary.md)
+  (the summary),
+  [ADR-0076](decisions/0076-daily-husbandry-table-source-of-truth.md) (daily
+  table source of truth),
+  [ADR-0081](decisions/0081-session-registry-analysis-entry-point.md) (session
+  registry), [ADR-0100](decisions/0100-ad-lib-water-regime.md) (water regime),
+  [ADR-0104](decisions/0104-water-method-field.md) (water method)
+
+**Motivation / context.** The behavioral summary reports what happened in the
+task, but not the welfare context that frames it - the animal's weight as a
+percent of baseline that day, whether it was on restriction vs ad-lib, and how the
+day's water was delivered (timed access / measured bottle / task-earned). Those
+live in the daily husbandry table (`daily_log.csv`, keyed by (animal, date)) and
+are already read at Session Start to prefill `animal_state.json`. Joining them
+into the summary (or the registry row) would let an analyst read task performance
+against the day's water state without a manual cross-reference - e.g. "accuracy
+dipped on the ad-lib day."
+
+**Sketch of approach.** At Stop, read the already-loaded `animal_state` (or
+re-read the day's `daily_log` row) and copy the relevant context fields
+(`percent_baseline`, `water_regime`, `water_method`, weight/baseline) into an
+additive `welfare_context` block in the summary JSON - a passthrough, no
+recompute (ADR-0071). Alternatively (or additionally) join them in the registry
+builder so the per-session view carries them. Keep the daily table the source of
+truth; the summary only snapshots.
+
+**Evaluation / acceptance.** A session summary for a known day shows the same
+%baseline / regime / method as that day's `daily_log` row; an ad-lib day is
+labeled as such. Headless test over a synthetic daily row + session.
+
+**Effort / risk.** Small-to-medium. Risk: the daily row may be absent or edited
+after the session - snapshot what was known at Stop and note it may lag a later
+correction. Additive JSON only.
+
+**Open questions.** Summary block, registry column, or both? Snapshot-at-Stop vs
+join-at-read (the latter always reflects later corrections but couples the summary
+to the resources repo)? Which fields are worth freezing?
+
+**ADR needed?** Yes (records which fields are snapshotted vs joined, and the
+snapshot-vs-live trade-off).
+
+### FW-0039: Firmware/host git-SHA provenance stamp in the session data
+
+- **Status:** Proposed
+- **Date added:** 2026-08-18
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** `host/tmaze/core/session/session_log.py` (manifest),
+  `host/tmaze/core/phase3/phase3_log.py` /
+  `host/tmaze/core/phase3/excursion_log.py` (CSV headers); a small host
+  version-probe helper
+- **Related ADRs:** [ADR-0072](decisions/0072-per-session-config-snapshot.md)
+  (config snapshot / reproducibility),
+  [ADR-0048](decisions/0048-host-session-orchestration-and-manifest.md)
+  (manifest)
+
+**Motivation / context.** A session is reproducible in its *config* (ADR-0072
+snapshots the JSON that shaped the run) but not in its *code version*: nothing in
+the bundle records which host commit produced the data or which firmware build was
+flashed. When behavior shifts after a code change, there is no in-bundle way to
+attribute it. A git-SHA (host) + firmware build id, stamped into the manifest and
+the data-file headers, would make each session self-describing.
+
+**Sketch of approach.** Add a best-effort host version probe (`git rev-parse
+HEAD` + dirty flag, or a packaged version when not a git checkout) and record it
+in the manifest (`provenance` block) and in the `phase3_*` / `_excursions` CSV
+header comments (which already carry session_id/animal/clock caveats). For
+firmware, capture the build id the firmware reports on handshake (add a `VERSION`
+echo if none exists - possibly a separate firmware change) into the same block.
+Purely additive; a missing SHA (not a checkout) leaves the field blank.
+
+**Evaluation / acceptance.** A fresh session's manifest + CSV headers carry the
+current host SHA; a dirty tree is flagged; the firmware build id appears when the
+firmware reports one. Headless test over the probe with a stubbed git output.
+
+**Effort / risk.** Small on the host side (a subprocess probe, guarded); the
+firmware `VERSION` echo is a separate, larger firmware/protocol change if it does
+not already exist. Risk: don't let the probe block or throw on non-checkout
+machines.
+
+**Open questions.** Host SHA only first, deferring firmware build id until a
+`VERSION` protocol message exists? Where canonically - manifest only, or also the
+CSV headers (duplication vs self-containment)? Include the dirty-tree flag?
+
+**ADR needed?** Yes (records the provenance schema + the best-effort/blank-on-
+failure policy; cross-link ADR-0072).
 
 ## Completed
 
