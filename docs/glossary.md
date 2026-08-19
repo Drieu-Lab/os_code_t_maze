@@ -78,6 +78,15 @@ the transition from off→on (e.g. a lick beam just became blocked; the gate jus
 opened); a "falling edge" is on→off. Much of the logic reacts to edges, not
 levels, so an action fires once per event instead of every frame.
 
+### Excursion event
+One *outbound trip* the rat makes away from the hub, treated as a single logged
+event. Most trips go up the central stem and become a scored trial, but the rat
+also darts up a side arm without using the stem — a "non-stem" (denied) excursion
+that never becomes a trial yet still carries behaviour (impulsive shortcut pulls,
+a warming-up or tiring animal). The Phase 3 **excursion log** records every trip,
+stem and non-stem, as its own timestamped row so both kinds are visible over
+time, not just tallied at the end. See ADR-0109.
+
 ### Fast view vs. debounced view
 Two readings of the rat's position from the same camera stream. The **debounced
 view** is smoothed for a stable display and analysis ([debounce](#debounce)). The

@@ -146,6 +146,13 @@ class SessionPhase3WiringTest(unittest.TestCase):
         task_dir = os.path.join(session_dir, "task")
         return sorted(os.listdir(task_dir)) if os.path.isdir(task_dir) else []
 
+    @staticmethod
+    def _expected_task_files(csv_name):
+        """The two files a Phase 3 session writes into task/: the trial CSV and its
+        paired excursion-event log (ADR-0109), in os.listdir sorted order ('.'
+        sorts before '_', so the trial CSV comes first)."""
+        return sorted([csv_name, csv_name[:-4] + "_excursions.csv"])
+
     # --------------------------------------------------------------- tests
     def test_arming_before_start_still_lands_data_in_the_session_folder(self):
         """The ADR-0060 order: arm first, so the gate opens before the session
@@ -163,8 +170,11 @@ class SessionPhase3WiringTest(unittest.TestCase):
                                 f"phase3_{os.path.basename(session_dir)}.csv")
         self.assertEqual(self.phase3.current_log_path(), expected)
         self.assertEqual(self._task_files(session_dir),
-                         [os.path.basename(expected)])
+                         self._expected_task_files(os.path.basename(expected)))
         self.assertEqual(self.session._manifest.streams["phase3_task"], expected)
+        # The excursion-event log is registered as its own stream (ADR-0109).
+        self.assertEqual(self.session._manifest.streams["phase3_excursions"],
+                         expected[:-4] + "_excursions.csv")
 
     def test_rebound_file_keeps_the_trials_run_before_start(self):
         """Rebinding re-points the path; it must not lose the table built while
@@ -213,10 +223,12 @@ class SessionPhase3WiringTest(unittest.TestCase):
         expected_b = os.path.join(dir_b, "task",
                                   f"phase3_{os.path.basename(dir_b)}.csv")
         self.assertEqual(self.session._manifest.streams["phase3_task"], expected_b)
-        self.assertEqual(self._task_files(dir_b), [os.path.basename(expected_b)])
-        # Session A's folder keeps exactly its own file, untouched by session B.
+        self.assertEqual(self._task_files(dir_b),
+                         self._expected_task_files(os.path.basename(expected_b)))
+        # Session A's folder keeps exactly its own files, untouched by session B.
         self.assertEqual(self._task_files(dir_a),
-                         [f"phase3_{os.path.basename(dir_a)}.csv"])
+                         self._expected_task_files(
+                             f"phase3_{os.path.basename(dir_a)}.csv"))
 
     def test_manifest_never_records_a_file_outside_the_session(self):
         """The backstop, independent of the rebind: a reported path from outside

@@ -69,6 +69,8 @@ from tmaze.core.phase3.phase3_config import (
     save_phase3_config, to_trial_config, validate_phase3_config)
 from tmaze.core.phase3.trial_sequence import (
     GEN_BALANCED, GEN_DEBIAS_BLOCKS, GEN_INTERVENTION_BLOCKS)
+from tmaze.core.phase3.excursion_log import (
+    ExcursionLog, OUTCOME_DENIED, OUTCOME_SCORED, TYPE_NON_STEM, TYPE_UP_STEM)
 from tmaze.core.phase3.phase3_log import Phase3Log, Phase3StateSnapshot
 from tmaze.core.phase3.phase3_task import ABANDONED, CORRECT, INCORRECT, Phase3Config, Phase3Task
 from tmaze.core.reward.reward_dispenser import WellDispenser
@@ -208,6 +210,16 @@ class Phase3ControlView(VisionActuator):
         # (FW-0027), so the HUB->stem departure is computed once, in the pure core.
         self._log: Optional[Phase3Log] = None
         self._log_path: Optional[str] = None
+        # Timestamped per-excursion event log (ADR-0109): one row per outbound trip
+        # (stem + non-stem), written beside the trial CSV in the session task/
+        # folder. Same actuation-thread-only ownership + atomic write as _log.
+        self._excursion_log: Optional[ExcursionLog] = None
+        self._excursion_path: Optional[str] = None
+        # The choice-cue-on stamp of the CURRENT outbound trip (set when the choice
+        # cue sounds, a prior frame), so a scored stem excursion can carry the
+        # relative cue-zone dwell (choice_time - cue_on; ADR-0108). Per-trip: it is
+        # cleared on each (re)arm / silence-and-rearm.
+        self._choice_cue_on_iso: Optional[str] = None
         # Shared session id when armed via the Session controller (docs/decisions/
         # 0048); "" on a manual arm. Set on the Tk thread, snapshotted to the thread.
         self._session_id = ""
@@ -562,6 +574,13 @@ class Phase3ControlView(VisionActuator):
         out_dir = snap.session_out_dir or DATA_DIR
         self._log_path = os.path.join(out_dir, f"{base}.csv")
         self._write_log()
+        # Fresh excursion-event log alongside the trial CSV (ADR-0109), named in
+        # lockstep with the trial file (so a restart's _r<n> tag carries over).
+        self._excursion_log = ExcursionLog(
+            animal=animal, session_id=snap.session_id, session_start_iso=_now_iso())
+        self._excursion_path = self._excursion_path_for(self._log_path)
+        self._choice_cue_on_iso = None
+        self._write_excursion_log()
         self._publish_state(armed=True)      # expose the fresh plan to other tabs
         self._send_cmd("CUE,VISION")         # host owns the DAC; suppress auto-tone
 
@@ -621,6 +640,7 @@ class Phase3ControlView(VisionActuator):
         trial's cue waits for a fresh up-the-stem excursion from the hub."""
         self._send_cmd("CUE_OFF")
         self._active_cue = None
+        self._choice_cue_on_iso = None
         self._gate.reset()
         # Drop any pending credential prime + open well visit, so an interrupted
         # trial can't carry a stale top-up window into the next one (ADR-0069).
@@ -669,6 +689,12 @@ class Phase3ControlView(VisionActuator):
         self._log.session_id = snap.session_id   # the header's correlation id
         self._log_path = new_path
         self._write_log()
+        # Re-point the excursion log at the session that now owns it too, keeping
+        # any rows appended between arm and Start (ADR-0109; mirrors _log rebind).
+        if self._excursion_log is not None:
+            self._excursion_log.session_id = snap.session_id
+            self._excursion_path = self._excursion_path_for(new_path)
+            self._write_excursion_log()
         self._publish_state(armed=snap.gate_open)
 
     def _restart_session(self, snap: _Phase3Snapshot) -> None:
@@ -749,6 +775,9 @@ class Phase3ControlView(VisionActuator):
             self._send_cmd(f"CUE_ON,CHOICE,{freq}" if freq is not None
                            else "CUE_ON,CHOICE")
             self._active_cue = CHOICE
+            # Remember this trip's cue-on stamp so a scored excursion can carry the
+            # relative cue-zone dwell (ADR-0108/0109).
+            self._choice_cue_on_iso = iso
             self._log_call(lambda: self._log.choice_cue_started(idx, iso))
             changed = True
         elif d.started == RETURN:
@@ -810,6 +839,11 @@ class Phase3ControlView(VisionActuator):
                 self._correct += 1
             elif dec.outcome == INCORRECT:
                 self._incorrect += 1
+            # One excursion-log row per outbound trip (stem + non-stem), on the
+            # once-per-excursion choice_committed edge (ADR-0109). Done after the
+            # score fold so a scored stem trip's choice_time (this frame's iso) is
+            # available for the relative cue-zone dwell.
+            self._append_excursion(task_frame, idx, iso)
 
         if changed:
             # Re-align the display cues of the current + upcoming (not-yet-run)
@@ -873,6 +907,90 @@ class Phase3ControlView(VisionActuator):
             with open(tmp, "w", encoding="utf-8", newline="") as fh:
                 fh.write(self._log.render_csv())
             os.replace(tmp, self._log_path)
+        except OSError:
+            pass
+
+    # ------------------------------------------------ excursion event log (A/0109)
+    @staticmethod
+    def _excursion_path_for(log_path: Optional[str]) -> Optional[str]:
+        """The excursion-log path that pairs with a trial-CSV path: the same name
+        with an ``_excursions`` suffix, so a restart's ``_r<n>`` tag carries over."""
+        if not log_path:
+            return None
+        base = log_path[:-4] if log_path.endswith(".csv") else log_path
+        return f"{base}_excursions.csv"
+
+    def current_excursion_path(self) -> Optional[str]:
+        """Path of the in-progress excursion-event file, or None until a session
+        starts. Used by the Session controller's manifest (ADR-0109)."""
+        return self._excursion_path
+
+    def _append_excursion(self, task_frame, idx: int, iso: str) -> None:
+        """Append one outbound-excursion row on the choice_committed edge and
+        persist the log (ADR-0109). ``type``/``outcome`` come from
+        ``outbound_used_stem`` (a stem trip is a scored trial with a
+        ``linked_trial``; a non-stem trip is a denied trip). A scored trip also
+        carries the relative cue-zone dwell (choice_time - cue_on; ADR-0108)."""
+        if self._excursion_log is None or task_frame is None:
+            return
+        side = task_frame.choice_committed
+        if side is None:                 # not a commit edge this tick
+            return
+        stem = bool(task_frame.outbound_used_stem)
+        linked = (idx + 1) if stem else None
+        cue_dwell = self._cue_dwell_for(iso) if stem else None
+        sched_state, bias = self._decision_context(idx)
+        self._excursion_log.append(
+            iso=iso, mono=getattr(task_frame, "now", None),
+            type=(TYPE_UP_STEM if stem else TYPE_NON_STEM), side=side,
+            outcome=(OUTCOME_SCORED if stem else OUTCOME_DENIED),
+            linked_trial=linked, sched_state=sched_state, bias=bias,
+            cue_dwell_s=cue_dwell)
+        self._write_excursion_log()
+
+    def _cue_dwell_for(self, choice_iso: str) -> Optional[float]:
+        """This trip's relative cue-zone dwell = choice_time - choice_cue_on, in
+        seconds, or None if either stamp is missing/unparseable or the interval is
+        negative (a clock anomaly). Host-clock, not a reaction time (ADR-0108)."""
+        on = self._parse_iso(self._choice_cue_on_iso)
+        choice = self._parse_iso(choice_iso)
+        if on is None or choice is None:
+            return None
+        dwell = (choice - on).total_seconds()
+        return dwell if dwell >= 0.0 else None
+
+    @staticmethod
+    def _parse_iso(iso: Optional[str]):
+        if not iso:
+            return None
+        try:
+            return datetime.fromisoformat(iso)
+        except (TypeError, ValueError):
+            return None
+
+    def _decision_context(self, idx: int):
+        """The closed-loop scheduler state + directional bias at trial ``idx``
+        (blank for the balanced generator), for the excursion row."""
+        seq = self._seq
+        if seq is None or not getattr(seq, "is_debias", False):
+            return None, None
+        try:
+            m = seq.trial_meta(idx)
+        except Exception:
+            return None, None
+        return m.get("sched_state"), m.get("bias")
+
+    def _write_excursion_log(self) -> None:
+        """Atomically persist the excursion event log (temp file + os.replace),
+        the same crash-safe write as :meth:`_write_log`."""
+        if self._excursion_log is None or self._excursion_path is None:
+            return
+        try:
+            os.makedirs(os.path.dirname(self._excursion_path), exist_ok=True)
+            tmp = self._excursion_path + ".tmp"
+            with open(tmp, "w", encoding="utf-8", newline="") as fh:
+                fh.write(self._excursion_log.render_csv())
+            os.replace(tmp, self._excursion_path)
         except OSError:
             pass
 

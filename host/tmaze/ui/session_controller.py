@@ -1131,6 +1131,16 @@ class SessionControlView:
             self._manifest.set_stream("phase3_task", p3)
             changed = True
 
+        # The per-excursion event log lives beside the trial CSV in task/ (ADR-0109);
+        # register it the same way, guarded by the same within-session check so a
+        # pre-rebind path (previous session / host-data fallback) is never recorded.
+        p3ex = self._phase3_excursion_path()
+        if p3ex is not None and not path_within_session(p3ex, self._session_dir or ""):
+            p3ex = None
+        if p3ex and self._manifest.streams.get("phase3_excursions") != p3ex:
+            self._manifest.set_stream("phase3_excursions", p3ex)
+            changed = True
+
         if changed:
             self._write_manifest()
 
@@ -1163,6 +1173,17 @@ class SessionControlView:
             return None
         try:
             return self._phase3.current_log_path()
+        except Exception:
+            return None
+
+    def _phase3_excursion_path(self) -> Optional[str]:
+        """The Phase 3 excursion-event file path (ADR-0109), or None if the tab is
+        unavailable / no session has started."""
+        if self._phase3 is None or not hasattr(self._phase3,
+                                               "current_excursion_path"):
+            return None
+        try:
+            return self._phase3.current_excursion_path()
         except Exception:
             return None
 
