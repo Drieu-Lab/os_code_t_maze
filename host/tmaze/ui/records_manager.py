@@ -191,6 +191,10 @@ class RecordsManager:
         # persisted). The registry CSV is READ from a fixed spot regardless of the
         # scan root (host/data/phase3_recordings; see docs/decisions/0088).
         self.recordings_root = self._load_recordings_root()
+        # Extra read-only ARCHIVE roots (older sessions moved off the rig disk;
+        # docs/decisions/0113). Scanned in addition to the primary root; the rig
+        # still writes only to the primary. Persisted in records_manager.json.
+        self.recordings_archives = self._load_recordings_archives()
         self.registry_path = os.path.join(
             build_session_registry.REGISTRY_OUTPUT_DIR,
             build_session_registry.REGISTRY_FILENAME)
@@ -252,11 +256,15 @@ class RecordsManager:
         recbar = ttk.Frame(self.root, padding=(8, 0))
         recbar.pack(side="top", fill="x")
         ttk.Label(recbar, text="Recordings:").pack(side="left")
-        self.rec_root_var = tk.StringVar(value=self.recordings_root)
+        self.rec_root_var = tk.StringVar(value=self._recordings_summary())
         ttk.Label(recbar, textvariable=self.rec_root_var,
                   foreground="#555").pack(side="left", padx=(4, 6))
         ttk.Button(recbar, text="Browse...",
                    command=self._on_pick_recordings).pack(side="left")
+        # Manage the read-only archive roots (scanned in addition to the primary;
+        # docs/decisions/0113).
+        ttk.Button(recbar, text="Archives...",
+                   command=self._on_manage_archives).pack(side="left", padx=(6, 0))
 
         # Staleness banner: how many sessions are indexed + when the registry was
         # last built, and whether the daily Excel workbook has edits not yet
@@ -971,8 +979,8 @@ class RecordsManager:
             else:
                 self.a_hint.configure(
                     text=("No sessions indexed yet. Scanning: "
-                          f"{self.recordings_root}. Record sessions there, then "
-                          "click 'Generate files'."),
+                          f"{self._recordings_summary()}. Record sessions there, "
+                          "then click 'Generate files'."),
                     foreground="#9C0006")
         else:
             self.a_hint.configure(
@@ -1866,6 +1874,40 @@ class RecordsManager:
         """Persist the chosen recordings folder (best-effort)."""
         self._save_prefs(recordings_root=path)
 
+    def _load_recordings_archives(self) -> List[str]:
+        """The persisted list of read-only ARCHIVE recordings roots (folders
+        older sessions were moved to; docs/decisions/0113). [] when unset. Only
+        well-formed string entries are kept, order preserved."""
+        raw = self._load_prefs().get("recordings_archives", [])
+        if not isinstance(raw, list):
+            return []
+        return [os.path.normpath(p.strip()) for p in raw
+                if isinstance(p, str) and p.strip()]
+
+    def _save_recordings_archives(self, paths: List[str]) -> None:
+        """Persist the archive-root list (best-effort)."""
+        self._save_prefs(recordings_archives=paths)
+
+    def _all_scan_roots(self) -> List[str]:
+        """Every root the registry build should scan: the primary first, then the
+        archives, order-preserving de-duplicated (docs/decisions/0113)."""
+        seen: set = set()
+        out: List[str] = []
+        for p in [self.recordings_root, *self.recordings_archives]:
+            key = os.path.normcase(os.path.normpath(p))
+            if key not in seen:
+                seen.add(key)
+                out.append(p)
+        return out
+
+    def _recordings_summary(self) -> str:
+        """The recordings-bar label: the primary root, plus a "(+N archived)"
+        suffix when archive roots are configured."""
+        n = len(self.recordings_archives)
+        if not n:
+            return self.recordings_root
+        return f"{self.recordings_root}   (+{n} archived)"
+
     def _record_xlsx_sync(self) -> None:
         """Remember the daily workbook's mtime right after we (re)built it from
         the CSV, so a later hand-edit in Excel shows up as an out-of-sync edit."""
@@ -1896,10 +1938,75 @@ class RecordsManager:
         if not chosen:
             return
         self.recordings_root = os.path.normpath(chosen)
-        self.rec_root_var.set(self.recordings_root)
+        self.rec_root_var.set(self._recordings_summary())
         self._save_recordings_root(self.recordings_root)
         self._set_status(f"Recordings folder set to {self.recordings_root}. "
                          "Click Generate files to re-scan.")
+
+    def _on_manage_archives(self) -> None:
+        """Add/remove read-only ARCHIVE recordings roots (older sessions moved off
+        the rig disk; docs/decisions/0113). These are scanned in ADDITION to the
+        primary folder on the next Generate; the rig still writes only to the
+        primary. Changes persist immediately."""
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Archive recordings folders")
+        dlg.transient(self.root)
+        dlg.grab_set()
+        ttk.Label(
+            dlg, wraplength=460, justify="left",
+            text=("Extra, read-only folders where older sessions were moved when "
+                  "the rig disk filled. They are scanned in addition to the "
+                  "primary recordings folder when you click 'Generate files'. "
+                  "Point each at a 'phase3_recordings' folder.")).pack(
+            side="top", anchor="w", padx=10, pady=(10, 6))
+
+        wrap = ttk.Frame(dlg)
+        wrap.pack(side="top", fill="both", expand=True, padx=10)
+        lb = tk.Listbox(wrap, height=6, width=64)
+        for p in self.recordings_archives:
+            lb.insert("end", p)
+        vsb = ttk.Scrollbar(wrap, orient="vertical", command=lb.yview)
+        lb.configure(yscrollcommand=vsb.set)
+        lb.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+
+        def _add() -> None:
+            chosen = filedialog.askdirectory(
+                title="Select an archive phase3_recordings folder", parent=dlg)
+            if not chosen:
+                return
+            norm = os.path.normpath(chosen)
+            existing = {os.path.normcase(lb.get(i)) for i in range(lb.size())}
+            if os.path.normcase(norm) in existing:
+                return
+            lb.insert("end", norm)
+
+        def _remove() -> None:
+            for i in reversed(lb.curselection()):
+                lb.delete(i)
+
+        btns = ttk.Frame(dlg)
+        btns.pack(side="top", fill="x", padx=10, pady=(6, 0))
+        ttk.Button(btns, text="Add folder...", command=_add).pack(side="left")
+        ttk.Button(btns, text="Remove selected", command=_remove).pack(
+            side="left", padx=(6, 0))
+
+        def _save() -> None:
+            paths = [lb.get(i) for i in range(lb.size())]
+            self.recordings_archives = paths
+            self._save_recordings_archives(paths)
+            self.rec_root_var.set(self._recordings_summary())
+            n = len(paths)
+            self._set_status(
+                f"{n} archive folder{'' if n == 1 else 's'} set. "
+                "Click Generate files to re-scan.")
+            dlg.destroy()
+
+        foot = ttk.Frame(dlg)
+        foot.pack(side="bottom", fill="x", padx=10, pady=10)
+        ttk.Button(foot, text="Save", command=_save).pack(side="left")
+        ttk.Button(foot, text="Cancel", command=dlg.destroy).pack(
+            side="left", padx=(6, 0))
 
     # ---------------------------------------------------------------- actions
     def _on_reload(self) -> None:
@@ -1961,12 +2068,16 @@ class RecordsManager:
 
     def _build_registry_inprocess(self) -> str:
         """Rebuild session_registry.csv by calling the tool's main() directly,
-        scanning the operator-chosen recordings root (the CSV still lands in the
-        tool's fixed output dir; see docs/decisions/0088)."""
+        scanning the operator-chosen recordings root plus any archive roots (the
+        CSV still lands in the tool's fixed output dir; see docs/decisions/0088,
+        0113)."""
         buf = io.StringIO()
+        root_args: List[str] = []
+        for r in self._all_scan_roots():
+            root_args += ["--root", r]
         try:
             with contextlib.redirect_stdout(buf):
-                build_session_registry.main(["--root", self.recordings_root])
+                build_session_registry.main(root_args)
             return "[session registry] " + (buf.getvalue().strip() or "rebuilt")
         except SystemExit as e:  # the tool raises SystemExit on a missing root
             return f"[session registry] {e}"

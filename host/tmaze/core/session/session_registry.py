@@ -61,7 +61,7 @@ import glob
 import io
 import json
 import os
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 from tmaze.core.session import session_notes
 
@@ -148,6 +148,28 @@ def scan(root: str) -> List[str]:
         return []
     return [os.path.join(root, e) for e in entries
             if is_bundle(os.path.join(root, e))]
+
+
+def scan_roots(roots: Iterable[str]) -> List[str]:
+    """Every session bundle across several recordings roots, de-duplicated by
+    session_id (the bundle folder name) with the FIRST listed root winning.
+
+    A recordings history split across drives (the rig's disk plus one or more
+    archive locations; docs/decisions/0113) is scanned as one. A session that
+    momentarily exists in two roots - e.g. mid-copy while being archived - is
+    counted once, keeping the copy in the earliest-listed root so an incomplete
+    destination copy can't shadow the source. Order within a root is preserved
+    (sorted by session_id); across roots, the first root's bundles come first."""
+    out: List[str] = []
+    seen: set = set()
+    for root in roots:
+        for bundle in scan(root):
+            sid = _session_id_of(bundle)
+            if sid in seen:
+                continue
+            seen.add(sid)
+            out.append(bundle)
+    return out
 
 
 # --------------------------------------------------------------- one bundle
@@ -301,7 +323,7 @@ def _tally_tags(notes_text: str) -> Dict[str, int]:
 
 
 # --------------------------------------------------------------- build all
-def build(root: str, daily: Optional[Any] = None,
+def build(root: Union[str, Iterable[str]], daily: Optional[Any] = None,
           ignore: Optional[Any] = None) -> Tuple[
         List[Dict[str, Any]], List[Tuple[str, str, int]]]:
     """Full idempotent rebuild: every bundle under ``root`` -> (registry rows,
@@ -309,14 +331,19 @@ def build(root: str, daily: Optional[Any] = None,
     private ``_tags`` key so the renderer can project the current vocabulary into
     wide columns; the tidy rows are the churn-proof source of truth.
 
+    ``root`` is either one recordings root or a sequence of them (primary +
+    archives; docs/decisions/0113). Multiple roots are merged and de-duplicated
+    by session_id via :func:`scan_roots` (first-listed root wins).
+
     ``ignore`` is an optional collection of session ids to SKIP (non-real
     sessions kept on disk; the ``session_ignore`` core, ADR-0097): those bundles
     produce no registry row and no tag rows, so the whole downstream pipeline
     (View sheets, Records Manager list) drops them without deleting anything."""
+    roots = [root] if isinstance(root, str) else list(root)
     skip = set(ignore or ())
     rows: List[Dict[str, Any]] = []
     tag_rows: List[Tuple[str, str, int]] = []
-    for bundle in scan(root):
+    for bundle in scan_roots(roots):
         if _session_id_of(bundle) in skip:
             continue
         row, counts = bundle_row(bundle, daily=daily)

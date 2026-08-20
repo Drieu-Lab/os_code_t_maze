@@ -56,6 +56,36 @@ class TestScanAndOutputDecoupled(unittest.TestCase):
             self.assertIn("600_20260101_120000", "".join(data))
             self.assertIn("601_20260101_130000", "".join(data))
 
+    def test_merges_multiple_roots_and_dedups(self):
+        # A split-across-drives history (docs/decisions/0113): --root is
+        # repeatable; bundles from every root are merged and de-duplicated by
+        # session_id (first-listed root wins).
+        with tempfile.TemporaryDirectory() as tmp:
+            primary = os.path.join(tmp, "rig_recordings")
+            archive = os.path.join(tmp, "archive_recordings")
+            out = os.path.join(tmp, "out")
+            os.makedirs(primary, exist_ok=True)
+            os.makedirs(archive, exist_ok=True)
+            _make_bundle(primary, "600_20260201_120000")   # newest, on primary
+            _make_bundle(archive, "600_20260101_120000")   # archived, older
+            _make_bundle(archive, "600_20260201_120000")   # dup of the primary one
+
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = bsr.main(["--root", primary, "--root", archive,
+                               "--out-dir", out])
+            self.assertEqual(rc, 0)
+
+            reg = os.path.join(out, bsr.REGISTRY_FILENAME)
+            with open(reg, "r", encoding="utf-8") as fh:
+                data = [ln for ln in fh if not ln.startswith("#")]
+            # header + 2 unique sessions (the duplicate id collapses to one)
+            self.assertEqual(len(data), 3)
+            joined = "".join(data)
+            self.assertIn("600_20260101_120000", joined)
+            self.assertIn("600_20260201_120000", joined)
+            self.assertIn("2 sessions", buf.getvalue())
+
     def test_empty_root_writes_header_only(self):
         with tempfile.TemporaryDirectory() as tmp:
             scan = os.path.join(tmp, "empty")

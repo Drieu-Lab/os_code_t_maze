@@ -33,6 +33,13 @@ _LANDMARKS = (".git", "pyproject.toml")
 _RECORDINGS_ENV = "TMAZE_RECORDINGS_DIR"
 _DEFAULT_CAMERA_OUTPUT_DIR = r"C:\Users\Celine\Documents\t-maze_recordings"
 
+# Extra, read-only ARCHIVE recordings roots (older sessions moved off the rig PC
+# when its disk fills, e.g. Z:\Ravi\phase3_recordings). Discovery scans these in
+# ADDITION to the primary root; the rig still WRITES only to the primary. Each
+# entry is a full `phase3_recordings` folder (the one that directly holds session
+# bundles), os.pathsep-separated. See docs/decisions/0113 (extends 0088).
+_RECORDINGS_ARCHIVES_ENV = "TMAZE_RECORDINGS_ARCHIVES"
+
 
 def repo_root() -> Path:
     """Absolute path to the code-repo root (the folder holding ``.git`` /
@@ -74,5 +81,32 @@ def camera_output_dir() -> Path:
 
 def phase3_recordings_root() -> Path:
     """Where the Phase 3 session bundles live: ``<camera_output_dir>/
-    phase3_recordings`` (the folder ``build_session_registry`` scans)."""
+    phase3_recordings`` (the PRIMARY root the rig writes to and the default the
+    tools scan). Use :func:`phase3_recordings_roots` when you also want the
+    read-only archive locations (docs/decisions/0113)."""
     return camera_output_dir() / "phase3_recordings"
+
+
+def phase3_recordings_archives() -> list[Path]:
+    """The read-only ARCHIVE recordings roots from ``TMAZE_RECORDINGS_ARCHIVES``
+    (os.pathsep-separated full ``phase3_recordings`` folders), in order. Empty
+    when the env var is unset/blank. These are scanned in addition to the primary
+    root; the rig never writes to them (docs/decisions/0113)."""
+    raw = os.environ.get(_RECORDINGS_ARCHIVES_ENV) or ""
+    return [Path(p) for p in raw.split(os.pathsep) if p.strip()]
+
+
+def phase3_recordings_roots() -> list[Path]:
+    """The full recordings search path: the primary root first, then any archive
+    roots, order-preserving de-duplicated. This is the single source of truth for
+    *everywhere sessions may live* - shared by the registry builder and the
+    offline analysis reader so a history split across drives is fully discovered
+    (docs/decisions/0113, extends 0088)."""
+    seen: set[str] = set()
+    out: list[Path] = []
+    for p in [phase3_recordings_root(), *phase3_recordings_archives()]:
+        key = os.path.normcase(os.path.normpath(str(p)))
+        if key not in seen:
+            seen.add(key)
+            out.append(p)
+    return out
