@@ -468,9 +468,15 @@ TIPS: Dict[str, Entry] = {
                                 "trace, so it can be smoothed over a SHORTER span "
                                 "than the rate traces and react to a rat going quiet "
                                 "within a few trials. Blank = follow the main window.",
-    "phase3.traces.xwindow": "Clamp the shared x-axis to the most recent N minutes of "
-                             "the session (blank or 0 = show the whole session). "
-                             "View-only.",
+    "phase3.traces.width": "Width of the visible time window in minutes (the zoom). "
+                           "Blank or 0 = show the whole session (fully zoomed out). "
+                           "A smaller value zooms in; scroll with the bar below, or "
+                           "hit Latest to jump back to the newest trials. View-only.",
+    "phase3.traces.scroll": "Scroll the visible time window across the session (pan). "
+                            "Dragging it stops the plot from auto-following the "
+                            "newest trials; press Latest to resume following.",
+    "phase3.traces.latest": "Jump back to the newest trials and resume auto-following "
+                            "the live edge of the session (undoes a manual scroll).",
     "phase3.traces.toggle": "Show or hide the {group} subplot.",
 
     # ---- maze_state_view.py: Maze state tab ----

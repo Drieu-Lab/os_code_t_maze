@@ -23,8 +23,12 @@ Controls (the configurable aspects):
   - ITI window (trials): a SEPARATE rolling-window size for the ITI median, so
     the engagement signal can be smoothed over a shorter span than the rates
     (blank = follow the main window).
-  - last N min: clamps the shared x-axis to the most recent N minutes (blank/0 =
-    whole session); view-only.
+  - width (min) + scrollbar + Latest: a zoomable/scrollable time VIEWPORT over
+    the shared x-axis (docs/decisions/0116). Width sets the visible window size
+    (blank/0 = whole session); the scrollbar pans it; Latest re-pins to the live
+    edge. Panning turns OFF auto-follow (follow-unless-zoomed) so the plot stops
+    chasing new trials while you inspect an earlier stretch; the viewport arith-
+    metic is the pure ``trace_viewport.compute_viewport``. View-only.
   - per-subplot show/hide toggles (ITI / accuracy / strategy / bias): hidden
     subplots are dropped so the rest gain height.
 
@@ -44,6 +48,7 @@ from tmaze.core.phase3.phase3_log import Phase3StateSnapshot
 from tmaze.core.phase3.phase3_traces import (
     DEFAULT_DISENGAGED_GAP_S, DEFAULT_MIN_DEN, TraceResult, build_traces)
 from tmaze.core.phase3.phase3_stats import DEFAULT_WINDOW
+from tmaze.core.phase3.trace_viewport import compute_viewport
 from tmaze.ui.trial_ribbon_view import progress_signature
 
 try:
@@ -102,6 +107,15 @@ class Phase3TracesView:
         self._dirty = True                 # force the first draw
         self._last_state: Optional[Phase3StateSnapshot] = None
 
+        # Interactive time viewport (docs/decisions/0116): the visible window is
+        # width (zoom) + start (pan) + follow-latest flag. ``_total_min`` is the
+        # data's full x-extent, refreshed each redraw so a scrollbar drag can map
+        # its fraction back to minutes. Follow-unless-zoomed starts ON.
+        self._view_start = 0.0
+        self._follow_latest = True
+        self._total_min = 0.0
+        self._scrollbar: Optional[ttk.Scrollbar] = None
+
         self._frame = ttk.LabelFrame(parent, text=text)
         tip(self._frame, "phase3.traces")
 
@@ -117,6 +131,21 @@ class Phase3TracesView:
             return
 
         self._build_controls(self._frame)
+
+        # Horizontal scrollbar + Latest button (the viewport's pan controls),
+        # pinned under the canvas. Packed BEFORE the canvas so the expanding
+        # canvas fills the space above it.
+        navbar = ttk.Frame(self._frame)
+        navbar.pack(side=tk.BOTTOM, fill=tk.X, padx=4, pady=(0, 4))
+        latest = ttk.Button(navbar, text="Latest", width=7,
+                            command=self._snap_latest)
+        latest.pack(side=tk.RIGHT, padx=(4, 0))
+        tip(latest, "phase3.traces.latest")
+        self._scrollbar = ttk.Scrollbar(navbar, orient=tk.HORIZONTAL,
+                                        command=self._on_scroll)
+        self._scrollbar.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self._scrollbar.set(0.0, 1.0)
+        tip(self._scrollbar, "phase3.traces.scroll")
 
         self._fig = Figure(figsize=(6.6, 6.0), dpi=100)
         self._canvas = FigureCanvasTkAgg(self._fig, master=self._frame)
@@ -174,13 +203,16 @@ class Phase3TracesView:
         self._iti_win_var.trace_add("write", _mark_dirty)
         tip(iti_win, "phase3.traces.iti_window")
 
-        ttk.Label(bar, text="Last N min:").pack(side=tk.LEFT, padx=(0, 2))
-        self._xwin_var = tk.StringVar(value="")   # blank = whole session
-        xwin = ttk.Spinbox(bar, from_=0, to=600, increment=5, width=5,
-                           textvariable=self._xwin_var, command=_mark_dirty)
-        xwin.pack(side=tk.LEFT, padx=(0, 10))
-        self._xwin_var.trace_add("write", _mark_dirty)
-        tip(xwin, "phase3.traces.xwindow")
+        # Viewport WIDTH (zoom): blank/0 = whole session. Changing it keeps the
+        # current follow state (zooming while following stays pinned to the live
+        # edge); only PANNING the scrollbar turns follow off. See _on_scroll.
+        ttk.Label(bar, text="Width (min):").pack(side=tk.LEFT, padx=(0, 2))
+        self._width_var = tk.StringVar(value="")   # blank = whole session
+        width = ttk.Spinbox(bar, from_=0, to=600, increment=5, width=5,
+                            textvariable=self._width_var, command=_mark_dirty)
+        width.pack(side=tk.LEFT, padx=(0, 10))
+        self._width_var.trace_add("write", _mark_dirty)
+        tip(width, "phase3.traces.width")
 
         # Per-subplot show/hide toggles.
         self._show: dict[str, tk.BooleanVar] = {}
@@ -245,6 +277,9 @@ class Phase3TracesView:
         self._fig.clear()
         visible = [key for key, _ in _GROUPS if self._show[key].get()]
         if not visible or len(res) == 0:
+            self._total_min = 0.0
+            if self._scrollbar is not None:
+                self._scrollbar.set(0.0, 1.0)
             self._fig.text(0.5, 0.5,
                            "No completed trials yet." if state is not None
                            else "Not armed.",
@@ -254,6 +289,7 @@ class Phase3TracesView:
 
         # Shared x in MINUTES since t0; keep None-x points out of the line data.
         t_min = [(v / 60.0) if v is not None else None for v in res.t]
+        self._total_min = max((v for v in t_min if v is not None), default=0.0)
         axes = self._fig.subplots(len(visible), 1, sharex=True, squeeze=False)
         axes = [row[0] for row in axes]
         for ax, key in zip(axes, visible):
@@ -262,7 +298,7 @@ class Phase3TracesView:
             self._shade_probes(ax, res)
         axes[-1].set_xlabel("session time (min)")
 
-        self._apply_xlimit(axes, t_min)
+        self._apply_viewport(axes)
         self._fig.subplots_adjust(left=0.10, right=0.90, top=0.96, bottom=0.08,
                                   hspace=0.25)
         self._canvas.draw_idle()
@@ -371,14 +407,68 @@ class Phase3TracesView:
             ax.plot(xs, ys, marker="D", ls="none", ms=6,
                     color=_PROBE_SHADE, markeredgecolor="#0b5", label="probe")
 
-    def _apply_xlimit(self, axes, t_min: List[Optional[float]]) -> None:
-        """Clamp the shared x-axis to the most recent N minutes if requested."""
-        xs = [v for v in t_min if v is not None]
-        if not xs:
+    # --------------------------------------------------------- viewport (x)
+    def _parse_width(self) -> Optional[float]:
+        """The width-control value in minutes, or None for whole-session
+        (blank / 0 / unparseable = fully zoomed out)."""
+        raw = self._width_var.get().strip()
+        if not raw:
+            return None
+        try:
+            v = float(raw)
+        except (TypeError, ValueError):
+            return None
+        return v if v > 0.0 else None
+
+    def _apply_viewport(self, axes) -> None:
+        """Drive the shared x-axis (all subplots share x) from the viewport state
+        and size the scrollbar thumb to match. Never re-autoscales x, so a manual
+        zoom/pan survives the live redraws. See trace_viewport.compute_viewport."""
+        xlo, xhi, lo, hi = compute_viewport(
+            self._total_min, self._parse_width(), self._view_start,
+            self._follow_latest)
+        # When following, remember the resolved left edge so turning follow off
+        # (a scrollbar drag) resumes from where the eye already is.
+        if self._follow_latest:
+            self._view_start = xlo
+        axes[0].set_xlim(xlo, xhi)
+        if self._scrollbar is not None:
+            try:
+                self._scrollbar.set(lo, hi)
+            except tk.TclError:
+                pass
+
+    def _on_scroll(self, *args) -> None:
+        """ttk.Scrollbar command: pan the viewport (a ``moveto`` fraction or a
+        ``scroll`` step). Panning is a manual take-over, so it turns follow off
+        (follow-unless-zoomed); Latest turns it back on."""
+        width = self._parse_width()
+        total = self._total_min
+        if width is None or total <= 0.0:
+            return                          # whole session shown; nothing to pan
+        if not args:
             return
-        xmax = max(xs)
-        n = self._int_var(self._xwin_var, 0)
-        if n > 0:
-            axes[0].set_xlim(max(0.0, xmax - n), xmax if xmax > 0 else 1.0)
+        how = args[0]
+        if how == "moveto" and len(args) >= 2:
+            try:
+                frac = float(args[1])
+            except (TypeError, ValueError):
+                return
+            self._view_start = frac * total
+        elif how == "scroll" and len(args) >= 3:
+            try:
+                number = float(args[1])
+            except (TypeError, ValueError):
+                return
+            step = width if args[2] == "pages" else max(0.5, width * 0.1)
+            self._view_start = self._view_start + number * step
         else:
-            axes[0].set_xlim(0.0, xmax if xmax > 0 else 1.0)
+            return
+        self._follow_latest = False
+        self._dirty = True
+
+    def _snap_latest(self) -> None:
+        """Latest button: re-pin the viewport to the live edge and resume
+        auto-following the newest trials."""
+        self._follow_latest = True
+        self._dirty = True
