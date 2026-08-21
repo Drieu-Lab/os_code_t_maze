@@ -456,6 +456,10 @@ TIPS: Dict[str, Entry] = {
     "phase3.traces.window": "Rolling-window size (most-recent completed trials) for "
                             "the rate traces (accuracy, strategy, bias). Larger = "
                             "smoother but slower to react.",
+    "phase3.traces.iti_window": "Separate rolling-window size for the ITI engagement "
+                                "trace, so it can be smoothed over a SHORTER span "
+                                "than the rate traces and react to a rat going quiet "
+                                "within a few trials. Blank = follow the main window.",
     "phase3.traces.xwindow": "Clamp the shared x-axis to the most recent N minutes of "
                              "the session (blank or 0 = show the whole session). "
                              "View-only.",

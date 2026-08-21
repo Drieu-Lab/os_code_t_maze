@@ -18,7 +18,11 @@ miss it).
 Controls (the configurable aspects):
   - disengaged-gap line (s): the horizontal ITI threshold; default 45 s, matching
     ``analysis/mode_label.ModeThresholds.disengaged_gap_s``.
-  - window (trials): the rolling-window size fed to ``build_traces``.
+  - window (trials): the rolling-window size fed to ``build_traces`` for the rate
+    series (accuracy / strategy / bias).
+  - ITI window (trials): a SEPARATE rolling-window size for the ITI median, so
+    the engagement signal can be smoothed over a shorter span than the rates
+    (blank = follow the main window).
   - last N min: clamps the shared x-axis to the most recent N minutes (blank/0 =
     whole session); view-only.
   - per-subplot show/hide toggles (ITI / accuracy / strategy / bias): hidden
@@ -157,6 +161,16 @@ class Phase3TracesView:
         self._win_var.trace_add("write", _mark_dirty)
         tip(win, "phase3.traces.window")
 
+        # A separate, usually shorter window for the ITI engagement trace; blank
+        # follows the main window.
+        ttk.Label(bar, text="ITI window:").pack(side=tk.LEFT, padx=(0, 2))
+        self._iti_win_var = tk.StringVar(value="")
+        iti_win = ttk.Spinbox(bar, from_=2, to=200, increment=1, width=5,
+                              textvariable=self._iti_win_var, command=_mark_dirty)
+        iti_win.pack(side=tk.LEFT, padx=(0, 10))
+        self._iti_win_var.trace_add("write", _mark_dirty)
+        tip(iti_win, "phase3.traces.iti_window")
+
         ttk.Label(bar, text="Last N min:").pack(side=tk.LEFT, padx=(0, 2))
         self._xwin_var = tk.StringVar(value="")   # blank = whole session
         xwin = ttk.Spinbox(bar, from_=0, to=600, increment=5, width=5,
@@ -206,7 +220,15 @@ class Phase3TracesView:
             return
         window_n = max(2, self._int_var(self._win_var, DEFAULT_WINDOW))
         gap_s = float(max(1, self._int_var(self._gap_var, int(DEFAULT_DISENGAGED_GAP_S))))
-        res = build_traces(state, window_n=window_n, min_den=DEFAULT_MIN_DEN)
+        # Blank ITI-window entry means "follow the main window" (None); a value
+        # gives the ITI median its own, usually shorter, span.
+        raw_iti = self._iti_win_var.get().strip()
+        try:
+            iti_window_n: Optional[int] = max(2, int(float(raw_iti))) if raw_iti else None
+        except (TypeError, ValueError):
+            iti_window_n = None
+        res = build_traces(state, window_n=window_n, iti_window_n=iti_window_n,
+                           min_den=DEFAULT_MIN_DEN)
 
         self._fig.clear()
         visible = [key for key, _ in _GROUPS if self._show[key].get()]

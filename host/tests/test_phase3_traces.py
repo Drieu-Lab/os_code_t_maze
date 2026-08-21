@@ -106,6 +106,35 @@ class TestITI(unittest.TestCase):
         self.assertAlmostEqual(r.iti_med_s[4], 60.0)
         self.assertGreater(r.iti_med_s[4], DEFAULT_DISENGAGED_GAP_S)
 
+    def test_iti_window_independent_of_rate_window(self):
+        # Gaps are [-, 5, 5, 60, 60] across trials 1..5. A short ITI window (2)
+        # tracks only the recent long gaps (median 60), while the rate window can
+        # stay large; passing a large ITI window (or None) instead folds in the
+        # early short gaps (median of [5,5,60,60] = 32.5). The two windows are
+        # independent.
+        log = _log(n=10)
+        _fill(log, 0, "left", CORRECT, start_s=0, end_s=20)
+        _fill(log, 1, "left", CORRECT, start_s=25, end_s=45)     # ITI 5
+        _fill(log, 2, "left", CORRECT, start_s=50, end_s=70)     # ITI 5
+        _fill(log, 3, "left", CORRECT, start_s=130, end_s=150)   # ITI 60
+        _fill(log, 4, "left", CORRECT, start_s=210, end_s=230)   # ITI 60
+        snap = log.snapshot(5, armed=True)
+        short = build_traces(snap, window_n=20, iti_window_n=2)
+        wide = build_traces(snap, window_n=20, iti_window_n=20)
+        self.assertAlmostEqual(short.iti_med_s[-1], 60.0)
+        self.assertAlmostEqual(wide.iti_med_s[-1], 32.5)
+        # The rate window is untouched by the ITI window: accuracy matches.
+        self.assertEqual(short.accuracy[-1], wide.accuracy[-1])
+        self.assertEqual(short.window_n, 20)
+        self.assertEqual(short.iti_window_n, 2)
+
+    def test_iti_window_defaults_to_main_window(self):
+        log = _log(n=10)
+        for i in range(4):
+            _fill(log, i, "left", CORRECT, start_s=30 * i, end_s=30 * i + 20)
+        res = build_traces(log.snapshot(4, armed=True), window_n=7)
+        self.assertEqual(res.iti_window_n, 7)   # None -> follows window_n
+
     def test_negative_gap_dropped(self):
         # A trial that "starts" before the previous one ended (clock anomaly) is
         # not folded into the ITI - here trial 2 has no other sample, so None.

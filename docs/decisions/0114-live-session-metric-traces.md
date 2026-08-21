@@ -31,7 +31,8 @@ reduction from the snapshot to per-trial time series and a plot surface.
 Add a live trace panel as a pure core + thin shell (ADR-0083), on its own
 top-level GUI tab.
 
-1. **Pure core `phase3_traces.build_traces(snapshot, window_n, min_den)`** emits
+1. **Pure core `phase3_traces.build_traces(snapshot, window_n, iti_window_n,
+   min_den)`** emits
    one point per COMPLETED trial on a wall-clock x-axis (seconds since the
    earliest trial-start stamp) plus rolling series, reusing the settled
    definitions from `phase3_stats` (the ISO parser, the median helper, the arm /
@@ -61,10 +62,12 @@ top-level GUI tab.
    (ITI / accuracy / strategy / bias) via `FigureCanvasTkAgg` (guarded import
    with a text fallback, as in `records_manager`, ADR-0087), pull-mode
    self-polling the published snapshot gated by `progress_signature` (like the
-   ribbon). Configurable: the disengaged line, the rolling `window_n`, per-subplot
-   show/hide toggles, and a "last N minutes" x-window; only `window_n` and the
-   line feed the core, the rest are pure view state (a control change forces a
-   redraw the change-gate would otherwise miss).
+   ribbon). Configurable: the disengaged line, the rolling `window_n`, a SEPARATE
+   `iti_window_n` for the ITI trace (blank = follow `window_n`, so the engagement
+   signal can be smoothed over a shorter span and react faster than the rate
+   traces), per-subplot show/hide toggles, and a "last N minutes" x-window; only
+   `window_n`, `iti_window_n`, and the line feed the core, the rest are pure view
+   state (a control change forces a redraw the change-gate would otherwise miss).
 
 5. **Its own top-level "Metrics" tab**, not the Rig-view bottom strip (already
    full: ribbon + behavior readout + control bar + Session panel) - the stacked

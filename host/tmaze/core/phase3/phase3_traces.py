@@ -42,7 +42,11 @@ Series produced (each a list parallel to the completed trials):
 
 Rolling windows are the trailing ``window_n`` COMPLETED trials (default 20, as in
 phase3_stats); a rate is ``None`` until its denominator reaches ``min_den``
-(default 3) so an early window doesn't show a spuriously extreme value.
+(default 3) so an early window doesn't show a spuriously extreme value. The ITI
+median has its OWN window (``iti_window_n``, defaulting to ``window_n``) so the
+engagement signal can be smoothed over a shorter span than the strategy rates -
+a small ITI window reacts to a rat going quiet within a few trials, while the
+rate windows stay long enough to be stable.
 
 Pure stdlib, headless-testable over deterministic snapshots (build a Phase3Log,
 fill it via its public methods incl. ``trial_started`` / ``trial_ended`` for the
@@ -116,6 +120,7 @@ class TraceResult:
     blocks: List[BlockSpan] = field(default_factory=list)
     t0_iso: Optional[str] = None
     window_n: int = DEFAULT_WINDOW
+    iti_window_n: int = DEFAULT_WINDOW
 
     def __len__(self) -> int:
         return len(self.trial)
@@ -193,21 +198,25 @@ def _row_x_iso(row: Phase3RowView) -> Optional[str]:
 
 def build_traces(snapshot: Optional[Phase3StateSnapshot], *,
                  window_n: int = DEFAULT_WINDOW,
+                 iti_window_n: Optional[int] = None,
                  min_den: int = DEFAULT_MIN_DEN) -> TraceResult:
     """Reduce a published Phase 3 snapshot to per-completed-trial rolling traces.
 
     Reads only the frozen snapshot (no I/O, no locks), so it is safe to call on
     the Tk poll with whatever ``published_state()`` returned. ``window_n`` sizes
-    the trailing rolling window (most-recent completed trials); ``min_den`` is
-    the smallest denominator a rate is reported at. A ``None`` or empty snapshot
-    yields an empty result.
+    the trailing rolling window for the rate series (most-recent completed
+    trials); ``iti_window_n`` sizes the ITI median's own window (defaults to
+    ``window_n``) so the engagement signal can be smoothed over a shorter span;
+    ``min_den`` is the smallest denominator a rate is reported at. A ``None`` or
+    empty snapshot yields an empty result.
     """
     n = max(1, int(window_n))
+    ni = n if iti_window_n is None else max(1, int(iti_window_n))
     md = max(1, int(min_den))
     rows: Tuple[Phase3RowView, ...] = snapshot.rows if snapshot is not None else ()
     high_left = snapshot.high_tone_is_left if snapshot is not None else True
     if not rows:
-        return TraceResult(window_n=n)
+        return TraceResult(window_n=n, iti_window_n=ni)
 
     # t0 = the earliest parseable trial-start stamp in the table (the session's
     # wall-clock origin for the x-axis). Fall back to any usable stamp so a
@@ -260,16 +269,18 @@ def build_traces(snapshot: Optional[Phase3StateSnapshot], *,
             prev_correct=prev_correct, prev_incorrect=prev_incorrect))
         prev_completed = row
 
-    out = TraceResult(t0_iso=t0_iso, window_n=n)
+    out = TraceResult(t0_iso=t0_iso, window_n=n, iti_window_n=ni)
     for j in range(len(pts)):
         w = pts[max(0, j - n + 1): j + 1]
         p = pts[j]
         out.t.append(p.x)
         out.trial.append(p.trial)
 
-        # Engagement: rolling median dead-time ITI over the window's completed
-        # trials (a single sample is informative, so no min_den gate here).
-        itis = [q.iti for q in w if q.iti is not None]
+        # Engagement: rolling median dead-time ITI over its OWN window
+        # (``iti_window_n``, often shorter than the rate window so it reacts
+        # faster); a single sample is informative, so no min_den gate here.
+        wi = pts[max(0, j - ni + 1): j + 1]
+        itis = [q.iti for q in wi if q.iti is not None]
         out.iti_med_s.append(_median(itis))
 
         # Accuracy over the out-of-block completed trials in the window.
