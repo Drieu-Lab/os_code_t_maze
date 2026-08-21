@@ -58,7 +58,10 @@ Add a past-session **reference (ghost) overlay** as pure core + thin shell.
    comes from the Task tab's shared field: `task_animal_id` was lifted to the top
    of `main()` (like the `phase3_state` seam) and passed as the panel's
    `animal_getter`. The dropdown defaults to "None" (ghost off) and re-scans on
-   open / refresh — no disk read happens until a session is actually picked.
+   open / refresh — no disk read happens until a session is actually picked. Each
+   entry is labelled `<animal> · <date> <time>`: the list is already filtered to
+   the current rat, so the animal prefix is visible confirmation the ghost is
+   animal-matched rather than a disambiguator.
 
 4. **Config-mismatch caption.** A pure `describe_config_mismatch(current,
    reference)` lists exactly which run settings differ (cue→side mapping,

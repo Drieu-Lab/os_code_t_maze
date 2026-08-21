@@ -491,6 +491,15 @@ TIPS: Dict[str, Entry] = {
                               "comparison across different conditions is obvious. "
                               "Quiet when they match.",
     "phase3.traces.toggle": "Show or hide the {group} subplot.",
+    "phase3.traces.series": "Show or hide the '{series}' trace within the {group} "
+                            "subplot (and its faded reference line). The subplot "
+                            "itself stays; its legend drops the hidden trace.",
+    "phase3.traces.inblock": "Overlay the animal's response DURING each intervention "
+                             "block: cumulative compliance with the forced arm (on "
+                             "Accuracy) and in-block P(left) (on Strategy), one "
+                             "segment per block, coloured by block type. The block "
+                             "shading + colour key stay either way. The free-choice "
+                             "lines still gap over the block on purpose.",
 
     # ---- maze_state_view.py: Maze state tab ----
     "maze.define_zones": "Draw the maze zones (central reward HUB, stem, "

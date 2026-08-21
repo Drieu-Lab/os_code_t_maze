@@ -171,8 +171,9 @@ def snapshot_from_csv(path: str) -> Optional[Tuple[Phase3StateSnapshot, SessionC
 @dataclass(frozen=True)
 class SessionRef:
     """A recorded past session available as a reference overlay: its id, animal,
-    ISO date, a human ``label`` for the dropdown, and the path to its trial CSV.
-    Lightweight - the CSV is only parsed when the operator actually picks it."""
+    ISO date, a human ``label`` for the dropdown (``<animal> · <date> <time>``),
+    and the path to its trial CSV. Lightweight - the CSV is only parsed when the
+    operator actually picks it."""
     session_id: str
     animal: str
     date: str
@@ -236,7 +237,10 @@ def discover_sessions(animal: str,
         csv_path = _first_trial_csv(bundle)
         if not csv_path:
             continue
-        label = f"{d} {hm}" if d and hm else sid
+        # Prefix the animal id so the operator can visually confirm the ghost is
+        # animal-matched (the list is already filtered to ``want``, so this is a
+        # constant across entries - shown for reassurance, not disambiguation).
+        label = f"{a} \u00b7 {d} {hm}" if d and hm else sid
         refs.append(SessionRef(session_id=sid, animal=a or want,
                                date=d or "", label=label, csv_path=csv_path))
     # session_id embeds a sortable timestamp; reverse gives newest-first.

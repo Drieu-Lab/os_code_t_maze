@@ -29,8 +29,20 @@ Controls (the configurable aspects):
     edge. Panning turns OFF auto-follow (follow-unless-zoomed) so the plot stops
     chasing new trials while you inspect an earlier stretch; the viewport arith-
     metic is the pure ``trace_viewport.compute_viewport``. View-only.
-  - per-subplot show/hide toggles (ITI / accuracy / strategy / bias): hidden
-    subplots are dropped so the rest gain height.
+  - a two-level show/hide toggle matrix (one row per subplot): the SUBPLOT
+    toggle (ITI / accuracy / strategy / bias) drops the whole subplot so the
+    rest gain height; the per-SERIES toggles beside it hide an individual trace
+    within a subplot (and its faded reference line), and that trace also drops
+    out of the subplot's legend. Every subplot carries a legend naming its
+    visible traces.
+  - intervention-block highlight (docs/decisions/0118): each corrective block is
+    shaded behind the traces, colour-coded by KIND (debias side-bias / alternation;
+    unrewarded probe keeps its teal) with a small colour key on the top subplot.
+    The "In-block" toggle overlays the animal's RESPONSE during each block -
+    cumulative compliance with the forced arm (on Accuracy) and in-block P(left)
+    (on Strategy), one segment per block in the block's colour. The free-choice
+    lines still gap over a block by design (those measure uncoerced choice); a
+    reference session's blocks are hatched to read as "past".
   - reference (ghost) overlay (docs/decisions/0117): pick a PAST session of the
     same rat and its traces are drawn behind the live ones as faded dashed lines,
     so a run can be compared against an earlier one. The dropdown lists the rat's
@@ -74,10 +86,12 @@ except Exception:  # pragma: no cover
 try:
     from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
     from matplotlib.figure import Figure
+    from matplotlib.patches import Patch
     _MPL_ERR: Optional[str] = None
 except Exception as e:  # pragma: no cover - depends on host environment
     FigureCanvasTkAgg = None  # type: ignore
     Figure = None  # type: ignore
+    Patch = None  # type: ignore
     _MPL_ERR = f"{type(e).__name__}: {e}"
 
 # Poll cadence: a touch slower than the ribbon's 100 ms since a redraw repaints a
@@ -85,9 +99,21 @@ except Exception as e:  # pragma: no cover - depends on host environment
 # doesn't churn.
 POLL_INTERVAL_MS = 250
 
-# Shading colour for INTERVENTION (corrective) block spans (a faint purple, to
-# echo the ribbon's corrective outline).
-_BLOCK_SHADE = "#8a2be2"
+# INTERVENTION block shading + in-block response-line colours, keyed by block
+# KIND so the operator can tell a debias (side-bias) block from an alternation
+# block at a glance (docs/decisions/0118). Chosen to stay legible at low alpha and
+# distinct from the trace-line palette; an unlabelled block falls back to the
+# side-bias hue. Probe blocks keep their own teal (``_PROBE_SHADE``).
+_BLOCK_KIND_COLORS = {
+    "side_bias": "#8a2be2",     # blueviolet (the former single corrective shade)
+    "alternation": "#ff8c00",   # dark orange
+    "": "#8a2be2",
+}
+_BLOCK_KIND_LABELS = {
+    "side_bias": "debias (side-bias)",
+    "alternation": "alternation",
+    "": "intervention",
+}
 # Shading + marker colour for unrewarded PROBE block spans (a teal, echoing the
 # ribbon's probe cell fill; distinct from the purple corrective shade).
 _PROBE_SHADE = "#1aa179"
@@ -108,7 +134,7 @@ _GROUPS: Tuple[Tuple[str, str], ...] = (
 # per-subplot decorations (threshold lines, y-limits, legend, probe markers) stay
 # in _decorate. See docs/decisions/0114 (series) / 0117 (ghost).
 _SERIES: dict = {
-    "iti": (("iti_med_s", "#1f77b4", 1.6, None),),
+    "iti": (("iti_med_s", "#1f77b4", 1.6, "ITI median"),),
     "accuracy": (("accuracy", "#1a7f37", 1.6, "all"),
                  ("high_acc", "#7f7fff", 1.0, "HIGH cue"),
                  ("low_acc", "#ff9f40", 1.0, "LOW cue")),
@@ -175,6 +201,7 @@ class Phase3TracesView:
             return
 
         self._build_controls(self._frame)
+        self._build_toggle_grid(self._frame)
         self._build_reference_bar(self._frame)
 
         # Horizontal scrollbar + Latest button (the viewport's pan controls),
@@ -215,27 +242,29 @@ class Phase3TracesView:
             self._job = None
 
     # ------------------------------------------------------------- controls
+    def _mark_dirty(self, *_a) -> None:
+        """Force the next poll to redraw (a control changed; the snapshot didn't,
+        so the change-gate alone would miss it)."""
+        self._dirty = True
+
     def _build_controls(self, parent: tk.Misc) -> None:
         bar = ttk.Frame(parent)
         bar.pack(side=tk.TOP, fill=tk.X, padx=4, pady=4)
 
-        def _mark_dirty(*_a) -> None:
-            self._dirty = True
-
         ttk.Label(bar, text="Disengaged (s):").pack(side=tk.LEFT, padx=(0, 2))
         self._gap_var = tk.StringVar(value=str(int(DEFAULT_DISENGAGED_GAP_S)))
         gap = ttk.Spinbox(bar, from_=1, to=600, increment=5, width=5,
-                          textvariable=self._gap_var, command=_mark_dirty)
+                          textvariable=self._gap_var, command=self._mark_dirty)
         gap.pack(side=tk.LEFT, padx=(0, 10))
-        self._gap_var.trace_add("write", _mark_dirty)
+        self._gap_var.trace_add("write", self._mark_dirty)
         tip(gap, "phase3.traces.gap")
 
         ttk.Label(bar, text="Window:").pack(side=tk.LEFT, padx=(0, 2))
         self._win_var = tk.StringVar(value=str(DEFAULT_WINDOW))
         win = ttk.Spinbox(bar, from_=2, to=200, increment=1, width=5,
-                          textvariable=self._win_var, command=_mark_dirty)
+                          textvariable=self._win_var, command=self._mark_dirty)
         win.pack(side=tk.LEFT, padx=(0, 10))
-        self._win_var.trace_add("write", _mark_dirty)
+        self._win_var.trace_add("write", self._mark_dirty)
         tip(win, "phase3.traces.window")
 
         # A separate, usually shorter window for the ITI engagement trace; blank
@@ -243,9 +272,10 @@ class Phase3TracesView:
         ttk.Label(bar, text="ITI window:").pack(side=tk.LEFT, padx=(0, 2))
         self._iti_win_var = tk.StringVar(value="")
         iti_win = ttk.Spinbox(bar, from_=2, to=200, increment=1, width=5,
-                              textvariable=self._iti_win_var, command=_mark_dirty)
+                              textvariable=self._iti_win_var,
+                              command=self._mark_dirty)
         iti_win.pack(side=tk.LEFT, padx=(0, 10))
-        self._iti_win_var.trace_add("write", _mark_dirty)
+        self._iti_win_var.trace_add("write", self._mark_dirty)
         tip(iti_win, "phase3.traces.iti_window")
 
         # Viewport WIDTH (zoom): blank/0 = whole session. Changing it keeps the
@@ -254,29 +284,73 @@ class Phase3TracesView:
         ttk.Label(bar, text="Width (min):").pack(side=tk.LEFT, padx=(0, 2))
         self._width_var = tk.StringVar(value="")   # blank = whole session
         width = ttk.Spinbox(bar, from_=0, to=600, increment=5, width=5,
-                            textvariable=self._width_var, command=_mark_dirty)
+                            textvariable=self._width_var,
+                            command=self._mark_dirty)
         width.pack(side=tk.LEFT, padx=(0, 10))
-        self._width_var.trace_add("write", _mark_dirty)
+        self._width_var.trace_add("write", self._mark_dirty)
         tip(width, "phase3.traces.width")
 
-        # Per-subplot show/hide toggles.
+    def _build_toggle_grid(self, parent: tk.Misc) -> None:
+        """Two-level show/hide matrix, one row per subplot: the first column is the
+        SUBPLOT toggle (hide the whole subplot; the rest gain height) and the
+        following columns are per-SERIES toggles (hide an individual trace within
+        that subplot, so the legend and ghost line drop with it). A trailing Probe
+        row toggles the unrewarded-probe shading/markers across subplots."""
+        grid = ttk.Frame(parent)
+        grid.pack(side=tk.TOP, fill=tk.X, padx=4, pady=(0, 2))
+        ttk.Label(grid, text="Show:").grid(row=0, column=0, sticky="w",
+                                           padx=(0, 6), pady=(0, 1))
+
         self._show: dict[str, tk.BooleanVar] = {}
-        for key, label in _GROUPS:
+        self._show_series: dict[Tuple[str, str], tk.BooleanVar] = {}
+        for r, (key, label) in enumerate(_GROUPS, start=1):
             var = tk.BooleanVar(value=True)
             self._show[key] = var
-            cb = ttk.Checkbutton(bar, text=label, variable=var,
-                                 command=_mark_dirty)
-            cb.pack(side=tk.LEFT, padx=(0, 4))
+            cb = ttk.Checkbutton(grid, text=label, width=9, variable=var,
+                                 command=self._mark_dirty)
+            cb.grid(row=r, column=0, sticky="w", padx=(0, 8))
             tip(cb, "phase3.traces.toggle", group=label)
+            for c, (attr, _color, _lw, slabel) in enumerate(_SERIES[key], start=1):
+                svar = tk.BooleanVar(value=True)
+                self._show_series[(key, attr)] = svar
+                text = slabel if slabel else label
+                scb = ttk.Checkbutton(grid, text=text, variable=svar,
+                                      command=self._mark_dirty)
+                scb.grid(row=r, column=c, sticky="w", padx=(0, 6))
+                tip(scb, "phase3.traces.series", series=text, group=label)
 
         # Probe overlay toggle (not a subplot of its own): shades the unrewarded
         # probe spans across every subplot and overlays each block's probe accuracy
         # on the Accuracy subplot. See probe_blocks.py / docs/decisions/0115-probe.
         self._show_probe = tk.BooleanVar(value=True)
-        pcb = ttk.Checkbutton(bar, text="Probe", variable=self._show_probe,
-                              command=_mark_dirty)
-        pcb.pack(side=tk.LEFT, padx=(0, 4))
+        pcb = ttk.Checkbutton(grid, text="Probe", width=9,
+                              variable=self._show_probe, command=self._mark_dirty)
+        pcb.grid(row=len(_GROUPS) + 1, column=0, sticky="w", padx=(0, 8),
+                 pady=(1, 0))
         tip(pcb, "phase3.traces.toggle", group="Probe")
+
+        # In-block response overlay: the per-block compliance / P(left) lines drawn
+        # across each intervention span (the shading + colour key stay regardless).
+        self._show_inblock = tk.BooleanVar(value=True)
+        icb = ttk.Checkbutton(grid, text="In-block", width=9,
+                              variable=self._show_inblock,
+                              command=self._mark_dirty)
+        icb.grid(row=len(_GROUPS) + 1, column=1, columnspan=3, sticky="w",
+                 pady=(1, 0))
+        tip(icb, "phase3.traces.inblock")
+
+    def _series_shown(self, key: str, attr: str) -> bool:
+        """Whether the per-series toggle for ``(subplot, series)`` is on (default
+        on if - defensively - a series has no toggle registered)."""
+        var = self._show_series.get((key, attr))
+        return True if var is None else bool(var.get())
+
+    def _any_series_shown(self, key: str) -> bool:
+        """True if at least one LABELLED series in the subplot is toggled on - the
+        gate for drawing that subplot's legend (avoids a matplotlib "no labelled
+        artists" warning when every trace in the subplot is hidden)."""
+        return any(self._series_shown(key, attr)
+                   for attr, _c, _lw, label in _SERIES[key] if label)
 
     def _build_reference_bar(self, parent: tk.Misc) -> None:
         """Reference (ghost) overlay controls: a session dropdown + refresh + the
@@ -468,16 +542,26 @@ class Phase3TracesView:
 
         axes = self._fig.subplots(len(visible), 1, sharex=True, squeeze=False)
         axes = [row[0] for row in axes]
+        show_inblock = self._show_inblock.get()
         for ax, key in zip(axes, visible):
+            # Block shading first (zorder 0, behind everything); ghost blocks are
+            # hatched so past episodes read distinctly from the live ones.
+            if have_ghost:
+                self._shade_blocks(ax, ghost, ghost=True)
+                self._shade_probes(ax, ghost, ghost=True)
+            if have_current:
+                self._shade_blocks(ax, res)
+                self._shade_probes(ax, res)
             if have_ghost:
                 self._draw_ghost(ax, key, ghost, ghost_t_min)
             if have_current:
                 self._draw_group_lines(ax, key, res, t_min)
+                if show_inblock:
+                    self._draw_inblock(ax, key, res)
             self._decorate(ax, key, gap_s, state, res, have_current)
-            if have_current:
-                self._shade_blocks(ax, res)
-                self._shade_probes(ax, res)
         axes[-1].set_xlabel("session time (min)")
+        self._draw_block_key(axes[0], res if have_current else None,
+                             ghost if have_ghost else None)
 
         self._apply_viewport(axes)
         self._fig.subplots_adjust(left=0.10, right=0.90, top=0.96, bottom=0.08,
@@ -500,8 +584,11 @@ class Phase3TracesView:
     def _draw_group_lines(self, ax, key: str, res: TraceResult,
                           t_min: List[Optional[float]]) -> None:
         """Plot the live line series for one subplot (from the shared _SERIES
-        table); the decorations are added by _decorate."""
+        table), skipping any series toggled off; the decorations are added by
+        _decorate."""
         for attr, color, lw, label in _SERIES[key]:
+            if not self._series_shown(key, attr):
+                continue
             self._line(ax, t_min, getattr(res, attr), color=color, lw=lw,
                        label=label)
 
@@ -510,8 +597,11 @@ class Phase3TracesView:
         """Plot the reference session's SAME series behind the live ones - faded,
         dashed, and thinner so they read as "past" - on the reference's own elapsed
         minutes. No labels (they'd double the legend) and no span shading. Same
-        _SERIES table as the live line, so the two can't drift. See ADR-0117."""
+        _SERIES table as the live line, so the two can't drift. A series hidden by
+        its per-series toggle drops its ghost too. See ADR-0117."""
         for attr, color, lw, _label in _SERIES[key]:
+            if not self._series_shown(key, attr):
+                continue
             self._line(ax, ref_t_min, getattr(ref_res, attr), color=color,
                        lw=max(0.8, lw * 0.6), ls="--", alpha=0.4, zorder=1)
 
@@ -524,29 +614,35 @@ class Phase3TracesView:
             ax.axhline(gap_s, color="#b3261e", lw=1.0, ls="--", alpha=0.8)
             ax.set_ylabel("ITI med (s)", fontsize=8)
             ax.set_ylim(bottom=0)
+            self._legend(ax, key, has_current, ncol=1)
         elif key == "accuracy":
             ax.axhline(0.5, color="#999999", lw=0.8, ls=":", alpha=0.7)
             if has_current:
                 self._plot_probe_accuracy(ax, res)
             ax.set_ylabel("accuracy", fontsize=8)
             ax.set_ylim(0, 1)
-            if has_current:
-                ax.legend(fontsize=6, loc="lower right", framealpha=0.5, ncol=3)
+            self._legend(ax, key, has_current, ncol=3)
         elif key == "strategy":
             ax.axhline(0.5, color="#999999", lw=0.8, ls=":", alpha=0.7)
             ax.set_ylabel("strategy", fontsize=8)
             ax.set_ylim(0, 1)
-            if has_current:
-                ax.legend(fontsize=6, loc="lower right", framealpha=0.5, ncol=3)
+            self._legend(ax, key, has_current, ncol=3)
         elif key == "bias":
             ax.axhline(0.0, color="#999999", lw=0.8, ls=":", alpha=0.7)
             self._trigger_lines(ax, state)
             ax.set_ylabel("bias / alt", fontsize=8)
             ax.set_ylim(-1.05, 1.05)
-            if has_current:
-                ax.legend(fontsize=6, loc="lower right", framealpha=0.5, ncol=2)
+            self._legend(ax, key, has_current, ncol=2)
         ax.tick_params(axis="both", labelsize=7)
         ax.grid(True, axis="y", alpha=0.15)
+
+    def _legend(self, ax, key: str, has_current: bool, ncol: int) -> None:
+        """Draw the subplot's trace legend, but only for the live session and only
+        when at least one labelled series is visible (a ghost-only draw and an
+        all-series-hidden subplot get none, which also dodges matplotlib's
+        "no labelled artists" warning)."""
+        if has_current and self._any_series_shown(key):
+            ax.legend(fontsize=6, loc="lower right", framealpha=0.5, ncol=ncol)
 
     def _trigger_lines(self, ax, state: Optional[Phase3StateSnapshot]) -> None:
         """Draw the closed-loop auto-trigger thresholds the snapshot reports, so
@@ -561,18 +657,84 @@ class Phase3TracesView:
             ax.axhline(state.alt_trigger_rate, color="#ff7f0e", lw=0.8,
                        ls="--", alpha=0.5)
 
-    def _shade_blocks(self, ax, res: TraceResult) -> None:
-        for span in res.blocks:
-            ax.axvspan(span.start_t / 60.0, span.end_t / 60.0,
-                       color=_BLOCK_SHADE, alpha=0.10, lw=0, zorder=0)
+    def _shade_span(self, ax, x0: float, x1: float, color: str,
+                    ghost: bool) -> None:
+        """Shade one [x0, x1]-minute span in ``color``: a solid low-alpha fill for
+        the current session, a hatched outline for a reference (ghost) session so
+        past blocks read distinctly from the live ones. See docs/decisions/0118."""
+        if ghost:
+            ax.axvspan(x0, x1, facecolor="none", edgecolor=color, hatch="////",
+                       alpha=0.5, lw=0, zorder=0)
+        else:
+            ax.axvspan(x0, x1, color=color, alpha=0.13, lw=0, zorder=0)
 
-    def _shade_probes(self, ax, res: TraceResult) -> None:
+    def _shade_blocks(self, ax, res: TraceResult, *, ghost: bool = False) -> None:
+        """Shade each intervention block span, coloured by its kind."""
+        for span in res.blocks:
+            color = _BLOCK_KIND_COLORS.get(span.kind, _BLOCK_KIND_COLORS[""])
+            self._shade_span(ax, span.start_t / 60.0, span.end_t / 60.0, color,
+                             ghost)
+
+    def _shade_probes(self, ax, res: TraceResult, *, ghost: bool = False) -> None:
         """Shade the unrewarded probe spans (teal), gated on the Probe toggle."""
         if not self._show_probe.get():
             return
         for span in res.probe_blocks:
-            ax.axvspan(span.start_t / 60.0, span.end_t / 60.0,
-                       color=_PROBE_SHADE, alpha=0.12, lw=0, zorder=0)
+            self._shade_span(ax, span.start_t / 60.0, span.end_t / 60.0,
+                             _PROBE_SHADE, ghost)
+
+    def _draw_inblock(self, ax, key: str, res: TraceResult) -> None:
+        """Overlay the in-block RESPONSE trajectory on the relevant subplot: rolling
+        (cumulative-from-block-start) COMPLIANCE with the forced arm on the accuracy
+        subplot, and in-block P(left) on the strategy subplot - one segment per
+        block, coloured by its kind (so it reads against the same colour key as the
+        shading). Current session only; gated on the In-block toggle. See
+        docs/decisions/0118."""
+        if key == "accuracy":
+            attr = "compliance"
+        elif key == "strategy":
+            attr = "pleft"
+        else:
+            return
+        for span in res.blocks:
+            color = _BLOCK_KIND_COLORS.get(span.kind, _BLOCK_KIND_COLORS[""])
+            px: List[float] = []
+            py: List[float] = []
+            for x, y in zip(span.xs, getattr(span, attr)):
+                if y is not None:
+                    px.append(x / 60.0)
+                    py.append(y)
+            if px:
+                ax.plot(px, py, color=color, lw=1.6, ls="-", marker="o", ms=2.6,
+                        alpha=0.95, zorder=3)
+
+    def _draw_block_key(self, ax, res: Optional[TraceResult],
+                        ghost: Optional[TraceResult]) -> None:
+        """A small colour key on the top subplot mapping shade colour -> block kind,
+        for whichever kinds actually appear (current or ghost). Added as a SECOND
+        legend so it doesn't replace the subplot's trace legend."""
+        if Patch is None:
+            return
+        kinds: List[str] = []
+        for r in (res, ghost):
+            if r is not None:
+                for span in r.blocks:
+                    if span.kind not in kinds:
+                        kinds.append(span.kind)
+        handles = [Patch(facecolor=_BLOCK_KIND_COLORS.get(k, _BLOCK_KIND_COLORS[""]),
+                         alpha=0.4, label=_BLOCK_KIND_LABELS.get(k, "intervention"))
+                   for k in kinds]
+        has_probe = ((res is not None and res.probe_blocks)
+                     or (ghost is not None and ghost.probe_blocks))
+        if self._show_probe.get() and has_probe:
+            handles.append(Patch(facecolor=_PROBE_SHADE, alpha=0.4, label="probe"))
+        if not handles:
+            return
+        existing = ax.get_legend()          # the subplot's trace legend
+        key = ax.legend(handles=handles, fontsize=6, loc="upper left",
+                        framealpha=0.5, ncol=len(handles))
+        if existing is not None:
+            ax.add_artist(existing)         # keep the trace legend too
 
     def _plot_probe_accuracy(self, ax, res: TraceResult) -> None:
         """Overlay each probe block's accuracy as a diamond at the span midpoint on

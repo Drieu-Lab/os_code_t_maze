@@ -184,7 +184,7 @@ class TestDiscovery(unittest.TestCase):
                 "600", roots=[root], ignore={"600_20260721_110000"})
             self.assertEqual([r.session_id for r in refs],
                              ["600_20260723_120000", "600_20260720_090000"])
-            self.assertEqual(refs[0].label, "2026-07-23 12:00")
+            self.assertEqual(refs[0].label, "600 \u00b7 2026-07-23 12:00")
             self.assertTrue(refs[0].csv_path.endswith(".csv"))
         finally:
             shutil.rmtree(root, ignore_errors=True)

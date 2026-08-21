@@ -38,7 +38,9 @@ Series produced (each a list parallel to the completed trials):
     passthrough of the row's ``alt_rate``; blank outside an intervention run).
     The view pairs these with the snapshot's ``trigger_bias`` / ``alt_trigger_
     rate`` threshold lines.
-  - ``blocks`` - contiguous INTERVENTION spans (start/end x + kind) for shading.
+  - ``blocks`` - contiguous INTERVENTION spans (start/end x + kind) for shading,
+    each carrying the in-block response trajectory (cumulative compliance with the
+    forced arm + in-block P(left)) the Metrics tab overlays (docs/decisions/0118).
 
 Rolling windows are the trailing ``window_n`` COMPLETED trials (default 20, as in
 phase3_stats); a rate is ``None`` until its denominator reaches ``min_den``
@@ -84,10 +86,21 @@ DEFAULT_DISENGAGED_GAP_S = 45.0
 class BlockSpan:
     """A contiguous run of INTERVENTION (corrective) completed trials, in x
     (seconds since t0), for shading behind the traces. ``kind`` is the block
-    kind (``side_bias`` / ``alternation``; "" if unset)."""
+    kind (``side_bias`` / ``alternation``; "" if unset).
+
+    It also carries the in-block RESPONSE trajectory the Metrics tab overlays
+    (docs/decisions/0118): ``xs`` are the x (seconds since t0) of each in-block
+    completed trial with a usable stamp, and ``compliance`` / ``pleft`` the
+    CUMULATIVE-from-block-start fraction that went to the forced/target arm and
+    the fraction that chose LEFT at each of those trials. These are computed here
+    (not windowed against the free-behaviour series) because a coerced block is a
+    self-contained episode; the free lines still gap over it on purpose."""
     start_t: float
     end_t: float
     kind: str
+    xs: Tuple[float, ...] = ()
+    compliance: Tuple[Optional[float], ...] = ()
+    pleft: Tuple[Optional[float], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -355,16 +368,36 @@ def build_traces(snapshot: Optional[Phase3StateSnapshot], *,
 
 
 def _block_spans(pts: List[_Point]) -> List[BlockSpan]:
-    """Contiguous runs of INTERVENTION completed trials as x-spans for shading.
-    A run's span is [first.x, last.x]; runs with no usable x are skipped."""
+    """Contiguous runs of INTERVENTION completed trials as x-spans for shading,
+    each carrying its in-block response trajectory (cumulative compliance +
+    P(left); docs/decisions/0118). A run's span is [first.x, last.x]; runs with no
+    usable x are skipped. In a block the forced arm IS the scored ``correct_arm``,
+    so a correct trial == the rat complied - cumulative compliance is the running
+    fraction correct within the run."""
     spans: List[BlockSpan] = []
     run: List[_Point] = []
 
     def flush() -> None:
-        xs = [q.x for q in run if q.x is not None]
+        xs: List[float] = []
+        comp: List[Optional[float]] = []
+        pl: List[Optional[float]] = []
+        complied = scored = left = choices = 0
+        for q in run:
+            scored += 1
+            if q.correct:
+                complied += 1
+            if q.choice is not None:
+                choices += 1
+                if q.choice == LEFT_LABEL:
+                    left += 1
+            if q.x is not None:
+                xs.append(q.x)
+                comp.append(complied / scored)
+                pl.append((left / choices) if choices else None)
         if xs:
-            spans.append(BlockSpan(start_t=min(xs), end_t=max(xs),
-                                   kind=run[0].kind))
+            spans.append(BlockSpan(
+                start_t=min(xs), end_t=max(xs), kind=run[0].kind,
+                xs=tuple(xs), compliance=tuple(comp), pleft=tuple(pl)))
         run.clear()
 
     for p in pts:

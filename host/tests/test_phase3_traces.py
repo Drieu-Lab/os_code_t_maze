@@ -247,6 +247,42 @@ class TestBlockSpans(unittest.TestCase):
         r = build_traces(log.snapshot(5, armed=True))
         self.assertAlmostEqual(r.side_bias_left[-1], 1.0)
 
+    def test_block_carries_inblock_response_trajectory(self):
+        # A 4-trial side-bias block (indices 1-4). The forced arm is LEFT, so a
+        # LEFT choice complies (CORRECT), a RIGHT choice does not (INCORRECT).
+        # Sequence over the block: L(ok), R(miss), L(ok), L(ok).
+        log = _log(n=10)
+        _fill(log, 0, "left", CORRECT, start_s=0, end_s=20)
+        seq = [("left", CORRECT), ("right", INCORRECT),
+               ("left", CORRECT), ("left", CORRECT)]
+        for k, (side, outcome) in enumerate(seq, start=1):
+            _fill(log, k, side, outcome, start_s=30 * k, end_s=30 * k + 20)
+            log._rows[k].sched_state = "INTERVENTION"
+            log._rows[k].block_kind = "side_bias"
+        r = build_traces(log.snapshot(5, armed=True))
+        self.assertEqual(len(r.blocks), 1)
+        span = r.blocks[0]
+        # One point per in-block trial, on the block's own x (trial-start s).
+        self.assertEqual(span.xs, (30.0, 60.0, 90.0, 120.0))
+        # Cumulative compliance = running fraction that went to the forced arm:
+        # 1/1, 1/2, 2/3, 3/4.
+        self.assertEqual(len(span.compliance), 4)
+        self.assertAlmostEqual(span.compliance[0], 1.0)
+        self.assertAlmostEqual(span.compliance[1], 0.5)
+        self.assertAlmostEqual(span.compliance[2], 2 / 3)
+        self.assertAlmostEqual(span.compliance[3], 0.75)
+        # Cumulative in-block P(left): 1/1, 1/2, 2/3, 3/4.
+        self.assertAlmostEqual(span.pleft[0], 1.0)
+        self.assertAlmostEqual(span.pleft[1], 0.5)
+        self.assertAlmostEqual(span.pleft[3], 0.75)
+
+    def test_block_trajectory_empty_when_no_block(self):
+        log = _log(n=10)
+        for i in range(4):
+            _fill(log, i, "left", CORRECT, start_s=30 * i, end_s=30 * i + 20)
+        r = build_traces(log.snapshot(4, armed=True))
+        self.assertEqual(r.blocks, [])
+
 
 if __name__ == "__main__":
     unittest.main()
