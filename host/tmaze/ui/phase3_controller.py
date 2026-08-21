@@ -74,7 +74,7 @@ from tmaze.core.phase3.excursion_log import (
 from tmaze.core.phase3.phase3_log import Phase3Log, Phase3StateSnapshot
 from tmaze.core.session.session_notes import (
     AUTO_ALT_END, AUTO_ALT_START, AUTO_BACK, AUTO_DEBIAS_END,
-    AUTO_DEBIAS_START, AUTO_REPEAT, AUTO_SKIP)
+    AUTO_DEBIAS_START, AUTO_PROBE_END, AUTO_PROBE_START, AUTO_REPEAT, AUTO_SKIP)
 from tmaze.core.phase3.phase3_task import ABANDONED, CORRECT, INCORRECT, Phase3Config, Phase3Task
 from tmaze.core.reward.reward_dispenser import WellDispenser
 from tmaze.core.reward.reward_volume import format_volume, reward_volume_ul
@@ -259,6 +259,10 @@ class Phase3ControlView(VisionActuator):
         # Live tallies (thread-written, Tk-read for status).
         self._correct = 0
         self._incorrect = 0
+        # Unrewarded probe-trial tallies (probe_blocks.py): scored probe trials and
+        # of those how many were correct, for the conditional status segment.
+        self._probe_done = 0
+        self._probe_correct = 0
         self._reward_count = 0
         self._reward_ul = 0.0            # session dispensed volume (prime + top-ups)
         self._active_seed = 0
@@ -525,6 +529,29 @@ class Phase3ControlView(VisionActuator):
         st = self._state
         return st is not None and st.generator != "balanced"
 
+    # The unrewarded probe-block override (Rig-view / control-bar button). Unlike
+    # the debias/alternation toggles this works under ANY generator (probes are
+    # orthogonal to the closed-loop stack; probe_blocks.py). Enqueued like the
+    # other overrides and applied on the next committed trial at a block boundary.
+    def force_probe_block(self) -> None:
+        """Operator: request an unrewarded probe block (starts at the next
+        counterbalanced boundary with no intervention active)."""
+        self._enqueue_act(("cmd", "probe_start"))
+
+    def end_probe_block(self) -> None:
+        """Operator: end a running probe early, or cancel a pending request."""
+        self._enqueue_act(("cmd", "probe_end"))
+
+    def toggle_probe_block(self) -> None:
+        """Flip a probe block on/off from the published probe state: end/cancel when
+        ACTIVE or PENDING, else start one."""
+        st = self._state
+        probe_state = getattr(st, "probe_state", "NORMAL") if st is not None else "NORMAL"
+        if probe_state in ("ACTIVE", "PENDING"):
+            self.end_probe_block()
+        else:
+            self.force_probe_block()
+
     # --------------------------------------------------------------- thread
     def _process_act_item(self, item, snap) -> None:
         """Sole caller of CueGate.step / TaskEvents.update / Phase3Task.update /
@@ -567,6 +594,7 @@ class Phase3ControlView(VisionActuator):
         self._reward_trial_index = None
         self._active_seed = snap.seed
         self._correct = self._incorrect = self._reward_count = 0
+        self._probe_done = self._probe_correct = 0
         self._reward_ul = 0.0
         self._active_cue = None
         # Start a fresh session data file: the planned matrix is written now, then
@@ -644,6 +672,21 @@ class Phase3ControlView(VisionActuator):
                 self._task.end_alternation_block()
                 self._emit_intervention(AUTO_ALT_END,
                                         "de-alternation block ended", idx, iso)
+            self._publish_state(armed=snap.gate_open)
+            return
+        if name in ("probe_start", "probe_end"):
+            # Operator request for an unrewarded probe block (probe_blocks.py).
+            # Latched on the task, applied on the next committed trial at a
+            # counterbalanced boundary; publish so the control bar/readout reflect
+            # the request (PENDING) promptly.
+            if name == "probe_start":
+                self._task.force_probe_block()
+                self._emit_intervention(AUTO_PROBE_START,
+                                        "probe block requested", idx, iso)
+            else:
+                self._task.end_probe_block()
+                self._emit_intervention(AUTO_PROBE_END,
+                                        "probe block ended/cancelled", idx, iso)
             self._publish_state(armed=snap.gate_open)
             return
         if name == "skip":
@@ -892,6 +935,13 @@ class Phase3ControlView(VisionActuator):
                 self._correct += 1
             elif dec.outcome == INCORRECT:
                 self._incorrect += 1
+            # Tally scored PROBE trials separately for the status readout (they are
+            # still counted in _correct/_incorrect above - the session accuracy is
+            # over all scored trials; the probe segment is an extra breakdown).
+            if dec.probe and dec.outcome in (CORRECT, INCORRECT):
+                self._probe_done += 1
+                if dec.outcome == CORRECT:
+                    self._probe_correct += 1
             # One excursion-log row per outbound trip (stem + non-stem), on the
             # once-per-excursion choice_committed edge (ADR-0109). Done after the
             # score fold so a scored stem trip's choice_time (this frame's iso) is
@@ -1059,10 +1109,21 @@ class Phase3ControlView(VisionActuator):
         done = self._correct + self._incorrect
         acc = (100.0 * self._correct / done) if done else 0.0
         extra = f"  drops:{self._act_drops}" if self._act_drops else ""
+        # Conditional probe segment: only after the first scored probe trial (so a
+        # normal session's status line is unchanged), plus a live PROBE tag while a
+        # probe block is running/pending. See probe_blocks.py / docs/decisions/0115-probe.
+        probe = ""
+        st = self._state
+        probe_state = getattr(st, "probe_state", "NORMAL") if st is not None else "NORMAL"
+        if self._probe_done:
+            ppct = 100.0 * self._probe_correct / self._probe_done
+            probe = f"  probe:{self._probe_correct}/{self._probe_done} ({ppct:.0f}%)"
+        if probe_state in ("ACTIVE", "PENDING"):
+            probe += f"  [PROBE {probe_state}]"
         self._status_text = (
             f"ARMED  seed:{self._active_seed}  trial:{min(idx + 1, n)}/{n}  "
             f"correct:{self._correct}/{done} ({acc:.0f}%)  "
-            f"rewards:{self._reward_count} ({format_volume(self._reward_ul)})  "
+            f"rewards:{self._reward_count} ({format_volume(self._reward_ul)}){probe}  "
             f"{self._last_fw_cue}{extra}")
 
     def _send_cmd(self, cmd: str) -> None:
@@ -1346,10 +1407,18 @@ class Phase3ControlView(VisionActuator):
         left = "L" if s["high_tone_is_left"] else "R"
         seed = s.get("seed")
         seed_txt = "random each launch" if seed is None else str(seed)
+        # Read-only probe-block summary (params are file-only per ADR-0070, like the
+        # tones/seed; the only live control is the Rig-view "Start probe block"
+        # button). See probe_blocks.py / docs/decisions/0115-probe.
+        pb = s.get("probe_blocks", {})
+        if pb.get("enabled", False):
+            probe_txt = f" \u00b7 probe {int(pb.get('block_len', 10))} (manual)"
+        else:
+            probe_txt = " \u00b7 probe off"
         self._seq_info_var.set(
             f"trials {s['max_trials']} \u00b7 block {s['block_size']} \u00b7 "
             f"max-run {s['max_same_run']} \u00b7 tones {s['high_tone_hz']}/"
-            f"{s['low_tone_hz']} Hz (HIGH={left}) \u00b7 seed {seed_txt}")
+            f"{s['low_tone_hz']} Hz (HIGH={left}) \u00b7 seed {seed_txt}{probe_txt}")
 
     def _sync_debias_enabled(self) -> None:
         """Enable each intervention's controls to match the generator + its enable
@@ -1796,5 +1865,8 @@ class Phase3ControlView(VisionActuator):
             result = f"chose {chosen} {'OK' if row.outcome == CORRECT else 'X'}"
         else:
             result = ""
+        # Tag an unrewarded probe trial (probe_blocks.py); probes are inserted at
+        # runtime, so they only appear once committed (docs/decisions/0115-probe).
+        tag = " PROBE" if row.probe == "1" else ""
         return (f"{mark}{row.trial:>4}  {row.choice_cue:<4}->{arm}  "
-                f"ret L:{left} R:{right}   {result}")
+                f"ret L:{left} R:{right}{tag}   {result}")

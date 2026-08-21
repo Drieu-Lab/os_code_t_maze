@@ -54,6 +54,11 @@ _BUTTONS = (
     # only): toggles a corrective block that forces the last choice. See
     # alternation.py / intervention_stack.py.
     ("alt", "Start alt block", "phase3.alt_toggle"),
+    # Manual unrewarded probe block (probe_blocks.py). Unlike the two toggles
+    # above this is live under ANY generator (probes are orthogonal to the
+    # closed-loop stack); enable = armed and probe_enabled. Label + enable set in
+    # _refresh from the published probe state.
+    ("probe", "Start probe block", "phase3.probe_toggle"),
 )
 
 
@@ -148,6 +153,10 @@ class TrialControlBar:
         in_block = bool(has_state
                         and getattr(state, "debias_state", "NORMAL") == "INTERVENTION")
         active_kind = getattr(state, "active_kind", "") if has_state else ""
+        # Probe is orthogonal to the generator: live whenever armed and probe blocks
+        # are enabled this run (the snapshot carries both). See probe_blocks.py.
+        probe_on = bool(has_state and getattr(state, "probe_enabled", False))
+        probe_state = getattr(state, "probe_state", "NORMAL") if has_state else "NORMAL"
         enabled = {
             "skip": armed,
             "repeat": armed,
@@ -157,6 +166,7 @@ class TrialControlBar:
             "pause": armed,
             "debias": armed and debias_on,
             "alt": armed and alt_on,
+            "probe": armed and probe_on,
         }
         for key, b in self._buttons.items():
             b.configure(state=("normal" if enabled.get(key) else "disabled"))
@@ -177,3 +187,9 @@ class TrialControlBar:
             alt_active = in_block and active_kind == "alternation"
             self._buttons["alt"].configure(
                 text="End alt block" if alt_active else "Start alt block")
+        # The probe toggle reads "End probe block" while a probe is running OR still
+        # pending (so a mistaken request can be cancelled before it starts).
+        if "probe" in self._buttons:
+            probe_active = probe_state in ("ACTIVE", "PENDING")
+            self._buttons["probe"].configure(
+                text="End probe block" if probe_active else "Start probe block")

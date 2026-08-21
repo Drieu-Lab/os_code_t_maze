@@ -203,6 +203,14 @@ class Phase3Stats:
     cue_dwell_mean_s: Optional[float] = None
     cue_dwell_median_s: Optional[float] = None
     cue_dwell_n: int = 0
+    # ---- unrewarded probe blocks (probe_blocks.py; 0/None without probes) ----
+    # Probe trials are EXCLUDED from every reinforced/out-of-block measure above
+    # (they are neither reinforced nor coerced), and summarised on their own: their
+    # accuracy is the "latent knowledge" read-out to compare against ``accuracy_cum``
+    # (expressed/reinforced performance). See docs/decisions/0115-probe.
+    probe_completed: int = 0
+    probe_correct: int = 0
+    probe_accuracy: Optional[float] = None
     # ---- per-width reward pulse tally (calibration-free; see docs/decisions/0110) --
     # Maps a pulse width in ms (as a string key, e.g. "500") to the number of pulses
     # delivered at that width over the completed trials (primes + lick top-ups).
@@ -322,9 +330,19 @@ def compute(snapshot: Optional[Phase3StateSnapshot], *,
     # learning measures use them; in-block (INTERVENTION) trials force one side and
     # are summarized on their own. For a balanced session inb is empty and oob is
     # every completed trial, so every measure below matches the pre-debias readout.
-    inb = [r for r in completed if r.sched_state == INTERVENTION_LABEL]
-    oob = [r for r in completed if r.sched_state != INTERVENTION_LABEL]
+    # Probe trials (unrewarded read-out; probe_blocks.py) are their OWN partition:
+    # excluded from both the in-block (coerced) and out-of-block (reinforced) sets,
+    # so probe extinction never drags the reinforced accuracy down. Summarised
+    # separately as the latent-knowledge accuracy. See docs/decisions/0115-probe.
+    probe_rows = [r for r in completed if r.probe == "1"]
+    inb = [r for r in completed
+           if r.sched_state == INTERVENTION_LABEL and r.probe != "1"]
+    oob = [r for r in completed
+           if r.sched_state != INTERVENTION_LABEL and r.probe != "1"]
     noob = len(oob)
+    probe_completed = len(probe_rows)
+    probe_correct = sum(1 for r in probe_rows if r.outcome == CORRECT)
+    probe_accuracy = (probe_correct / probe_completed) if probe_completed else None
 
     correct_oob = sum(1 for r in oob if r.outcome == CORRECT)
     accuracy_cum = (correct_oob / noob) if noob else None
@@ -411,7 +429,9 @@ def compute(snapshot: Optional[Phase3StateSnapshot], *,
         alt_window_samples=(snapshot.alt_window_samples
                             if snapshot is not None else 0),
         cue_dwell_mean_s=cue_dwell_mean, cue_dwell_median_s=cue_dwell_median,
-        cue_dwell_n=len(dwells), reward_pulses_by_ms=reward_pulses_by_ms)
+        cue_dwell_n=len(dwells), reward_pulses_by_ms=reward_pulses_by_ms,
+        probe_completed=probe_completed, probe_correct=probe_correct,
+        probe_accuracy=probe_accuracy)
 
 
 def _dir_bias(rows: List[Phase3RowView]) -> Tuple[Optional[float], int, int]:
@@ -514,6 +534,10 @@ def _win_stay_lose_shift(
         if b.trial != a.trial + 1:
             continue
         if INTERVENTION_LABEL in (a.sched_state, b.sched_state):
+            continue
+        # A probe trial (unrewarded) is not the rat's freely-reinforced strategy,
+        # so break the pair rather than count a stay/shift into or out of it.
+        if getattr(a, "probe", None) == "1" or getattr(b, "probe", None) == "1":
             continue
         if a.chosen_arm not in (LEFT_LABEL, RIGHT_LABEL):
             continue

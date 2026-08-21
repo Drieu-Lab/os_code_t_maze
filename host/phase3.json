@@ -41,6 +41,10 @@
       "exit_min_samples": 6,
       "max_block_len": 15,
       "signal": "cue_aware"
+    },
+    "probe_blocks": {
+      "enabled": true,
+      "block_len": 10
     }
   }
 }

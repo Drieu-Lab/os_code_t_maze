@@ -42,6 +42,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 if TYPE_CHECKING:               # avoid a runtime import cycle (debias imports us)
     from tmaze.core.phase3.alternation import AlternationBlockConfig
     from tmaze.core.phase3.debias import DebiasBlockConfig
+    from tmaze.core.phase3.probe_blocks import ProbeBlockConfig
 
 # 32-bit mask so the LCG matches the firmware's uint32_t wraparound exactly.
 _U32 = 0xFFFFFFFF
@@ -93,6 +94,11 @@ class TrialConfig:
     generator: str = GEN_BALANCED
     debias: Optional["DebiasBlockConfig"] = None
     alternation: Optional["AlternationBlockConfig"] = None
+    # Unrewarded probe blocks (probe_blocks.py). Orthogonal to the debias /
+    # de-alternation stack and available under ANY generator, so it is carried on
+    # TrialConfig directly rather than under a generator. None (or ``enabled``
+    # False) => no probe machinery is built. See docs/decisions/0115-probe.
+    probe: Optional["ProbeBlockConfig"] = None
 
 
 def lcg(state: int) -> int:
@@ -220,6 +226,8 @@ class TrialSequence:
             GEN_DEBIAS_BLOCKS, GEN_INTERVENTION_BLOCKS)
         self._committed: Dict[int, int] = {}
         self._meta: Dict[int, object] = {}
+        # index -> (block_id, index_in_block) for committed probe trials.
+        self._probe_meta: Dict[int, Tuple[int, int]] = {}
         self._frontier = 0        # next index to commit (== len(committed))
         self._spine_pos = 0       # how many NORMAL trials have consumed the spine
         self._ctl = None
@@ -232,6 +240,18 @@ class TrialSequence:
             )
             self._ctl = InterventionStackController(
                 self.cfg.debias, self.cfg.alternation)
+        # Optional unrewarded probe blocks - orthogonal to the intervention stack
+        # and buildable under ANY generator (probe_blocks.py). Present it and the
+        # lazy-commit path turns on even for the "balanced" generator, so a probe
+        # can insert on top of the spine without consuming it.
+        self._probe = None
+        if self.cfg.probe is not None and self.cfg.probe.enabled:
+            from tmaze.core.phase3.probe_blocks import ProbeBlockController
+            self._probe = ProbeBlockController(self.cfg.probe, seed=self.seed)
+        # The lazy, in-order commit machinery (correct side decided the first time
+        # a trial is reached) is needed whenever something inserts trials on top of
+        # the spine: a closed-loop generator OR a probe block under any generator.
+        self._lazy_commit = self._closed_loop or (self._probe is not None)
 
     def __len__(self) -> int:
         return len(self.seq)
@@ -244,7 +264,7 @@ class TrialSequence:
         :meth:`commit`)."""
         if not (0 <= index < len(self.seq)):
             return None
-        if not self._closed_loop:
+        if not self._lazy_commit:
             return self.seq[index]
         if index in self._committed:
             return self._committed[index]
@@ -281,11 +301,12 @@ class TrialSequence:
         return self.seq[min(spine_pos, len(self.seq) - 1)]
 
     def is_committed(self, index: int) -> bool:
-        """True if trial ``index``'s correct side is finalized: always True in
-        balanced mode; in debias_blocks mode once :meth:`commit` has reached it.
+        """True if trial ``index``'s correct side is finalized: always True when no
+        block can insert (plain balanced, no probe); under a closed-loop generator
+        or with probe blocks enabled, once :meth:`commit` has reached it.
         Un-committed trials only have a provisional side (see :meth:`_provisional_arm`).
         """
-        return (not self._closed_loop) or (index in self._committed)
+        return (not self._lazy_commit) or (index in self._committed)
 
     def commit(self, index: int) -> Optional[int]:
         """Fix (and cache) the correct side for trial ``index`` and every trial
@@ -299,21 +320,43 @@ class TrialSequence:
         range)."""
         if not (0 <= index < len(self.seq)):
             return None
-        if not self._closed_loop:
+        if not self._lazy_commit:
             return self.seq[index]
         while self._frontier <= index:
             self._commit_one(self._frontier)
         return self._committed[index]
 
+    def _next_spine_side(self) -> int:
+        """Take (and consume) the next counterbalanced spine side. Clamps at the
+        tail so a burst of inserted trials near the end can't index past it."""
+        side = self.seq[min(self._spine_pos, len(self.seq) - 1)]
+        self._spine_pos += 1
+        return side
+
     def _commit_one(self, i: int) -> None:
-        dec = self._ctl.decide()
-        if dec.side is not None:
-            side = dec.side                    # forced block side
+        # Probe blocks take PRIORITY over the intervention stack and suspend it
+        # while active: a probe trial forces its own counterbalanced side, does NOT
+        # consume the spine, and does NOT poll the stack (so no intervention block
+        # advances during a probe). See probe_blocks.py / docs/decisions/0115-probe.
+        if self._probe is not None:
+            interv_active = self._ctl is not None and self._ctl.target is not None
+            pdec = self._probe.decide(
+                spine_pos=self._spine_pos, block_size=self.cfg.block_size,
+                intervention_active=interv_active)
+            if pdec.active:
+                self._committed[i] = pdec.side
+                self._meta[i] = None          # a probe carries no stack decision
+                self._probe_meta[i] = (pdec.block_id, pdec.index_in_block)
+                self._frontier = i + 1
+                return
+        if self._ctl is not None:
+            dec = self._ctl.decide()
+            side = dec.side if dec.side is not None else self._next_spine_side()
+            self._meta[i] = dec
         else:
-            side = self.seq[self._spine_pos]   # next counterbalanced spine side
-            self._spine_pos += 1
+            side = self._next_spine_side()    # plain balanced spine (probe enabled)
+            self._meta[i] = None
         self._committed[i] = side
-        self._meta[i] = dec
         self._frontier = i + 1
 
     def record_outcome(self, index: int, cued_side: int, chosen_side: int) -> None:
@@ -323,31 +366,41 @@ class TrialSequence:
             self._ctl.record(cued_side, chosen_side)
 
     def trial_meta(self, index: int):
-        """The closed-loop metadata for trial ``index`` as a dict:
-        ``{sched_state, block_id, block_trigger, bias, block_kind, alt_rate}``. For
-        a committed trial these are its decided values; otherwise a provisional read
-        of the current controller state. ``block_kind`` names the active
-        intervention ("side_bias"/"alternation"; "" when NORMAL) and ``alt_rate`` is
-        the cue-aware alternation rate (None when no alternation detector is running).
-        In "balanced" mode every trial is NORMAL."""
-        if not self._closed_loop or self._ctl is None:
-            return {"sched_state": "NORMAL", "block_id": 0, "block_trigger": "",
-                    "bias": 0.0, "block_kind": "", "alt_rate": None}
+        """The per-trial scheduler metadata for trial ``index`` as a dict:
+        ``{sched_state, block_id, block_trigger, bias, block_kind, alt_rate,
+        probe}``. For a committed trial these are its decided values; otherwise a
+        provisional read of the current controller state. ``block_kind`` names the
+        active intervention ("side_bias"/"alternation"; "" when NORMAL) and
+        ``alt_rate`` is the cue-aware alternation rate (None when no alternation
+        detector is running). ``probe`` is True on an unrewarded probe trial
+        (orthogonal to the intervention state, which stays NORMAL). In plain
+        balanced mode every non-probe trial is NORMAL."""
+        d = {"sched_state": "NORMAL", "block_id": 0, "block_trigger": "",
+             "bias": 0.0, "block_kind": "", "alt_rate": None, "probe": False}
+        # A committed probe trial: NORMAL scheduler state, just flagged probe (it
+        # carries no intervention decision - the stack was suspended).
+        if index in self._probe_meta:
+            d["probe"] = True
+            return d
+        if not self._lazy_commit or self._ctl is None:
+            return d
         dec = self._meta.get(index)
         if dec is not None:
             kind = getattr(dec, "kind", None)
             if kind is None:                       # single DebiasBlockController
                 kind = "side_bias" if dec.state == "INTERVENTION" else ""
-            return {"sched_state": dec.state, "block_id": dec.block_id,
-                    "block_trigger": dec.trigger, "bias": dec.bias,
-                    "block_kind": kind, "alt_rate": getattr(dec, "alt_rate", None)}
+            d.update(sched_state=dec.state, block_id=dec.block_id,
+                     block_trigger=dec.trigger, bias=dec.bias,
+                     block_kind=kind, alt_rate=getattr(dec, "alt_rate", None))
+            return d
         active_kind = getattr(self._ctl, "active_kind", None)
         if active_kind is None:                    # single DebiasBlockController
             active_kind = "side_bias" if self._ctl.state == "INTERVENTION" else ""
         alt_rate = self._ctl.alt_rate() if hasattr(self._ctl, "alt_rate") else None
-        return {"sched_state": self._ctl.state, "block_id": self._ctl.block_id,
-                "block_trigger": "", "bias": self._ctl.bias(),
-                "block_kind": active_kind, "alt_rate": alt_rate}
+        d.update(sched_state=self._ctl.state, block_id=self._ctl.block_id,
+                 block_trigger="", bias=self._ctl.bias(),
+                 block_kind=active_kind, alt_rate=alt_rate)
+        return d
 
     # ------------------------------------------------- operator overrides
     def force_block(self, side: Optional[int] = None) -> None:
@@ -364,6 +417,31 @@ class TrialSequence:
         Under "intervention_blocks" this ends whichever block is active."""
         if self._ctl is not None:
             self._ctl.end_block()
+
+    def force_probe_block(self) -> None:
+        """Operator: request an unrewarded probe block. It starts at the next
+        counterbalanced block boundary with no intervention active (probe_blocks.py).
+        A no-op when probe blocks are not enabled this run."""
+        if self._probe is not None:
+            self._probe.force_block()
+
+    def end_probe_block(self) -> None:
+        """Operator: end a running probe early, or cancel a still-pending request.
+        A no-op when probe blocks are not enabled this run."""
+        if self._probe is not None:
+            self._probe.end_block()
+
+    @property
+    def probe_enabled(self) -> bool:
+        """Whether unrewarded probe blocks are available this run (the operator
+        button is live only then)."""
+        return self._probe is not None
+
+    def probe_state(self) -> str:
+        """Probe scheduler state for the snapshot/readout: ``ACTIVE`` while a probe
+        runs, ``PENDING`` once requested but not started, else ``NORMAL`` (also when
+        probe is disabled)."""
+        return self._probe.state() if self._probe is not None else "NORMAL"
 
     def force_alternation_block(self) -> None:
         """Operator: start a de-alternation block on the next committed trial.
@@ -421,26 +499,34 @@ class TrialSequence:
 
     @property
     def is_debias(self) -> bool:
-        """True in any closed-loop mode (debias_blocks or intervention_blocks).
+        """True whenever the lazy, in-order commit path is active: any closed-loop
+        generator (debias_blocks / intervention_blocks) OR a probe-enabled run.
 
         Kept under the historical name for back-compat: the log/task shells gate
-        their closed-loop paths on it, and those paths are identical for either
-        closed-loop generator."""
-        return self._closed_loop
+        their per-trial "set the decided cue + scheduler context" paths on it, and
+        those paths must run for probe trials too (so the probe flag is logged even
+        under the plain balanced generator)."""
+        return self._lazy_commit
 
     @property
     def is_closed_loop(self) -> bool:
-        """Clearer alias for :attr:`is_debias` (any closed-loop generator)."""
-        return self._closed_loop
+        """Clearer alias for :attr:`is_debias` (any lazy-commit run)."""
+        return self._lazy_commit
 
     def reset_debias(self) -> None:
-        """Rewind the closed-loop state to a fresh session (Restart button)."""
+        """Rewind the lazy-commit state to a fresh session (Restart button):
+        the intervention controller, the probe controller, and the commit caches."""
+        if not self._lazy_commit:
+            return
         if self._ctl is not None:
             self._ctl.reset()
-            self._committed.clear()
-            self._meta.clear()
-            self._frontier = 0
-            self._spine_pos = 0
+        if self._probe is not None:
+            self._probe.reset()
+        self._committed.clear()
+        self._meta.clear()
+        self._probe_meta.clear()
+        self._frontier = 0
+        self._spine_pos = 0
 
     def choice_cue(self, index: int) -> Optional[str]:
         """The CHOICE cue identity (HIGH/LOW) for trial ``index``, or None if out of range."""

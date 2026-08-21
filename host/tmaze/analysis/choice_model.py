@@ -160,6 +160,10 @@ def fit_in_block_interaction(
         raise ImportError("choice_model.fit_in_block_interaction requires statsmodels")
     c = signals[signals["completed"].fillna(False)].copy()
     c = c[c["choice"].notna() & c["cue_side"].notna()]
+    # Exclude unrewarded probe trials: they are neither free-reinforced nor
+    # intervention trials, so they don't belong in the free-vs-block contrast.
+    if "probe" in c.columns:
+        c = c[~c["probe"].fillna(False)]
     if len(c) < min_trials or c["in_block"].fillna(False).sum() < 10:
         return None
     y = _signed(c["choice"]).map({1.0: 1, -1.0: 0}).astype(int)

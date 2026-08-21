@@ -45,6 +45,10 @@ class TraceResult:
     traces: pd.DataFrame
     session_bounds: List[dict] = field(default_factory=list)
     blocks: List[dict] = field(default_factory=list)
+    # Contiguous unrewarded probe-block runs (probe_blocks.py), each a dict with
+    # ``session_id, start_seq, end_seq, length, n, accuracy`` - the offline twin of
+    # phase3_traces.ProbeBlockSummary for the notebook. See docs/decisions/0115-probe.
+    probe_blocks: List[dict] = field(default_factory=list)
 
 
 def _masked_rate(
@@ -95,6 +99,8 @@ def build_traces(
             # in-block trial, and whether the animal complied with the pushed side).
             "epoch": c["epoch"].to_numpy(),
             "in_block": c["in_block"].fillna(False).to_numpy(),
+            "probe": bool_series(c["probe"]).to_numpy() if "probe" in c
+            else np.zeros(len(c), dtype=bool),
             "block_kind": c["block_kind"].replace("", pd.NA).to_numpy(),
             "complying": (c["choice"] == c["correct_arm"]).to_numpy(),
         }
@@ -133,6 +139,7 @@ def build_traces(
         traces=traces,
         session_bounds=_session_bounds(c),
         blocks=block_epochs(c),
+        probe_blocks=probe_epochs(c),
     )
 
 
@@ -184,6 +191,49 @@ def block_epochs(c: pd.DataFrame) -> List[dict]:
                 "length": int(len(grp)),
             }
         )
+    out.sort(key=lambda b: b["start_seq"])
+    return out
+
+
+def probe_epochs(c: pd.DataFrame) -> List[dict]:
+    """Contiguous unrewarded probe-block runs as ``seq`` spans, with per-block
+    accuracy - the offline twin of ``phase3_traces._probe_spans``.
+
+    A probe block is a maximal run of ``probe``-flagged completed trials within a
+    session/run (probe blocks are inserted at runtime and carry no block_id, so
+    they are grouped by contiguity, not id). Returns one dict per block:
+    ``session_id, start_seq, end_seq, length, n, accuracy`` - the spans the
+    notebook shades and the per-block latent-knowledge accuracy it marks. See
+    docs/decisions/0115-probe."""
+    if "probe" not in c.columns:
+        return []
+    probe = bool_series(c["probe"])
+    out: List[dict] = []
+    run: List[int] = []
+
+    def flush(sid) -> None:
+        if not run:
+            return
+        grp = c.loc[run]
+        n = len(grp)
+        acc = (float(bool_series(grp["correct"]).sum()) / n) if n else None
+        out.append({
+            "session_id": sid,
+            "start_seq": int(grp["seq"].min()),
+            "end_seq": int(grp["seq"].max()),
+            "length": n,
+            "n": n,
+            "accuracy": acc,
+        })
+        run.clear()
+
+    for (sid, _run), grp in c.groupby(["session_id", "run_idx"], sort=False):
+        for i in grp.index:
+            if bool(probe.at[i]):
+                run.append(i)
+            elif run:
+                flush(sid)
+        flush(sid)
     out.sort(key=lambda b: b["start_seq"])
     return out
 

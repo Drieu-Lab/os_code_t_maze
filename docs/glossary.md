@@ -199,6 +199,20 @@ event. The GUI runs a "Tk poll" roughly every 100 ms to refresh status and hand
 the actuation thread a fresh [snapshot](#snapshot). Polling is simple but adds up
 to a poll-interval of delay, which is why the fast/hot path avoids it.
 
+### Probe block
+A short run of **unrewarded** trials dropped into an otherwise normal Phase 3
+session: the cue plays and the choice is scored as usual, but no reward is
+delivered. Comparing accuracy under a probe (what the animal *knows* — its latent
+cue→action map) against its reinforced accuracy (what it *expresses* when paid)
+separates knowledge from reward-driven engagement — the acquisition/expression
+dissociation of Drieu et al. 2025. Like an [intervention block](#intervention-tag)
+it is *inserted on top of* the counterbalanced schedule (it doesn't consume the
+seed-deterministic left/right spine) and it is internally 5/5 balanced, but it is
+orthogonal to the debias/alternation corrections and takes priority over them.
+Manual-only for now (an operator button); marked by a `probe` column in the log
+and excluded from reinforced accuracy everywhere. See
+[ADR-0115](decisions/0115-phase3-unrewarded-probe-blocks.md).
+
 ### Protocol
 The agreed format of the messages between firmware and host — the
 `<ms>,<TYPE>,<payload…>` serial lines and what each field means. Parsed in one
@@ -304,7 +318,9 @@ trial (the animal's uncoerced behaviour); **in-block** = a trial inside an activ
 block, where the schedule is forcing one side; **post-block** = a normal trial
 shortly after a block ended (to see carryover). Blocks are kept, not thrown away —
 baseline strategy is measured on *free* trials, the animal's response on *in-block*
-trials, and persistence on *post-block* trials. See ADR-0112.
+trials, and persistence on *post-block* trials. A [probe block](#probe-block)
+trial is tagged as its own **probe** epoch, kept out of all three reinforced sets.
+See ADR-0112 and ADR-0115.
 
 ### USB CDC
 The USB standard that lets a device pretend to be an old-style serial port, so

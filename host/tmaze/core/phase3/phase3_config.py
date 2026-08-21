@@ -41,6 +41,7 @@ from typing import Optional
 from tmaze.core.cue_gate import CueParams
 from tmaze.core.phase3.alternation import AlternationBlockConfig
 from tmaze.core.phase3.debias import DebiasBlockConfig
+from tmaze.core.phase3.probe_blocks import ProbeBlockConfig
 from tmaze.core.phase3.phase3_task import Phase3Config
 from tmaze.core.phase3.trial_sequence import (
     GEN_BALANCED, GEN_DEBIAS_BLOCKS, GEN_INTERVENTION_BLOCKS, TrialConfig,
@@ -72,7 +73,11 @@ _SCHEMA = {
              "(counterbalanced + closed-loop side-bias corrective blocks; params in "
              "'debias_blocks'), or 'intervention_blocks' (counterbalanced + the "
              "'enabled' interventions in 'debias_blocks' and/or 'alternation_blocks' "
-             "run concurrently, one active at a time)."),
+             "run concurrently, one active at a time). 'probe_blocks' adds "
+             "unrewarded, internally-counterbalanced probe blocks (block_len trials) "
+             "started MANUALLY from the Rig-view button; they work under ANY "
+             "generator and read out latent cue->side knowledge (docs/decisions/"
+             "0115-probe)."),
 }
 
 
@@ -87,6 +92,7 @@ def default_config() -> dict:
     """
     pc, cp, tc, db = Phase3Config(), CueParams(), TrialConfig(), DebiasBlockConfig()
     al = AlternationBlockConfig()
+    pb = ProbeBlockConfig()
     return {
         "_schema": dict(_SCHEMA),
         "reward": {
@@ -133,6 +139,20 @@ def default_config() -> dict:
                 "exit_min_samples": al.exit_min_samples,
                 "max_block_len": al.max_block_len,
                 "signal": al.signal,
+            },
+            # Unrewarded probe blocks (docs/decisions/0115-probe): a short block
+            # where the cue plays and the choice is scored but no reward is given,
+            # to read out latent cue->side knowledge vs reinforced performance.
+            # MANUAL-only for now (started from the Rig-view "Start probe block"
+            # button); automatic triggers are deferred (see docs/future-work.md),
+            # so this section carries just the two knobs the button needs. Works
+            # under ANY generator (orthogonal to the intervention stack).
+            # Derived from the dataclass default (enabled False) so default_config
+            # mirrors a bare TrialConfig (no drift; test_phase3_config). The live
+            # host/phase3.json turns it on to expose the "Start probe block" button.
+            "probe_blocks": {
+                "enabled": pb.enabled,
+                "block_len": pb.block_len,
             },
         },
     }
@@ -274,6 +294,19 @@ def _to_alternation_config(d: dict) -> AlternationBlockConfig:
                                   max_block_len=max_block_len, signal=signal)
 
 
+def _to_probe_config(d: dict) -> ProbeBlockConfig:
+    """Build + range-check the unrewarded-probe `ProbeBlockConfig` from the
+    ``sequence.probe_blocks`` sub-section (missing keys fall back to defaults).
+    ``block_len`` must be > 0; there is no upper bound beyond the session length
+    (a probe that runs off the end simply ends with the session)."""
+    pb = ProbeBlockConfig()
+    enabled = bool(d.get("enabled", pb.enabled))
+    block_len = int(d.get("block_len", pb.block_len))
+    if block_len <= 0:
+        raise ValueError("sequence.probe_blocks.block_len must be > 0")
+    return ProbeBlockConfig(enabled=enabled, block_len=block_len)
+
+
 def to_trial_config(config: dict) -> TrialConfig:
     """Build the schedule/tone `TrialConfig` from the ``sequence`` section."""
     s = config.get("sequence", {})
@@ -313,11 +346,18 @@ def to_trial_config(config: dict) -> TrialConfig:
             debias = debias_cfg
         if bool(al_sub.get("enabled", True)):
             alternation = alternation_cfg
+    # Probe blocks are ORTHOGONAL to the generator (they work under balanced too),
+    # so validate + attach them regardless; the controller is only built when
+    # ``enabled`` (see TrialSequence). Always validated so a bad block_len is caught
+    # on Save even under the balanced generator.
+    probe_cfg = _to_probe_config(s.get("probe_blocks", {}))
+    probe = probe_cfg if probe_cfg.enabled else None
     return TrialConfig(max_trials=max_trials, block_size=block_size,
                        max_same_run=max_same_run,
                        high_tone_is_left=bool(s.get("high_tone_is_left", True)),
                        high_tone_hz=high_hz, low_tone_hz=low_hz,
-                       generator=generator, debias=debias, alternation=alternation)
+                       generator=generator, debias=debias, alternation=alternation,
+                       probe=probe)
 
 
 def resolve_seed(config: dict) -> Optional[int]:

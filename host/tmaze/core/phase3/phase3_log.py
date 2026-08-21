@@ -66,6 +66,10 @@ COLUMNS = (
     # pulse widths (ms). Blank until the corresponding pulse fires. Raw ms only -
     # no calibration in the pure log; volume is computed downstream.
     "prime_ms", "topup_ms_total",
+    # Unrewarded PROBE trial marker (docs/decisions/0115-probe): "1" on a probe
+    # trial (cue + scoring normal, reward suppressed), blank otherwise. Orthogonal
+    # to sched_state (a probe stays NORMAL - it is not an intervention block).
+    "probe",
 )
 
 
@@ -112,6 +116,9 @@ class _Row:
     # matching pulse fires. See :meth:`reward_fired` / :meth:`topup_fired`.
     prime_ms: Optional[str] = None
     topup_ms_total: Optional[str] = None
+    # Unrewarded probe-trial marker ("1" / None); set in :meth:`set_decision` from
+    # the sequence's per-trial metadata (docs/decisions/0115-probe).
+    probe: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -150,6 +157,7 @@ class Phase3RowView:
     alt_rate: Optional[str]
     prime_ms: Optional[str]
     topup_ms_total: Optional[str]
+    probe: Optional[str]
 
 
 @dataclass(frozen=True)
@@ -208,6 +216,12 @@ class Phase3StateSnapshot:
     alt_trigger_rate: float = 0.0
     alt_min_samples: int = 0
     alt_window_samples: int = 0
+    # Unrewarded probe-block scheduler context (probe_blocks.py). ``probe_enabled``
+    # is whether probe blocks are available this run (the Rig-view button is live
+    # only then); ``probe_state`` is the CURRENT probe state at snapshot time
+    # ("ACTIVE" while a probe runs / "PENDING" once requested / "NORMAL").
+    probe_enabled: bool = False
+    probe_state: str = "NORMAL"
 
 
 class Phase3Log:
@@ -294,6 +308,7 @@ class Phase3Log:
         r.block_kind = m.get("block_kind") or None
         alt = m.get("alt_rate")
         r.alt_rate = None if alt is None else f"{alt:.4f}"
+        r.probe = "1" if m.get("probe") else None
 
     def refresh_provisional(self, current_index: int) -> None:
         """Re-align the DISPLAY cue columns of not-yet-scored trials from
@@ -480,14 +495,15 @@ class Phase3Log:
             alt_enabled=(al is not None),
             alt_trigger_rate=(al.trigger_rate if al is not None else 0.0),
             alt_min_samples=(al.min_samples if al is not None else 0),
-            alt_window_samples=seq.alt_samples())
+            alt_window_samples=seq.alt_samples(),
+            probe_enabled=seq.probe_enabled, probe_state=seq.probe_state())
 
     # ------------------------------------------------------------- render
     def _header_comment(self) -> List[str]:
         c = self.cfg
         lines = [
             f"# phase3_session animal={self.animal} session_id={self.session_id} "
-            f"seed={self.seed} proto=7",
+            f"seed={self.seed} proto=8",
             f"# high_tone_is_left={c.high_tone_is_left} "
             f"high_tone_hz={c.high_tone_hz} low_tone_hz={c.low_tone_hz}",
             f"# block_size={c.block_size} max_same_run={c.max_same_run} "

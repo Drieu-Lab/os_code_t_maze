@@ -72,6 +72,9 @@ _COLUMN_DEFAULTS: Dict[str, object] = {
     "bias": "0.0",
     "block_kind": "",
     "alt_rate": "0.0",
+    # Unrewarded probe-trial marker ("1" / ""); absent in pre-probe sessions, so it
+    # back-fills to "" (= not a probe). See docs/decisions/0115-probe.
+    "probe": "",
 }
 
 

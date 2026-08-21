@@ -91,6 +91,19 @@ class BlockSpan:
 
 
 @dataclass(frozen=True)
+class ProbeBlockSummary:
+    """A contiguous run of unrewarded PROBE completed trials, in x (seconds since
+    t0), for shading + a per-block accuracy marker (probe_blocks.py). ``n`` is the
+    number of scored probe trials in the run and ``accuracy`` their correct
+    fraction (None if none scored) - the latent-knowledge read-out plotted at the
+    span midpoint against the reinforced accuracy line. See docs/decisions/0114."""
+    start_t: float
+    end_t: float
+    n: int
+    accuracy: Optional[float]
+
+
+@dataclass(frozen=True)
 class TraceResult:
     """Parallel per-completed-trial series + intervention spans for one snapshot.
 
@@ -118,6 +131,7 @@ class TraceResult:
     sched_alt_rate: List[Optional[float]] = field(default_factory=list)
     # context
     blocks: List[BlockSpan] = field(default_factory=list)
+    probe_blocks: List[ProbeBlockSummary] = field(default_factory=list)
     t0_iso: Optional[str] = None
     window_n: int = DEFAULT_WINDOW
     iti_window_n: int = DEFAULT_WINDOW
@@ -131,7 +145,8 @@ class _Point:
     """Pre-reduced per-completed-trial facts the windowed rates sum over."""
     x: Optional[float]
     trial: int
-    oob: bool                       # out-of-block (uncoerced) trial
+    oob: bool                       # reinforced (uncoerced, non-probe) trial
+    probe: bool                     # unrewarded probe trial (probe_blocks.py)
     correct: bool
     choice: Optional[str]           # LEFT / RIGHT / None
     cue: Optional[str]              # HIGH / LOW / None (planned choice cue)
@@ -238,7 +253,11 @@ def build_traces(snapshot: Optional[Phase3StateSnapshot], *,
             continue
         choice = row.chosen_arm if row.chosen_arm in (LEFT_LABEL, RIGHT_LABEL) else None
         cue = row.choice_cue if row.choice_cue in (HIGH, LOW) else None
-        oob = row.sched_state != INTERVENTION_LABEL
+        probe = row.probe == "1"
+        # Reinforced (uncoerced) trials feed the accuracy/strategy series: neither
+        # an intervention block trial NOR an unrewarded probe (probe extinction must
+        # not drag the reinforced line down). See docs/decisions/0115-probe.
+        oob = row.sched_state != INTERVENTION_LABEL and not probe
         x_dt = _parse_iso(_row_x_iso(row))
         x = (x_dt - t0).total_seconds() if (x_dt is not None and t0 is not None) else None
 
@@ -251,8 +270,11 @@ def build_traces(snapshot: Optional[Phase3StateSnapshot], *,
             pchoice = (prev_completed.chosen_arm
                        if prev_completed.chosen_arm in (LEFT_LABEL, RIGHT_LABEL) else None)
             consecutive = row.trial == prev_completed.trial + 1
+            # Neither trial coerced (intervention) NOR unrewarded (probe): a probe
+            # is not the rat's freely-reinforced strategy, so it breaks the pair.
             neither_block = (row.sched_state != INTERVENTION_LABEL
-                             and prev_completed.sched_state != INTERVENTION_LABEL)
+                             and prev_completed.sched_state != INTERVENTION_LABEL
+                             and not probe and prev_completed.probe != "1")
             if consecutive and neither_block and choice is not None and pchoice is not None:
                 pair_valid = True
                 switched = choice != pchoice
@@ -260,7 +282,8 @@ def build_traces(snapshot: Optional[Phase3StateSnapshot], *,
                 prev_incorrect = prev_completed.outcome == INCORRECT
 
         pts.append(_Point(
-            x=x, trial=row.trial, oob=oob, correct=row.outcome == CORRECT,
+            x=x, trial=row.trial, oob=oob, probe=probe,
+            correct=row.outcome == CORRECT,
             choice=choice, cue=cue, cue_side=_cue_side(cue, high_left),
             correct_arm=row.correct_arm if row.correct_arm in (LEFT_LABEL, RIGHT_LABEL) else None,
             sched_state=row.sched_state or "NORMAL", kind=row.block_kind or "",
@@ -327,6 +350,7 @@ def build_traces(snapshot: Optional[Phase3StateSnapshot], *,
         out.sched_alt_rate.append(p.sched_alt)
 
     out.blocks.extend(_block_spans(pts))
+    out.probe_blocks.extend(_probe_spans(pts))
     return out
 
 
@@ -345,6 +369,32 @@ def _block_spans(pts: List[_Point]) -> List[BlockSpan]:
 
     for p in pts:
         if p.sched_state == INTERVENTION_LABEL:
+            run.append(p)
+        elif run:
+            flush()
+    if run:
+        flush()
+    return spans
+
+
+def _probe_spans(pts: List[_Point]) -> List[ProbeBlockSummary]:
+    """Contiguous runs of unrewarded PROBE completed trials, each as an x-span plus
+    its per-block accuracy (correct / scored), for shading + the accuracy marker.
+    A run with no usable x is skipped. See docs/decisions/0115-probe."""
+    spans: List[ProbeBlockSummary] = []
+    run: List[_Point] = []
+
+    def flush() -> None:
+        xs = [q.x for q in run if q.x is not None]
+        if xs:
+            n = len(run)
+            acc = (sum(1 for q in run if q.correct) / n) if n else None
+            spans.append(ProbeBlockSummary(start_t=min(xs), end_t=max(xs),
+                                           n=n, accuracy=acc))
+        run.clear()
+
+    for p in pts:
+        if p.probe:
             run.append(p)
         elif run:
             flush()

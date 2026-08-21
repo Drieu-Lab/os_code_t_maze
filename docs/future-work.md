@@ -95,6 +95,7 @@ criteria).
 | [FW-0040](#fw-0040-latent-state-glm-hmm-model-of-behavioural-mode) | Latent-state (GLM-HMM) model of behavioural mode | Cross-session analysis (`analysis/`) | Deferred |
 | [FW-0041](#fw-0041-reward-pressure--mode-transition-characterization) | Reward-pressure / mode-transition characterization | Cross-session analysis (`analysis/`) | Deferred |
 | [FW-0042](#fw-0042-live-excursion-based-engagement-traces) | Live excursion-based engagement traces (trips/min, non-stem fraction) | Phase 3 host + live trace panel | Proposed |
+| [FW-0043](#fw-0043-automatic-probe-block-triggers) | Automatic probe-block triggers (position / elapsed time / reward volume) | Phase 3 host (`core/phase3/probe_blocks.py`) | Proposed |
 
 ## Entries
 
@@ -2157,6 +2158,66 @@ engagement trace or give it its own?
 
 **ADR needed?** Yes (records the snapshot-publishing choice and the trace
 definitions), likely folded into a follow-up to ADR-0114.
+
+### FW-0043: Automatic probe-block triggers
+
+- **Status:** Proposed
+- **Date added:** 2026-08-21
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** `host/tmaze/core/phase3/probe_blocks.py` (a trigger
+  evaluator on `ProbeBlockController`), `host/tmaze/core/phase3/phase3_config.py`
+  (`sequence.probe_blocks` trigger parameters), `host/tmaze/core/phase3/phase3_task.py`
+  (feed the evaluator the per-trial context it needs), `host/tmaze/ui/phase3_controller.py`
+- **Related ADRs:** [ADR-0115](decisions/0115-phase3-unrewarded-probe-blocks.md)
+  (probe blocks - manual only), [ADR-0114](decisions/0114-live-session-metric-traces.md)
+  (the disengagement signal a time/volume trigger would key off),
+  [ADR-0110](decisions/0110-per-trial-reward-magnitude.md) (per-trial reward
+  magnitude, the source for a cumulative-volume trigger)
+
+**Motivation / context.** Probe blocks shipped MANUAL-only on purpose (ADR-0115,
+decision 5): the operator presses "Start probe block" so they can pilot WHERE in
+a session a probe is worth spending. The original request (from the paper's
+design, Drieu et al. 2025) was to run probes near disengagement onset - "a couple
+of blocks in from the start" and again "around the one-hour mark or 6-8 ml
+consumed". Once piloting settles good placements, those should be automatable so a
+session doesn't depend on the operator watching the clock.
+
+**Sketch of approach.** Add an optional trigger evaluator to
+`ProbeBlockController` (kept separate from the manual `force_block` latch so the
+button always works). Candidate triggers, config-driven under
+`sequence.probe_blocks`: (a) **fixed position** - fire at spine block boundary K
+(e.g. after 2 counterbalanced blocks); (b) **elapsed wall-clock** - fire once past
+T minutes into the session; (c) **cumulative reward volume** - fire once dispensed
+volume crosses V ml (sum the per-trial magnitudes, ADR-0110). Each trigger is
+one-shot (arms the pending latch once, then disarms) with a minimum spacing so two
+triggers can't stack. The controller already gates the actual START on a
+counterbalanced boundary with no intervention active, so a trigger only needs to
+set `pending` - the existing `decide()` placement rules are reused unchanged.
+Feed the evaluator the session clock / cumulative volume from `phase3_task` (which
+already sees each scored trial).
+
+**Evaluation / acceptance.** Headless tests: a position trigger fires exactly once
+at the configured boundary; a time trigger fires on the first trial past the
+threshold and not again; a volume trigger sums per-trial magnitudes and fires at
+the crossing; a manual `force_block` still works alongside an armed auto-trigger;
+minimum-spacing suppresses a second auto-probe too soon after the first. Placement
+determinism note from ADR-0115 still holds for position triggers (seed-derivable)
+but NOT for time/volume triggers (depend on the animal's pace) - assert the CSV
+records the realized placement either way.
+
+**Effort / risk.** Small-to-medium (the placement/insert machinery already
+exists; this is a trigger layer on top). Main risk is a poorly chosen threshold
+wasting probe trials on an already-disengaged animal - which is exactly why manual
+piloting comes first.
+
+**Open questions.** Which trigger(s) are actually useful once piloting is done -
+position, time, volume, or a disengagement-signal trigger keyed off the live
+rolling ITI (ADR-0114)? Should an auto-trigger be suppressed if the animal is
+already clearly disengaged (probe would be uninformative)? How many probes per
+session is too many (they cost unrewarded trials)?
+
+**ADR needed?** Yes - a follow-up to ADR-0115 recording the trigger semantics and
+the chosen thresholds/defaults.
 
 ## Completed
 

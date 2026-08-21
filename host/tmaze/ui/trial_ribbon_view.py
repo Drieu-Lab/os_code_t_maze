@@ -53,6 +53,10 @@ _FG_INCORRECT = "#b3261e"       # an incorrect choice
 # A closed-loop debias corrective block: a distinct coloured outline around the
 # cell (purple, so it reads apart from the current-trial fill and the OK/X colours).
 _CORRECTIVE_OUTLINE = "#8a2be2"
+# An unrewarded probe trial (probe_blocks.py): a distinct teal cell fill, so it
+# reads apart from the normal grey/current-yellow cells and the purple corrective
+# outline. See docs/decisions/0115-probe.
+_PROBE_BG = "#cdeede"
 
 # Compact one-letter labels for the strip (arms and cue tones).
 _ARM_SHORT = {"LEFT": "L", "RIGHT": "R"}
@@ -80,7 +84,10 @@ def progress_signature(state: Optional[Phase3StateSnapshot]):
             sum(1 for r in state.rows if r.outcome is not None),
             # so a NORMAL<->INTERVENTION toggle (incl. an operator override) redraws
             state.debias_state,
-            sum(1 for r in state.rows if r.sched_state == "INTERVENTION"))
+            sum(1 for r in state.rows if r.sched_state == "INTERVENTION"),
+            # so a probe appearing / the probe state changing redraws too
+            getattr(state, "probe_state", "NORMAL"),
+            sum(1 for r in state.rows if r.probe == "1"))
 
 
 class TrialRibbonView:
@@ -179,14 +186,27 @@ class TrialRibbonView:
 
     def _fill_cell(self, cell: dict, row: RibbonRow) -> None:
         """Update one pre-made ribbon cell in place (text, colours, highlight)."""
-        bg = _CELL_CURRENT_BG if row.is_current else _CELL_BG
+        # The current trial's yellow fill wins; else a probe trial gets its teal
+        # fill; else the neutral grey. Probe and corrective are orthogonal (a probe
+        # suspends interventions), so a probe cell never also shows the outline.
+        if row.is_current:
+            bg = _CELL_CURRENT_BG
+        elif row.probe:
+            bg = _PROBE_BG
+        else:
+            bg = _CELL_BG
         for key in ("frame", "trial", "choice", "ret"):
             cell[key].configure(bg=bg)
-        # Ring corrective-block trials in a distinct outline (and mark the number).
+        # Ring corrective-block trials in a distinct outline (and mark the number);
+        # tag probe trials in the number line instead.
         cell["frame"].configure(
             highlightthickness=2 if row.corrective else 0)
-        cell["trial"].configure(
-            text=(f"#{row.trial} blk" if row.corrective else f"#{row.trial}"))
+        if row.probe:
+            cell["trial"].configure(text=f"#{row.trial} prb")
+        elif row.corrective:
+            cell["trial"].configure(text=f"#{row.trial} blk")
+        else:
+            cell["trial"].configure(text=f"#{row.trial}")
         cell["choice"].configure(
             text=f"{row.choice_cue}->{_ARM_SHORT.get(row.choice_side, '?')}")
         cell["ret"].configure(

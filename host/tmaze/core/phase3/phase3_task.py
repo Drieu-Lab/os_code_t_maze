@@ -76,7 +76,9 @@ class Phase3Decision:
     TrialSequence's metadata; NORMAL/0/""/0.0/""/None for the balanced generator),
     so the controller can log and display it. ``block_kind`` names the active
     intervention ("side_bias"/"alternation"); ``alt_rate`` is the cue-aware
-    alternation rate (None when no alternation detector is running).
+    alternation rate (None when no alternation detector is running). ``probe`` is
+    True on an unrewarded probe trial (probe_blocks.py) - the choice is scored
+    normally but ``reward`` is forced False.
     """
     trial_index: int
     correct_arm: Optional[int]
@@ -91,6 +93,7 @@ class Phase3Decision:
     bias: float = 0.0
     block_kind: str = ""
     alt_rate: Optional[float] = None
+    probe: bool = False
 
 
 class Phase3Task:
@@ -193,6 +196,15 @@ class Phase3Task:
     def end_alternation_block(self) -> None:
         self.seq.end_alternation_block()
 
+    def force_probe_block(self) -> None:
+        """Operator: request an unrewarded probe block (probe_blocks.py). Takes
+        effect at the next counterbalanced boundary. No-op if probe is disabled."""
+        self.seq.force_probe_block()
+
+    def end_probe_block(self) -> None:
+        """Operator: end a running probe early, or cancel a pending request."""
+        self.seq.end_probe_block()
+
     def debias_state(self) -> str:
         return self.seq.debias_state()
 
@@ -249,11 +261,17 @@ class Phase3Task:
             # block counters update for the NEXT trial's decision (no-op balanced).
             if correct is not None:
                 self.seq.record_outcome(idx, correct, chosen)
+            # Suppress reward on a probe trial: the cue plays and the choice is
+            # scored as usual, but no prime fires (and, because the controller only
+            # tops up after a prime, no top-ups) and reward_incorrect is ignored -
+            # the unrewarded read-out of latent knowledge (probe_blocks.py).
+            reward = bool((is_correct or self.cfg.reward_incorrect)
+                          and not meta.get("probe", False))
             return Phase3Decision(
                 trial_index=idx, correct_arm=correct,
                 choice_side=choice_side,
                 outcome=CORRECT if is_correct else INCORRECT,
-                reward=bool(is_correct or self.cfg.reward_incorrect), **meta)
+                reward=reward, **meta)
 
         # --- Advance on the return lap (rat back at the hub after the choice). ---
         if self._awaiting_return and getattr(frame, "loop_closed", None) is not None:

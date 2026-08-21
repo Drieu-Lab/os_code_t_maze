@@ -314,14 +314,16 @@ def _debias_seq(n=40, seed=3):
 class TestDebiasLogging(unittest.TestCase):
     def test_new_columns_exist_in_order(self):
         # The six closed-loop columns, then the two reward-magnitude columns
-        # (docs/decisions/0110), are appended at the end of the schema, in order.
-        self.assertEqual(COLUMNS[-8:],
+        # (docs/decisions/0110), then the unrewarded-probe marker (docs/decisions/
+        # 0115-probe), are appended at the end of the schema, in order.
+        self.assertEqual(COLUMNS[-9:],
                          ("sched_state", "block_id", "block_trigger", "bias",
-                          "block_kind", "alt_rate", "prime_ms", "topup_ms_total"))
+                          "block_kind", "alt_rate", "prime_ms", "topup_ms_total",
+                          "probe"))
 
-    def test_header_bumped_to_proto7_with_generator(self):
+    def test_header_bumped_to_proto8_with_generator(self):
         header = [ln for ln in _log().render_csv().split("\n") if ln.startswith("#")]
-        self.assertTrue(any("proto=7" in ln for ln in header))
+        self.assertTrue(any("proto=8" in ln for ln in header))
         self.assertTrue(any("generator=balanced" in ln for ln in header))
         # A balanced session records no closed-loop params.
         self.assertFalse(any("debias_blocks" in ln for ln in header))

@@ -443,6 +443,14 @@ TIPS: Dict[str, Entry] = {
                          "'intervention_blocks' generator with the de-alternation "
                          "block enabled). A manual block forces the last choice and "
                          "is flagged 'manual' in the log. Applies on the next trial.",
+    "phase3.probe_toggle": "Start (or end) an unrewarded PROBE block: the cue plays "
+                           "and the choice is scored normally, but no water is given "
+                           "- a read-out of what the animal KNOWS vs what it works "
+                           "for. The block is internally counterbalanced (5/5) and "
+                           "starts at the next 20-trial boundary when no correction "
+                           "block is running; 'End' stops a running probe early or "
+                           "cancels a pending request. Works under any generator. "
+                           "Manual only for now (see docs/decisions/0115-probe).",
 
     # ---- phase3_traces_view.py: Metrics tab (live rolling traces) ----
     "phase3.traces": "Live rolling traces of the current Phase 3 session, plotted "

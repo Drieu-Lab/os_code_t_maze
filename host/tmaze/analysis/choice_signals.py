@@ -50,6 +50,10 @@ DEFAULT_POST_WINDOW = 10
 EPOCH_FREE = "free"
 EPOCH_IN_BLOCK = "in_block"
 EPOCH_POST_BLOCK = "post_block"
+# An unrewarded probe trial (probe_blocks.py): its own epoch so it is excluded
+# from the reinforced FREE measures, like an in-block trial. See docs/decisions/
+# 0115-probe.
+EPOCH_PROBE = "probe"
 
 
 def bool_series(s: pd.Series) -> pd.Series:
@@ -98,6 +102,9 @@ def add_signals(
     df["reward"] = pd.to_numeric(df["rewarded"], errors="coerce").fillna(0).astype(int)
     df["in_block"] = df["sched_state"].eq(INTERVENTION_LABEL)
     df["auto_block"] = df["in_block"] & df["block_trigger"].eq("auto")
+    # Unrewarded probe trial marker (string "1" in the CSV -> bool). Absent/"" in a
+    # pre-probe session => all False. See docs/decisions/0115-probe.
+    df["probe"] = df.get("probe", pd.Series("", index=df.index)).eq("1")
 
     htl = df.get("high_tone_is_left")
     if htl is None:
@@ -119,6 +126,7 @@ def add_signals(
     df["prev_reward"] = g["reward"].shift(1)
     df["prev_completed"] = g["completed"].shift(1)
     df["prev_in_block"] = g["in_block"].shift(1)
+    df["prev_probe"] = g["probe"].shift(1)
     df["prev_cue_side"] = g["cue_side"].shift(1)
     # Return-cue carryover: N-1's PLAYED return cue + congruency, carried onto N.
     df["prev_return_cue"] = g["return_cue_played"].shift(1)
@@ -134,8 +142,13 @@ def add_signals(
         & df["prev_choice"].notna()
     )
     df["pair_valid"] = pair_valid
-    # A free-to-free own-choice transition (neither trial coerced by a block).
-    df["own_pair"] = pair_valid & ~df["in_block"] & ~bool_series(df["prev_in_block"])
+    # A free-to-free own-choice transition: neither trial coerced by a block NOR an
+    # unrewarded probe (a probe is not the rat's freely-reinforced strategy).
+    df["own_pair"] = (
+        pair_valid
+        & ~df["in_block"] & ~bool_series(df["prev_in_block"])
+        & ~df["probe"] & ~bool_series(df["prev_probe"])
+    )
     df["switch"] = (df["choice"] != df["prev_choice"]).where(pair_valid)
     df["stay"] = (df["choice"] == df["prev_choice"]).where(pair_valid)
     df["cue_switched"] = (df["cue_side"] != df["prev_cue_side"]).where(
@@ -156,6 +169,11 @@ def _epoch_series(df: pd.DataFrame, post_window: int) -> pd.Series:
     for _, idx in df.groupby(["session_id", "run_idx"], sort=False).groups.items():
         since_block = None
         for i in idx:
+            # An unrewarded probe trial is its own epoch (excluded from FREE); it
+            # does not open/advance/close the post-block countdown.
+            if bool(df.at[i, "probe"]):
+                out.at[i] = EPOCH_PROBE
+                continue
             if bool(df.at[i, "in_block"]):
                 out.at[i] = EPOCH_IN_BLOCK
                 since_block = 0

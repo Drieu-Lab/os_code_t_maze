@@ -72,6 +72,9 @@ POLL_INTERVAL_MS = 250
 # Shading colour for INTERVENTION (corrective) block spans (a faint purple, to
 # echo the ribbon's corrective outline).
 _BLOCK_SHADE = "#8a2be2"
+# Shading + marker colour for unrewarded PROBE block spans (a teal, echoing the
+# ribbon's probe cell fill; distinct from the purple corrective shade).
+_PROBE_SHADE = "#1aa179"
 
 _UNSET = object()
 
@@ -189,6 +192,15 @@ class Phase3TracesView:
             cb.pack(side=tk.LEFT, padx=(0, 4))
             tip(cb, "phase3.traces.toggle", group=label)
 
+        # Probe overlay toggle (not a subplot of its own): shades the unrewarded
+        # probe spans across every subplot and overlays each block's probe accuracy
+        # on the Accuracy subplot. See probe_blocks.py / docs/decisions/0115-probe.
+        self._show_probe = tk.BooleanVar(value=True)
+        pcb = ttk.Checkbutton(bar, text="Probe", variable=self._show_probe,
+                              command=_mark_dirty)
+        pcb.pack(side=tk.LEFT, padx=(0, 4))
+        tip(pcb, "phase3.traces.toggle", group="Probe")
+
     def _int_var(self, var: tk.StringVar, default: int) -> int:
         try:
             return int(float(var.get()))
@@ -247,6 +259,7 @@ class Phase3TracesView:
         for ax, key in zip(axes, visible):
             self._draw_group(ax, key, res, t_min, gap_s, state)
             self._shade_blocks(ax, res)
+            self._shade_probes(ax, res)
         axes[-1].set_xlabel("session time (min)")
 
         self._apply_xlimit(axes, t_min)
@@ -283,6 +296,7 @@ class Phase3TracesView:
             self._line(ax, t_min, res.low_acc, color="#ff9f40", lw=1.0,
                        label="LOW cue")
             ax.axhline(0.5, color="#999999", lw=0.8, ls=":", alpha=0.7)
+            self._plot_probe_accuracy(ax, res)
             ax.set_ylabel("accuracy", fontsize=8)
             ax.set_ylim(0, 1)
             ax.legend(fontsize=6, loc="lower right", framealpha=0.5, ncol=3)
@@ -331,6 +345,31 @@ class Phase3TracesView:
         for span in res.blocks:
             ax.axvspan(span.start_t / 60.0, span.end_t / 60.0,
                        color=_BLOCK_SHADE, alpha=0.10, lw=0, zorder=0)
+
+    def _shade_probes(self, ax, res: TraceResult) -> None:
+        """Shade the unrewarded probe spans (teal), gated on the Probe toggle."""
+        if not self._show_probe.get():
+            return
+        for span in res.probe_blocks:
+            ax.axvspan(span.start_t / 60.0, span.end_t / 60.0,
+                       color=_PROBE_SHADE, alpha=0.12, lw=0, zorder=0)
+
+    def _plot_probe_accuracy(self, ax, res: TraceResult) -> None:
+        """Overlay each probe block's accuracy as a diamond at the span midpoint on
+        the Accuracy subplot - the latent-knowledge read-out against the reinforced
+        line. Gated on the Probe toggle. See docs/decisions/0115-probe."""
+        if not self._show_probe.get():
+            return
+        xs: List[float] = []
+        ys: List[float] = []
+        for span in res.probe_blocks:
+            if span.accuracy is None:
+                continue
+            xs.append((span.start_t + span.end_t) / 2.0 / 60.0)
+            ys.append(span.accuracy)
+        if xs:
+            ax.plot(xs, ys, marker="D", ls="none", ms=6,
+                    color=_PROBE_SHADE, markeredgecolor="#0b5", label="probe")
 
     def _apply_xlimit(self, axes, t_min: List[Optional[float]]) -> None:
         """Clamp the shared x-axis to the most recent N minutes if requested."""
