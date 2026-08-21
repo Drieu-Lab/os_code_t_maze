@@ -10,7 +10,7 @@
   },
   "cue": {
     "choice_enabled": true,
-    "return_enabled": true,
+    "return_enabled": false,
     "require_up_stem": false,
     "min_confidence": 0.0
   },
