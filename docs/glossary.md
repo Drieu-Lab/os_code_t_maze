@@ -128,6 +128,15 @@ every bundle each run, so re-running it after another session (or twice by
 mistake) never double-counts. Contrast an "append" step, whose output depends on
 how many times it ran. See ADR-0081.
 
+### Inter-trial interval (ITI)
+The gap between one trial ending and the next beginning — here the *dead time*
+from the rat closing a trial's loop back at the hub (`trial_end`) to it next
+setting off up the stem to start the next one (`trial_start`). A rising rolling
+median ITI is the main sign a rat is **disengaging** (losing motivation): it
+stops initiating trials. The live "Metrics" trace panel plots it with a
+configurable threshold line (default 45 s, matching the offline mode labeler).
+See ADR-0114 and [rolling window](#rolling-window-trace).
+
 ### Intervention tag
 A short, reusable label the operator applies to a [stamped note
 entry](#stamped-note-entry) to mark a recurring human action during a session —

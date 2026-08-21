@@ -444,6 +444,23 @@ TIPS: Dict[str, Entry] = {
                          "block enabled). A manual block forces the last choice and "
                          "is flagged 'manual' in the log. Applies on the next trial.",
 
+    # ---- phase3_traces_view.py: Metrics tab (live rolling traces) ----
+    "phase3.traces": "Live rolling traces of the current Phase 3 session, plotted "
+                     "against session wall-clock time: engagement (ITI), accuracy, "
+                     "strategy, and directional/alternation bias. Read-only view "
+                     "computed from the published session snapshot.",
+    "phase3.traces.gap": "Disengaged line drawn on the ITI trace: the dead-time gap "
+                         "(seconds, between one trial ending and the next starting) "
+                         "above which the rat is treated as disengaged. View-only "
+                         "reference line; doesn't change the task.",
+    "phase3.traces.window": "Rolling-window size (most-recent completed trials) for "
+                            "the rate traces (accuracy, strategy, bias). Larger = "
+                            "smoother but slower to react.",
+    "phase3.traces.xwindow": "Clamp the shared x-axis to the most recent N minutes of "
+                             "the session (blank or 0 = show the whole session). "
+                             "View-only.",
+    "phase3.traces.toggle": "Show or hide the {group} subplot.",
+
     # ---- maze_state_view.py: Maze state tab ----
     "maze.define_zones": "Draw the maze zones (central reward HUB, stem, "
                          "junction, choice/return arms), the well region (inside "

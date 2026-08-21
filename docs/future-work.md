@@ -92,6 +92,7 @@ criteria).
 | [FW-0037](#fw-0037-zone-dwell--consummatory-well-time-from-tracking--licks) | Zone dwell + consummatory well time from tracking + licks | Behavior stats + session summary | Proposed |
 | [FW-0038](#fw-0038-join-the-days-baseline--water-context-into-the-session-summary) | Join the day's %baseline / water context into the session summary | Session summary + records cores | Proposed |
 | [FW-0039](#fw-0039-firmwarehost-git-sha-provenance-stamp-in-the-session-data) | Firmware/host git-SHA provenance stamp in the session data | Session log + data-file headers | Proposed |
+| [FW-0042](#fw-0042-live-excursion-based-engagement-traces) | Live excursion-based engagement traces (trips/min, non-stem fraction) | Phase 3 host + live trace panel | Proposed |
 
 ## Entries
 
@@ -2004,6 +2005,53 @@ CSV headers (duplication vs self-containment)? Include the dirty-tree flag?
 
 **ADR needed?** Yes (records the provenance schema + the best-effort/blank-on-
 failure policy; cross-link ADR-0072).
+
+### FW-0042: Live excursion-based engagement traces
+
+- **Status:** Proposed
+- **Date added:** 2026-08-21
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** `host/tmaze/ui/phase3_controller.py` (publish excursion
+  data on the snapshot), `host/tmaze/core/phase3/phase3_traces.py`,
+  `host/tmaze/ui/phase3_traces_view.py`
+- **Related ADRs:** [ADR-0114](decisions/0114-live-session-metric-traces.md)
+  (the live trace panel), [ADR-0109](decisions/0109-phase3-excursion-event-log.md)
+  (the excursion event log), [ADR-0050](decisions/0050-phase3-published-state-contract.md)
+  (the published snapshot)
+
+**Motivation / context.** The live "Metrics" trace panel (ADR-0114) derives its
+engagement signal (rolling inter-trial interval) from the completed-trial table
+only. But disengagement often shows first in *off-task* behaviour - the rat
+making outbound trips that never commit up the stem, or fewer trips per minute -
+which the excursion log already captures per event (ADR-0109). The offline
+analysis (ADR-0112) plans the same excursion-based measures (trips/min,
+non-stem fraction) but they're not computed live because the excursion rows are
+written to CSV only, not published on the `Phase3StateSnapshot` the panel reads.
+
+**Sketch of approach.** Publish the excursion events (or a rolling reduction of
+them) on the cross-thread snapshot the same way the trial table is (ADR-0050) -
+either a bounded tail of `ExcursionRow`s or pre-reduced counts - then add two
+series to `phase3_traces.build_traces` (rolling `trips_per_min` from event
+timestamps and `nonstem_frac` from `type`) and a subplot/toggle to the view.
+Keep the reconciliation caveat from ADR-0109 (the controller's actuation-thread
+`TaskEvents` is the authoritative per-event source, distinct from the behavior
+panel's debounced view).
+
+**Evaluation / acceptance.** Headless tests over a synthetic snapshot carrying
+excursion data: trips/min tracks an injected trip cadence; non-stem fraction
+rises when denied trips are injected; the series stay empty (not crashing) when
+no excursion data is present. The subplot toggle hides cleanly.
+
+**Effort / risk.** Small-to-medium. Main risk is snapshot bloat / churn if the
+full excursion list is published every poll - prefer a bounded tail or a
+pre-reduced rolling summary so the publish stays cheap.
+
+**Open questions.** Publish raw events vs. a pre-reduced rolling summary? Window
+by trials or by wall-clock minutes for trips/min? Share the subplot with the ITI
+engagement trace or give it its own?
+
+**ADR needed?** Yes (records the snapshot-publishing choice and the trace
+definitions), likely folded into a follow-up to ADR-0114.
 
 ## Completed
 

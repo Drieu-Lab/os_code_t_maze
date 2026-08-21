@@ -142,6 +142,14 @@ try:
     from tmaze.ui.trial_control_bar import TrialControlBar
 except Exception:  # pragma: no cover
     TrialControlBar = None  # type: ignore
+# Live session-metric trace panel: stacked matplotlib subplots (rolling ITI /
+# accuracy / strategy / bias) over wall-clock session time, on its own top-level
+# tab. Reads the published Phase 3 snapshot (pull mode). Optional; guarded like
+# the tabs above (matplotlib is guarded inside the view itself). See ADR-0114.
+try:
+    from tmaze.ui.phase3_traces_view import Phase3TracesView
+except Exception:  # pragma: no cover
+    Phase3TracesView = None  # type: ignore
 # One shared maze-state pipeline (pure stdlib): a single estimator driven on the
 # camera tracking worker that fans a RatState stream out to the three tabs above,
 # replacing their per-tab estimators. Optional; guarded like the tabs above.
@@ -502,6 +510,15 @@ def main() -> int:
     # locomotor/compliance snapshot for the end-of-session summary (ADR-0071).
     behavior_ref = {}
 
+    # Cross-tab seam (docs/decisions/0050): the live Phase 3 controller's
+    # immutable published snapshot, resolved through the shared holder (populated
+    # when the Task tab is built). Defined here at the top level so BOTH the Rig
+    # view's ribbon/behavior readout AND the Metrics trace tab can read it
+    # (null-safe until the Phase 3 tab exists / arms). See ADR-0114.
+    def phase3_state():
+        p3 = phase3_ref.get("p3")
+        return p3.published_state() if p3 is not None else None
+
     # One shared maze-state pipeline (a single estimator on the camera tracking
     # worker), consumed by the Maze state / Rules / Behavior tabs instead of a
     # per-tab estimator (ADR-0041). Seed it with a previously drawn zone map so
@@ -636,6 +653,15 @@ def main() -> int:
     if tracker is not None and TaskControlView is not None and (
             Phase3ControlView is not None or RulesControlView is not None):
         tabs.append(("Task", [make_task]))
+    # Metrics tab (ADR-0114): live within-session trace plots read from the
+    # published Phase 3 snapshot (pull mode, like the Rig-view ribbon). Its own
+    # top-level tab since the stacked subplots need vertical room the crowded
+    # Rig-view bottom strip doesn't have. Present whenever the view imported
+    # (matplotlib is guarded inside it); shows "Not armed." until a run starts.
+    if Phase3TracesView is not None:
+        tabs.append(("Metrics",
+                     [lambda parent: Phase3TracesView(
+                         parent, state_getter=phase3_state)]))
     # NOTE: the Session control is NOT a tab - it lives in the Rig view bottom
     # strip's RIGHT column, under the live behavior readout (filling the dead
     # space there so it doesn't lengthen the left column / the window). It is
@@ -772,14 +798,8 @@ def main() -> int:
     # so it gets each serial line (to reset on a MODE switch) and close().
     if (tracker is not None and BehaviorView is not None
             and rig_controls_right is not None):
-        # Cross-tab seam (docs/decisions/0050): resolve the live Phase 3 controller
-        # through the shared holder (populated when the Phase 3 tab is built) and
-        # hand its immutable published snapshot to the behavior panel, so the panel
-        # can go phase-aware without reaching across tabs itself.
-        def phase3_state():
-            p3 = phase3_ref.get("p3")
-            return p3.published_state() if p3 is not None else None
-
+        # ``phase3_state`` (the published-snapshot getter) is defined at the top
+        # of main() so the Metrics tab can share it (docs/decisions/0050/0114).
         # The Phase 3 session line is driven by the Session panel's Start/Stop
         # button (ADR-0060); resolve it through the shared holder (the Session
         # panel is built just below), so the behavior panel needn't reach across.
