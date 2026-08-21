@@ -1,0 +1,141 @@
+"""
+test_analysis_bundle_reader.py - headless tests for the bundle discovery/loader.
+
+Covers ``bundle_reader``: the ``#``-header comment parser, animal/date filtering in
+``discover_bundles``, and ``load_animals`` over a synthetic on-disk bundle (a
+``task/`` CSV with a real ``#`` header + a ``session_<id>.json`` marker), including
+the graceful empty ``excursions`` frame and the global ``seq`` ordering. Uses a temp
+dir; no rig/Tk.
+
+Run from host/tests:  python -m unittest test_analysis_bundle_reader
+"""
+from __future__ import annotations
+
+import os
+import tempfile
+import unittest
+
+from tmaze.analysis import bundle_reader as br
+
+_HEADER = (
+    "# phase3_session animal=600 session_id={sid} seed=42 proto=7\n"
+    "# high_tone_is_left=True high_tone_hz=8000 low_tone_hz=4000\n"
+    "# generator=intervention_blocks\n"
+    "# note: this line is free prose and ignored\n"
+)
+_COLS = (
+    "trial,correct_arm,choice_cue,return_cue_left,return_cue_right,chosen_arm,"
+    "outcome,rewarded,topups,return_arm_used,return_cue_played,trial_start_iso,"
+    "choice_cue_on_iso,choice_time_iso,reward_cmd_iso,return_cue_on_iso,"
+    "return_cue_off_iso,trial_end_iso,lick_time_iso,lick_fw_ms,sched_state,"
+    "block_id,block_trigger,bias,block_kind,alt_rate\n"
+)
+
+
+def _row(trial, cue, choice, outcome, rewarded):
+    ts = f"2026-01-01T12:00:{trial:02d}"
+    return (
+        f"{trial},LEFT,{cue},HIGH,LOW,{choice},{outcome},{rewarded},,{choice},HIGH,"
+        f"{ts},{ts},{ts},,{ts},{ts},{ts},,,NORMAL,,,0.0,,0.0\n"
+    )
+
+
+def _make_bundle(root, sid, n=5):
+    bundle = os.path.join(root, sid)
+    os.makedirs(os.path.join(bundle, "task"))
+    with open(os.path.join(bundle, f"session_{sid}.json"), "w") as fh:
+        fh.write("{}")
+    path = os.path.join(bundle, "task", f"phase3_{sid}.csv")
+    with open(path, "w") as fh:
+        fh.write(_HEADER.format(sid=sid))
+        fh.write(_COLS)
+        for t in range(1, n + 1):
+            fh.write(_row(t, "HIGH", "LEFT", "CORRECT", 1))
+    return bundle
+
+
+class TestHeaderParser(unittest.TestCase):
+    def test_parses_key_values_skips_notes(self):
+        hdr = br.parse_header_comments(_HEADER.format(sid="600_20260101_120000"))
+        self.assertEqual(hdr["high_tone_is_left"], "True")
+        self.assertEqual(hdr["generator"], "intervention_blocks")
+        self.assertEqual(hdr["high_tone_hz"], "8000")
+        self.assertNotIn("prose", hdr)
+
+
+class TestDiscover(unittest.TestCase):
+    def test_filters_by_animal_and_date(self):
+        with tempfile.TemporaryDirectory() as root:
+            _make_bundle(root, "600_20260101_120000")
+            _make_bundle(root, "601_20260105_120000")
+            _make_bundle(root, "000_20260101_120000")  # junk id
+            got = br.discover_bundles(root, animals={"600", "601"})
+            names = sorted(os.path.basename(p) for p in got)
+            self.assertEqual(
+                names, ["600_20260101_120000", "601_20260105_120000"]
+            )
+            # date bound excludes the later one
+            got2 = br.discover_bundles(
+                root, animals={"600", "601"}, end_date="2026-01-03"
+            )
+            self.assertEqual(len(got2), 1)
+
+
+class TestLoadAnimals(unittest.TestCase):
+    def test_loads_trials_and_meta(self):
+        with tempfile.TemporaryDirectory() as root:
+            _make_bundle(root, "600_20260101_120000", n=5)
+            _make_bundle(root, "600_20260102_120000", n=3)
+            data = br.load_animals(("600",), root=root)
+            self.assertEqual(len(data.sessions), 2)
+            self.assertEqual(len(data.trials), 8)
+            self.assertTrue(data.excursions.empty)
+            # global seq is contiguous and ordered by session start
+            self.assertEqual(list(data.trials["seq"]), list(range(8)))
+            self.assertEqual(data.sessions.iloc[0]["high_tone_is_left"], True)
+            self.assertEqual(
+                data.sessions.iloc[0]["generator"], "intervention_blocks"
+            )
+
+
+class TestMultiRoot(unittest.TestCase):
+    """A history split across a primary + archive root (docs/decisions/0113):
+    discovery/loading spans both and de-duplicates by session_id, first wins."""
+
+    def test_discover_merges_two_roots(self):
+        with tempfile.TemporaryDirectory() as primary, \
+                tempfile.TemporaryDirectory() as archive:
+            _make_bundle(primary, "600_20260201_120000")   # newest, on primary
+            _make_bundle(archive, "600_20260101_120000")   # archived, older
+            got = br.discover_bundles([primary, archive], animals={"600"})
+            names = sorted(os.path.basename(p) for p in got)
+            self.assertEqual(
+                names, ["600_20260101_120000", "600_20260201_120000"])
+
+    def test_discover_dedups_first_root_wins(self):
+        with tempfile.TemporaryDirectory() as primary, \
+                tempfile.TemporaryDirectory() as archive:
+            sid = "600_20260101_120000"          # exists in BOTH (mid-copy)
+            _make_bundle(primary, sid)
+            _make_bundle(archive, sid)
+            got = br.discover_bundles([primary, archive], animals={"600"})
+            self.assertEqual(len(got), 1)
+            # kept from the earliest-listed (primary/source) root
+            self.assertTrue(os.path.dirname(got[0]) == primary)
+
+    def test_load_animals_spans_two_roots(self):
+        with tempfile.TemporaryDirectory() as primary, \
+                tempfile.TemporaryDirectory() as archive:
+            _make_bundle(primary, "600_20260201_120000", n=2)
+            _make_bundle(archive, "600_20260101_120000", n=3)
+            data = br.load_animals(("600",), root=[primary, archive])
+            self.assertEqual(len(data.sessions), 2)
+            self.assertEqual(len(data.trials), 5)
+            # ordered by session start: the archived (older) session comes first
+            self.assertEqual(list(data.trials["seq"]), list(range(5)))
+            self.assertEqual(data.trials.iloc[0]["session_id"],
+                             "600_20260101_120000")
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -37,6 +37,13 @@ test_task_core.exe
 # see docs/decisions/0033
 docs/notes/.obsidian/
 
+# Jupyter checkpoints (auto-saved beside host/notebooks/*.ipynb; the notebooks
+# themselves are versioned, this per-edit scratch copy is not).
+.ipynb_checkpoints/
+
+# Anaconda / anaconda-project local scratch (per-machine tool state DB).
+anaconda_projects/
+
 # OS cruft
 .DS_Store
 Thumbs.db

@@ -92,6 +92,8 @@ criteria).
 | [FW-0037](#fw-0037-zone-dwell--consummatory-well-time-from-tracking--licks) | Zone dwell + consummatory well time from tracking + licks | Behavior stats + session summary | Proposed |
 | [FW-0038](#fw-0038-join-the-days-baseline--water-context-into-the-session-summary) | Join the day's %baseline / water context into the session summary | Session summary + records cores | Proposed |
 | [FW-0039](#fw-0039-firmwarehost-git-sha-provenance-stamp-in-the-session-data) | Firmware/host git-SHA provenance stamp in the session data | Session log + data-file headers | Proposed |
+| [FW-0040](#fw-0040-latent-state-glm-hmm-model-of-behavioural-mode) | Latent-state (GLM-HMM) model of behavioural mode | Cross-session analysis (`analysis/`) | Deferred |
+| [FW-0041](#fw-0041-reward-pressure--mode-transition-characterization) | Reward-pressure / mode-transition characterization | Cross-session analysis (`analysis/`) | Deferred |
 | [FW-0042](#fw-0042-live-excursion-based-engagement-traces) | Live excursion-based engagement traces (trips/min, non-stem fraction) | Phase 3 host + live trace panel | Proposed |
 
 ## Entries
@@ -2005,6 +2007,109 @@ CSV headers (duplication vs self-containment)? Include the dirty-tree flag?
 
 **ADR needed?** Yes (records the provenance schema + the best-effort/blank-on-
 failure policy; cross-link ADR-0072).
+
+### FW-0040: Latent-state (GLM-HMM) model of behavioural mode
+
+- **Status:** Deferred
+- **Date added:** 2026-08-18
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** `host/tmaze/analysis/` (a new `state_model.py` beside
+  `choice_model.py`), `host/notebooks/animal_progress.ipynb`, a new
+  `host/tests/test_analysis_state_model.py`; new dep (`ssm` or a small hand-rolled
+  EM), analysis-only
+- **Related ADRs:** [ADR-0112](decisions/0112-longitudinal-strategy-analysis.md)
+  (the interpretable-first analysis this extends; its rule-based mode decomposition
+  is the validation baseline)
+
+**Motivation / context.** ADR-0112 ships an interpretable, *rule-based* mode
+decomposition (thresholds + priority order) — great for explainability and as a
+first pass, but the cut-points are hand-set and a trial belongs to exactly one mode.
+The animals visibly *cycle* through modes, which is exactly what a latent-state
+model captures principledly: a Generalized-Linear-Model Hidden Markov Model
+(GLM-HMM, aka a "state-space" choice model) infers K hidden states, each with its
+own choice policy (its own logistic weights on cue/history), plus the
+trial-to-trial transition probabilities between states. It would give a
+data-driven, probabilistic version of the same picture (per-trial state posteriors,
+a state-occupancy timeline, dwell times), and the transition matrix is a natural
+home for the deferred reward-pressure question (FW-0041).
+
+**Sketch of approach.** Reuse the `choice_signals` design matrix (cue, prev choice,
+win-stay/lose-shift, return-cue). Fit a K-state GLM-HMM per animal (start with the
+Ashwood et al. 2022 formulation; `ssm` library or a compact EM/Baum-Welch over
+logistic emissions). Select K by cross-validated held-out log-likelihood. Output
+per-trial state posteriors, a MAP state timeline (overlay on the ADR-0112 mode
+band), per-state weight vectors, and the transition matrix. Validate the states
+against the rule-based labels (confusion/adjusted-Rand) so the interpretable layer
+remains the sanity check. Fit on FREE trials first; optionally allow blocks to
+influence transitions (ties to FW-0041).
+
+**Evaluation / acceptance.** Held-out log-likelihood beats the single per-session
+logit (ADR-0112) and a 1-state baseline; recovered states are stable across seeds
+and correspond recognisably to the rule-based modes; runs headlessly on synthetic
+data with known states (recovers them). Keep it optional/guarded like
+`choice_model` so the base analysis has no new hard dep.
+
+**Effort / risk.** Medium-large. Risks: label-switching/identifiability across
+fits, choosing K, a heavier dependency, and over-interpreting states on
+short/among-session-nonstationary data. Mitigate by anchoring to the interpretable
+baseline and reporting uncertainty.
+
+**Open questions.** Per-animal vs hierarchical (partial pooling across 600/601/602)?
+Include an explicit engagement/disengaged state driven by the ADR-0109 excursion
+signals once they exist? Pool sessions or model session as a covariate?
+
+**ADR needed?** Yes (records the model choice, K-selection policy, and how it
+relates to the rule-based decomposition).
+
+### FW-0041: Reward-pressure / mode-transition characterization
+
+- **Status:** Deferred
+- **Date added:** 2026-08-18
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** `host/tmaze/analysis/intervention_response.py` (extend),
+  a new `transition_model.py`, `host/notebooks/animal_progress.ipynb`, tests
+- **Related ADRs:** [ADR-0112](decisions/0112-longitudinal-strategy-analysis.md)
+  (peri-intervention transitions are descriptive there; this makes the driver
+  explicit), [ADR-0107](decisions/0107-phase3-alternation-intervention-stack.md) /
+  [ADR-0086](decisions/0086-phase3-debias-blocks.md) (the intervention blocks whose
+  reward pressure is the candidate driver)
+
+**Motivation / context.** The operator's observation is that mode switches are often
+*instigated* by reward pressure — a stretch where the animal's current strategy
+stops paying off (its side-bias/alternation runs against the schedule, or an
+intervention block actively withholds reward for the current habit). ADR-0112
+surfaces peri-intervention transitions descriptively (dominant mode pre vs post, for
+auto blocks) but deliberately does NOT model what *drives* a transition. This item
+is that lightweight causal-ish characterization: quantify how the recent
+reward/error history and the block context predict a mode switch on the next window.
+
+**Sketch of approach.** Define a per-window "reward-pressure" signal (e.g. rolling
+reward-rate deficit vs the animal's own baseline, plus a count of
+strategy-vs-schedule mismatches — how often the current dominant mode's predicted
+choice would have been wrong). Then either (a) a transition-hazard / survival model
+(probability of leaving the current mode as a function of accumulated pressure and
+block onset), or (b) if FW-0040 lands, regress the GLM-HMM transition probabilities
+on the pressure covariate. Also characterize the *free-trial* adverse alignment
+(when counterbalancing alone punishes a bias) separately from the *coerced* block
+pressure. Include the return-cue-congruency covariate (ADR-0112) as a candidate
+short-timescale nudge.
+
+**Evaluation / acceptance.** Pressure predicts transitions above chance on
+held-out data; block onset adds predictive power beyond free-trial pressure;
+results are robust to window size. Headless tests on synthetic sequences with a
+built-in pressure->switch rule recover it.
+
+**Effort / risk.** Medium. Risks: endogeneity (pressure and mode are mutually
+determined), few transitions per animal (low power), and defining "pressure"
+without baking in the conclusion. Mitigate with pre-registered signal definitions
+and reporting effect sizes with uncertainty.
+
+**Open questions.** Best pressure definition (reward deficit vs explicit
+strategy-schedule mismatch vs both)? Hazard model vs HMM-transition regression?
+Pool animals or per-animal?
+
+**ADR needed?** Yes (records the pressure definition and the transition-model
+choice).
 
 ### FW-0042: Live excursion-based engagement traces
 

@@ -20,6 +20,15 @@ reward valve, sounding a tone, sending a firmware command. In this code the
 "actuation path" is the whole chain from *rat position/lick* → *decision* →
 *hardware command*, and shortening its delay (latency) is a recurring goal.
 
+### Behavioural mode (mode decomposition)
+A named *style* of behaving that an animal falls into for a stretch of trials —
+e.g. *disengaged*, *side-bias* (keeps picking one arm), *alternating* (keeps
+switching arms), *lose-shift* / *win-stay* (reacts to the last outcome), or
+*cue-following* (uses the tone). The longitudinal analysis assigns each rolling
+window one dominant mode by simple, explicit rules (no model fitting), so the
+label always traces back to one checkable number. This makes the ebb and flow of
+strategies visible where a single accuracy number would hide it. See ADR-0112.
+
 ### Bounded queue
 A [queue](#queue) with a fixed maximum size. When it is full, new items are
 **dropped** (and counted) instead of the queue growing without limit or the
@@ -77,6 +86,15 @@ The *moment a state changes*, as opposed to the state itself. A "rising edge" is
 the transition from off→on (e.g. a lick beam just became blocked; the gate just
 opened); a "falling edge" is on→off. Much of the logic reacts to edges, not
 levels, so an action fires once per event instead of every frame.
+
+### Endogeneity
+When a "predictor" you want to use to explain behaviour is itself partly *caused by*
+that behaviour, so a correlation between them can't be read as one driving the
+other. Example: the return cue an animal hears (`return_cue_played`) depends on
+which arm it chose to come back through, so "does the return cue affect the next
+choice" is entangled with the animal's own habits. The return-cue analysis controls
+for prior choice/reward but stays *observational* — only a randomised return-cue
+schedule could make it causal. See ADR-0112.
 
 ### Excursion event
 One *outbound trip* the rat makes away from the hub, treated as a single logged
@@ -165,6 +183,16 @@ shared data safe but cost time, so this code avoids putting a lock on the
 [hot path](#hot-path) by routing all work through a single thread instead. See
 ADR-0043 and [race condition](#race-condition--torn-state).
 
+### Logistic regression (choice model)
+A standard statistical fit for a yes/no outcome: it weighs several inputs and
+returns how strongly each pushes the outcome one way. Here the outcome is
+"chose LEFT vs RIGHT" and the inputs are the current cue and the recent history
+(the previous choice, whether it was rewarded, the previous return cue). The
+fitted *weight* on the cue, tracked across sessions, is a direct read of "is the
+animal starting to use the tone?" — the cue weight climbing above the
+history weights is the emergence signature a single accuracy number hides. See
+ADR-0112.
+
 ### Poll / poll loop
 Repeatedly checking or doing something on a timer, rather than reacting to an
 event. The GUI runs a "Tk poll" roughly every 100 ms to refresh status and hand
@@ -188,6 +216,13 @@ same data at once and their steps interleave, leaving it half-updated and
 inconsistent ("torn"). It may work thousands of times and corrupt on the one bad
 interleaving, which makes it hard to reproduce. Avoided here by never letting two
 threads call the same core (see [lock](#lock), [thread](#thread)). See ADR-0043.
+
+### Rolling window (trace)
+Instead of one number per session, compute a rate over the most recent *N* trials
+and slide that window forward trial by trial, giving a *trace* that shows the rate
+rising and falling within and across sessions. The longitudinal analysis uses
+rolling windows (default 20 completed trials) for every strategy rate, so a mode
+that lasts a few dozen trials is visible rather than averaged away. See ADR-0112.
 
 ### Snapshot
 An immutable (unchangeable) copy of some state, taken at one instant and handed
@@ -261,6 +296,15 @@ derived from the current vocabulary at build time. See ADR-0081.
 Python's built-in GUI toolkit, used for all the on-screen windows and tabs. "The
 Tk thread" is the thread that owns the GUI; GUI objects must only be touched from
 it, which is why cross-thread hand-offs use [snapshots](#snapshot).
+
+### Trial epoch (free / in-block / post-block)
+How the longitudinal analysis tags each trial by its relationship to an
+[intervention block](#intervention-tag): **free** = a normal, counterbalanced
+trial (the animal's uncoerced behaviour); **in-block** = a trial inside an active
+block, where the schedule is forcing one side; **post-block** = a normal trial
+shortly after a block ended (to see carryover). Blocks are kept, not thrown away —
+baseline strategy is measured on *free* trials, the animal's response on *in-block*
+trials, and persistence on *post-block* trials. See ADR-0112.
 
 ### USB CDC
 The USB standard that lets a device pretend to be an old-style serial port, so

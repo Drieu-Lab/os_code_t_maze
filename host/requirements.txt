@@ -28,3 +28,11 @@ av>=12.0
 # shells out to those builders with this env's interpreter, so it must be present.
 # See docs/decisions/0085.
 openpyxl>=3.1
+
+# Offline cross-session analysis only (tmaze.analysis + the animal_progress
+# notebook, ADR-0112). NOT needed by the live rig tools: pandas is the tidy-frame
+# engine, statsmodels fits the per-session choice logit (guarded - choice_model
+# degrades to "not installed" without it). numpy/matplotlib are already required
+# above. Add jupyterlab by hand if you want to run the notebook interactively.
+pandas>=2.1
+statsmodels>=0.14
