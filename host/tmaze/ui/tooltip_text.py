@@ -477,6 +477,19 @@ TIPS: Dict[str, Entry] = {
                             "newest trials; press Latest to resume following.",
     "phase3.traces.latest": "Jump back to the newest trials and resume auto-following "
                             "the live edge of the session (undoes a manual scroll).",
+    "phase3.traces.reference": "Overlay a PAST session of the same rat as a faded, "
+                               "dashed reference line behind the live traces, to "
+                               "compare this run against an earlier one. Lists the "
+                               "rat's recorded sessions (newest first); 'None' turns "
+                               "the ghost off. Read from disk only when you pick one.",
+    "phase3.traces.ref_refresh": "Re-scan the rat's recorded sessions into the "
+                                 "Reference list (e.g. after a new session was saved "
+                                 "or the animal id changed).",
+    "phase3.traces.mismatch": "Flags run-config differences between the reference "
+                              "session and the current one (cue mapping, generator, "
+                              "tone frequencies, return-cue use, probe trials), so a "
+                              "comparison across different conditions is obvious. "
+                              "Quiet when they match.",
     "phase3.traces.toggle": "Show or hide the {group} subplot.",
 
     # ---- maze_state_view.py: Maze state tab ----

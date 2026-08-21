@@ -231,6 +231,15 @@ inconsistent ("torn"). It may work thousands of times and corrupt on the one bad
 interleaving, which makes it hard to reproduce. Avoided here by never letting two
 threads call the same core (see [lock](#lock), [thread](#thread)). See ADR-0043.
 
+### Reference (ghost) trace
+A faded, dashed line on the Metrics tab showing a *past* session of the same rat
+drawn behind the live traces, so today's run can be compared against an earlier
+one (is the [inter-trial interval](#inter-trial-interval-iti) climbing sooner than
+last time? did accuracy settle lower after a config change?). The old session's
+recorded CSV is read back into the same [snapshot](#snapshot) shape and run
+through the *same* trace computation as the live line, so the two are directly
+comparable; a caption flags any run-config differences between them. See ADR-0117.
+
 ### Rolling window (trace)
 Instead of one number per session, compute a rate over the most recent *N* trials
 and slide that window forward trial by trial, giving a *trace* that shows the rate

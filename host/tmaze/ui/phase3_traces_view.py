@@ -31,6 +31,14 @@ Controls (the configurable aspects):
     metic is the pure ``trace_viewport.compute_viewport``. View-only.
   - per-subplot show/hide toggles (ITI / accuracy / strategy / bias): hidden
     subplots are dropped so the rest gain height.
+  - reference (ghost) overlay (docs/decisions/0117): pick a PAST session of the
+    same rat and its traces are drawn behind the live ones as faded dashed lines,
+    so a run can be compared against an earlier one. The dropdown lists the rat's
+    recorded sessions (needs an ``animal_getter``); "None" turns the ghost off. A
+    caption flags any run-config differences (cue mapping, generator, tones,
+    return-cue, probe) between the reference and the current session. The
+    reference is read from disk ONCE on selection (off the poll hot path) and its
+    traces are cached, rebuilt only when the window sizes change.
 
 Module contract (so the Rig view / a tab can register it like any other module):
     widget() -> the Tk widget to place
@@ -49,6 +57,9 @@ from tmaze.core.phase3.phase3_traces import (
     DEFAULT_DISENGAGED_GAP_S, DEFAULT_MIN_DEN, TraceResult, build_traces)
 from tmaze.core.phase3.phase3_stats import DEFAULT_WINDOW
 from tmaze.core.phase3.trace_viewport import compute_viewport
+from tmaze.core.phase3.phase3_log_reader import (
+    SessionConfig, SessionRef, describe_config_mismatch, discover_sessions,
+    session_config_from_snapshot, snapshot_from_csv)
 from tmaze.ui.trial_ribbon_view import progress_signature
 
 try:
@@ -91,21 +102,54 @@ _GROUPS: Tuple[Tuple[str, str], ...] = (
     ("bias", "Bias"),
 )
 
+# The plotted line series per subplot key: (TraceResult attr, colour, linewidth,
+# legend label). Kept as ONE table so the live lines and the faded reference
+# (ghost) lines are drawn from the same definition and can't drift apart; the
+# per-subplot decorations (threshold lines, y-limits, legend, probe markers) stay
+# in _decorate. See docs/decisions/0114 (series) / 0117 (ghost).
+_SERIES: dict = {
+    "iti": (("iti_med_s", "#1f77b4", 1.6, None),),
+    "accuracy": (("accuracy", "#1a7f37", 1.6, "all"),
+                 ("high_acc", "#7f7fff", 1.0, "HIGH cue"),
+                 ("low_acc", "#ff9f40", 1.0, "LOW cue")),
+    "strategy": (("side_bias_left", "#1f77b4", 1.2, "P(left)"),
+                 ("switch_rate", "#d62728", 1.2, "switch"),
+                 ("win_stay", "#2ca02c", 1.0, "win-stay"),
+                 ("lose_shift", "#9467bd", 1.0, "lose-shift"),
+                 ("cue_follow", "#8c564b", 1.0, "cue-follow")),
+    "bias": (("dir_bias", "#111111", 1.6, "dir bias"),
+             ("sched_alt_rate", "#ff7f0e", 1.0, "sched alt rate")),
+}
+
 
 class Phase3TracesView:
     """Tk widget: stacked live trace subplots drawn from a Phase3StateSnapshot."""
 
     def __init__(self, parent: tk.Misc, *,
                  state_getter: Callable[[], Optional[Phase3StateSnapshot]],
+                 animal_getter: Optional[Callable[[], str]] = None,
                  poll_ms: int = POLL_INTERVAL_MS,
                  text: str = "Session metric traces"):
         self._state_getter = state_getter
+        # Optional: the current rat id, used to list its past sessions for the
+        # reference (ghost) overlay. Without it the reference control is hidden.
+        self._animal_getter = animal_getter
         self._poll_ms = poll_ms
         self._closed = False
         self._job: Optional[str] = None
         self._sig = _UNSET
         self._dirty = True                 # force the first draw
         self._last_state: Optional[Phase3StateSnapshot] = None
+
+        # Reference (ghost) overlay state (docs/decisions/0117). The chosen past
+        # session is read + reconstructed ONCE on selection; its build_traces
+        # result is cached and rebuilt only when the window sizes change.
+        self._refs: List[SessionRef] = []
+        self._ref_snapshot: Optional[Phase3StateSnapshot] = None
+        self._ref_config: Optional[SessionConfig] = None
+        self._ref_selected: Optional[SessionRef] = None
+        self._ref_traces: Optional[TraceResult] = None
+        self._ref_cache_key: Optional[Tuple[int, Optional[int]]] = None
 
         # Interactive time viewport (docs/decisions/0116): the visible window is
         # width (zoom) + start (pan) + follow-latest flag. ``_total_min`` is the
@@ -131,6 +175,7 @@ class Phase3TracesView:
             return
 
         self._build_controls(self._frame)
+        self._build_reference_bar(self._frame)
 
         # Horizontal scrollbar + Latest button (the viewport's pan controls),
         # pinned under the canvas. Packed BEFORE the canvas so the expanding
@@ -233,6 +278,126 @@ class Phase3TracesView:
         pcb.pack(side=tk.LEFT, padx=(0, 4))
         tip(pcb, "phase3.traces.toggle", group="Probe")
 
+    def _build_reference_bar(self, parent: tk.Misc) -> None:
+        """Reference (ghost) overlay controls: a session dropdown + refresh + the
+        config-mismatch caption. Only shown when an ``animal_getter`` was wired
+        (otherwise there's no rat id to list past sessions for)."""
+        self._mismatch_var = tk.StringVar(value="")
+        if self._animal_getter is None:
+            return
+        bar = ttk.Frame(parent)
+        bar.pack(side=tk.TOP, fill=tk.X, padx=4, pady=(0, 2))
+
+        ttk.Label(bar, text="Reference:").pack(side=tk.LEFT, padx=(0, 2))
+        self._ref_var = tk.StringVar(value="None")
+        combo = ttk.Combobox(bar, textvariable=self._ref_var, state="readonly",
+                             width=22, values=["None"],
+                             postcommand=self._refresh_sessions)
+        combo.pack(side=tk.LEFT, padx=(0, 4))
+        combo.bind("<<ComboboxSelected>>", self._on_reference_selected)
+        self._ref_combo = combo
+        tip(combo, "phase3.traces.reference")
+
+        refresh = ttk.Button(bar, text="\u21bb", width=3,
+                            command=self._refresh_sessions)
+        refresh.pack(side=tk.LEFT, padx=(0, 4))
+        tip(refresh, "phase3.traces.ref_refresh")
+
+        caption = ttk.Label(bar, textvariable=self._mismatch_var,
+                            foreground="#8a6d00", font=("", 8))
+        caption.pack(side=tk.LEFT, padx=(6, 0))
+        tip(caption, "phase3.traces.mismatch")
+
+    def _refresh_sessions(self) -> None:
+        """Re-scan the current rat's recorded sessions into the dropdown (off the
+        Tk poll - only on refresh / dropdown open). Keeps the current selection if
+        it survived; drops the ghost if the picked session vanished."""
+        animal = ""
+        try:
+            animal = self._animal_getter() if self._animal_getter else ""
+        except Exception:
+            animal = ""
+        try:
+            self._refs = discover_sessions(animal)
+        except Exception:
+            self._refs = []
+        self._ref_combo["values"] = ["None"] + [r.label for r in self._refs]
+        # If a selection is live but no longer listed, fall back to None.
+        if self._ref_selected is not None:
+            still = any(r.session_id == self._ref_selected.session_id
+                        for r in self._refs)
+            if not still:
+                self._clear_reference()
+
+    def _on_reference_selected(self, _evt=None) -> None:
+        """Load the picked past session once (or clear on 'None') and force a
+        redraw. Disk read happens here, never on the poll."""
+        idx = self._ref_combo.current()
+        if idx <= 0:                       # index 0 == "None"
+            self._clear_reference()
+            self._dirty = True
+            return
+        ref = self._refs[idx - 1] if 0 <= idx - 1 < len(self._refs) else None
+        if ref is None:
+            self._clear_reference()
+            self._dirty = True
+            return
+        loaded = snapshot_from_csv(ref.csv_path)
+        if loaded is None:
+            self._clear_reference()
+            self._mismatch_var.set(f"Reference {ref.label}: could not read file.")
+            self._dirty = True
+            return
+        self._ref_snapshot, self._ref_config = loaded
+        self._ref_selected = ref
+        self._ref_traces = None            # rebuild against the current windows
+        self._ref_cache_key = None
+        self._dirty = True
+
+    def _clear_reference(self) -> None:
+        self._ref_selected = None
+        self._ref_snapshot = None
+        self._ref_config = None
+        self._ref_traces = None
+        self._ref_cache_key = None
+        self._mismatch_var.set("")
+        if getattr(self, "_ref_var", None) is not None:
+            self._ref_var.set("None")
+
+    def _ensure_ghost(self, window_n: int,
+                      iti_window_n: Optional[int]) -> Optional[TraceResult]:
+        """The reference session's traces, rebuilt via the SAME build_traces as the
+        live line and cached; recomputed only when the window sizes change. None
+        when no reference is selected."""
+        if self._ref_snapshot is None:
+            return None
+        key = (window_n, iti_window_n)
+        if self._ref_traces is None or self._ref_cache_key != key:
+            self._ref_traces = build_traces(
+                self._ref_snapshot, window_n=window_n,
+                iti_window_n=iti_window_n, min_den=DEFAULT_MIN_DEN)
+            self._ref_cache_key = key
+        return self._ref_traces
+
+    def _update_mismatch_caption(self,
+                                 state: Optional[Phase3StateSnapshot]) -> None:
+        """Set the caption to the config differences between the current session
+        and the reference (quiet when they match, blank when no reference)."""
+        if self._ref_selected is None or self._ref_config is None:
+            self._mismatch_var.set("")
+            return
+        label = self._ref_selected.label
+        if state is None:
+            self._mismatch_var.set(f"Reference: {label}")
+            return
+        current = session_config_from_snapshot(state)
+        diffs = describe_config_mismatch(current, self._ref_config)
+        if diffs:
+            self._mismatch_var.set(f"Reference {label} differs (now→ref): "
+                                   + "; ".join(diffs))
+        else:
+            self._mismatch_var.set(f"Reference {label}: config matches.")
+
     def _int_var(self, var: tk.StringVar, default: int) -> int:
         try:
             return int(float(var.get()))
@@ -273,10 +438,14 @@ class Phase3TracesView:
             iti_window_n = None
         res = build_traces(state, window_n=window_n, iti_window_n=iti_window_n,
                            min_den=DEFAULT_MIN_DEN)
+        ghost = self._ensure_ghost(window_n, iti_window_n)
+        self._update_mismatch_caption(state)
 
         self._fig.clear()
         visible = [key for key, _ in _GROUPS if self._show[key].get()]
-        if not visible or len(res) == 0:
+        have_current = len(res) > 0
+        have_ghost = ghost is not None and len(ghost) > 0
+        if not visible or (not have_current and not have_ghost):
             self._total_min = 0.0
             if self._scrollbar is not None:
                 self._scrollbar.set(0.0, 1.0)
@@ -287,15 +456,27 @@ class Phase3TracesView:
             self._canvas.draw_idle()
             return
 
-        # Shared x in MINUTES since t0; keep None-x points out of the line data.
+        # Shared x in MINUTES since each session's own t0; keep None-x points out
+        # of the line data. The reference is aligned on ITS OWN elapsed minutes.
         t_min = [(v / 60.0) if v is not None else None for v in res.t]
-        self._total_min = max((v for v in t_min if v is not None), default=0.0)
+        ghost_t_min = ([(v / 60.0) if v is not None else None for v in ghost.t]
+                       if have_ghost else [])
+        # Viewport extent spans both sessions so the full ghost arc can scroll in.
+        cur_max = max((v for v in t_min if v is not None), default=0.0)
+        ghost_max = max((v for v in ghost_t_min if v is not None), default=0.0)
+        self._total_min = max(cur_max, ghost_max)
+
         axes = self._fig.subplots(len(visible), 1, sharex=True, squeeze=False)
         axes = [row[0] for row in axes]
         for ax, key in zip(axes, visible):
-            self._draw_group(ax, key, res, t_min, gap_s, state)
-            self._shade_blocks(ax, res)
-            self._shade_probes(ax, res)
+            if have_ghost:
+                self._draw_ghost(ax, key, ghost, ghost_t_min)
+            if have_current:
+                self._draw_group_lines(ax, key, res, t_min)
+            self._decorate(ax, key, gap_s, state, res, have_current)
+            if have_current:
+                self._shade_blocks(ax, res)
+                self._shade_probes(ax, res)
         axes[-1].set_xlabel("session time (min)")
 
         self._apply_viewport(axes)
@@ -316,51 +497,54 @@ class Phase3TracesView:
         if xs:
             ax.plot(xs, vals, **kw)
 
-    def _draw_group(self, ax, key: str, res: TraceResult,
-                    t_min: List[Optional[float]], gap_s: float,
-                    state: Optional[Phase3StateSnapshot]) -> None:
+    def _draw_group_lines(self, ax, key: str, res: TraceResult,
+                          t_min: List[Optional[float]]) -> None:
+        """Plot the live line series for one subplot (from the shared _SERIES
+        table); the decorations are added by _decorate."""
+        for attr, color, lw, label in _SERIES[key]:
+            self._line(ax, t_min, getattr(res, attr), color=color, lw=lw,
+                       label=label)
+
+    def _draw_ghost(self, ax, key: str, ref_res: TraceResult,
+                    ref_t_min: List[Optional[float]]) -> None:
+        """Plot the reference session's SAME series behind the live ones - faded,
+        dashed, and thinner so they read as "past" - on the reference's own elapsed
+        minutes. No labels (they'd double the legend) and no span shading. Same
+        _SERIES table as the live line, so the two can't drift. See ADR-0117."""
+        for attr, color, lw, _label in _SERIES[key]:
+            self._line(ax, ref_t_min, getattr(ref_res, attr), color=color,
+                       lw=max(0.8, lw * 0.6), ls="--", alpha=0.4, zorder=1)
+
+    def _decorate(self, ax, key: str, gap_s: float,
+                  state: Optional[Phase3StateSnapshot], res: TraceResult,
+                  has_current: bool) -> None:
+        """Per-subplot threshold lines, y-limits, legend, and probe markers. The
+        legend + probe markers are live-only (skipped when only a ghost is shown)."""
         if key == "iti":
-            self._line(ax, t_min, res.iti_med_s, color="#1f77b4", lw=1.6)
             ax.axhline(gap_s, color="#b3261e", lw=1.0, ls="--", alpha=0.8)
             ax.set_ylabel("ITI med (s)", fontsize=8)
             ax.set_ylim(bottom=0)
         elif key == "accuracy":
-            self._line(ax, t_min, res.accuracy, color="#1a7f37", lw=1.6,
-                       label="all")
-            self._line(ax, t_min, res.high_acc, color="#7f7fff", lw=1.0,
-                       label="HIGH cue")
-            self._line(ax, t_min, res.low_acc, color="#ff9f40", lw=1.0,
-                       label="LOW cue")
             ax.axhline(0.5, color="#999999", lw=0.8, ls=":", alpha=0.7)
-            self._plot_probe_accuracy(ax, res)
+            if has_current:
+                self._plot_probe_accuracy(ax, res)
             ax.set_ylabel("accuracy", fontsize=8)
             ax.set_ylim(0, 1)
-            ax.legend(fontsize=6, loc="lower right", framealpha=0.5, ncol=3)
+            if has_current:
+                ax.legend(fontsize=6, loc="lower right", framealpha=0.5, ncol=3)
         elif key == "strategy":
-            self._line(ax, t_min, res.side_bias_left, color="#1f77b4", lw=1.2,
-                       label="P(left)")
-            self._line(ax, t_min, res.switch_rate, color="#d62728", lw=1.2,
-                       label="switch")
-            self._line(ax, t_min, res.win_stay, color="#2ca02c", lw=1.0,
-                       label="win-stay")
-            self._line(ax, t_min, res.lose_shift, color="#9467bd", lw=1.0,
-                       label="lose-shift")
-            self._line(ax, t_min, res.cue_follow, color="#8c564b", lw=1.0,
-                       label="cue-follow")
             ax.axhline(0.5, color="#999999", lw=0.8, ls=":", alpha=0.7)
             ax.set_ylabel("strategy", fontsize=8)
             ax.set_ylim(0, 1)
-            ax.legend(fontsize=6, loc="lower right", framealpha=0.5, ncol=3)
+            if has_current:
+                ax.legend(fontsize=6, loc="lower right", framealpha=0.5, ncol=3)
         elif key == "bias":
-            self._line(ax, t_min, res.dir_bias, color="#111111", lw=1.6,
-                       label="dir bias")
-            self._line(ax, t_min, res.sched_alt_rate, color="#ff7f0e", lw=1.0,
-                       label="sched alt rate")
             ax.axhline(0.0, color="#999999", lw=0.8, ls=":", alpha=0.7)
             self._trigger_lines(ax, state)
             ax.set_ylabel("bias / alt", fontsize=8)
             ax.set_ylim(-1.05, 1.05)
-            ax.legend(fontsize=6, loc="lower right", framealpha=0.5, ncol=2)
+            if has_current:
+                ax.legend(fontsize=6, loc="lower right", framealpha=0.5, ncol=2)
         ax.tick_params(axis="both", labelsize=7)
         ax.grid(True, axis="y", alpha=0.15)
 

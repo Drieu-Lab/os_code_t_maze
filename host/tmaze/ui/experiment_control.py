@@ -519,6 +519,15 @@ def main() -> int:
         p3 = phase3_ref.get("p3")
         return p3.published_state() if p3 is not None else None
 
+    # The current animal id from the Task tab's single shared field (ADR-0053,
+    # FW-0005), resolved through the shared holder. Defined here (not only beside
+    # the Session panel below) so the Metrics tab can list the rat's past sessions
+    # for its reference (ghost) overlay (ADR-0117); null-safe until the Task tab
+    # is built.
+    def task_animal_id():
+        tv = task_ref.get("task")
+        return tv.animal_id() if tv is not None else ""
+
     # One shared maze-state pipeline (a single estimator on the camera tracking
     # worker), consumed by the Maze state / Rules / Behavior tabs instead of a
     # per-tab estimator (ADR-0041). Seed it with a previously drawn zone map so
@@ -661,7 +670,8 @@ def main() -> int:
     if Phase3TracesView is not None:
         tabs.append(("Metrics",
                      [lambda parent: Phase3TracesView(
-                         parent, state_getter=phase3_state)]))
+                         parent, state_getter=phase3_state,
+                         animal_getter=task_animal_id)]))
     # NOTE: the Session control is NOT a tab - it lives in the Rig view bottom
     # strip's RIGHT column, under the live behavior readout (filling the dead
     # space there so it doesn't lengthen the left column / the window). It is
@@ -905,11 +915,9 @@ def main() -> int:
         # (ADR-0049). Use the camera's fixed default recordings folder as the base
         # (not the live Output: box), so sessions always land in one place.
         recordings_root = os.path.join(DEFAULT_OUTPUT_DIR, "phase3_recordings")
-        # The animal id comes from the Task tab's single shared field (ADR-0053,
-        # FW-0005); the session slugs it into the session_id + manifest.
-        def task_animal_id():
-            tv = task_ref.get("task")
-            return tv.animal_id() if tv is not None else ""
+        # ``task_animal_id`` (the Task tab's shared id field; ADR-0053/FW-0005) is
+        # defined at the top of main() so the Metrics tab can share it; the session
+        # slugs its value into the session_id + manifest.
         # The behavior panel's Phase 3 locomotor snapshot for the end-of-session
         # summary (ADR-0071); resolved through the shared holder, null-safe if the
         # behavior panel wasn't built (no tracker).
