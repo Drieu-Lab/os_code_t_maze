@@ -77,6 +77,15 @@ code-level conventions live in [`CONTRIBUTING.md`](CONTRIBUTING.md)):
   pass), pause and **offer to commit** — propose a commit message, and if the work
   spans multiple purposes, propose how to split it — rather than letting one large
   diff accumulate. Only commit when the human agrees; never commit automatically.
+- **Check the working tree before you start.** Run `git status` (this repo, and
+  the sibling `os_code_t_maze_resources` if your task touches it) *before* making
+  code changes. Uncommitted changes already in the tree are almost always someone
+  else's in-progress work — do **not** fold them into your commits. Keep your
+  change isolated: stage only the files your task touched, leave the pre-existing
+  changes alone, and flag them to the human. If unrelated edits are intermixed
+  *within* a file you must touch, surface that and stage only your hunks rather
+  than committing the mix. A dirty starting tree that goes unnoticed is how one
+  commit ends up silently carrying two unrelated features.
 
 ## Explain for a non-specialist audience
 
