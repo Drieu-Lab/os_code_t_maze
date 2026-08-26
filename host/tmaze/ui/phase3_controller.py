@@ -61,6 +61,7 @@ from tkinter import messagebox, ttk
 from typing import Callable, Optional
 
 from tmaze.core import protocol
+from tmaze.core import cue_volume
 from tmaze.core.cue_gate import CHOICE, RETURN, CueGate, CueParams
 from tmaze.core.phase3.alternation import AlternationBlockConfig
 from tmaze.core.phase3.debias import DebiasBlockConfig
@@ -967,8 +968,8 @@ class Phase3ControlView(VisionActuator):
                             outbound, on_leg)
         if d.started == CHOICE:
             freq = self._task.current_choice_freq()
-            self._send_cmd(f"CUE_ON,CHOICE,{freq}" if freq is not None
-                           else "CUE_ON,CHOICE")
+            self._send_cmd(f"CUE_ON,CHOICE,{freq},{cue_volume.gain_pct_for(freq)}"
+                           if freq is not None else "CUE_ON,CHOICE")
             self._active_cue = CHOICE
             # Remember this trip's cue-on stamp so a scored excursion can carry the
             # relative cue-zone dwell (ADR-0108/0109).
@@ -981,8 +982,8 @@ class Phase3ControlView(VisionActuator):
             side = _SIDE_OF_ARM.get(d.return_arm)
             freq = self._seq.return_freq(side, idx) if side is not None else None
             cue = self._seq.return_cue(side, idx) if side is not None else None
-            self._send_cmd(f"CUE_ON,RETURN,{freq}" if freq is not None
-                           else "CUE_ON,RETURN")
+            self._send_cmd(f"CUE_ON,RETURN,{freq},{cue_volume.gain_pct_for(freq)}"
+                           if freq is not None else "CUE_ON,RETURN")
             self._active_cue = RETURN
             self._log_call(lambda: self._log.return_cue_started(
                 idx, d.return_arm or "", cue, iso))

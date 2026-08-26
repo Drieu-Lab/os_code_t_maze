@@ -84,6 +84,15 @@ TIPS: Dict[str, Entry] = {
     "cue.burst": "How long each test tone plays before the host auto-stops it, "
                  "in ms (1-5000).",
 
+    # ---- cue_volume_view.py: per-cue speaker volume calibration (ADR-0125) ----
+    "cue.volume": "Playback volume for this cue, as a percent of full amplitude "
+                  "(0-100). Turn the LOUDER cue down to match the quieter one; "
+                  "100 % is the firmware's full level (volume only attenuates).",
+    "cue.volume.play": "Play this cue at the volume set above (auto-stops after "
+                       "the burst) so you can measure it with a dB meter.",
+    "cue.volume.save": "Save the HIGH/LOW balance to host/cue_calibration.json. "
+                       "It is auto-applied to Phase 3 cues and the speaker test.",
+
     # ---- experiment_control.py: training mode ----
     "mode.free": "Switch the firmware to Free Roam (no cues/trials); refill the "
                  "central well manually. Restarts the session.",

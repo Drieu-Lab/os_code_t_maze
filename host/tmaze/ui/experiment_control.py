@@ -47,6 +47,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 from tmaze.core import protocol
+from tmaze.core import cue_volume
 from tmaze.io.rig_io import RigClient
 from tmaze.ui.rig_view import RigView
 from tmaze.ui.camera_view import (CameraView, DEFAULT_OUTPUT_DIR, ORIENTATION,
@@ -87,6 +88,13 @@ try:
 except Exception as e:  # pragma: no cover
     MazeStateControlView = None  # type: ignore
     _TRACKER_ERR = _TRACKER_ERR or f"{type(e).__name__}: {e}"
+# Cue-volume calibration subtab (Setup): balance HIGH vs LOW speaker loudness and
+# save it to host/cue_calibration.json (auto-applied to Phase 3 + the speaker
+# test). Pure Tk + the broker send; no tracker/camera. See docs/decisions/0125.
+try:
+    from tmaze.ui.cue_volume_view import CueVolumeView
+except Exception:  # pragma: no cover
+    CueVolumeView = None  # type: ignore
 # Phase 3 tab: the host-owned cued task (firmware = actuator). Composes the cue
 # gate + trial FSM over the shared pipeline; drives CUE_ON,<kind>,<hz> / reward.
 # Optional; guarded like the tabs above. See docs/decisions/0046.
@@ -378,9 +386,11 @@ def build_cue_panel(parent: tk.Misc, client: RigClient) -> None:
     def play(hz: int) -> None:
         hz = max(CUE_HZ_MIN, min(CUE_HZ_MAX, hz))
         # The firmware no-ops CUE_ON while a tone is already playing, so stop
-        # any current/pending tone first, then start the new one.
+        # any current/pending tone first, then start the new one. Apply the saved
+        # per-cue volume balance so the test bar previews what Phase 3 will play
+        # (the "Cue volume" Setup subtab is where that balance is tuned; ADR-0125).
         stop()
-        client.send(f"CUE_ON,{kind_var.get()},{hz}")
+        client.send(f"CUE_ON,{kind_var.get()},{hz},{cue_volume.gain_pct_for(hz)}")
         raw = burst_var.get().strip()
         try:
             ms = int(raw)
@@ -647,6 +657,13 @@ def main() -> int:
         setup_subtabs.append(("Maze state", lambda parent: MazeStateControlView(
             parent, tracker=tracker, camera=camera_ref.get("cam"),
             pipeline=pipeline)))
+    # Cue volume: a pre-run speaker-balance calibration (ADR-0125). Needs only the
+    # broker (to play test tones), resolved lazily like make_task since subtab
+    # factories run before the client exists; no tracker/camera, so it is offered
+    # even when the vision deps are missing.
+    if CueVolumeView is not None:
+        setup_subtabs.append(("Cue volume", lambda parent: CueVolumeView(
+            parent, send=lambda cmd: client.send(cmd))))
     if setup_subtabs:
         labels = [label for label, _ in setup_subtabs]
         factories = [factory for _, factory in setup_subtabs]
