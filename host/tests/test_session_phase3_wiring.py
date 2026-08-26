@@ -262,6 +262,30 @@ class SessionPhase3WiringTest(unittest.TestCase):
         # The reopen was surfaced to the operator as a resume, not a restart.
         self.assertGreaterEqual(self.phase3._reopen_resumes, 1)
 
+    def test_disk_write_failure_is_surfaced_and_clears_on_recovery(self):
+        """ADR-0121: a failed atomic write of the trial CSV is no longer swallowed
+        - it is recorded per-file and surfaced loudly in the status line, then
+        cleared once a later write succeeds."""
+        import unittest.mock as mock
+
+        self._open_gate()
+        self._run_a_trial()                        # arms; a normal write succeeded
+        self.phase3._publish_status(self.phase3._act_snapshot)
+        self.assertNotIn("DISK WRITE FAILED", self.phase3._status_text)
+
+        # The disk write fails: the failure is recorded, not swallowed.
+        with mock.patch("builtins.open", side_effect=OSError("disk full")):
+            self.phase3._write_log()
+        self.assertIn("task", self.phase3._write_errors)
+        self.phase3._publish_status(self.phase3._act_snapshot)
+        self.assertIn("DISK WRITE FAILED", self.phase3._status_text)
+
+        # A later successful write clears the warning.
+        self.phase3._write_log()
+        self.assertNotIn("task", self.phase3._write_errors)
+        self.phase3._publish_status(self.phase3._act_snapshot)
+        self.assertNotIn("DISK WRITE FAILED", self.phase3._status_text)
+
     def test_manifest_never_records_a_file_outside_the_session(self):
         """The backstop, independent of the rebind: a reported path from outside
         the session's tree is refused rather than recorded."""

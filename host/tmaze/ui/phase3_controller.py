@@ -288,6 +288,13 @@ class Phase3ControlView(VisionActuator):
         # Last live-validation error of the GUI debias fields (invalid edits fall
         # back to the last valid config; surfaced in the sequence readout).
         self._debias_error = ""
+        # Disk-write failures we could not persist (slot -> failing file name). A
+        # failed atomic write of the trial CSV or the excursion log means data is
+        # NOT on disk; rather than swallow it (the old silent `except OSError:
+        # pass`), record it per-file and surface it loudly in the status line so
+        # the operator notices, and clear a slot once its next write succeeds
+        # (docs/decisions/0121). Actuation-thread-only, like the log itself.
+        self._write_errors: dict = {}
         self._load_config()
 
         # --- actuation thread (ADR-0043 skeleton, shared via VisionActuator) ---
@@ -1067,9 +1074,25 @@ class Phase3ControlView(VisionActuator):
         idx = self._task.index if self._task is not None else 0
         self._state = log.snapshot(idx, armed=armed)
 
+    def _record_write_result(self, slot: str, path: Optional[str],
+                             exc: Optional[OSError]) -> None:
+        """Track a persist attempt for a data-file ``slot`` ("task" / "excursions";
+        docs/decisions/0121). A failure records the file name so the status line
+        can warn that data is NOT on disk; a success clears that slot so a
+        transient hiccup that recovers stops warning. Per-slot so a persistently
+        failing file isn't masked by the other file writing fine."""
+        if exc is None:
+            self._write_errors.pop(slot, None)
+        else:
+            self._write_errors[slot] = os.path.basename(path) if path else slot
+
     def _write_log(self) -> None:
         """Atomically persist the whole table (temp file + os.replace), so a crash
-        never leaves a half-written CSV. Cheap for a few hundred rows."""
+        never leaves a half-written CSV. Cheap for a few hundred rows.
+
+        A write failure is NOT swallowed: it is recorded and surfaced in the
+        status line (docs/decisions/0121), because a silently dropped write means
+        the session's data is not on disk."""
         if self._log is None or self._log_path is None:
             return
         try:
@@ -1078,8 +1101,10 @@ class Phase3ControlView(VisionActuator):
             with open(tmp, "w", encoding="utf-8", newline="") as fh:
                 fh.write(self._log.render_csv())
             os.replace(tmp, self._log_path)
-        except OSError:
-            pass
+        except OSError as exc:
+            self._record_write_result("task", self._log_path, exc)
+        else:
+            self._record_write_result("task", self._log_path, None)
 
     # ------------------------------------------------ excursion event log (A/0109)
     @staticmethod
@@ -1162,15 +1187,28 @@ class Phase3ControlView(VisionActuator):
             with open(tmp, "w", encoding="utf-8", newline="") as fh:
                 fh.write(self._excursion_log.render_csv())
             os.replace(tmp, self._excursion_path)
-        except OSError:
-            pass
+        except OSError as exc:
+            self._record_write_result("excursions", self._excursion_path, exc)
+        else:
+            self._record_write_result("excursions", self._excursion_path, None)
+
+    def _write_warn(self) -> str:
+        """A loud status-line prefix when a data file could not be written to disk
+        (docs/decisions/0121), else "". Named files so the operator knows what is
+        at risk; shown in every state since a failure may outlast the run."""
+        if not self._write_errors:
+            return ""
+        files = ", ".join(sorted(set(self._write_errors.values())))
+        return f"!! DISK WRITE FAILED: {files} - data not saved !!  "
 
     def _publish_status(self, snap: _Phase3Snapshot) -> None:
+        warn = self._write_warn()
         if not snap.gate_open:
-            self._status_text = f"gated ({self._gate_reason()})"
+            self._status_text = warn + f"gated ({self._gate_reason()})"
             return
         if snap.paused:
-            self._status_text = "PAUSED  (cues muted; still armed - press Resume)"
+            self._status_text = (
+                warn + "PAUSED  (cues muted; still armed - press Resume)")
             return
         n = len(self._seq) if self._seq is not None else 0
         idx = self._task.index if self._task is not None else 0
@@ -1193,6 +1231,7 @@ class Phase3ControlView(VisionActuator):
         if probe_state in ("ACTIVE", "PENDING"):
             probe += f"  [PROBE {probe_state}]"
         self._status_text = (
+            warn +
             f"ARMED  seed:{self._active_seed}  trial:{min(idx + 1, n)}/{n}  "
             f"correct:{self._correct}/{done} ({acc:.0f}%)  "
             f"rewards:{self._reward_count} ({format_volume(self._reward_ul)}){probe}  "
