@@ -111,6 +111,7 @@ def default_config() -> dict:
             "max_trials": tc.max_trials,
             "block_size": tc.block_size,
             "max_same_run": tc.max_same_run,
+            "max_alt_run": tc.max_alt_run,
             "high_tone_is_left": tc.high_tone_is_left,
             "high_tone_hz": tc.high_tone_hz,
             "low_tone_hz": tc.low_tone_hz,
@@ -313,6 +314,7 @@ def to_trial_config(config: dict) -> TrialConfig:
     max_trials = int(s.get("max_trials", 200))
     block_size = int(s.get("block_size", 20))
     max_same_run = int(s.get("max_same_run", 4))
+    max_alt_run = int(s.get("max_alt_run", 0))
     high_hz = int(s.get("high_tone_hz", 8000))
     low_hz = int(s.get("low_tone_hz", 4000))
     generator = str(s.get("generator", GEN_BALANCED))
@@ -322,6 +324,8 @@ def to_trial_config(config: dict) -> TrialConfig:
         raise ValueError("sequence.block_size must be > 0")
     if max_same_run < 0:
         raise ValueError("sequence.max_same_run must be >= 0")
+    if max_alt_run < 0:
+        raise ValueError("sequence.max_alt_run must be >= 0")
     if high_hz <= 0 or low_hz <= 0:
         raise ValueError("sequence tone Hz must be > 0")
     if generator not in (GEN_BALANCED, GEN_DEBIAS_BLOCKS, GEN_INTERVENTION_BLOCKS):
@@ -353,7 +357,7 @@ def to_trial_config(config: dict) -> TrialConfig:
     probe_cfg = _to_probe_config(s.get("probe_blocks", {}))
     probe = probe_cfg if probe_cfg.enabled else None
     return TrialConfig(max_trials=max_trials, block_size=block_size,
-                       max_same_run=max_same_run,
+                       max_same_run=max_same_run, max_alt_run=max_alt_run,
                        high_tone_is_left=bool(s.get("high_tone_is_left", True)),
                        high_tone_hz=high_hz, low_tone_hz=low_hz,
                        generator=generator, debias=debias, alternation=alternation,

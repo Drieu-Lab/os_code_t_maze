@@ -360,7 +360,7 @@ def _params_lines(params: Dict[str, Any]) -> list:
     gen = g("generator") or "balanced"
     lines = [
         f"  Sequence:    block {g('block_size')}   max-run {g('max_same_run')}   "
-        f"generator {gen}",
+        f"max-alt {g('max_alt_run')}   generator {gen}",
         f"  Cue:         require up-stem {g('require_up_stem')}   "
         f"min-conf {_conf(g('min_confidence'))}",
         f"  Reward:      pulse {g('reward_pulse_ms')} ms   "

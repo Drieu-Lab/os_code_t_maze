@@ -74,8 +74,10 @@ class TrialConfig:
 
     ``max_trials`` should be a multiple of ``block_size`` (any remainder is left
     as LEFT, exactly as the firmware does). ``max_same_run`` is the anti-bias cap
-    on consecutive same-side trials (0 disables). The tone fields map a correct
-    arm to a frequency via :func:`cue_for`.
+    on consecutive same-side trials (0 disables). ``max_alt_run`` is the companion
+    anti-bias cap on consecutive *alternating* trials - runs like L R L R that let
+    a rat succeed by simply alternating (0 disables; see docs/decisions/0126). The
+    tone fields map a correct arm to a frequency via :func:`cue_for`.
 
     ``generator`` selects the schedule: ``"balanced"`` (default, the original
     counterbalanced generator), ``"debias_blocks"`` (counterbalanced plus the
@@ -88,6 +90,10 @@ class TrialConfig:
     max_trials: int = 200
     block_size: int = 20
     max_same_run: int = 4
+    # Anti-bias cap on consecutive ALTERNATING trials (L R L R ...). Default 0
+    # (disabled) so existing seeds/schedules stay byte-identical unless a config
+    # opts in via phase3.json. See docs/decisions/0126.
+    max_alt_run: int = 0
     high_tone_is_left: bool = True
     high_tone_hz: int = 8000
     low_tone_hz: int = 4000
@@ -138,8 +144,30 @@ def max_run_ok(seq: List[int], n: int, max_run: int) -> bool:
     return True
 
 
+def alt_run_ok(seq: List[int], n: int, max_alt: int) -> bool:
+    """True if ``seq[0..n)`` never alternates for more than ``max_alt`` trials in
+    a row.
+
+    The companion of :func:`max_run_ok` for the *alternating* bias: it counts a
+    run of strictly alternating trials (L R L R ...) by trial, so ``max_alt == 4``
+    permits ``L R L R`` but rejects a 5th trial that would extend it (``L R L R L``).
+    ``max_alt == 0`` disables the check. See docs/decisions/0126.
+    """
+    if max_alt == 0 or n < 2:
+        return True
+    run = 1
+    for i in range(1, n):
+        if seq[i] != seq[i - 1]:
+            run += 1
+            if run > max_alt:
+                return False
+        else:
+            run = 1
+    return True
+
+
 def generate_balanced(n: int, block: int, max_run: int,
-                      rng: int) -> Tuple[List[int], int]:
+                      rng: int, max_alt: int = 0) -> Tuple[List[int], int]:
     """Build a balanced, per-block-shuffled, anti-bias binary (0/1) schedule.
 
     The shared engine behind BOTH the choice L/R schedule and the two return-arm
@@ -153,6 +181,9 @@ def generate_balanced(n: int, block: int, max_run: int,
     ``max_run`` (counting across the boundary with the already-fixed previous
     blocks) is re-rolled up to ``MAX_ATTEMPTS`` times; the PRNG is threaded across
     attempts and blocks, and the last attempt is accepted unconditionally.
+    ``max_alt`` adds a second anti-bias constraint checked the same way: a block
+    that would alternate for more than ``max_alt`` trials in a row is also
+    re-rolled (0 disables; see docs/decisions/0126).
     """
     half = block // 2
     MAX_ATTEMPTS = 200
@@ -169,7 +200,8 @@ def generate_balanced(n: int, block: int, max_run: int,
                 j = (rng >> 16) % (i + 1)
                 seq[off + i], seq[off + j] = seq[off + j], seq[off + i]
             # Validate the prefix so far (catches runs spanning the block boundary).
-            if max_run_ok(seq, off + block, max_run):
+            if (max_run_ok(seq, off + block, max_run)
+                    and alt_run_ok(seq, off + block, max_alt)):
                 break
         off += block
     return seq, rng
@@ -185,7 +217,7 @@ def generate_sequence(cfg: TrialConfig, seed: int) -> Tuple[List[int], int]:
     are 0/1), kept for back-compat and to name the choice-schedule intent.
     """
     return generate_balanced(cfg.max_trials, cfg.block_size, cfg.max_same_run,
-                             seed & _U32)
+                             seed & _U32, max_alt=cfg.max_alt_run)
 
 
 class TrialSequence:
@@ -212,8 +244,9 @@ class TrialSequence:
         # session is reproducible from the one seed. (0=LOW, 1=HIGH.) Return cues
         # are navigational and index-keyed, so they are unaffected by debias mode.
         n, block, run = len(self.seq), self.cfg.block_size, self.cfg.max_same_run
-        left_bits, rng = generate_balanced(n, block, run, rng)
-        right_bits, rng = generate_balanced(n, block, run, rng)
+        alt = self.cfg.max_alt_run
+        left_bits, rng = generate_balanced(n, block, run, rng, max_alt=alt)
+        right_bits, rng = generate_balanced(n, block, run, rng, max_alt=alt)
         self._return_bits = {LEFT: left_bits, RIGHT: right_bits}
         self._rng = rng
 
@@ -564,20 +597,21 @@ class TrialSequence:
         and the existing prefix is left byte-identical (append-only). ``n_more`` is
         rounded up to a whole ``block_size`` so each appended segment keeps the same
         exact per-block L/R (and hi/lo) balance as the initial plan; ``None`` adds
-        one block. The anti-bias run cap is enforced only WITHIN each appended
-        block, not across the join with the existing tail.
+        one block. The anti-bias run caps (same-side and alternating) are enforced
+        only WITHIN each appended block, not across the join with the existing tail.
         """
         block = self.cfg.block_size
         run = self.cfg.max_same_run
+        alt = self.cfg.max_alt_run
         if n_more is None:
             n_more = block
         if n_more <= 0:
             return len(self.seq)
         n_more = ((n_more + block - 1) // block) * block   # whole blocks only
         rng = self._rng
-        choice_ext, rng = generate_balanced(n_more, block, run, rng)
-        left_ext, rng = generate_balanced(n_more, block, run, rng)
-        right_ext, rng = generate_balanced(n_more, block, run, rng)
+        choice_ext, rng = generate_balanced(n_more, block, run, rng, max_alt=alt)
+        left_ext, rng = generate_balanced(n_more, block, run, rng, max_alt=alt)
+        right_ext, rng = generate_balanced(n_more, block, run, rng, max_alt=alt)
         self.seq.extend(choice_ext)
         self._return_bits[LEFT].extend(left_ext)
         self._return_bits[RIGHT].extend(right_ext)

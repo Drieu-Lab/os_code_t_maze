@@ -14,7 +14,7 @@ from __future__ import annotations
 import unittest
 
 from tmaze.core.phase3.trial_sequence import (
-    HIGH, LEFT, LOW, RIGHT, TrialConfig, TrialSequence, cue_for,
+    HIGH, LEFT, LOW, RIGHT, TrialConfig, TrialSequence, alt_run_ok, cue_for,
     generate_balanced, generate_sequence, lcg, max_run_ok,
 )
 
@@ -47,6 +47,21 @@ class TestMaxRunOk(unittest.TestCase):
         self.assertFalse(max_run_ok([0, 0, 0, 0], 4, 3))
         self.assertTrue(max_run_ok([0, 0, 0, 0], 4, 0))   # 0 disables
         self.assertTrue(max_run_ok([1], 1, 3))            # n < 2
+
+
+class TestAltRunOk(unittest.TestCase):
+    def test_basic(self):
+        # counting is by trial: L R L R is a run of 4 alternating trials.
+        self.assertTrue(alt_run_ok([0, 1, 0, 1], 4, 4))      # 4 allowed at cap 4
+        self.assertFalse(alt_run_ok([0, 1, 0, 1, 0], 5, 4))  # 5th extends -> reject
+        self.assertTrue(alt_run_ok([0, 0, 1, 1, 0], 5, 3))   # non-alternating is fine
+        self.assertTrue(alt_run_ok([0, 1, 0, 1, 0], 5, 0))   # 0 disables
+        self.assertTrue(alt_run_ok([1], 1, 3))               # n < 2
+
+    def test_run_resets_after_repeat(self):
+        # A repeated pair resets the alternating run, so L R L R | L R L R passes
+        # at cap 4 even though there are 8 alternating-ish trials total.
+        self.assertTrue(alt_run_ok([0, 1, 0, 1, 1, 0, 1, 0], 8, 4))
 
 
 class TestGenerateSequence(unittest.TestCase):
@@ -117,6 +132,39 @@ class TestGenerateBalanced(unittest.TestCase):
         c = TrialConfig(max_trials=40, block_size=20, max_same_run=3)
         self.assertEqual(generate_sequence(c, 999),
                          generate_balanced(40, 20, 3, 999))
+
+    def test_alt_run_cap_enforced_and_balance_kept(self):
+        # With an alternation cap set, no block alternates for more than the cap,
+        # yet every block keeps its exact per-block balance.
+        seq, _ = generate_balanced(200, 20, 4, 12345, max_alt=4)
+        self.assertTrue(alt_run_ok(seq, 200, 4))
+        self.assertTrue(max_run_ok(seq, 200, 4))
+        for off in range(0, 200, 20):
+            self.assertEqual(seq[off:off + 20].count(0), 10)
+
+    def test_alt_default_disabled_is_backcompat(self):
+        # Default max_alt (0) must leave the schedule byte-identical to a call that
+        # omits the arg, so existing seeds/sessions are unaffected.
+        self.assertEqual(generate_balanced(200, 20, 3, 555),
+                         generate_balanced(200, 20, 3, 555, max_alt=0))
+
+
+class TestAltRunSequence(unittest.TestCase):
+    def test_generate_sequence_respects_alt_cap(self):
+        c = TrialConfig(max_trials=200, block_size=20, max_same_run=4,
+                        max_alt_run=4)
+        seq, _ = generate_sequence(c, 24680)
+        self.assertTrue(alt_run_ok(seq, 200, 4))
+        self.assertTrue(max_run_ok(seq, 200, 4))
+
+    def test_return_schedules_respect_alt_cap(self):
+        c = TrialConfig(max_trials=200, block_size=20, max_same_run=4,
+                        max_alt_run=4)
+        ts = TrialSequence(c, seed=777)
+        for side in (LEFT, RIGHT):
+            bits = [1 if ts.return_cue(side, i) == HIGH else 0
+                    for i in range(len(ts))]
+            self.assertTrue(alt_run_ok(bits, len(bits), 4))
 
 
 class TestReturnSchedules(unittest.TestCase):

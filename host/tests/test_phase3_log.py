@@ -260,6 +260,15 @@ class TestExtendAndAbandon(unittest.TestCase):
         self.assertTrue(any("reward_pulse_ms=250" in ln for ln in header))
         self.assertTrue(any("max_topups=4" in ln for ln in header))
 
+    def test_header_records_max_alt_run(self):
+        # The anti-alternation cap is stamped in the header for reproducibility
+        # (docs/decisions/0126).
+        seq = TrialSequence(TrialConfig(max_trials=20, block_size=20,
+                                        max_same_run=4, max_alt_run=4), seed=123)
+        log = Phase3Log(seq, animal="R", session_start_iso="t")
+        header = [ln for ln in log.render_csv().split("\n") if ln.startswith("#")]
+        self.assertTrue(any("max_alt_run=4" in ln for ln in header))
+
     def test_header_stamps_canonical_session_t0_when_set(self):
         # The manifest anchor (Start Session; host wall+mono+iso) is stamped into
         # the header so the file self-anchors to the one shared instant (ADR-0124).

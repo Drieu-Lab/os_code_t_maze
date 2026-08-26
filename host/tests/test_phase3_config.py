@@ -47,6 +47,12 @@ class TestDefaults(unittest.TestCase):
         self.assertEqual(to_trial_config(cfg), TrialConfig())
         self.assertEqual(reward_max_topups(cfg), DEFAULT_MAX_TOPUPS)
 
+    def test_max_alt_run_round_trips(self):
+        cfg = default_config()
+        self.assertEqual(cfg["sequence"]["max_alt_run"], TrialConfig().max_alt_run)
+        cfg["sequence"]["max_alt_run"] = 4
+        self.assertEqual(to_trial_config(cfg).max_alt_run, 4)
+
 
 class TestLoadMerge(unittest.TestCase):
     def _write(self, obj) -> str:
@@ -117,6 +123,9 @@ class TestValidation(unittest.TestCase):
 
     def test_bad_block_size(self):
         self._bad("sequence", "block_size", 0)
+
+    def test_bad_max_alt_run(self):
+        self._bad("sequence", "max_alt_run", -1)
 
     def test_bad_tone(self):
         self._bad("sequence", "high_tone_hz", -1)

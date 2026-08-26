@@ -606,6 +606,7 @@ class Phase3Log:
             f"# high_tone_is_left={c.high_tone_is_left} "
             f"high_tone_hz={c.high_tone_hz} low_tone_hz={c.low_tone_hz}",
             f"# block_size={c.block_size} max_same_run={c.max_same_run} "
+            f"max_alt_run={c.max_alt_run} "
             f"max_trials={c.max_trials} planned_trials={len(self._rows)} "
             f"reward_incorrect={self.reward_incorrect} "
             f"reward_pulse_ms={self.reward_pulse_ms} max_topups={self.max_topups}",
