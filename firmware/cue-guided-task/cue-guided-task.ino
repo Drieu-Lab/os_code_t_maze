@@ -172,15 +172,22 @@ void handleManualSolenoid(const char* b) {
 // clamped to [CUE_HZ_MIN, CUE_HZ_MAX] so a bad value can't drive the DAC out of
 // range. see docs/decisions/0046
 void handleCueOn(const char* arg) {
-  // Split "<kind>[,<hz>]" into the kind token and an optional frequency.
+  // Split "<kind>[,<hz>[,<gain>]]" into the kind token, an optional frequency,
+  // and an optional per-cue volume percent (v7). Fields are positional.
   char kind[8] = {0};
   uint8_t k = 0;
   const char* p = arg;
   while (*p && *p != ',' && k < sizeof(kind) - 1) kind[k++] = *p++;
   kind[k] = '\0';
   long hz = 0;
+  long gainPct = CUE_GAIN_PCT_DEFAULT;
   if (*p == ',') {
-    for (const char* q = p + 1; *q >= '0' && *q <= '9'; q++) hz = hz * 10 + (*q - '0');
+    const char* q = p + 1;
+    while (*q >= '0' && *q <= '9') { hz = hz * 10 + (*q - '0'); q++; }
+    if (*q == ',') {                      // optional volume percent (v7)
+      gainPct = 0;
+      for (q = q + 1; *q >= '0' && *q <= '9'; q++) gainPct = gainPct * 10 + (*q - '0');
+    }
   }
 
   uint16_t freq;
@@ -203,11 +210,17 @@ void handleCueOn(const char* arg) {
     if (hz > CUE_HZ_MAX) hz = CUE_HZ_MAX;
     freq = (uint16_t)hz;
   }
+  // Volume percent -> Q8 gain, clamped so it can only attenuate (v7). Rounded so
+  // 100 maps exactly to full scale (TONE_GAIN_UNITY). see docs/decisions/0125
+  if (gainPct < CUE_GAIN_PCT_MIN) gainPct = CUE_GAIN_PCT_MIN;
+  if (gainPct > CUE_GAIN_PCT_MAX) gainPct = CUE_GAIN_PCT_MAX;
+  uint16_t gainQ8 = (uint16_t)((gainPct * TONE_GAIN_UNITY + 50) / 100);
   if (tonePlaying) return;                           // already sounding: don't relog / retrigger
-  startToneAsync((float)freq);                       // also raises the TONE_ON TTL
+  startToneAsync((float)freq, gainQ8);               // also raises the TONE_ON TTL
   unsigned long t = millis() - session.startMs;
   CONSOLE.print(t); CONSOLE.print(",CUE,ON,");
-  CONSOLE.print(type); CONSOLE.print(','); CONSOLE.println(freq);
+  CONSOLE.print(type); CONSOLE.print(','); CONSOLE.print(freq);
+  CONSOLE.print(','); CONSOLE.println(gainPct);
 }
 
 void handleCueOff() {

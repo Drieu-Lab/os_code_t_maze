@@ -189,6 +189,15 @@
  * this band. see docs/decisions/0046 */
 #define CUE_HZ_MIN           500
 #define CUE_HZ_MAX           20000
+/* Per-cue playback volume as a PERCENT of full DAC amplitude (CUE_ON,<kind>,
+ * <hz>,<gain>, v7). A cheap speaker's response is not flat, so the HIGH and LOW
+ * cues can measure at different dB even at equal amplitude; this lets the host
+ * ATTENUATE the louder cue to equalize them (100 = today's full level, the
+ * default when no gain is sent). We only go DOWN because DAC_AMPLITUDE already
+ * sits just under the clip ceiling. see docs/decisions/0125 */
+#define CUE_GAIN_PCT_MIN     0
+#define CUE_GAIN_PCT_MAX     100
+#define CUE_GAIN_PCT_DEFAULT 100
 
 /* DAC / audio (Arduino Due). The tone ISR is wavetable-based (integer-only, see
  * sound.h), so this is cheap. 80 kHz gives a clean sine (>=10 samples/cycle at
@@ -196,7 +205,13 @@
 #define DAC_SAMPLE_RATE      80000.0f    /* Hz */
 
 /* ================================ Protocol ============================== */
-/* v6 lets the host supply the cue tone identity explicitly:
+/* v7 lets the host set a per-cue playback volume: CUE_ON,<CHOICE|RETURN>,<hz>,
+ * <gain> where <gain> is a percent 0..100 of full DAC amplitude (optional and
+ * clamped to [CUE_GAIN_PCT_MIN, CUE_GAIN_PCT_MAX]; absent == 100 == v6 level).
+ * The firmware scales the tone in the wavetable ISR (integer Q8, see sound.h)
+ * and echoes the applied gain: CUE,ON,<type>,<freq>,<gain>. Used to equalize
+ * the HIGH/LOW cues on a non-flat speaker. see docs/decisions/0125.
+ * v6 lets the host supply the cue tone identity explicitly:
  * CUE_ON,<CHOICE|RETURN>,<hz> (the <hz> is optional and clamped to
  * [CUE_HZ_MIN, CUE_HZ_MAX]); without it the firmware resolves identity as in v5.
  * v6 also fires the choice / return-arm TTLs autonomously on their beam edges in
@@ -215,6 +230,6 @@
  * logging (REWARD,<port>,MANUAL), and SESSION_SUMMARY (see docs/decisions/0009);
  * plus full manual solenoid control in cue-guided-task (R<port><sol>[,<ms>] ->
  * SOL ack) and auto well-clean SOL lines at trial start (docs/decisions/0010). */
-#define PROTO_VERSION        6
+#define PROTO_VERSION        7
 
 #endif /* RIG_CONFIG_H */

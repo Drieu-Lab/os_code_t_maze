@@ -1,7 +1,17 @@
-# Rig serial protocol v6
+# Rig serial protocol v7
 
 Both firmware sketches (`cue-guided-task`, `tmaze_test`) and the host tools
-(`maze_gui.py`, `lick_tuner.py`, `rig_logger.py`) speak this protocol. v6 lets
+(`maze_gui.py`, `lick_tuner.py`, `rig_logger.py`) speak this protocol. v7 adds a
+per-cue playback volume: `CUE_ON,<CHOICE|RETURN>,<hz>` gains an optional trailing
+percent, `CUE_ON,<CHOICE|RETURN>,<hz>,<gain>` (0-100 % of full DAC amplitude,
+clamped to `[CUE_GAIN_PCT_MIN, CUE_GAIN_PCT_MAX]`; absent == 100 == the v6 level,
+so it is append-only and backward compatible). The firmware scales the tone in
+its wavetable ISR and echoes the applied gain on the `CUE,ON` line. This lets the
+host equalize the HIGH and LOW cues on a speaker whose response is not flat -
+attenuating the louder cue - without touching tone identity or timing (see
+docs/decisions/0125).
+
+v6 lets
 the HOST own the cue tone identity: `CUE_ON,<CHOICE|RETURN>` gains an optional
 trailing frequency, `CUE_ON,<CHOICE|RETURN>,<hz>`. Without `<hz>` the firmware
 resolves identity as in v5; with it the host supplies the tone directly (clamped
@@ -63,7 +73,7 @@ Emitted at boot, in order, before the session begins:
 
 | Line | Meaning |
 |------|---------|
-| `0,PROTO,6` | protocol version (assert this on the client) |
+| `0,PROTO,7` | protocol version (assert this on the client) |
 | `0,ANIMAL,<id>` | configured animal id |
 
 The firmware then starts in its default **training mode** (Free Roam unless
@@ -101,7 +111,7 @@ log can contain several of them.
 | `REWARD` | `<port>,MANUAL,<dur_ms>` | manual reward-spout fire (`R<port>` / `R<port>1`): the experimenter delivered reward at `port` (0=left,1=right,2=center) for `<dur_ms>` ms. The Free Roam reward path; emitted alongside the `SOL` ack. |
 | `SOL` | `<port>,<sol>,<dur_ms>` | a solenoid was pulsed for `<dur_ms>` ms: a manual `R<port><sol>` fire, or the automatic well-clean (`SOL,2,4,<rinse_ms>` rinse then `SOL,2,3,<drain_ms>` drain) at trial start. Drives the Rig-view marker flash. |
 | `RETURN_ARM` | `ENTRY` | return-arm beam entered; trial advances |
-| `CUE` | `ON,<CHOICE\|RETURN>,<freq_hz>` | a host-driven cue tone started (v5): `<type>` is the cue, `<freq_hz>` the tone actually played (CHOICE = the trial's `correctArm` mapping; RETURN = a random hi/lo). Emitted only on a real onset, not a no-op. The `TONE_ON` TTL marks the acoustic onset. see docs/decisions/0044 |
+| `CUE` | `ON,<CHOICE\|RETURN>,<freq_hz>[,<gain_pct>]` | a host-driven cue tone started (v5): `<type>` is the cue, `<freq_hz>` the tone actually played (CHOICE = the trial's `correctArm` mapping; RETURN = a random hi/lo). v7 appends `<gain_pct>`, the volume applied (0-100 % of full amplitude; 100 when none was sent). Emitted only on a real onset, not a no-op. The `TONE_ON` TTL marks the acoustic onset. A parser that only reads the first three fields is unaffected by the appended gain. see docs/decisions/0044, docs/decisions/0125 |
 | `CUE` | `OFF` | a host-driven cue tone stopped (v5). Emitted only when a tone was actually playing. The `TONE_OFF` TTL marks the acoustic offset. |
 | `SESSION_SUMMARY` | `<trials>,<correct>,<incorrect>` | emitted before `SESSION_COMPLETE` for a Full task session |
 | `STATUS` | `<count>,<index>,<active>` | reply to `STATUS` command |
@@ -141,7 +151,7 @@ Commands are newline-terminated and are NOT part of the `ms,TYPE` line schema.
 | `R<port><sol>[,<ms>]` | cue-guided-task, tmaze_test | pulse solenoid `[port][sol]` (port 0=left,1=right,2=center; sol 0-2 reward, 3 drain, 4 rinse); optional `<ms>` overrides `REWARD_PULSE_MS` (clamped <=5000). Both sketches ack with `SOL,<port>,<sol>` (`cue-guided-task` appends the pulse `<dur_ms>`: `SOL,<port>,<sol>,<dur_ms>`; `tmaze_test` does not). In `cue-guided-task` the pulse is non-blocking, works in any mode (independent of an active session), and a reward-spout fire (`<sol>` omitted or `=1`) also logs `REWARD,<port>,MANUAL,<dur_ms>`. A bare `R<port>` fires that port's reward spout. |
 | `PING` | cue-guided-task | -> `PONG`. Answered in ANY session state, including after a session has completed, so the broker's liveness probe keeps working post-session (see docs/decisions/0123). |
 | `STATUS` | cue-guided-task | -> `STATUS,<count>,<index>,<active>`. Answered in any session state; after completion `<active>` reports `0` (see docs/decisions/0123). |
-| `CUE_ON,CHOICE[,<hz>]` / `CUE_ON,RETURN[,<hz>]` | cue-guided-task | start the host-driven cue tone. Without `<hz>` (v5) the frequency is chosen in firmware: `CHOICE` from the current trial's `correctArm` (`cueFor`), `RETURN` a random hi/lo from the session PRNG. With an explicit `<hz>` (v6) the host supplies identity directly, clamped to `[CUE_HZ_MIN, CUE_HZ_MAX]` - used by the host-owned Phase 3 (Free Roam, no firmware trial), see docs/decisions/0046. Session-independent (works in any mode; in Free Roam `CHOICE` without `<hz>` falls back to the low tone). Fires the `TONE_ON` TTL and emits `CUE,ON,<type>,<freq>` (the tone actually played). No-op if a tone is already playing. see docs/decisions/0044 |
+| `CUE_ON,CHOICE[,<hz>[,<gain>]]` / `CUE_ON,RETURN[,<hz>[,<gain>]]` | cue-guided-task | start the host-driven cue tone. Without `<hz>` (v5) the frequency is chosen in firmware: `CHOICE` from the current trial's `correctArm` (`cueFor`), `RETURN` a random hi/lo from the session PRNG. With an explicit `<hz>` (v6) the host supplies identity directly, clamped to `[CUE_HZ_MIN, CUE_HZ_MAX]` - used by the host-owned Phase 3 (Free Roam, no firmware trial), see docs/decisions/0046. A trailing `<gain>` (v7) sets the playback volume as a percent 0-100 of full amplitude (clamped to `[CUE_GAIN_PCT_MIN, CUE_GAIN_PCT_MAX]`; absent == 100), applied by scaling the wavetable in the ISR - used to equalize HIGH/LOW on a non-flat speaker, see docs/decisions/0125. Session-independent (works in any mode; in Free Roam `CHOICE` without `<hz>` falls back to the low tone). Fires the `TONE_ON` TTL and emits `CUE,ON,<type>,<freq>,<gain>` (the tone actually played). No-op if a tone is already playing. see docs/decisions/0044 |
 | `CUE_OFF` | cue-guided-task | stop the host-driven cue tone (v5). Fires the `TONE_OFF` TTL and emits `CUE,OFF`. No-op if no tone is playing. |
 | `CUE,VISION` / `CUE,BEAM` | cue-guided-task | select the cue source (v5). `VISION`: the host drives the tone via `CUE_ON`/`CUE_OFF` and the firmware suppresses its `CueRunning` beam auto-tone (single DAC authority). `BEAM` (default): the v4 beam-driven auto-tone. All other trial FSM / scoring / reward / TTL behavior is unchanged. |
 

@@ -20,14 +20,22 @@ const float SAMPLE_RATE = DAC_SAMPLE_RATE;    // DAC update rate (Hz), from rig_
 
 static const uint16_t SINE_TABLE_SIZE = 256;  // power of 2; top 8 bits of phase index it
 static const uint16_t DAC_CENTER      = 2048; // 12-bit mid-rail (silent)
-static const uint16_t DAC_AMPLITUDE   = 2000; // peak deviation (< 2048)
-uint16_t sineTable[SINE_TABLE_SIZE];
+static const uint16_t DAC_AMPLITUDE   = 2000; // peak deviation at full volume (< 2048)
+// Signed deviation from mid-rail, +/- DAC_AMPLITUDE (fits int16_t). The ISR adds
+// this to DAC_CENTER after scaling by the per-tone gain, so a runtime volume can
+// attenuate the tone without rebuilding the table. see docs/decisions/0125
+int16_t sineDev[SINE_TABLE_SIZE];
 
-// Tone control. ISR reads phaseAcc/phaseInc/tonePlaying only.
+// Q8 gain fixed-point unit: toneGainQ8 == TONE_GAIN_UNITY is full volume, and
+// the ISR does (dev * gain) >> 8, so the multiply/shift is integer-only.
+static const uint16_t TONE_GAIN_UNITY = 256;   // 256/256 == 100%
+
+// Tone control. ISR reads phaseAcc/phaseInc/tonePlaying/toneGainQ8 only.
 volatile bool     tonePlaying = false;
 volatile uint32_t phaseAcc    = 0;   // 32-bit phase accumulator (wraps == one cycle)
 volatile uint32_t phaseInc    = 0;   // per-sample phase step (set when a tone starts)
 volatile float    toneFreq    = 0;   // current tone frequency (Hz), for reference/logging
+volatile uint16_t toneGainQ8  = TONE_GAIN_UNITY;  // per-tone volume (Q8; set when a tone starts)
 
 // --- Non-blocking TTL pulse structure ---
 struct TTLPulse {
@@ -44,7 +52,7 @@ TTLPulse ttlToneOff = {PIN_TTL_TONE_OFF, 0, TTL_PULSE_MS, false};
 static void buildSineTable() {
   for (uint16_t i = 0; i < SINE_TABLE_SIZE; i++) {
     float theta = (2.0f * PI * i) / SINE_TABLE_SIZE;
-    sineTable[i] = (uint16_t)(DAC_CENTER + DAC_AMPLITUDE * sinf(theta));
+    sineDev[i] = (int16_t)lroundf(DAC_AMPLITUDE * sinf(theta));  // signed, +/- DAC_AMPLITUDE
   }
 }
 
@@ -71,10 +79,14 @@ void setupSound() {
 }
 
 // --- Start a constant tone asynchronously ---
-void startToneAsync(float freq) {
+// gainQ8 scales the amplitude (Q8: TONE_GAIN_UNITY == full volume); it defaults
+// to full so the beam-driven auto-tone (task_core StartTone) is unchanged. The
+// host-driven cue passes a calibrated gain to equalize HIGH/LOW (docs/decisions/0125).
+void startToneAsync(float freq, uint16_t gainQ8 = TONE_GAIN_UNITY) {
   if (tonePlaying) return;
 
   toneFreq = freq;
+  toneGainQ8 = (gainQ8 > TONE_GAIN_UNITY) ? TONE_GAIN_UNITY : gainQ8;  // never boost past full
   // inc = freq * 2^32 / fs : the accumulator spans one full table cycle per 2^32.
   phaseInc = (uint32_t)(((uint64_t)((double)freq * 4294967296.0)) / (uint32_t)SAMPLE_RATE);
   phaseAcc = 0;
@@ -108,7 +120,11 @@ void TC0_Handler() {
   TC_GetStatus(TC0, 0);            // clear interrupt flag
   if (!tonePlaying) return;
   phaseAcc += phaseInc;
-  dacc_write_conversion_data(DACC, sineTable[phaseAcc >> 24]);  // top 8 bits -> 0..255
+  // Scale the signed sample by the Q8 gain (integer multiply + shift), then
+  // re-center. gain <= unity so the result stays within 0..4095. see docs/decisions/0125
+  int32_t sample = DAC_CENTER +
+      (((int32_t)sineDev[phaseAcc >> 24] * (int32_t)toneGainQ8) >> 8);  // top 8 bits -> 0..255
+  dacc_write_conversion_data(DACC, (uint16_t)sample);
 }
 
 // --- Check TTL pulses in main loop ---
