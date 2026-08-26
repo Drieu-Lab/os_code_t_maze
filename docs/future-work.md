@@ -78,7 +78,6 @@ criteria).
 | [FW-0023](#fw-0023-shared-preview-producer-loop-helper) | Shared preview *producer* loop helper | Preview helpers + tab modules | Done |
 | [FW-0024](#fw-0024-config-driven-phase-3-taskreward-parameters-parity-with-rules) | Config-driven Phase 3 task/reward parameters (parity with Rules) | Phase 3 host + config | Done (ADR-0070) |
 | [FW-0025](#fw-0025-surface-the-brokers-link-health-in-the-gui) | Surface the broker's link health in the GUI | Broker + GUI status | Proposed |
-| [FW-0026](#fw-0026-a-mid-session-gate-reopen-should-not-restart-the-session-and-overwrite-its-file) | A mid-session gate reopen should not restart the session and overwrite its file | Phase 3 host | Proposed |
 | [FW-0027](#fw-0027-one-triggereffect-framework-behind-phases-1-2a-and-3) | One trigger/effect framework behind Phases 1, 2a and 3 | Rules engine + task-event layer + Phase 3 host | Proposed |
 | [FW-0028](#fw-0028-scope-the-session-summary-to-the-startstop-window) | Scope the session summary to the Start/Stop window | Session controller + summary + stats cores | Proposed |
 | [FW-0029](#fw-0029-real-water-timestamps--hours-since-water-in-the-daily-table) | Real water timestamps + hours-since-water in the daily table | Daily husbandry table + animal_state | Done (ADR-0101) |
@@ -1200,66 +1199,6 @@ just warn?
 **ADR needed?** Yes if the broker gains an out-of-band message (it narrows
 ADR-0002); no if clients only watch the existing stream.
 
-### FW-0026: A mid-session gate reopen should not restart the session and overwrite its file
-
-- **Status:** Proposed
-- **Date added:** 2026-07-29
-- **Author / Agent:** Agent (Cursor) on behalf of Celine
-- **Area / modules:** `host/phase3_controller.py` (`_process_frame` gate edges,
-  `_arm_session`), `host/test_session_phase3_wiring.py`
-- **Related ADRs:** [ADR-0066](decisions/0066-rebind-phase3-output-on-session-start.md)
-  (surfaced this while fixing the neighbouring bug),
-  [ADR-0058](decisions/0058-rig-view-trial-control-buttons.md) (the `_r<n>`
-  restart tag this would reuse),
-  [ADR-0047](decisions/0047-phase3-return-schedules-and-session-log.md) (the data
-  file)
-
-**Motivation / context.** Phase 3 treats the cue gate's rising edge as "start a
-fresh session": `_arm_session` regenerates the sequence from the seed at trial 1
-and re-binds the data-file path. That is right for the *first* arm, but the gate
-also closes and reopens for mundane reasons mid-session — the operator pausing
-tracking to reposition the rat or clear the camera view, or a brief firmware mode
-change. When that happens **during** an active session, `_arm_session` runs with
-`restart_index=0`, recomputes the same `phase3_<session_id>.csv` name, and
-overwrites the session's file with a blank plan at trial 1. The trials already run
-are lost from disk, and the operator gets no warning.
-
-This is pre-existing behaviour, not introduced by ADR-0066, but that ADR made it
-visible: now that Start reliably binds the file into the session folder, a reopen
-clobbers the *session's* record rather than a stray `host/data/` file. It has not
-been seen on the rig yet, which is why it was left out of that change.
-
-**Sketch of approach.** Distinguish "first arm of this session" from "the gate
-flickered". A rising edge that happens while a session context is set and a log
-already exists for that same `session_id` should either (a) resume — keep the
-existing task, sequence and file, and only redo the DAC-authority handshake
-(`CUE,VISION`) plus the per-trip cue/gate reset that `_silence_and_rearm` already
-does — or (b) restart explicitly, via the existing `_restart_count` path so the
-prior run is preserved as `_r<n>` rather than overwritten. Option (a) matches what
-an operator briefly pausing tracking expects; option (b) is safer if a reopen
-should always mean a clean run. Either way the fix is confined to the edge
-handling in `_process_frame`, and the file-clobbering half is a one-line
-consequence of reusing `_restart_count`.
-
-**Evaluation / acceptance.** Extend `test_session_phase3_wiring.py`: with a
-session active and several trials run, drop and restore tracking, then assert the
-session's CSV still contains the completed trials and (for option a) that the
-trial index did not reset. On the rig, pause and resume tracking mid-session and
-confirm the ribbon and the file both survive.
-
-**Effort / risk.** Small. The risk is behavioural rather than technical: a resume
-must not leave stale cue state sounding or skip the `CUE,VISION` handshake, and
-whichever semantics is chosen needs to be the one the operator expects — getting
-it wrong silently changes what a "session" means.
-
-**Open questions.** Resume or explicit restart? Should a mid-session reopen be
-surfaced in the status line / stats panel so the operator knows it happened? Does
-a firmware mode change out of Free Roam mean something different from tracking
-being toggled?
-
-**ADR needed?** Yes - it redefines what a gate rising edge means mid-session,
-which is exactly the kind of non-obvious semantics a future reader would query.
-
 ### FW-0027: One trigger/effect framework behind Phases 1, 2a and 3
 
 - **Status:** Proposed
@@ -2284,6 +2223,7 @@ referenced from those ADRs resolve.
 | ID | Title | Implemented in |
 |----|-------|----------------|
 | FW-0004 | Position-based task-rule engine over landmarks | [ADR-0023](decisions/0023-position-based-rules-engine.md) |
+| FW-0026 | Mid-session gate reopen must not restart/overwrite the session | [ADR-0120](decisions/0120-gate-reopen-resumes-session.md) |
 | FW-0007 | Maze-state consumers - rule-shaping + behavior stats | [ADR-0026](decisions/0026-reward-shaping-phases.md), [ADR-0032](decisions/0032-live-behavior-readout.md) |
 | FW-0012 | Run tracking off the camera grab thread | [ADR-0040](decisions/0040-tracking-off-grab-thread.md) |
 | FW-0021 | Single-parse serial fan-out in the GUI orchestrator | [ADR-0056](decisions/0056-single-parse-fanout-and-mode-reset-seam.md) |

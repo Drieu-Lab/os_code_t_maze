@@ -74,7 +74,8 @@ from tmaze.core.phase3.excursion_log import (
 from tmaze.core.phase3.phase3_log import Phase3Log, Phase3StateSnapshot
 from tmaze.core.session.session_notes import (
     AUTO_ALT_END, AUTO_ALT_START, AUTO_BACK, AUTO_DEBIAS_END,
-    AUTO_DEBIAS_START, AUTO_PROBE_END, AUTO_PROBE_START, AUTO_REPEAT, AUTO_SKIP)
+    AUTO_DEBIAS_START, AUTO_PROBE_END, AUTO_PROBE_START, AUTO_REPEAT, AUTO_RESUME,
+    AUTO_SKIP)
 from tmaze.core.phase3.phase3_task import ABANDONED, CORRECT, INCORRECT, Phase3Config, Phase3Task
 from tmaze.core.reward.reward_dispenser import WellDispenser
 from tmaze.core.reward.reward_volume import format_volume, reward_volume_ul
@@ -243,6 +244,11 @@ class Phase3ControlView(VisionActuator):
         # tags each restart's data file so a restart never clobbers the prior run.
         self._paused = False
         self._restart_count = 0
+        # How many times a mid-session gate REOPEN was resumed rather than treated
+        # as a fresh arm (docs/decisions/0120). Surfaced in the status line so the
+        # operator knows a tracking flicker did not restart / overwrite the run;
+        # reset on every real (re)arm.
+        self._reopen_resumes = 0
         # The center-well lick channel (reward-collection lick), from the shared
         # rig-config pin map (ADR-0021/0022); None if unavailable -> no lick times.
         self._center_lick = load_rig_config().lick_index_by_role.get("center")
@@ -595,6 +601,7 @@ class Phase3ControlView(VisionActuator):
         self._active_seed = snap.seed
         self._correct = self._incorrect = self._reward_count = 0
         self._probe_done = self._probe_correct = 0
+        self._reopen_resumes = 0             # a fresh run: no reopens yet
         self._reward_ul = 0.0
         self._active_cue = None
         # Start a fresh session data file: the planned matrix is written now, then
@@ -830,10 +837,44 @@ class Phase3ControlView(VisionActuator):
         self._silence_and_rearm()
         self._arm_session(snap, restart_index=self._restart_count)
 
+    def _is_session_reopen(self, snap) -> bool:
+        """Whether a gate RISING edge is a mid-session reopen (tracking toggled or
+        a brief firmware mode change) rather than the first arm of a run.
+
+        True when a session is already armed AND the snapshot's session context
+        matches the one the live log was armed with, so the SAME session is still
+        active (docs/decisions/0120). A different (or absent) ``session_id`` -
+        e.g. a new coordinated session, or a re-arm after Stop cleared the context
+        - is a genuinely new run and re-arms. A manual run (both ids blank) resumes
+        its own file; use Restart for a clean manual run."""
+        return self._log is not None and snap.session_id == self._log.session_id
+
+    def _resume_after_reopen(self, snap) -> None:
+        """Resume the SAME session after a gate reopen instead of re-arming it
+        (FW-0026, docs/decisions/0120): keep the task, sequence, trial index, and
+        data file exactly as they were - only reclaim DAC authority and clear stale
+        per-trip cue/gate/well state so no leftover tone sounds and the next trial
+        waits for a fresh hub->stem run. Surfaced (status line + an ``auto:resume``
+        note) so the operator knows the flicker was not treated as a new run."""
+        if self._task_events is not None:
+            self._task_events.reset()
+        self._silence_and_rearm()            # CUE_OFF + per-trip cue/gate/well reset
+        self._send_cmd("CUE,VISION")         # host re-owns the DAC (suppress auto-tone)
+        self._reopen_resumes += 1
+        idx = self._task.index if self._task is not None else 0
+        self._emit_intervention(
+            AUTO_RESUME, "tracking reopened mid-session - resumed (data preserved)",
+            idx, _now_iso())
+        self._publish_state(armed=True)
+
     def _process_frame(self, bundle, snap) -> None:
         # Gate edges own the DAC-authority handshake + a clean session (re)start.
         if snap.gate_open and not self._gate_was_open:
-            self._arm_session(snap)
+            # A mid-session reopen resumes (no data loss); a first/new arm re-arms.
+            if self._is_session_reopen(snap):
+                self._resume_after_reopen(snap)
+            else:
+                self._arm_session(snap)
         elif not snap.gate_open and self._gate_was_open:
             self._send_cmd("CUE_OFF")
             self._send_cmd("CUE,BEAM")       # restore firmware autonomy
@@ -1136,6 +1177,10 @@ class Phase3ControlView(VisionActuator):
         done = self._correct + self._incorrect
         acc = (100.0 * self._correct / done) if done else 0.0
         extra = f"  drops:{self._act_drops}" if self._act_drops else ""
+        # A mid-session tracking flicker was resumed, not restarted (ADR-0120):
+        # show the count so the operator knows the run survived the reopen.
+        if self._reopen_resumes:
+            extra += f"  resumes:{self._reopen_resumes}"
         # Conditional probe segment: only after the first scored probe trial (so a
         # normal session's status line is unchanged), plus a live PROBE tag while a
         # probe block is running/pending. See probe_blocks.py / docs/decisions/0115-probe.

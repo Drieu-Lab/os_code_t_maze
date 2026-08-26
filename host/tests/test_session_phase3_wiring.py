@@ -230,6 +230,38 @@ class SessionPhase3WiringTest(unittest.TestCase):
                          self._expected_task_files(
                              f"phase3_{os.path.basename(dir_a)}.csv"))
 
+    def test_mid_session_reopen_resumes_and_preserves_data(self):
+        """FW-0026 / ADR-0120: a mid-session tracking flicker (gate closes then
+        reopens) must RESUME the same run - keep the same file, the recorded
+        trials, and the trial index - not re-arm and overwrite the file with a
+        blank plan at trial 1."""
+        self._open_gate()
+        self._run_a_trial()                        # arms this session
+        self._start_session()                      # rebinds the file into task/
+        self.session._resolve_paths(reschedule=False)
+
+        # Hold the live log OBJECT: a RESUME keeps it; a re-arm (the bug) replaces
+        # it with a fresh Phase3Log and rewrites the file as a blank plan.
+        log_before = self.phase3._log
+        path_before = self.phase3.current_log_path()
+        rows_before = len(self.phase3.published_state().rows)
+        index_before = self.phase3.published_state().current_index
+
+        # The gate flickers: the operator toggles tracking off then on again.
+        self.camera.tracking = False
+        self._run_a_trial()                        # gate closes (disarm, table kept)
+        self.camera.tracking = True
+        self._run_a_trial()                        # gate reopens -> RESUME
+
+        # Same log object + file + table + index: the run was resumed, not re-armed.
+        self.assertIs(self.phase3._log, log_before)
+        self.assertEqual(self.phase3.current_log_path(), path_before)
+        state1 = self.phase3.published_state()
+        self.assertEqual(len(state1.rows), rows_before)
+        self.assertEqual(state1.current_index, index_before)
+        # The reopen was surfaced to the operator as a resume, not a restart.
+        self.assertGreaterEqual(self.phase3._reopen_resumes, 1)
+
     def test_manifest_never_records_a_file_outside_the_session(self):
         """The backstop, independent of the rebind: a reported path from outside
         the session's tree is refused rather than recorded."""

@@ -58,6 +58,12 @@ AUTO_PROBE_END = "auto:probe_end"
 AUTO_REPEAT = "auto:repeat"
 AUTO_SKIP = "auto:skip"
 AUTO_BACK = "auto:back"
+# A mid-session cue-gate REOPEN that was resumed (not restarted): tracking was
+# toggled off/on or the firmware briefly changed mode, so the gate flickered while
+# the SAME session stayed active. The run is resumed with its data preserved
+# (docs/decisions/0120), recorded here so the operator can see the flicker
+# happened without it being mistaken for a new run.
+AUTO_RESUME = "auto:resume"
 
 
 def is_auto_tag(tag: Optional[str]) -> bool:
