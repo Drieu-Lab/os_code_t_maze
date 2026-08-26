@@ -260,6 +260,26 @@ class TestExtendAndAbandon(unittest.TestCase):
         self.assertTrue(any("reward_pulse_ms=250" in ln for ln in header))
         self.assertTrue(any("max_topups=4" in ln for ln in header))
 
+    def test_header_stamps_canonical_session_t0_when_set(self):
+        # The manifest anchor (Start Session; host wall+mono+iso) is stamped into
+        # the header so the file self-anchors to the one shared instant (ADR-0124).
+        log = Phase3Log(_seq(), animal="R", session_start_iso="2026-07-23T12:00:00",
+                        session_t0={"iso": "2026-07-23T12:00:05.250",
+                                    "wall": 1753272005.25, "mono": 999.5})
+        header = [ln for ln in log.render_csv().split("\n") if ln.startswith("#")]
+        self.assertTrue(any("session_t0_iso=2026-07-23T12:00:05.250" in ln
+                            for ln in header))
+        self.assertTrue(any("session_t0_wall=1753272005.25" in ln for ln in header))
+        self.assertTrue(any("session_t0_mono=999.5" in ln for ln in header))
+        # The gate-arm time is still recorded (as a labeled secondary event).
+        self.assertTrue(any("session_start_iso=2026-07-23T12:00:00" in ln
+                            for ln in header))
+
+    def test_header_omits_session_t0_when_absent(self):
+        # A manual arm (no coordinated session) has no anchor: no session_t0 line.
+        header = [ln for ln in _log().render_csv().split("\n") if ln.startswith("#")]
+        self.assertFalse(any("session_t0_iso=" in ln for ln in header))
+
 
 class TestSnapshot(unittest.TestCase):
     def test_rowview_fields_align(self):

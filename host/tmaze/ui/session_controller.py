@@ -1081,7 +1081,8 @@ class SessionControlView:
         # task/ folder so its data file correlates with the video + manifest - do
         # NOT arm it here (docs/decisions/0060).
         if self._phase3 is not None and hasattr(self._phase3, "set_session_context"):
-            self._phase3.set_session_context(self._session_id, out_dir=task_dir)
+            self._phase3.set_session_context(
+                self._session_id, out_dir=task_dir, session_t0=self._manifest.t0)
         else:
             notes.append("Phase 3 unavailable")
 
@@ -1223,9 +1224,17 @@ class SessionControlView:
     def _camera_start(self, out_dir: str) -> bool:
         if self._camera is None or not hasattr(self._camera, "start_recording"):
             return False
+        t0 = self._manifest.t0 if self._manifest is not None else None
         try:
-            return bool(self._camera.start_recording(self._session_id,
-                                                     out_dir=out_dir))
+            # Pass the canonical session anchor so the sidecar header self-anchors
+            # to the one shared instant (docs/decisions/0124). Older camera views
+            # without the parameter still work (fall back to no anchor).
+            try:
+                return bool(self._camera.start_recording(
+                    self._session_id, out_dir=out_dir, session_t0=t0))
+            except TypeError:
+                return bool(self._camera.start_recording(
+                    self._session_id, out_dir=out_dir))
         except Exception:
             return False
 
@@ -1264,8 +1273,8 @@ class SessionControlView:
             os.makedirs(os.path.dirname(path), exist_ok=True)
             self._serial_file = open(path, "w", encoding="utf-8", newline="")
             self._serial_file.write(
-                "# per-session serial capture (sensors + central port) - "
-                "see docs/decisions/0049\n")
+                "# per-session serial capture (sensors + central port + the "
+                "PONG session-start fiducial) - see docs/decisions/0049, 0124\n")
             self._serial_file.write(f"# session_id={self._session_id}\n")
             self._serial_file.write(
                 "# wall_clock_iso,firmware_line (ms,TYPE,payload...)\n")

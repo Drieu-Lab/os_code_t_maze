@@ -135,6 +135,51 @@ class TestLoadAnimals(unittest.TestCase):
             self.assertEqual(row2["outcome"], "INCORRECT")
 
 
+class TestSessionAnchor(unittest.TestCase):
+    """ADR-0124: the sessions frame anchors to the canonical session t0 when the
+    header carries it, and falls back to the gate-arm time for older bundles; the
+    gate-arm time is always preserved in its own column so no anchor is lost."""
+
+    _HDR_BOTH = (
+        "# phase3_session animal=600 session_id={sid} seed=42 proto=9\n"
+        "# high_tone_is_left=True high_tone_hz=8000 low_tone_hz=4000\n"
+        "# generator=balanced\n"
+        "# session_t0_iso=2026-01-01T12:00:05.250 session_t0_wall=1 session_t0_mono=2\n"
+        "# session_start_iso=2026-01-01T12:00:00.000\n"
+    )
+    _HDR_OLD = (
+        "# phase3_session animal=600 session_id={sid} seed=42 proto=8\n"
+        "# high_tone_is_left=True high_tone_hz=8000 low_tone_hz=4000\n"
+        "# generator=balanced\n"
+        "# session_start_iso=2026-01-01T12:00:00.000\n"
+    )
+
+    def _bundle(self, root, sid, hdr):
+        bundle = os.path.join(root, sid)
+        os.makedirs(os.path.join(bundle, "task"))
+        with open(os.path.join(bundle, f"session_{sid}.json"), "w") as fh:
+            fh.write("{}")
+        with open(os.path.join(bundle, "task", f"phase3_{sid}.csv"), "w") as fh:
+            fh.write(hdr.format(sid=sid))
+            fh.write(_COLS)
+            fh.write(_row(1, "HIGH", "LEFT", "CORRECT", 1))
+        return bundle
+
+    def test_prefers_t0_and_keeps_gate_arm(self):
+        with tempfile.TemporaryDirectory() as root:
+            self._bundle(root, "600_20260101_120000", self._HDR_BOTH)
+            s = br.load_animals(("600",), root=root).sessions.iloc[0]
+            self.assertEqual(s["start_iso"], "2026-01-01T12:00:05.250")
+            self.assertEqual(s["gate_arm_iso"], "2026-01-01T12:00:00.000")
+
+    def test_falls_back_to_gate_arm_for_old_bundle(self):
+        with tempfile.TemporaryDirectory() as root:
+            self._bundle(root, "600_20260102_120000", self._HDR_OLD)
+            s = br.load_animals(("600",), root=root).sessions.iloc[0]
+            self.assertEqual(s["start_iso"], "2026-01-01T12:00:00.000")
+            self.assertEqual(s["gate_arm_iso"], "2026-01-01T12:00:00.000")
+
+
 class TestMultiRoot(unittest.TestCase):
     """A history split across a primary + archive root (docs/decisions/0113):
     discovery/loading spans both and de-duplicates by session_id, first wins."""

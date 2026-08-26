@@ -195,6 +195,19 @@ class SessionPhase3WiringTest(unittest.TestCase):
             text = fh.read()
         self.assertIn(f"session_id={os.path.basename(session_dir)}", text)
 
+    def test_start_stamps_canonical_session_t0_into_the_header(self):
+        """ADR-0124: Start Session hands the manifest t0 to Phase 3, and the rebind
+        stamps it into the header so the trial file self-anchors to the one shared
+        instant every stream uses."""
+        self._open_gate()
+        self._run_a_trial()                        # arms (no t0 known yet)
+        self._start_session()                      # rebind stamps t0
+
+        t0_iso = self.session._manifest.t0["iso"]
+        with open(self.phase3.current_log_path(), encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertIn(f"session_t0_iso={t0_iso}", text)
+
     def test_second_session_does_not_inherit_the_first_ones_file(self):
         """The observed 600_20260727_134317 failure: tracking is toggled between
         animals, so Phase 3 re-arms between sessions."""

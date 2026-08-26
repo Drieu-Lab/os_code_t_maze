@@ -92,12 +92,13 @@ class SessionInfo:
     session_id: str
     animal: str
     date: str
-    start_iso: str
+    start_iso: str            # canonical anchor (manifest t0) when present, else gate-arm
     generator: str
     high_tone_is_left: Optional[bool]
     high_tone_hz: Optional[int]
     low_tone_hz: Optional[int]
     n_trials: int
+    gate_arm_iso: str = ""    # the gate rising edge (may precede start_iso); ADR-0124
     stage: str = ""
     trainer: str = ""
     pct_baseline: Optional[float] = None
@@ -311,7 +312,12 @@ def load_bundle(bundle: str) -> Optional[tuple]:
     meta = _read_json(os.path.join(bundle, "config", "session_meta.json")) or {}
     animal = str(astate.get("animal") or id_animal or "")
     date = str(astate.get("date") or id_date or "")
-    start_iso = str(header.get("session_start_iso", ""))
+    # Prefer the canonical session anchor (manifest t0, Start Session) when the
+    # newer header carries it; fall back to the gate-arm time for pre-ADR-0124
+    # bundles. Keep the gate-arm time as its own field so no anchor is lost and it
+    # agrees with the session registry (docs/decisions/0124).
+    gate_arm_iso = str(header.get("session_start_iso", ""))
+    start_iso = str(header.get("session_t0_iso", "")) or gate_arm_iso
 
     trials.insert(0, "session_id", session_id)
     trials.insert(1, "animal", animal)
@@ -324,6 +330,7 @@ def load_bundle(bundle: str) -> Optional[tuple]:
         animal=animal,
         date=date,
         start_iso=start_iso,
+        gate_arm_iso=gate_arm_iso,
         generator=str(header.get("generator", "")),
         high_tone_is_left=high_tone_is_left,
         high_tone_hz=_to_int(header.get("high_tone_hz")),
@@ -429,6 +436,7 @@ def _info_row(info: SessionInfo) -> dict:
         "animal": info.animal,
         "date": info.date,
         "start_iso": info.start_iso,
+        "gate_arm_iso": info.gate_arm_iso,
         "generator": info.generator,
         "high_tone_is_left": info.high_tone_is_left,
         "high_tone_hz": info.high_tone_hz,

@@ -126,6 +126,12 @@ UNDISTORT_ALPHA = 0.0
 
 # Sidecar CSV columns (future-proofed: cam_block_id / cam_timestamp are written
 # now even though Step 0 doesn't analyze them, so early recordings stay usable).
+# Clocks per frame (docs/decisions/0124): host_unix_s is the host wall time at
+# grab (the reliable cross-stream timeline); cam_block_id is the camera's frame
+# counter (monotonic; gaps = src-drops, so frame->time survives dropped frames);
+# rig_ms is the LATEST firmware session ms seen at grab - it lags and RESETS to 0
+# on a MODE switch (blanked on that line here), so it is NOT monotonic and must
+# not be used as a standalone clock.
 SIDECAR_COLUMNS = ("frame_idx", "host_unix_s", "rig_ms", "cam_block_id", "cam_timestamp")
 
 # Extra sidecar column written after TRACK_COLUMNS. Tracking now runs on its own
@@ -370,6 +376,16 @@ class CameraView:
         """
         parsed = info.parsed
         if parsed is None:
+            return
+        # rig_ms is the LATEST firmware session ms seen on the stream at grab time.
+        # It is NOT a monotonic clock: the firmware resets its session clock to 0
+        # on every MODE switch (docs/decisions/0124). On a MODE line we blank it so
+        # the sidecar marks that discontinuity explicitly (an empty cell between two
+        # ascending runs) instead of recording a deceptive "0" that reads like a
+        # real event time; offline timelines should use cam_block_id (the camera
+        # frame counter; gaps = src-drops) + host_unix_s, not rig_ms.
+        if info.mode is not None:
+            self._latest_rig_ms = ""
             return
         self._latest_rig_ms = str(parsed.ms)
         typ = parsed.type
@@ -857,7 +873,8 @@ class CameraView:
         self._set_format_locked(False)
 
     def start_recording(self, session_id: Optional[str] = None,
-                        out_dir: Optional[str] = None) -> bool:
+                        out_dir: Optional[str] = None,
+                        session_t0: Optional[dict] = None) -> bool:
         """Begin a recording; return True iff it started.
 
         Public seam used by the Session controller (one-click session start; see
@@ -867,8 +884,11 @@ class CameraView:
         the file is named ``<animal>_<stamp>`` as before. ``out_dir`` redirects the
         output into the session's folder (docs/decisions/0049); when omitted the
         file goes to the Output: box / the default recordings folder as before.
-        Needs the camera UI + PyAV; a no-op (returns False) if recording isn't
-        available or already on.
+        ``session_t0`` is the manifest anchor (host wall+mono+iso at Start Session)
+        stamped into the sidecar header so the video self-anchors to the one shared
+        instant, at millisecond resolution (docs/decisions/0124); None for a manual
+        Record-button recording. Needs the camera UI + PyAV; a no-op (returns False)
+        if recording isn't available or already on.
         """
         if not self._can_record or not hasattr(self, "_record_btn"):
             return False
@@ -933,6 +953,16 @@ class CameraView:
             "codec": codec,
             "crf": (crf if codec == "h264" else ""),
             "start_wall_clock": time.strftime("%Y-%m-%d %H:%M:%S"),
+            # Canonical session anchor shared by every stream (ms resolution),
+            # so the video self-anchors to one instant (docs/decisions/0124).
+            # start_wall_clock above is the (coarser) record-start, kept as a
+            # labeled secondary event.
+            "session_t0_iso": (session_t0.get("iso", "") if session_t0 else ""),
+            "session_t0_wall": (session_t0.get("wall", "") if session_t0 else ""),
+            # rig_ms is the latest firmware session ms at grab; it resets on a MODE
+            # switch and is NOT monotonic - use host_unix_s + cam_block_id offline
+            # (docs/decisions/0124).
+            "rig_ms_note": "latest firmware ms at grab; resets on MODE; not monotonic",
             "camera": f"ip={CAMERA_IP} mac={CAMERA_MAC}",
             "undistorted": undistorted,
             "calibration": (os.path.basename(calib["path"]) if calib else ""),

@@ -166,6 +166,11 @@ class _Phase3Snapshot:
     animal: str = ""
     session_id: str = ""
     session_out_dir: str = ""
+    # Canonical session anchor (manifest t0 = host wall+mono+iso at Start Session),
+    # handed down from the Session controller so the Phase 3 header can self-anchor
+    # to the one instant every stream shares (docs/decisions/0124). None before
+    # Start Session / on a manual arm.
+    session_t0: Optional[dict] = None
     # Operator "pause cues" toggle (Rig-view button; docs/decisions/0058). When
     # set, the actuation thread silences any tone and freezes trial progress
     # without disarming (the gate stays open).
@@ -237,6 +242,9 @@ class Phase3ControlView(VisionActuator):
         # Session output dir (the session's task/ folder; docs/decisions/0049); ""
         # -> the default host/data/ location for a manual arm.
         self._session_out_dir = ""
+        # Canonical session anchor (manifest t0) once Start Session hands it down
+        # via set_session_context; stamped into the log header on rebind (ADR-0124).
+        self._session_t0: Optional[dict] = None
         self._active_cue: Optional[str] = None
         # Operator controls (Rig-view buttons; docs/decisions/0058). ``_paused`` is
         # a plain Tk-thread bool (button + poll both run on the Tk thread) folded
@@ -379,7 +387,8 @@ class Phase3ControlView(VisionActuator):
         except tk.TclError:
             return False
 
-    def set_session_context(self, session_id: str = "", out_dir: str = "") -> None:
+    def set_session_context(self, session_id: str = "", out_dir: str = "",
+                            session_t0: Optional[dict] = None) -> None:
         """Record the coordinated session's id + output folder WITHOUT arming.
 
         The Session controller calls this on Start once it has confirmed Phase 3 is
@@ -387,7 +396,10 @@ class Phase3ControlView(VisionActuator):
         RELEASE the context. The ``session_id`` is threaded into the data-file name
         + header so it correlates with the video + manifest, and ``out_dir`` is the
         session's ``task/`` folder the data file is written into (docs/decisions/
-        0049). Unlike the old ``arm()`` this does NOT flip the Arm checkbox.
+        0049). ``session_t0`` is the manifest anchor (host wall+mono+iso at Start
+        Session) stamped into the header on rebind so the file self-anchors to the
+        one shared instant (docs/decisions/0124). Unlike the old ``arm()`` this does
+        NOT flip the Arm checkbox.
 
         Because the gate is already open by now, no rising edge will re-run
         ``_arm_session``, so this also asks the actuation thread to re-point an
@@ -397,6 +409,7 @@ class Phase3ControlView(VisionActuator):
             return
         self._session_id = session_id or ""
         self._session_out_dir = out_dir or ""
+        self._session_t0 = session_t0
         # Publish the new context BEFORE asking for the rebind: the Tk poll would
         # otherwise be up to POLL_INTERVAL_MS behind, and the thread would rebind
         # using the PREVIOUS session's snapshot.
@@ -438,6 +451,7 @@ class Phase3ControlView(VisionActuator):
         self._enable_var.set(False)
         self._session_id = ""
         self._session_out_dir = ""
+        self._session_t0 = None
 
     def current_log_path(self) -> Optional[str]:
         """Path of the in-progress session data file, or None until the gate
@@ -628,7 +642,8 @@ class Phase3ControlView(VisionActuator):
                               reward_incorrect=snap.reward_incorrect,
                               reward_pulse_ms=snap.reward_pulse_ms,
                               max_topups=snap.max_topups,
-                              session_id=snap.session_id)
+                              session_id=snap.session_id,
+                              session_t0=snap.session_t0)
         # Write into the session's task/ folder when armed via a session, else the
         # default host/data/ tree (docs/decisions/0049). _write_log makes the dir.
         out_dir = snap.session_out_dir or DATA_DIR
@@ -821,9 +836,18 @@ class Phase3ControlView(VisionActuator):
             snap.session_out_dir,
             f"phase3_{protocol.sanitize_animal_id(snap.session_id)}.csv")
         if new_path == self._log_path:
+            # Path already correct (unusual in the ADR-0060 flow). Still stamp the
+            # canonical anchor if it only just arrived, then re-render (ADR-0124).
+            if snap.session_t0 and self._log.session_t0 != snap.session_t0:
+                self._log.session_t0 = snap.session_t0
+                self._write_log()
             return
         self._restart_count = 0
         self._log.session_id = snap.session_id   # the header's correlation id
+        # Stamp the canonical session anchor now that Start Session has captured it,
+        # so the header self-anchors to the one shared instant (docs/decisions/0124).
+        if snap.session_t0:
+            self._log.session_t0 = snap.session_t0
         self._log_path = new_path
         self._write_log()
         # Re-point the excursion log at the session that now owns it too, keeping
@@ -1918,6 +1942,7 @@ class Phase3ControlView(VisionActuator):
             animal=self._current_animal(),
             session_id=self._session_id,
             session_out_dir=self._session_out_dir,
+            session_t0=self._session_t0,
             paused=self._paused)
 
     def _current_animal(self) -> str:

@@ -46,7 +46,7 @@ rendered text), no locks. Headless tests: python -m unittest test_phase3_log.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, fields, replace
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from tmaze.core.phase3.phase3_task import ABANDONED
 from tmaze.core.phase3.trial_sequence import HIGH, LEFT, LOW, RIGHT, TrialSequence
@@ -267,14 +267,22 @@ class Phase3Log:
     def __init__(self, sequence: TrialSequence, *, animal: str,
                  session_start_iso: str, reward_incorrect: bool = False,
                  reward_pulse_ms: int = 500, max_topups: int = 0,
-                 session_id: str = "") -> None:
+                 session_id: str = "",
+                 session_t0: Optional[Dict[str, Any]] = None) -> None:
         self.animal = animal
         self.seed = sequence.seed
         self.cfg = sequence.cfg
         # Kept so a snapshot can read the CURRENT closed-loop debias state (state +
         # bias) for panels; the snapshot copies those readings out by value.
         self._sequence = sequence
+        # Gate-arm time (the gate rising edge that started the task; ADR-0060). May
+        # precede the canonical session anchor below.
         self.session_start_iso = session_start_iso
+        # Canonical session anchor: the manifest t0 (host wall+mono+iso captured at
+        # Start Session), stamped in on rebind so this file is self-anchoring to the
+        # one instant every stream shares (docs/decisions/0124). None on a manual
+        # arm (no coordinated session) or before Start Session.
+        self.session_t0 = session_t0
         self.reward_incorrect = reward_incorrect
         # Reward dispensing params used this run (ADR-0069), recorded in the header
         # for reproducibility (FW-0024): the correct-choice prime pulse width and
@@ -625,8 +633,16 @@ class Phase3Log:
             lines.append(
                 "# note: intervention schedule is closed-loop - seed alone does NOT "
                 "reproduce it; it also depends on realized choices + overrides")
+        if self.session_t0:
+            lines.append(
+                f"# session_t0_iso={self.session_t0.get('iso', '')} "
+                f"session_t0_wall={self.session_t0.get('wall', '')} "
+                f"session_t0_mono={self.session_t0.get('mono', '')}")
         lines += [
             f"# session_start_iso={self.session_start_iso}",
+            "# note: session_t0_* is the canonical session anchor (Start Session; "
+            "host wall+mono+iso) shared by every stream; session_start_iso is the "
+            "gate-arm time (may precede t0). see docs/decisions/0124",
             "# note: *_iso are host actuation-decision times (serial latency ~ms); "
             "lick_fw_ms is the firmware hardware clock. see docs/decisions/0047",
         ]

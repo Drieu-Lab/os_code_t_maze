@@ -96,6 +96,7 @@ criteria).
 | [FW-0042](#fw-0042-live-excursion-based-engagement-traces) | Live excursion-based engagement traces (trips/min, non-stem fraction) | Phase 3 host + live trace panel | Proposed |
 | [FW-0043](#fw-0043-automatic-probe-block-triggers) | Automatic probe-block triggers (position / elapsed time / reward volume) | Phase 3 host (`core/phase3/probe_blocks.py`) | Proposed |
 | [FW-0044](#fw-0044-closed-loop-scheduler-rollback-on-a-manual-scored-re-run) | Closed-loop scheduler rollback on a manual scored re-run | Phase 3 closed-loop schedulers (`core/phase3/`) | Deferred |
+| [FW-0045](#fw-0045-in-fov-event-led-visual-fiducial-for-videoserial-alignment) | In-FOV event-LED visual fiducial (sensor/solenoid) for video<->serial alignment | Camera vision + sidecar + rig LED wiring | Proposed |
 
 ## Entries
 
@@ -2213,6 +2214,59 @@ controller state per trial and restore)? Should a manual edit inside an auto
 block be disallowed or warned-and-allowed (current behavior)?
 
 **ADR needed?** Yes - a follow-up to ADR-0119 recording the chosen mechanism.
+
+### FW-0045: In-FOV event-LED visual fiducial (sensor/solenoid) for video<->serial alignment
+
+- **Status:** Proposed
+- **Date added:** 2026-08-26
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** `host/tmaze/vision/` (a detector), `host/tmaze/ui/camera_view.py`
+  (sidecar columns), the rig's LED wiring, and offline alignment tools
+  (`host/tmaze/tools/maze_state_validate.py`)
+- **Related ADRs / work:** [ADR-0124](decisions/0124-self-anchoring-session-bundle.md)
+  (software self-anchoring; this is the middle rung between it and the hardware
+  fiducial), FW-0018 (hardware `SYNC` TTL + LED barcode), FW-0017 (cue-onset
+  latency from firmware echoes)
+
+**Motivation / context.** The rig has LEDs in the camera's field of view that
+flash on body-sensor and solenoid activations - i.e. the video ALREADY contains
+visible markers that correspond one-to-one to serial events (`S,...` sensor
+edges, `SOL,...`/`REWARD,...` at the central port). Detecting those flashes in
+the recorded frames and time-stamping them against the same events in the serial
+log would give a *direct* video<->serial alignment (and thus video<->firmware-ms)
+WITHOUT the Open Ephys hardware that FW-0018 needs - a practical middle path
+between ADR-0124's software self-anchoring (host-clock, ~ms + serial latency) and
+FW-0018's acquisition-grade hardware fiducial. It also cross-checks the host-clock
+alignment: the LED flash frame vs the serial event's host-wall stamp measures the
+camera's exposure->grab offset and the serial path latency empirically.
+
+**Sketch of approach.** Add a small vision detector that watches a
+configured in-FOV region (or auto-locates the LEDs from the empty-rig
+background) for on/off transitions per frame; write the detected LED state (or a
+per-LED on/off) as new sidecar column(s) alongside `cam_block_id`/`host_unix_s`.
+Offline, match LED-on frames to the corresponding `S`/`SOL`/`REWARD` serial
+events (nearest in host wall time, then refine) to fit `cam_block_id -> firmware_ms`
+per mode-segment. Keep it self-contained: no change to the firmware or the task
+FSM; the LEDs are already wired to the sensor/solenoid lines.
+
+**Evaluation / acceptance.** On a recorded session, LED-on frames align to the
+matching serial events within one frame period after the fit; the residual
+(flash frame time - serial host-wall time) is reported as the measured
+camera+serial offset/jitter. Regression: sessions without the LEDs (or with the
+detector off) behave exactly as today.
+
+**Effort / risk.** Medium: a new vision detector + sidecar columns + an offline
+matcher, plus deciding LED placement/colour so flashes are unambiguous and don't
+confuse the rat tracker. Low urgency but high payoff for behavior<->video
+alignment before neural recording lands. **Owner note:** the user asked to keep
+this as a separate task for a dedicated agent - do not fold it into the ADR-0124
+software groundwork.
+
+**Open questions.** One LED per event class or a small bank encoding which
+sensor/port fired? Fixed ROI vs background-difference auto-location? How to keep
+the flash out of the tracker's way (colour channel, brightness, placement)?
+
+**ADR needed?** Yes - when built (detector + sidecar schema + alignment method).
 
 ## Completed
 
