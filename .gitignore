@@ -41,6 +41,11 @@ docs/notes/.obsidian/
 # themselves are versioned, this per-edit scratch copy is not).
 .ipynb_checkpoints/
 
+# Generated grant-figure PNGs (reproducible from proposal_figures.ipynb; the
+# notebook + its tmaze.analysis code are versioned, the rendered images are not).
+# see docs/decisions/0128
+host/notebooks/grant_figures/outputs/
+
 # Anaconda / anaconda-project local scratch (per-machine tool state DB).
 anaconda_projects/
 
