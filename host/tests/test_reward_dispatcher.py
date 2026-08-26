@@ -98,7 +98,11 @@ class TestBackstop(unittest.TestCase):
         clock.advance(0.2)                             # 200 ms > 100 ms now
         self.assertTrue(disp.fire(2, 300, reason="topup", rule_id="center").fired)
 
-    def test_send_failure_still_records_and_advances(self):
+    def test_send_failure_reports_not_fired_and_does_not_advance(self):
+        # A serial hiccup means NO reward was delivered, so the record must say
+        # so (fired=False, suppressed_reason="send_failed") rather than counting
+        # a phantom reward. The backstop timer must NOT advance, so the very next
+        # attempt is free to retry. (ADR-0122)
         clock = _Clock()
 
         def boom(_cmd):
@@ -106,7 +110,32 @@ class TestBackstop(unittest.TestCase):
 
         disp = RewardDispatcher(boom, min_interval_ms=500, clock=clock)
         rec = disp.fire(2, 300, reason="prime", rule_id="center")
-        self.assertTrue(rec.fired)                     # timer advanced despite error
+        self.assertFalse(rec.fired)
+        self.assertEqual(rec.suppressed_reason, "send_failed")
+        self.assertEqual(rec.volume_ul, 0.0)
+        # No time has passed, yet a retry is allowed (timer never advanced).
+        self.assertFalse(disp.fire(2, 300, reason="topup", rule_id="center").fired)
+
+    def test_recovered_send_after_failure_fires_normally(self):
+        # Once the serial link recovers, the next fire delivers and is recorded
+        # as a real reward - the earlier failure left no stale backstop state.
+        state = {"ok": False}
+        sent: list = []
+        clock = _Clock()
+
+        def flaky(cmd):
+            if not state["ok"]:
+                raise RuntimeError("serial down")
+            sent.append(cmd)
+
+        disp = RewardDispatcher(flaky, min_interval_ms=500, clock=clock)
+        self.assertFalse(disp.fire(2, 300, reason="prime", rule_id="center").fired)
+        state["ok"] = True
+        rec = disp.fire(2, 300, reason="prime", rule_id="center")
+        self.assertTrue(rec.fired)
+        self.assertGreater(rec.volume_ul, 0.0)
+        self.assertEqual(sent, ["R21,300"])
+        # And now the backstop is armed again: an immediate second fire drops.
         clock.advance(0.2)
         self.assertFalse(disp.fire(2, 300, reason="topup", rule_id="center").fired)
 

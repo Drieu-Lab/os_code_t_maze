@@ -54,12 +54,14 @@ DEFAULT_GLOBAL_MIN_INTERVAL_MS = 500
 class RewardRecord:
     """Immutable outcome of one ``RewardDispatcher.fire`` call.
 
-    ``fired`` is True when the pulse was actually sent; when False the fire was
-    dropped by the rate backstop and ``suppressed_reason`` says why (no command
-    reached the wire). ``volume_ul`` is the calibrated dispensed volume for a
-    fired pulse (0.0 when suppressed). ``reason`` / ``rule_id`` describe what
-    asked for the reward (e.g. "prime"/"topup" from a rule, "phase3_reward" from
-    the Phase 3 scorer), so both modes log the same shape.
+    ``fired`` is True when the pulse was actually sent; when False the fire did
+    NOT reach the wire and ``suppressed_reason`` says why - either
+    ``"global_backstop"`` (dropped by the rate limiter) or ``"send_failed"``
+    (the serial send raised, so no reward was delivered; ADR-0122). ``volume_ul``
+    is the calibrated dispensed volume for a fired pulse (0.0 when not fired).
+    ``reason`` / ``rule_id`` describe what asked for the reward (e.g.
+    "prime"/"topup" from a rule, "phase3_reward" from the Phase 3 scorer), so
+    both modes log the same shape.
     """
     fired: bool
     reason: str
@@ -112,8 +114,12 @@ class RewardDispatcher:
         Returns a :class:`RewardRecord`. If the last accepted fire was less than
         ``min_interval_ms`` ago, the fire is suppressed (nothing is sent) and the
         record has ``fired=False`` + ``suppressed_reason="global_backstop"``.
-        Otherwise the timer advances, ``R<port>1,<ms>`` is sent, and the record
-        carries the calibrated ``volume_ul`` (ADR-0019).
+        Otherwise ``R<port>1,<ms>`` is sent; on a successful send the timer
+        advances and the record carries the calibrated ``volume_ul`` (ADR-0019).
+        If the send itself raises (serial hiccup), NO reward was delivered, so
+        the record is ``fired=False`` + ``suppressed_reason="send_failed"`` and
+        the backstop timer is NOT advanced (so accounting stays truthful and an
+        immediate retry isn't blocked; ADR-0122).
         """
         port = int(port)
         ms = int(ms)
@@ -125,8 +131,14 @@ class RewardDispatcher:
                     fired=False, reason=reason, rule_id=rule_id, port=port,
                     pulse_ms=ms, volume_ul=0.0,
                     suppressed_reason="global_backstop")
+            # Send BEFORE advancing the timer so a failed send neither counts as
+            # a delivered reward nor blocks the next attempt (ADR-0122).
+            if not self._do_send(f"R{port}1,{ms}"):
+                return RewardRecord(
+                    fired=False, reason=reason, rule_id=rule_id, port=port,
+                    pulse_ms=ms, volume_ul=0.0,
+                    suppressed_reason="send_failed")
             self._last_fire_now = now
-            self._do_send(f"R{port}1,{ms}")
             return RewardRecord(
                 fired=True, reason=reason, rule_id=rule_id, port=port,
                 pulse_ms=ms,
@@ -134,12 +146,17 @@ class RewardDispatcher:
                                            liquid=self._active_liquid),
                 suppressed_reason=None)
 
-    def _do_send(self, cmd: str) -> None:
+    def _do_send(self, cmd: str) -> bool:
+        """Hand ``cmd`` to the injected serial send. Returns True when the pulse
+        reached the wire (or there is no wire configured - ``send is None`` is a
+        deliberate headless no-op that counts as delivered), and False when the
+        send raised. A serial hiccup never propagates (it must not break the
+        actuation thread), but it IS reported so ``fire`` can record the truth
+        (ADR-0122)."""
         if self._send is None:
-            return
+            return True
         try:
             self._send(cmd)
         except Exception:
-            # Never let a serial hiccup break the actuation thread; the fire is
-            # still recorded (fired=True) because the backstop timer advanced.
-            pass
+            return False
+        return True
