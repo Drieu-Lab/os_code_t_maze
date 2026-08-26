@@ -158,6 +158,14 @@ try:
     from tmaze.ui.phase3_traces_view import Phase3TracesView
 except Exception:  # pragma: no cover
     Phase3TracesView = None  # type: ignore
+# Trial-by-trial choice raster: a companion panel beside the trace plots on the
+# Metrics tab (one bar per completed trial, side/outcome encoded, rolling accuracy
+# overlaid). Reads the same published snapshot; guarded like the traces view
+# (matplotlib is guarded inside it). See ADR-0127.
+try:
+    from tmaze.ui.phase3_choice_raster_view import Phase3ChoiceRasterView
+except Exception:  # pragma: no cover
+    Phase3ChoiceRasterView = None  # type: ignore
 # One shared maze-state pipeline (pure stdlib): a single estimator driven on the
 # camera tracking worker that fans a RatState stream out to the three tabs above,
 # replacing their per-tab estimators. Optional; guarded like the tabs above.
@@ -684,11 +692,16 @@ def main() -> int:
     # top-level tab since the stacked subplots need vertical room the crowded
     # Rig-view bottom strip doesn't have. Present whenever the view imported
     # (matplotlib is guarded inside it); shows "Not armed." until a run starts.
+    # A trial-by-trial choice raster (ADR-0127) rides alongside it as a SECOND
+    # module: packed left-to-right, so - being not the first - it expands to fill
+    # the tab space the fixed-width traces panel leaves empty on its right.
     if Phase3TracesView is not None:
-        tabs.append(("Metrics",
-                     [lambda parent: Phase3TracesView(
-                         parent, state_getter=phase3_state,
-                         animal_getter=task_animal_id)]))
+        metrics_factories = [lambda parent: Phase3TracesView(
+            parent, state_getter=phase3_state, animal_getter=task_animal_id)]
+        if Phase3ChoiceRasterView is not None:
+            metrics_factories.append(lambda parent: Phase3ChoiceRasterView(
+                parent, state_getter=phase3_state))
+        tabs.append(("Metrics", metrics_factories))
     # NOTE: the Session control is NOT a tab - it lives in the Rig view bottom
     # strip's RIGHT column, under the live behavior readout (filling the dead
     # space there so it doesn't lengthen the left column / the window). It is

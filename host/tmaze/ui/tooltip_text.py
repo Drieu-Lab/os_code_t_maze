@@ -510,6 +510,31 @@ TIPS: Dict[str, Entry] = {
                              "shading + colour key stay either way. The free-choice "
                              "lines still gap over the block on purpose.",
 
+    # ---- phase3_choice_raster_view.py: Metrics tab (trial-by-trial raster) ----
+    "phase3.raster": "Trial-by-trial choice raster of the current Phase 3 session: "
+                     "one bar per completed trial along the trial axis. A bar points "
+                     "UP for a RIGHT choice (purple) and DOWN for a LEFT choice "
+                     "(red); it is full-height + solid when the trial was correct "
+                     "and half-height + faded when incorrect. Probe trials get a "
+                     "teal outline, forced-arm (intervention) trials an orange "
+                     "outline. Read-only view of the published session snapshot.",
+    "phase3.raster.window": "Rolling-window size (most-recent completed trials) for "
+                            "the green rolling-accuracy line overlaid on the raster. "
+                            "Larger = smoother but slower to react. Only affects the "
+                            "accuracy line, not the bars.",
+    "phase3.raster.width": "Width of the visible window in TRIALS (the zoom). Blank "
+                           "or 0 = show the whole session. A smaller value zooms in; "
+                           "scroll with the bar below, or hit Latest to jump back to "
+                           "the newest trials. View-only.",
+    "phase3.raster.accuracy": "Overlay the rolling accuracy (0-1, right axis, green) "
+                              "over the choice bars, with a dashed 50% reference. "
+                              "Same rolling window as the Metrics traces panel.",
+    "phase3.raster.scroll": "Scroll the visible trial window across the session "
+                            "(pan). Dragging it stops the plot from auto-following "
+                            "the newest trials; press Latest to resume following.",
+    "phase3.raster.latest": "Jump back to the newest trials and resume auto-following "
+                            "the live edge of the session (undoes a manual scroll).",
+
     # ---- maze_state_view.py: Maze state tab ----
     "maze.define_zones": "Draw the maze zones (central reward HUB, stem, "
                          "junction, choice/return arms), the well region (inside "

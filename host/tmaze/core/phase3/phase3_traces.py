@@ -41,6 +41,10 @@ Series produced (each a list parallel to the completed trials):
   - ``blocks`` - contiguous INTERVENTION spans (start/end x + kind) for shading,
     each carrying the in-block response trajectory (cumulative compliance with the
     forced arm + in-block P(left)) the Metrics tab overlays (docs/decisions/0118).
+  - raw per-trial marks (``choice`` / ``correct`` / ``probe`` / ``oob``) - the
+    un-windowed facts behind the rate series, one per completed trial, so a
+    trial-by-trial choice raster can be drawn from the same reduction the rates
+    use (the Metrics tab's choice-raster panel; docs/decisions/0127).
 
 Rolling windows are the trailing ``window_n`` COMPLETED trials (default 20, as in
 phase3_stats); a rate is ``None`` until its denominator reaches ``min_den``
@@ -142,6 +146,17 @@ class TraceResult:
     # closed-loop trigger signals
     dir_bias: List[Optional[float]] = field(default_factory=list)
     sched_alt_rate: List[Optional[float]] = field(default_factory=list)
+    # per-trial marks (the raw, un-windowed facts behind the rate series), for a
+    # trial-by-trial choice raster (the Metrics tab's choice-raster panel;
+    # docs/decisions/0127). One entry per completed trial, parallel to ``trial``:
+    #   choice  - "LEFT" / "RIGHT" / None (unusable side)
+    #   correct - True if scored CORRECT, else False (completed => never None)
+    #   probe   - unrewarded probe trial (probe_blocks.py)
+    #   oob     - reinforced/uncoerced (not intervention, not probe)
+    choice: List[Optional[str]] = field(default_factory=list)
+    correct: List[bool] = field(default_factory=list)
+    probe: List[bool] = field(default_factory=list)
+    oob: List[bool] = field(default_factory=list)
     # context
     blocks: List[BlockSpan] = field(default_factory=list)
     probe_blocks: List[ProbeBlockSummary] = field(default_factory=list)
@@ -311,6 +326,14 @@ def build_traces(snapshot: Optional[Phase3StateSnapshot], *,
         p = pts[j]
         out.t.append(p.x)
         out.trial.append(p.trial)
+
+        # Raw per-trial marks for the choice raster (docs/decisions/0127): the
+        # same reduced facts the rolling rates below sum over, exposed one-per-
+        # trial so the raster and those rates can't drift apart.
+        out.choice.append(p.choice)
+        out.correct.append(p.correct)
+        out.probe.append(p.probe)
+        out.oob.append(p.oob)
 
         # Engagement: rolling median dead-time ITI over its OWN window
         # (``iti_window_n``, often shorter than the rate window so it reacts

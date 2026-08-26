@@ -216,6 +216,42 @@ class TestDirBias(unittest.TestCase):
         self.assertAlmostEqual(r.dir_bias[-1], 1.0)
 
 
+class TestPerTrialMarks(unittest.TestCase):
+    """The raw per-trial marks behind the choice raster (docs/decisions/0127):
+    one entry per completed trial, parallel to ``trial``."""
+
+    def test_marks_parallel_and_carry_side_and_outcome(self):
+        # A mixed sequence: L correct, R incorrect, R correct, L incorrect.
+        log = _log(n=10)
+        seq = [("left", CORRECT), ("right", INCORRECT),
+               ("right", CORRECT), ("left", INCORRECT)]
+        for i, (side, outcome) in enumerate(seq):
+            _fill(log, i, side, outcome, start_s=30 * i, end_s=30 * i + 20)
+        r = build_traces(log.snapshot(4, armed=True))
+        # Every mark list is parallel to trial.
+        self.assertEqual(len(r.choice), len(r.trial))
+        self.assertEqual(len(r.correct), len(r.trial))
+        self.assertEqual(len(r.probe), len(r.trial))
+        self.assertEqual(len(r.oob), len(r.trial))
+        self.assertEqual(r.choice, ["LEFT", "RIGHT", "RIGHT", "LEFT"])
+        self.assertEqual(r.correct, [True, False, True, False])
+        # No probes / interventions -> all reinforced, none flagged probe.
+        self.assertEqual(r.probe, [False, False, False, False])
+        self.assertEqual(r.oob, [True, True, True, True])
+
+    def test_probe_and_intervention_flags(self):
+        # Trial 2 (index 1) probe, trial 3 (index 2) intervention; the rest free.
+        log = _log(n=10)
+        for i in range(4):
+            _fill(log, i, "left", CORRECT, start_s=30 * i, end_s=30 * i + 20)
+        log._rows[1].probe = "1"
+        log._rows[2].sched_state = "INTERVENTION"
+        r = build_traces(log.snapshot(4, armed=True))
+        self.assertEqual(r.probe, [False, True, False, False])
+        # oob = reinforced: not intervention AND not probe.
+        self.assertEqual(r.oob, [True, False, False, True])
+
+
 class TestBlockSpans(unittest.TestCase):
     def test_intervention_run_becomes_a_span(self):
         # Mark trials 3-4 (0-based 2-3) as an INTERVENTION block by setting the
