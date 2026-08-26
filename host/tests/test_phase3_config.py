@@ -127,6 +127,14 @@ class TestValidation(unittest.TestCase):
     def test_bad_max_alt_run(self):
         self._bad("sequence", "max_alt_run", -1)
 
+    def test_bad_alt_exit_repeats_per_side(self):
+        # Zero, and greater than max_block_len, are both out of range (ADR-0129).
+        for bad in (0, 999):
+            cfg = default_config()
+            cfg["sequence"]["alternation_blocks"]["exit_repeats_per_side"] = bad
+            with self.assertRaises((ValueError, TypeError)):
+                validate_phase3_config(cfg)
+
     def test_bad_tone(self):
         self._bad("sequence", "high_tone_hz", -1)
 

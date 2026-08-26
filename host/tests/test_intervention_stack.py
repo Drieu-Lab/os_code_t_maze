@@ -29,7 +29,7 @@ def _both(**kw):
     db = DebiasBlockConfig(window=10, min_errors=3, trigger_bias=0.3,
                            exit_consecutive=3, max_block_len=5)
     al = AlternationBlockConfig(window=10, min_samples=3, trigger_rate=0.8,
-                                exit_rate=0.5, exit_min_samples=3, max_block_len=5)
+                                exit_repeats_per_side=2, max_block_len=5)
     return InterventionStackController(db, al)
 
 
@@ -91,8 +91,8 @@ class TestAlternationOnly(unittest.TestCase):
     def test_alternation_child_triggers_when_debias_disabled(self):
         s = InterventionStackController(
             None, AlternationBlockConfig(window=10, min_samples=3,
-                                         trigger_rate=0.8, exit_rate=0.5,
-                                         exit_min_samples=3, max_block_len=5))
+                                         trigger_rate=0.8, exit_repeats_per_side=2,
+                                         max_block_len=5))
         chosen = LEFT
         s.record(LEFT, chosen)
         for _ in range(4):

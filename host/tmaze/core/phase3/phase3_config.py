@@ -136,8 +136,7 @@ def default_config() -> dict:
                 "window": al.window,
                 "min_samples": al.min_samples,
                 "trigger_rate": al.trigger_rate,
-                "exit_rate": al.exit_rate,
-                "exit_min_samples": al.exit_min_samples,
+                "exit_repeats_per_side": al.exit_repeats_per_side,
                 "max_block_len": al.max_block_len,
                 "signal": al.signal,
             },
@@ -261,14 +260,14 @@ def _to_debias_config(d: dict) -> DebiasBlockConfig:
 def _to_alternation_config(d: dict) -> AlternationBlockConfig:
     """Build + range-check the closed-loop `AlternationBlockConfig` from the
     ``sequence.alternation_blocks`` sub-section (missing keys fall back to
-    defaults). ``exit_rate <= trigger_rate`` is enforced so the block keeps the
-    hysteresis (trigger high, relax to a lower exit) it was designed around."""
+    defaults). The success exit is the two-sided ``exit_repeats_per_side`` gate
+    (ADR-0129), capped by ``max_block_len``."""
     al = AlternationBlockConfig()
     window = int(d.get("window", al.window))
     min_samples = int(d.get("min_samples", al.min_samples))
     trigger_rate = float(d.get("trigger_rate", al.trigger_rate))
-    exit_rate = float(d.get("exit_rate", al.exit_rate))
-    exit_min_samples = int(d.get("exit_min_samples", al.exit_min_samples))
+    exit_repeats_per_side = int(
+        d.get("exit_repeats_per_side", al.exit_repeats_per_side))
     max_block_len = int(d.get("max_block_len", al.max_block_len))
     signal = str(d.get("signal", al.signal))
     if window <= 0:
@@ -279,20 +278,16 @@ def _to_alternation_config(d: dict) -> AlternationBlockConfig:
     if not 0.0 <= trigger_rate <= 1.0:
         raise ValueError(
             "sequence.alternation_blocks.trigger_rate must be in [0, 1]")
-    if not 0.0 <= exit_rate <= 1.0:
-        raise ValueError("sequence.alternation_blocks.exit_rate must be in [0, 1]")
-    if exit_rate > trigger_rate:
-        raise ValueError(
-            "sequence.alternation_blocks.exit_rate must be <= trigger_rate")
-    if exit_min_samples <= 0:
-        raise ValueError(
-            "sequence.alternation_blocks.exit_min_samples must be > 0")
     if max_block_len <= 0:
         raise ValueError("sequence.alternation_blocks.max_block_len must be > 0")
-    return AlternationBlockConfig(window=window, min_samples=min_samples,
-                                  trigger_rate=trigger_rate, exit_rate=exit_rate,
-                                  exit_min_samples=exit_min_samples,
-                                  max_block_len=max_block_len, signal=signal)
+    if not 0 < exit_repeats_per_side <= max_block_len:
+        raise ValueError(
+            "sequence.alternation_blocks.exit_repeats_per_side must be in "
+            "(0, max_block_len]")
+    return AlternationBlockConfig(
+        window=window, min_samples=min_samples, trigger_rate=trigger_rate,
+        exit_repeats_per_side=exit_repeats_per_side,
+        max_block_len=max_block_len, signal=signal)
 
 
 def _to_probe_config(d: dict) -> ProbeBlockConfig:

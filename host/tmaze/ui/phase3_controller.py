@@ -1396,8 +1396,8 @@ class Phase3ControlView(VisionActuator):
                 "window": _i(self._alt_window_var, al.window),
                 "min_samples": _i(self._alt_min_samples_var, al.min_samples),
                 "trigger_rate": _f(self._alt_trigger_var, al.trigger_rate),
-                "exit_rate": _f(self._alt_exit_var, al.exit_rate),
-                "exit_min_samples": _i(self._alt_exit_min_var, al.exit_min_samples),
+                "exit_repeats_per_side": _i(self._alt_exit_repeats_var,
+                                            al.exit_repeats_per_side),
                 "max_block_len": _i(self._alt_cap_var, al.max_block_len)}
 
     def _current_trial_config(self) -> TrialConfig:
@@ -1472,9 +1472,8 @@ class Phase3ControlView(VisionActuator):
         self._alt_window_var.set(str(al.get("window", ac.window)))
         self._alt_min_samples_var.set(str(al.get("min_samples", ac.min_samples)))
         self._alt_trigger_var.set(str(al.get("trigger_rate", ac.trigger_rate)))
-        self._alt_exit_var.set(str(al.get("exit_rate", ac.exit_rate)))
-        self._alt_exit_min_var.set(
-            str(al.get("exit_min_samples", ac.exit_min_samples)))
+        self._alt_exit_repeats_var.set(
+            str(al.get("exit_repeats_per_side", ac.exit_repeats_per_side)))
         self._alt_cap_var.set(str(al.get("max_block_len", ac.max_block_len)))
         self._sync_debias_enabled()
 
@@ -1815,10 +1814,8 @@ class Phase3ControlView(VisionActuator):
             value=str(al.get("min_samples", ac.min_samples)))
         self._alt_trigger_var = tk.StringVar(
             value=str(al.get("trigger_rate", ac.trigger_rate)))
-        self._alt_exit_var = tk.StringVar(
-            value=str(al.get("exit_rate", ac.exit_rate)))
-        self._alt_exit_min_var = tk.StringVar(
-            value=str(al.get("exit_min_samples", ac.exit_min_samples)))
+        self._alt_exit_repeats_var = tk.StringVar(
+            value=str(al.get("exit_repeats_per_side", ac.exit_repeats_per_side)))
         self._alt_cap_var = tk.StringVar(
             value=str(al.get("max_block_len", ac.max_block_len)))
         al_box = ttk.LabelFrame(frame, text="De-alternation block")
@@ -1830,10 +1827,8 @@ class Phase3ControlView(VisionActuator):
              1, 500, 1, False),
             ("Trigger rate:", self._alt_trigger_var, "phase3.alt_trigger_rate",
              0.0, 1.0, 0.05, True),
-            ("Exit rate:", self._alt_exit_var, "phase3.alt_exit_rate",
-             0.0, 1.0, 0.05, True),
-            ("Exit min samples:", self._alt_exit_min_var,
-             "phase3.alt_exit_min_samples", 1, 100, 1, False),
+            ("Exit repeats/side:", self._alt_exit_repeats_var,
+             "phase3.alt_exit_repeats_per_side", 1, 200, 1, False),
             ("Max block length:", self._alt_cap_var, "phase3.alt_max_block_len",
              1, 200, 1, False),
         ))

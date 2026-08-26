@@ -5,9 +5,10 @@ test_alternation.py - headless tests for the closed-loop de-alternation core
 Covers the cue-aware alternation-rate measure (only repeat-cued trials count, so a
 cue-follower is never flagged even when its CHOICES alternate - the off-phase
 false-positive guard), the AlternationBlockController state machine (auto trigger
-forcing the last choice, the relaxed-rate success exit, the max_block_len cap,
-window reset, manual override), and an "intervention_blocks" TrialSequence driven
-by a simulated pure alternator. Pure stdlib.
+forcing the last choice, the bias-aware two-sided-repeats success exit + the
+one-sided-camp guard, the max_block_len cap, window reset, manual override), and an
+"intervention_blocks" TrialSequence driven by a simulated pure alternator. Pure
+stdlib.
 
 Run from host/:  python -m unittest test_alternation
 """
@@ -81,8 +82,8 @@ def _prime_alternator(c, n):
 
 class TestAutoTrigger(unittest.TestCase):
     def _ctl(self, **kw):
-        base = dict(window=10, min_samples=4, trigger_rate=0.8, exit_rate=0.5,
-                    exit_min_samples=3, max_block_len=4)
+        base = dict(window=10, min_samples=4, trigger_rate=0.8,
+                    exit_repeats_per_side=2, max_block_len=4)
         base.update(kw)
         return AlternationBlockController(AlternationBlockConfig(**base))
 
@@ -100,20 +101,45 @@ class TestAutoTrigger(unittest.TestCase):
         self.assertEqual(d.trigger, AUTO)
         self.assertEqual(d.block_id, 1)
 
-    def test_success_exit_when_alternation_relaxes(self):
+    def test_success_exit_requires_repeats_on_both_arms(self):
+        # A perfect cue-follower always chooses the forced side. It exits only after
+        # earning exit_repeats_per_side rewarded repeats on EACH arm - so the forced
+        # side must have switched arms mid-block (the bias-aware two-sided exit).
         c = self._ctl(max_block_len=50)
-        _prime_alternator(c, 4)
-        self.assertEqual(c.decide().state, INTERVENTION)     # block trial 1
-        # Animal now complies: repeats the forced (last) side. Each such in-block
-        # trial is repeat-cued but NOT a switch, so the in-block rate falls to 0.
-        for _ in range(3):
+        _prime_alternator(c, 4)                    # prev choice = LEFT
+        forced = []
+        for _ in range(20):
             d = c.decide()
-            c.record(d.side, d.side)               # chose == forced side (repeat)
-        self.assertEqual(c.decide().state, NORMAL)           # relaxed below exit_rate
-        self.assertEqual(c.alt_rate(), 0.0)                  # window cleared on exit
+            if d.state == NORMAL:
+                break                              # block exited on success
+            forced.append(d.side)
+            c.record(d.side, d.side)               # follows the cue (repeat/bridge)
+        self.assertEqual(c.state, NORMAL)
+        self.assertIn(LEFT, forced)                # earned repeats on both arms
+        self.assertIn(RIGHT, forced)
+        self.assertEqual(c.alt_rate(), 0.0)        # window cleared on exit
+
+    def test_bias_camper_cannot_exit_one_sided(self):
+        # A rat that camps ONE arm (its bias) earns its repeats there, but the block
+        # then forces the OTHER arm; the camper never repeats there, so it can't exit
+        # by one-sided camping and rides to the welfare cap (ADR-0129).
+        c = self._ctl(max_block_len=10)
+        _prime_alternator(c, 4)
+        forced, states = [], []
+        for _ in range(20):
+            d = c.decide()
+            states.append(d.state)
+            if d.state == INTERVENTION:
+                forced.append(d.side)
+                c.record(d.side, RIGHT)            # cue = forced side; camper -> RIGHT
+            else:
+                c.record(RIGHT, RIGHT)
+        self.assertIn(LEFT, forced)                # forced onto the avoided arm
+        self.assertIn(NORMAL, states)              # the block did end...
+        self.assertEqual(states.index(NORMAL), 10)  # ...only at max_block_len (cap)
 
     def test_cap_exit_when_never_complies(self):
-        c = self._ctl(exit_min_samples=100)        # only the cap can end it
+        c = self._ctl()                            # only the cap can end it
         _prime_alternator(c, 4)
         states = []
         for _ in range(6):                         # stubborn: keep switching
@@ -156,8 +182,8 @@ def _cfg(**kw):
     base = dict(max_trials=80, block_size=20, max_same_run=4,
                 generator=GEN_INTERVENTION_BLOCKS, debias=None,
                 alternation=AlternationBlockConfig(
-                    window=10, min_samples=4, trigger_rate=0.8, exit_rate=0.5,
-                    exit_min_samples=3, max_block_len=4))
+                    window=10, min_samples=4, trigger_rate=0.8,
+                    exit_repeats_per_side=2, max_block_len=4))
     base.update(kw)
     return TrialConfig(**base)
 

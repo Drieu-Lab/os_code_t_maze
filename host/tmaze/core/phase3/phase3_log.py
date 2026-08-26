@@ -628,8 +628,7 @@ class Phase3Log:
                 lines.append(
                     f"# alternation_blocks window={al.window} "
                     f"min_samples={al.min_samples} trigger_rate={al.trigger_rate} "
-                    f"exit_rate={al.exit_rate} "
-                    f"exit_min_samples={al.exit_min_samples} "
+                    f"exit_repeats_per_side={al.exit_repeats_per_side} "
                     f"max_block_len={al.max_block_len} signal={al.signal}")
             lines.append(
                 "# note: intervention schedule is closed-loop - seed alone does NOT "

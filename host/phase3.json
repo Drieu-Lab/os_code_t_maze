@@ -38,8 +38,7 @@
       "window": 30,
       "min_samples": 8,
       "trigger_rate": 0.8,
-      "exit_rate": 0.6,
-      "exit_min_samples": 6,
+      "exit_repeats_per_side": 2,
       "max_block_len": 15,
       "signal": "cue_aware"
     },

@@ -437,12 +437,13 @@ TIPS: Dict[str, Entry] = {
                                "de-alternation block: P(switch | cue said to repeat "
                                "the last choice). 1.0 = always switches when told to "
                                "repeat (a pure alternator).",
-    "phase3.alt_exit_rate": "The in-block alternation rate (0-1, <= trigger) at/"
-                            "below which the block ends: the animal is repeating "
-                            "again. Kept under the trigger for hysteresis.",
-    "phase3.alt_exit_min_samples": "How many in-block repeat-cued trials must accrue "
-                                   "before the relaxed-rate exit can fire (so a "
-                                   "block isn't ended on one lucky repeat).",
+    "phase3.alt_exit_repeats_per_side": "How many rewarded repeats the rat must "
+                                        "earn on EACH arm before a de-alternation "
+                                        "block ends on success (ADR-0129). A "
+                                        "one-sided repeat run no longer exits, so "
+                                        "the rat can't escape by camping - and "
+                                        "reinforcing - a side bias; it must show it "
+                                        "repeats on both arms.",
     "phase3.alt_max_block_len": "Welfare failsafe: the maximum trials a "
                                 "de-alternation block may run before it auto-reverts "
                                 "(flagged as capped) even if the animal never "
@@ -711,9 +712,11 @@ TIPS: Dict[str, Entry] = {
                               "why). See alternation.py / ADR-0107.",
     "behavior.phase3.iv_alt_blocks": "De-alternation corrective blocks so far "
                                      "(count). Unlike side-bias blocks there is no "
-                                     "ok/cap split: the alternation exit is a "
-                                     "relaxed-rate test, best read from the "
-                                     "per-trial alt_rate in the CSV.",
+                                     "ok/cap split: a block exits once the rat has "
+                                     "repeated on BOTH arms (the two-sided exit, "
+                                     "ADR-0129) or hits the welfare cap - best read "
+                                     "from the per-trial block_kind/alt_rate in the "
+                                     "CSV.",
     "behavior.phase3.iv_inblock": "Accuracy on the forced in-block (corrective) "
                                   "trials, with the completed in-block trial count "
                                   "in brackets - across both intervention kinds. "
