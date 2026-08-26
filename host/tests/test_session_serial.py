@@ -54,10 +54,23 @@ class TestCentralPort(unittest.TestCase):
         self.assertTrue(_keep("1000,S,0,1", center_lick=None))
 
 
+class TestSessionStartFiducial(unittest.TestCase):
+    """PONG (the reply to the host's one PING at Start Session) is kept as the
+    in-bundle session-start fiducial - it ties firmware ms to host wall time
+    (docs/decisions/0124). Only the well-formed "<ms>,PONG" is kept; a bare,
+    prefix-less "PONG" is malformed and still dropped."""
+
+    def test_ms_prefixed_pong_kept(self):
+        self.assertTrue(_keep("1234,PONG"))
+
+    def test_bare_pong_dropped_as_malformed(self):
+        self.assertFalse(_keep("PONG"))
+
+
 class TestDroppedLines(unittest.TestCase):
-    def test_handshake_mode_cue_pong_dropped(self):
+    def test_handshake_mode_cue_dropped(self):
         for line in ("0,ANIMAL,RAT600", "0,MODE,FREEROAM", "0,PROTO,6",
-                     "1500,CUE,ON,CHOICE,8000", "1500,CUE,OFF", "PONG"):
+                     "1500,CUE,ON,CHOICE,8000", "1500,CUE,OFF"):
             self.assertFalse(_keep(line), line)
 
     def test_malformed_is_dropped(self):
@@ -71,7 +84,7 @@ class TestInfoAndLineParity(unittest.TestCase):
 
     LINES = ("1000,S,0,1", "1200,L,2,1", "1200,L,0,1", "1300,REWARD,CENTER,150",
              "1400,SOL,2,0,150", "1400,SOL,0,1", "0,MODE,FREEROAM",
-             "0,ANIMAL,RAT600", "1500,CUE,OFF", "", "garbage")
+             "0,ANIMAL,RAT600", "1500,CUE,OFF", "1234,PONG", "PONG", "", "garbage")
 
     def test_parity(self):
         for line in self.LINES:

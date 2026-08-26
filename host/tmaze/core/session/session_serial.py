@@ -10,9 +10,16 @@ whole thing (the complete verbatim stream stays with ``rig_logger.py``):
   - every body-beam sensor edge ``S,<i>,<state>`` - the rat's position signal;
   - the CENTRAL reward-well activity: its lick edges ``L,<center>,<state>`` and
     the reward it delivers - ``REWARD,...`` (all reward is at the central port,
-    see docs/decisions/0007) plus the central solenoid ack ``SOL,<center>,<sol>``.
+    see docs/decisions/0007) plus the central solenoid ack ``SOL,<center>,<sol>``;
+  - the ``PONG`` session-start fiducial - the reply to the single ``PING`` the
+    host sends at Start Session (see docs/decisions/0048/0062). It is NOT sensor
+    data, but keeping it makes the bundle self-anchoring: the ``PONG`` line
+    carries the firmware session ms (its own prefix) AND, via the per-line
+    host-wall prefix the writer adds, the host wall time - one clean tie point
+    that lets an offline tool map firmware-clock events onto the host timeline
+    from inside the bundle rather than only the full logger (see docs/decisions/0124).
 
-Everything else (other-port licks, cue echoes, MODE/handshake/PONG, ...) is left
+Everything else (other-port licks, cue echoes, MODE/handshake, ...) is left
 to the full logger. Keeping this as a pure function makes the capture rule easy
 to read and to test without a rig.
 
@@ -49,6 +56,10 @@ def is_sensor_or_central(info: protocol.LineInfo, *,
         return True
     # The central well's solenoid acks (drop other ports' valve-test acks).
     if info.sol is not None and info.sol[0] == center_sol_port:
+        return True
+    # The session-start fiducial: PONG ties the firmware clock to host wall time
+    # inside the bundle (docs/decisions/0124). Not sensor data, but self-anchoring.
+    if info.parsed is not None and info.parsed.type == "PONG":
         return True
     return False
 
