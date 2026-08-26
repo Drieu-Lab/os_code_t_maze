@@ -7,7 +7,7 @@ the seed, progressively filled with the animal's choices and event timestamps as
 the session runs, and rendered to CSV text for the thin controller shell to write
 to disk.
 
-Layout (one row per trial):
+Layout (one row per trial ATTEMPT):
   - PLANNED at arm (from the seed-deterministic TrialSequence):
     ``correct_arm`` (LEFT/RIGHT) + the N x3 cue matrix ``choice_cue`` /
     ``return_cue_left`` / ``return_cue_right`` (each HIGH/LOW). ``correct_arm``
@@ -16,6 +16,16 @@ Layout (one row per trial):
   - FILLED live as the trial resolves: ``chosen_arm``, ``outcome``,
     ``rewarded``, ``return_arm_used``, ``return_cue_played`` and the event
     timestamps (all host wall-clock ISO except ``lick_fw_ms``).
+
+Trial edits never erase behavior (docs/decisions/0119, bug #260810). The live
+table stays one row per trial INDEX (so the ribbon/stats/readers key on it
+unchanged), but a Repeat/Back on a trial that already recorded behavior does not
+clear that row - it ARCHIVES the animal's real attempt (append-only) and starts a
+fresh attempt in the live row. ``render_csv`` emits every attempt, so the file is
+one row per (trial, attempt): the ``attempt`` column counts 1.. per trial, the
+``superseded`` column marks a preserved (replaced) attempt, and the ``edit``
+column names the operator action that created a later attempt (``repeat`` /
+``back``). Readers that want only the trials that COUNT drop ``superseded`` rows.
 
 Timestamp definitions (the corrected Phase 3 timeline):
   - ``trial_start`` = the first HUB->stem transition after the previous trial end.
@@ -35,7 +45,7 @@ rendered text), no locks. Headless tests: python -m unittest test_phase3_log.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from typing import List, Optional, Tuple
 
 from tmaze.core.phase3.phase3_task import ABANDONED
@@ -70,6 +80,14 @@ COLUMNS = (
     # trial (cue + scoring normal, reward suppressed), blank otherwise. Orthogonal
     # to sched_state (a probe stays NORMAL - it is not an intervention block).
     "probe",
+    # Trial-edit lifecycle (docs/decisions/0119, bug #260810): with append-only
+    # trial edits the file is one row per (trial, ATTEMPT). ``attempt`` is the
+    # 1-based attempt number for that trial; ``superseded`` is "1" on a preserved
+    # attempt that a later Repeat/Back replaced (blank on the current attempt);
+    # ``edit`` names the operator action that created a >1 attempt ("repeat" /
+    # "back"; blank on the natural first attempt). These are lifecycle metadata,
+    # not trial data, so they live on the row here rather than in ``_Row``.
+    "attempt", "superseded", "edit",
 )
 
 
@@ -224,6 +242,25 @@ class Phase3StateSnapshot:
     probe_state: str = "NORMAL"
 
 
+@dataclass(frozen=True)
+class SupersedeResult:
+    """What :meth:`Phase3Log.supersede_trial` archived, so the shell can reconcile
+    its live tallies (docs/decisions/0119). ``outcome`` is the archived attempt's
+    scored outcome (CORRECT/INCORRECT/ABANDONED/None) and ``probe`` whether it was
+    a probe trial. Only returned when an attempt with recorded behavior was
+    actually preserved; None means nothing was archived (an empty row)."""
+    outcome: Optional[str]
+    probe: bool
+
+
+# The planned cue columns that a trial edit must KEEP (they belong to the trial's
+# identity, not its live behavior); everything else on ``_Row`` is cleared for a
+# fresh attempt. Named once so :meth:`Phase3Log._clear_live` and
+# :meth:`Phase3Log._has_behavior` agree on what "behavior" means.
+_PLANNED_FIELDS = ("correct_arm", "choice_cue", "return_cue_left",
+                   "return_cue_right")
+
+
 class Phase3Log:
     """The per-session Phase 3 data table (plan + live outcomes)."""
 
@@ -260,6 +297,14 @@ class Phase3Log:
         # The trial whose reward is still awaiting its collection lick (see module
         # docstring); the lick lands after that trial has already advanced.
         self._pending_lick_index: Optional[int] = None
+        # Trial-edit lifecycle (docs/decisions/0119). Parallel to ``_rows``: the
+        # current attempt number and the operator action that created it per trial
+        # index. ``_archive`` holds preserved (superseded) attempts as
+        # (index, attempt, edit, row-copy), append-only, rendered alongside the
+        # live rows so a Repeat/Back never erases the animal's real behavior.
+        self._attempt: List[int] = [1] * len(self._rows)
+        self._edit: List[str] = [""] * len(self._rows)
+        self._archive: List[Tuple[int, int, str, _Row]] = []
 
     # ------------------------------------------------------------- helpers
     def __len__(self) -> int:
@@ -415,21 +460,65 @@ class Phase3Log:
         if r.trial_end_iso is None:
             r.trial_end_iso = iso
 
+    def _clear_live(self, r: _Row) -> None:
+        """Reset a row's live (filled) fields to unrecorded, keeping its planned
+        cue columns, so it can be re-run cleanly."""
+        for f in fields(_Row):
+            if f.name not in _PLANNED_FIELDS:
+                setattr(r, f.name, None)
+
+    def _has_behavior(self, r: _Row) -> bool:
+        """True if a row recorded ANY live behavior (a scored outcome, an event
+        timestamp, a chosen arm, ...), i.e. there is something worth preserving
+        before a trial edit clears it."""
+        return any(getattr(r, f.name) is not None
+                   for f in fields(_Row) if f.name not in _PLANNED_FIELDS)
+
     def reset_trial(self, index: int) -> None:
         """Clear a trial's live (filled) fields back to unrecorded, keeping its
-        planned cue columns, so it can be re-run cleanly (Repeat / Back buttons;
-        docs/decisions/0058). Also drops a pending reward-lick pointer aimed at it,
-        so a stale lick can't attach to the reset row."""
+        planned cue columns, so it can be re-run cleanly. Also drops a pending
+        reward-lick pointer aimed at it, so a stale lick can't attach to the reset
+        row.
+
+        This is the DESTRUCTIVE clear (it does not preserve the row). The Repeat /
+        Back buttons now go through :meth:`supersede_trial`, which archives the
+        real attempt first (docs/decisions/0119); this stays for callers/tests
+        that want a plain clear."""
         r = self._row(index)
         if r is None:
             return
-        planned = ("correct_arm", "choice_cue", "return_cue_left",
-                   "return_cue_right")
-        for f in fields(_Row):
-            if f.name not in planned:
-                setattr(r, f.name, None)
+        self._clear_live(r)
         if self._pending_lick_index == index:
             self._pending_lick_index = None
+
+    def supersede_trial(self, index: int, edit: str) -> Optional[SupersedeResult]:
+        """Preserve the animal's real attempt for ``index`` and open a fresh one
+        for a re-run, instead of erasing it (the Repeat / Back buttons; bug
+        #260810, docs/decisions/0119).
+
+        If the live row recorded any behavior, a copy is appended to the archive
+        (marked superseded, tagged with the current attempt number and the edit
+        that preceded it), the live row's attempt counter is bumped, and its
+        ``edit`` is set to ``edit`` (the action that created the NEW attempt);
+        then the live row is cleared for the re-run. A row with nothing recorded
+        yet is just cleared (nothing to preserve). Returns a
+        :class:`SupersedeResult` describing what was archived (so the shell can
+        reconcile its accuracy tallies), or None when nothing was preserved.
+        """
+        r = self._row(index)
+        if r is None:
+            return None
+        result: Optional[SupersedeResult] = None
+        if self._has_behavior(r):
+            self._archive.append(
+                (index, self._attempt[index], self._edit[index], replace(r)))
+            result = SupersedeResult(outcome=r.outcome, probe=(r.probe == "1"))
+            self._attempt[index] += 1
+            self._edit[index] = edit
+        self._clear_live(r)
+        if self._pending_lick_index == index:
+            self._pending_lick_index = None
+        return result
 
     def extend_to(self, sequence: TrialSequence) -> int:
         """Append planned rows for trials added to ``sequence`` (append-only).
@@ -446,6 +535,8 @@ class Phase3Log:
                 return_cue_left=sequence.return_cue(LEFT, i) or "",
                 return_cue_right=sequence.return_cue(RIGHT, i) or "",
             ))
+            self._attempt.append(1)          # keep the edit-lifecycle lists aligned
+            self._edit.append("")
         return len(self._rows) - start
 
     def lick(self, iso: str, fw_ms: Optional[int]) -> bool:
@@ -503,7 +594,7 @@ class Phase3Log:
         c = self.cfg
         lines = [
             f"# phase3_session animal={self.animal} session_id={self.session_id} "
-            f"seed={self.seed} proto=8",
+            f"seed={self.seed} proto=9",
             f"# high_tone_is_left={c.high_tone_is_left} "
             f"high_tone_hz={c.high_tone_hz} low_tone_hz={c.low_tone_hz}",
             f"# block_size={c.block_size} max_same_run={c.max_same_run} "
@@ -543,14 +634,30 @@ class Phase3Log:
 
     def render_csv(self) -> str:
         """Render the whole table (header comment + column row + trials) as CSV
-        text. Cheap enough to re-render on every update (a few hundred rows)."""
+        text. Cheap enough to re-render on every update (a few hundred rows).
+
+        One row per (trial, ATTEMPT): the current live attempt of each trial plus
+        every preserved (superseded) attempt from the archive, ordered by
+        (trial, attempt) so a reader sees a trial's attempts together with the
+        current one last (docs/decisions/0119)."""
         data_fields = [f.name for f in fields(_Row)]
+        # (trial_no, attempt, superseded, edit, row): the current live attempts...
+        entries: List[Tuple[int, int, str, str, _Row]] = [
+            (i + 1, self._attempt[i], "", self._edit[i], r)
+            for i, r in enumerate(self._rows)
+        ]
+        # ...plus every preserved attempt (marked superseded).
+        entries += [(idx + 1, attempt, "1", edit, r)
+                    for (idx, attempt, edit, r) in self._archive]
+        entries.sort(key=lambda e: (e[0], e[1]))
+
         lines = list(self._header_comment())
         lines.append(",".join(COLUMNS))
-        for i, r in enumerate(self._rows, start=1):
-            cells = [str(i)] + [
+        for trial_no, attempt, superseded, edit, r in entries:
+            cells = [str(trial_no)] + [
                 ("" if getattr(r, name) is None else str(getattr(r, name)))
                 for name in data_fields
             ]
+            cells += [str(attempt), superseded, edit or ""]
             lines.append(",".join(cells))
         return "\n".join(lines) + "\n"

@@ -75,6 +75,13 @@ _COLUMN_DEFAULTS: Dict[str, object] = {
     # Unrewarded probe-trial marker ("1" / ""); absent in pre-probe sessions, so it
     # back-fills to "" (= not a probe). See docs/decisions/0115-probe.
     "probe": "",
+    # Trial-edit lifecycle (docs/decisions/0119; absent before it, back-filling to
+    # a single natural attempt). ``superseded`` == "1" marks a preserved attempt a
+    # later Repeat/Back replaced - dropped below so the tidy frame counts each
+    # trial once (its current attempt); the raw CSV keeps the full history.
+    "attempt": "1",
+    "superseded": "",
+    "edit": "",
 }
 
 
@@ -255,6 +262,11 @@ def _read_trial_csv(path: str) -> pd.DataFrame:
     for col, default in _COLUMN_DEFAULTS.items():
         if col not in df.columns:
             df[col] = default
+    # Drop preserved (superseded) trial-edit attempts (ADR-0119): the tidy trials
+    # frame counts each trial once - its current attempt - matching the live/rig
+    # tallies; the raw CSV still holds the replaced attempts for anyone who wants
+    # the full edit history.
+    df = df[df["superseded"].astype(str).str.strip() != "1"].copy()
     df["trial"] = pd.to_numeric(df["trial"], errors="coerce")
     df["rewarded"] = pd.to_numeric(df["rewarded"], errors="coerce").fillna(0).astype(int)
     df["bias"] = pd.to_numeric(df["bias"], errors="coerce")

@@ -75,6 +75,29 @@ class TestRoundTrip(unittest.TestCase):
                 build_traces(live, window_n=w, iti_window_n=3),
                 build_traces(recon, window_n=w, iti_window_n=3))
 
+    def test_superseded_attempts_are_skipped(self):
+        # A Repeat/Back preserves the animal's real attempt as a superseded row in
+        # the CSV (ADR-0119); the reader must reconstruct only the trials that
+        # COUNT (one per index, current attempt), matching the live snapshot.
+        log = _log(n=4)
+        for i in range(4):
+            _fill(log, i, "left", CORRECT, start_s=30 * i, end_s=30 * i + 20)
+        # Re-run trial 1 as an incorrect right choice after superseding it.
+        log.supersede_trial(1, "repeat")
+        _fill(log, 1, "right", INCORRECT, start_s=200, end_s=220)
+        live = log.snapshot(4, armed=True)
+
+        text = log.render_csv()
+        self.assertIn("superseded", text)              # the archive row is present
+        recon, _cfg = parse_csv_text(text)
+        # One row per trial index (the superseded attempt is dropped), and the
+        # kept trial-1 row is the current (re-run) attempt.
+        self.assertEqual(recon.total, 4)
+        self.assertEqual(len(recon.rows), 4)
+        self.assertEqual(recon.rows[1].chosen_arm, "RIGHT")
+        self.assertEqual(recon.rows[1].outcome, INCORRECT)
+        _assert_traces_equal(self, build_traces(live), build_traces(recon))
+
     def test_high_tone_is_left_false_round_trips(self):
         log = _log(n=6, high_tone_is_left=False)
         for i in range(6):

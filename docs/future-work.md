@@ -96,6 +96,7 @@ criteria).
 | [FW-0041](#fw-0041-reward-pressure--mode-transition-characterization) | Reward-pressure / mode-transition characterization | Cross-session analysis (`analysis/`) | Deferred |
 | [FW-0042](#fw-0042-live-excursion-based-engagement-traces) | Live excursion-based engagement traces (trips/min, non-stem fraction) | Phase 3 host + live trace panel | Proposed |
 | [FW-0043](#fw-0043-automatic-probe-block-triggers) | Automatic probe-block triggers (position / elapsed time / reward volume) | Phase 3 host (`core/phase3/probe_blocks.py`) | Proposed |
+| [FW-0044](#fw-0044-closed-loop-scheduler-rollback-on-a-manual-scored-re-run) | Closed-loop scheduler rollback on a manual scored re-run | Phase 3 closed-loop schedulers (`core/phase3/`) | Deferred |
 
 ## Entries
 
@@ -2218,6 +2219,61 @@ session is too many (they cost unrewarded trials)?
 
 **ADR needed?** Yes - a follow-up to ADR-0115 recording the trigger semantics and
 the chosen thresholds/defaults.
+
+### FW-0044: Closed-loop scheduler rollback on a manual scored re-run
+
+- **Status:** Deferred
+- **Date added:** 2026-08-26
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** `host/tmaze/core/phase3/` (`debias.py`, `alternation.py`,
+  `intervention_stack.py`, `trial_sequence.py`); wired from
+  `phase3_task.py`/`phase3_controller.py`
+- **Related ADRs:** [ADR-0119](decisions/0119-trial-edit-append-only-history.md),
+  [ADR-0086](decisions/0086-phase3-debias-blocks.md),
+  [ADR-0107](decisions/0107-phase3-alternation-blocks.md)
+
+**Motivation / context.** ADR-0119 made trial edits (Repeat/Back) preserve the
+animal's real behavior append-only, and un-counts the accuracy tallies for a
+preserved scored attempt. But in a **closed-loop** run (debias / alternation /
+intervention / probe schedulers) the trial's outcome was already fed to the
+scheduler via `TrialSequence.record_outcome` → `controller.record(...)` on the
+tick it was scored. Re-running that trial feeds a *second* outcome for the same
+index, so the scheduler's bias / alternation-rate windows and block counters
+double-count the edited trial and can fire (or fail to fire) a corrective block
+differently than they would have. ADR-0119 currently only surfaces an operator
+note ("auto-schedule may be affected") when a scored trial is re-run in a
+closed-loop session; the schedule itself is not reconciled.
+
+**Sketch of approach.** Two candidate designs:
+1. **Single-step undo.** Give each controller (`DebiasBlockController`,
+   `AlternationBlockController`, the `intervention_stack`) an `undo_last()` that
+   pops the most recent `record(...)` from its window/counters, and call it from
+   the edit path before the re-run re-feeds. Precise but stateful and easy to get
+   subtly wrong (window edges, block-length counters, forced/probe interactions).
+2. **Replay from history.** On a scored Repeat/Back, `reset_debias()` then replay
+   the current live table's recorded `(cued, chosen)` pairs for trials `< index`
+   in order (skipping superseded attempts, honouring forced/probe blocks). Reuses
+   existing methods and is deterministic, but must faithfully reproduce operator
+   forced-block/probe actions that aren't in the per-trial data, and re-commits
+   the spine.
+
+**Evaluation / acceptance.** A headless test where a debias/alternation session
+is scored, a mid-block scored trial is Repeated, and the scheduler state
+(bias/window/active block) matches what it would be had that trial simply been
+scored with the re-run's outcome from the start. Full host suite green.
+
+**Effort / risk.** Medium-high: touches the closed-loop cores that drive live
+behavior, so a regression could mis-schedule corrective blocks. Low urgency —
+only bites when an operator manually edits a *scored* trial *inside an auto
+block*, which is rare; the header already warns the closed-loop schedule is not
+seed-reproducible.
+
+**Open questions.** Undo vs replay? How to reconstruct operator forced-block /
+probe actions during a replay (persist an operator-action log, or snapshot
+controller state per trial and restore)? Should a manual edit inside an auto
+block be disallowed or warned-and-allowed (current behavior)?
+
+**ADR needed?** Yes - a follow-up to ADR-0119 recording the chosen mechanism.
 
 ## Completed
 

@@ -4,7 +4,9 @@
 - **Date:** 2026-07-24
 - **Author / Agent:** Agent (Cursor) on behalf of Celine
 - **Affects:** `host/trial_control_bar.py` (new), `host/phase3_controller.py`, `host/phase3_task.py`, `host/phase3_log.py`, `host/phase3_stats.py`, `host/trial_ribbon_view.py`, `host/experiment_control.py`, `host/tooltip_text.py`
-- **Supersedes / Superseded by:** —
+- **Supersedes / Superseded by:** the Repeat/Back *data-erasure* semantics
+  (`Phase3Log.reset_trial` on the edit path) are superseded by ADR-0119 (edits
+  now preserve history append-only); the rest of this ADR stands.
 
 ## Context
 

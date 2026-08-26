@@ -97,6 +97,43 @@ class TestLoadAnimals(unittest.TestCase):
                 data.sessions.iloc[0]["generator"], "intervention_blocks"
             )
 
+    def test_drops_superseded_trial_edit_rows(self):
+        # A Repeat/Back preserves the animal's real attempt as a superseded row in
+        # the CSV (ADR-0119); the tidy trials frame must count each trial once (its
+        # current attempt), not the preserved one. Render via the real log so the
+        # column set/order can't drift from the fixture.
+        from tmaze.core.phase3.phase3_log import Phase3Log
+        from tmaze.core.phase3.trial_sequence import TrialConfig, TrialSequence
+
+        with tempfile.TemporaryDirectory() as root:
+            sid = "600_20260101_120000"
+            bundle = os.path.join(root, sid)
+            os.makedirs(os.path.join(bundle, "task"))
+            with open(os.path.join(bundle, f"session_{sid}.json"), "w") as fh:
+                fh.write("{}")
+            seq = TrialSequence(
+                TrialConfig(max_trials=3, block_size=30, max_same_run=3), seed=7)
+            log = Phase3Log(seq, animal="600",
+                            session_start_iso="2026-01-01T12:00:00",
+                            session_id=sid)
+            for i in range(3):
+                log.choice_scored(i, "left", "CORRECT", f"2026-01-01T12:00:0{i}")
+                log.trial_ended(i, f"2026-01-01T12:00:1{i}")
+            # Re-run trial index 1 (Repeat) as an incorrect RIGHT choice.
+            log.supersede_trial(1, "repeat")
+            log.choice_scored(1, "right", "INCORRECT", "2026-01-01T12:00:20")
+            log.trial_ended(1, "2026-01-01T12:00:25")
+            with open(os.path.join(bundle, "task", f"phase3_{sid}.csv"),
+                      "w", encoding="utf-8") as fh:
+                fh.write(log.render_csv())
+
+            data = br.load_animals(("600",), root=root)
+            self.assertEqual(len(data.trials), 3)          # superseded row dropped
+            self.assertEqual(data.sessions.iloc[0]["n_trials"], 3)
+            row2 = data.trials[data.trials["trial"] == 2].iloc[0]
+            self.assertEqual(row2["chosen_arm"], "RIGHT")  # the kept re-run attempt
+            self.assertEqual(row2["outcome"], "INCORRECT")
+
 
 class TestMultiRoot(unittest.TestCase):
     """A history split across a primary + archive root (docs/decisions/0113):

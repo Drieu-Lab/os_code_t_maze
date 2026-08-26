@@ -11,6 +11,8 @@ Run from host/:  python -m unittest test_phase3_log
 
 from __future__ import annotations
 
+import csv
+import io
 import unittest
 from dataclasses import fields
 
@@ -33,9 +35,14 @@ def _log(**kw):
 
 class TestColumns(unittest.TestCase):
     def test_columns_align_with_row_fields(self):
-        # COLUMNS is "trial" + the _Row fields, in order; guards drift between the
-        # header and the rendered cells.
-        self.assertEqual(list(COLUMNS), ["trial"] + [f.name for f in fields(_Row)])
+        # COLUMNS is "trial" + the _Row fields + the trial-edit lifecycle columns
+        # (attempt/superseded/edit are row metadata, not _Row trial data;
+        # docs/decisions/0119), in order; guards drift between the header and the
+        # rendered cells.
+        self.assertEqual(
+            list(COLUMNS),
+            ["trial"] + [f.name for f in fields(_Row)]
+            + ["attempt", "superseded", "edit"])
 
 
 class TestPlan(unittest.TestCase):
@@ -315,15 +322,16 @@ class TestDebiasLogging(unittest.TestCase):
     def test_new_columns_exist_in_order(self):
         # The six closed-loop columns, then the two reward-magnitude columns
         # (docs/decisions/0110), then the unrewarded-probe marker (docs/decisions/
-        # 0115-probe), are appended at the end of the schema, in order.
-        self.assertEqual(COLUMNS[-9:],
+        # 0115-probe), then the trial-edit lifecycle columns (docs/decisions/0119),
+        # are appended at the end of the schema, in order.
+        self.assertEqual(COLUMNS[-12:],
                          ("sched_state", "block_id", "block_trigger", "bias",
                           "block_kind", "alt_rate", "prime_ms", "topup_ms_total",
-                          "probe"))
+                          "probe", "attempt", "superseded", "edit"))
 
-    def test_header_bumped_to_proto8_with_generator(self):
+    def test_header_bumped_to_proto9_with_generator(self):
         header = [ln for ln in _log().render_csv().split("\n") if ln.startswith("#")]
-        self.assertTrue(any("proto=8" in ln for ln in header))
+        self.assertTrue(any("proto=9" in ln for ln in header))
         self.assertTrue(any("generator=balanced" in ln for ln in header))
         # A balanced session records no closed-loop params.
         self.assertFalse(any("debias_blocks" in ln for ln in header))
@@ -403,6 +411,89 @@ class TestDebiasLogging(unittest.TestCase):
         row8_cue = log._rows[8].choice_cue
         self.assertEqual(seq.commit(8), seq.seq[4])     # trial 8 == next spine slot
         self.assertEqual(row8_cue, seq.choice_cue(8))   # displayed == committed cue
+
+
+def _csv_data_rows(text):
+    """The rendered CSV's data rows (skip the ``#`` header) as dicts."""
+    body = "\n".join(ln for ln in text.splitlines() if not ln.startswith("#"))
+    return list(csv.DictReader(io.StringIO(body)))
+
+
+class TestTrialEditArchive(unittest.TestCase):
+    """Trial edits (Repeat/Back) preserve the animal's real attempt instead of
+    erasing it (bug #260810, docs/decisions/0119)."""
+
+    def test_supersede_archives_scored_attempt_and_clears_live(self):
+        log = _log()
+        log.choice_scored(0, "left", "CORRECT", "t_choice")
+        log.reward_fired(0, "t_reward", 500)
+        res = log.supersede_trial(0, "repeat")
+        self.assertIsNotNone(res)
+        self.assertEqual(res.outcome, "CORRECT")
+        self.assertFalse(res.probe)
+        # The real attempt is preserved in the archive...
+        self.assertEqual(len(log._archive), 1)
+        idx, attempt, edit, row = log._archive[0]
+        self.assertEqual((idx, attempt, edit), (0, 1, ""))
+        self.assertEqual(row.outcome, "CORRECT")
+        self.assertEqual(row.chosen_arm, "LEFT")
+        # ...and the live row is cleared for the re-run (attempt bumped, planned
+        # cue columns kept).
+        self.assertEqual(log._attempt[0], 2)
+        self.assertEqual(log._edit[0], "repeat")
+        self.assertIsNone(log._rows[0].outcome)
+        self.assertIsNone(log._rows[0].reward_cmd_iso)
+        self.assertIsNotNone(log._rows[0].correct_arm)
+
+    def test_supersede_empty_row_preserves_nothing(self):
+        # Nothing recorded yet -> nothing to archive; the row is just cleared and
+        # the attempt counter is untouched.
+        log = _log()
+        self.assertIsNone(log.supersede_trial(0, "back"))
+        self.assertEqual(log._archive, [])
+        self.assertEqual(log._attempt[0], 1)
+
+    def test_supersede_drops_pending_lick_pointer(self):
+        log = _log()
+        log.reward_fired(0, "t_reward")     # arms the pending-lick pointer at 0
+        log.supersede_trial(0, "repeat")
+        # A stale collection lick must not attach to the reset row.
+        self.assertFalse(log.lick("t_lick", 10))
+
+    def test_render_is_one_row_per_attempt(self):
+        log = _log(n=3)
+        log.choice_scored(0, "left", "CORRECT", "t0")
+        log.supersede_trial(0, "repeat")
+        log.choice_scored(0, "right", "INCORRECT", "t0b")   # the re-run
+        rows = _csv_data_rows(log.render_csv())
+        # 3 planned trials + 1 preserved attempt = 4 rows.
+        self.assertEqual(len(rows), 4)
+        t1 = [r for r in rows if r["trial"] == "1"]
+        self.assertEqual(len(t1), 2)
+        first, second = t1          # render sorts by (trial, attempt)
+        self.assertEqual((first["attempt"], first["superseded"]), ("1", "1"))
+        self.assertEqual(first["outcome"], "CORRECT")
+        self.assertEqual(first["chosen_arm"], "LEFT")
+        self.assertEqual((second["attempt"], second["superseded"]), ("2", ""))
+        self.assertEqual(second["edit"], "repeat")
+        self.assertEqual(second["outcome"], "INCORRECT")
+        self.assertEqual(second["chosen_arm"], "RIGHT")
+        # The untouched trials each render exactly once, attempt 1, not superseded.
+        others = [r for r in rows if r["trial"] in ("2", "3")]
+        self.assertEqual(len(others), 2)
+        for r in others:
+            self.assertEqual((r["attempt"], r["superseded"], r["edit"]),
+                             ("1", "", ""))
+
+    def test_probe_attempt_reports_probe_in_result(self):
+        # A superseded scored probe attempt is flagged so the shell can un-count
+        # the probe tally too.
+        log = _log()
+        log.choice_scored(0, "left", "CORRECT", "t0")
+        log._rows[0].probe = "1"
+        res = log.supersede_trial(0, "back")
+        self.assertIsNotNone(res)
+        self.assertTrue(res.probe)
 
 
 if __name__ == "__main__":

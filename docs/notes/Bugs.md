@@ -15,7 +15,6 @@ date column is needed. Don't rename a handle after you've referenced it elsewher
 <!-- Add newest at the top. Example:
 - #260710_LickTunerFreeze Lick tuner trace freezes for ~1 s when the Rules tab arms [host/lick_tuner.py?]
 -->
-- #260810_TrialEditErasesHistory Pressing the manual trial-modification buttons ("Back", "Repeat", etc.) erases the log of what the animal actually did. Want: preserve the animal's real behavior history AND log the "injected" trial (the one created by the manual button) as its own event, so past history is never overwritten. [host task/phase3 logging + trial-edit buttons]
 - #260810_CueVolumeMismatch The high cue plays quieter than the low cue from the speaker; want both at equal volume. Debug the tone generation / speaker path. [firmware tone generation, speaker]
 - #260810_CameraSrcDrops The camera stream's src-drop / incomplete-frame counter climbs steadily over the course of a session. Debug. [host vision/camera pipeline; cf. #260720_TrackingDelays]
 - #260810_RecordsIntegrity Determine whether the coordinated records have integrity issues in how they're logged and cross-referenced (daily_log.csv, session_annotations.csv, the code repo's session_registry.csv, the generated Excel views, animals.json - across both repos). [records system]

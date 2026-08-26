@@ -695,14 +695,13 @@ class Phase3ControlView(VisionActuator):
             self._emit_intervention(AUTO_SKIP, "trial skipped (abandoned)",
                                     idx, iso)
         elif name == "repeat":
-            self._log_call(lambda: self._log.reset_trial(idx))
+            self._supersede_trial(idx, "repeat", AUTO_REPEAT,
+                                  "trial repeated", iso)
             self._task.repeat_current()
-            self._emit_intervention(AUTO_REPEAT, "trial repeated", idx, iso)
         elif name == "back":
             new_idx = self._task.step_back()
-            self._log_call(lambda: self._log.reset_trial(new_idx))
-            self._emit_intervention(AUTO_BACK, "stepped back a trial",
-                                    new_idx, iso)
+            self._supersede_trial(new_idx, "back", AUTO_BACK,
+                                  "stepped back a trial", iso)
         else:
             return
         self._silence_and_rearm()
@@ -730,6 +729,34 @@ class Phase3ControlView(VisionActuator):
             cb(event)
         except Exception:
             pass
+
+    def _supersede_trial(self, index: int, edit: str, tag: str, text: str,
+                         iso: str) -> None:
+        """Archive-not-erase a trial edit (Repeat / Back): preserve the animal's
+        real attempt (docs/decisions/0119) and reconcile the live tallies.
+
+        The pure log keeps the real attempt as a superseded row and opens a fresh
+        one; here we un-count only the ACCURACY tallies for a preserved scored
+        attempt (correct/incorrect + probe), never the reward count/volume - the
+        prime + top-ups were physically dispensed and the rat drank them, so they
+        stay in the session's water total. In a closed-loop run the scheduler has
+        already consumed the outcome and has no single-step undo (FW-0044), so we
+        flag on the operator note that re-running a scored trial may perturb the
+        auto-schedule."""
+        result = self._log.supersede_trial(index, edit) if self._log else None
+        if result is not None:
+            if result.outcome == CORRECT:
+                self._correct = max(0, self._correct - 1)
+            elif result.outcome == INCORRECT:
+                self._incorrect = max(0, self._incorrect - 1)
+            if result.probe and result.outcome in (CORRECT, INCORRECT):
+                self._probe_done = max(0, self._probe_done - 1)
+                if result.outcome == CORRECT:
+                    self._probe_correct = max(0, self._probe_correct - 1)
+            if (self._seq is not None and getattr(self._seq, "is_debias", False)
+                    and result.outcome in (CORRECT, INCORRECT)):
+                text += " - auto-schedule may be affected (scored trial re-run)"
+        self._emit_intervention(tag, text, index, iso)
 
     def _silence_and_rearm(self) -> None:
         """Cut any sounding tone and reset the per-trip cue/gate state, so the next

@@ -136,6 +136,11 @@ def parse_csv_text(text: str) -> Tuple[Phase3StateSnapshot, SessionConfig]:
     rows: List[Phase3RowView] = []
     reader = csv.DictReader(io.StringIO(body))
     for i, record in enumerate(reader, start=1):
+        # Skip preserved (superseded) trial-edit attempts so the reconstructed
+        # snapshot holds only the trials that COUNT - one per trial index, exactly
+        # like the live snapshot - and build_traces stays symmetric (ADR-0119).
+        if str(record.get("superseded") or "").strip() == "1":
+            continue
         trial = _to_int(record.get("trial")) or i
         rows.append(_row_view(record, trial))
 
