@@ -225,19 +225,23 @@ inline void completeSession(Session& n, const TaskConfig& cfg, Effects& fx) {
 inline Session step(const Session& s, const Inputs& in, const TaskConfig& cfg,
                     const int8_t* seq, Effects& fx) {
   Session n = s;
-  if (!s.active) return n;
 
-  /* --- Commands (host control) --- */
-  if (in.cmd.kind == Command::Abort) {
-    emit(fx, stopTone());
-    completeSession(n, cfg, fx);
-    return n;
-  }
+  /* --- Commands (host control) --- Serviced even when the session is INACTIVE
+   * so the broker's liveness probe (PING -> PONG) and STATUS keep answering
+   * after a session ends (previously step() returned at the !active guard and
+   * the host got silence post-session). Only ABORT needs a live session to act
+   * on; on an already-idle session it is a no-op. see docs/decisions/0123 */
   if (in.cmd.kind == Command::Ping) {
     emit(fx, logEv("PONG", ""));
   } else if (in.cmd.kind == Command::Status) {
     emit(fx, logN2("STATUS", (int32_t)s.trial.count, (int32_t)s.trial.index, s.active ? "1" : "0"));
+  } else if (in.cmd.kind == Command::Abort && s.active) {
+    emit(fx, stopTone());
+    completeSession(n, cfg, fx);
+    return n;
   }
+
+  if (!s.active) return n;
 
   /* --- Free Roam: no trials, no cues, no timeout. Commands above still apply
    * (ping / status / abort); the trial state machine is off. Manual reward in

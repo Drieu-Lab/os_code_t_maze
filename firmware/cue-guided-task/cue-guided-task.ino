@@ -474,7 +474,13 @@ void loop() {
     if (tonePlaying) stopToneAsync();
     if (in.cmd.arg == (int8_t)Mode::FullTask) startFullTask();
     else                                      startFreeRoam();
-  } else if (session.active) {
+  } else {
+    // Always step, even when the session is INACTIVE: step() services the
+    // host-control commands (PING -> PONG, STATUS) regardless of session.active,
+    // so the broker's liveness probe keeps working after a session completes.
+    // With the session idle the trial FSM stays off (step() returns right after
+    // the command block), so this is a cheap no-op when nothing is asked.
+    // see docs/decisions/0123
     Effects fx; fx.n = 0;
     session = step(session, in, cfg, gSeq, fx);
     applyEffects(fx);

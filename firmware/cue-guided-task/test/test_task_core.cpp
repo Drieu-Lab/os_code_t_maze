@@ -380,6 +380,38 @@ static void test_abort() {
   printf("  ok: ABORT ends session, then no-op\n");
 }
 
+/* Host-control commands (PING/STATUS) must still be answered after the session
+ * ends, so the broker's liveness probe keeps working post-session. ABORT on an
+ * already-idle session is a no-op (no second SESSION_COMPLETE). see docs/decisions/0123 */
+static void test_commands_serviced_when_inactive() {
+  TaskConfig c = mkcfg();
+  int8_t seq[20]; for (int i = 0; i < 20; i++) seq[i] = 0;
+  Session s = initialSession(0, 1u);
+  Inputs abort = mkin(100); abort.cmd = Command{ Command::Abort, 0 };
+  Effects fx{}; s = step(s, abort, c, seq, fx);
+  assert(!s.active);
+
+  /* PING while inactive -> PONG (and the trial FSM stays off). */
+  Inputs ping = mkin(110); ping.cmd = Command{ Command::Ping, 0 };
+  Effects fxp{}; s = step(s, ping, c, seq, fxp);
+  assert(hasLog(fxp, "PONG"));
+  assert(!s.active && s.trial.phase == Phase::Done);
+
+  /* STATUS while inactive -> STATUS reply reporting active flag "0". */
+  Inputs status = mkin(120); status.cmd = Command{ Command::Status, 0 };
+  Effects fxs{}; s = step(s, status, c, seq, fxs);
+  const Effect* st = findLog(fxs, "STATUS");
+  assert(st != nullptr);
+  assert(st->detail && std::strcmp(st->detail, "0") == 0);   /* not active */
+
+  /* ABORT on an already-idle session is a no-op: no repeat SESSION_COMPLETE. */
+  Inputs abort2 = mkin(130); abort2.cmd = Command{ Command::Abort, 0 };
+  Effects fxa{}; s = step(s, abort2, c, seq, fxa);
+  assert(!hasLog(fxa, "SESSION_COMPLETE"));
+  assert(countTag(fxa, FxTag::StopTone) == 0);
+  printf("  ok: PING/STATUS answered when inactive; ABORT idle is a no-op\n");
+}
+
 static void test_timeout() {
   TaskConfig c = mkcfg();
   int8_t seq[20]; for (int i = 0; i < 20; i++) seq[i] = 0;
@@ -452,6 +484,7 @@ int main() {
   test_session_summary();
   test_auto_drain();
   test_abort();
+  test_commands_serviced_when_inactive();
   test_timeout();
   test_max_trials();
   test_no_overflow_exhaustive();
