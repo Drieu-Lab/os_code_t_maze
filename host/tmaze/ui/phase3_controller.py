@@ -557,28 +557,19 @@ class Phase3ControlView(VisionActuator):
         st = self._state
         return st is not None and st.generator != "balanced"
 
-    # The unrewarded probe-block override (Rig-view / control-bar button). Unlike
-    # the debias/alternation toggles this works under ANY generator (probes are
-    # orthogonal to the closed-loop stack; probe_blocks.py). Enqueued like the
-    # other overrides and applied on the next committed trial at a block boundary.
-    def force_probe_block(self) -> None:
-        """Operator: request an unrewarded probe block (starts at the next
-        counterbalanced boundary with no intervention active)."""
-        self._enqueue_act(("cmd", "probe_start"))
-
+    # The unrewarded probe-block abort (Rig-view / control-bar button). There is NO
+    # manual start: a probe fires automatically on the correct-choice window trigger
+    # (probe_blocks.py / docs/decisions/0134). This works under ANY generator (probes
+    # are orthogonal to the closed-loop stack). Enqueued like the other overrides and
+    # applied on the next committed trial.
     def end_probe_block(self) -> None:
-        """Operator: end a running probe early, or cancel a pending request."""
+        """Operator: end a running probe block early (abort)."""
         self._enqueue_act(("cmd", "probe_end"))
 
     def toggle_probe_block(self) -> None:
-        """Flip a probe block on/off from the published probe state: end/cancel when
-        ACTIVE or PENDING, else start one."""
-        st = self._state
-        probe_state = getattr(st, "probe_state", "NORMAL") if st is not None else "NORMAL"
-        if probe_state in ("ACTIVE", "PENDING"):
-            self.end_probe_block()
-        else:
-            self.force_probe_block()
+        """Abort a running probe block (the button is live only while one is ACTIVE;
+        there is no manual start - the trigger is automatic)."""
+        self.end_probe_block()
 
     # --------------------------------------------------------------- thread
     def _process_act_item(self, item, snap) -> None:
@@ -704,19 +695,12 @@ class Phase3ControlView(VisionActuator):
                                         "de-alternation block ended", idx, iso)
             self._publish_state(armed=snap.gate_open)
             return
-        if name in ("probe_start", "probe_end"):
-            # Operator request for an unrewarded probe block (probe_blocks.py).
-            # Latched on the task, applied on the next committed trial at a
-            # counterbalanced boundary; publish so the control bar/readout reflect
-            # the request (PENDING) promptly.
-            if name == "probe_start":
-                self._task.force_probe_block()
-                self._emit_intervention(AUTO_PROBE_START,
-                                        "probe block requested", idx, iso)
-            else:
-                self._task.end_probe_block()
-                self._emit_intervention(AUTO_PROBE_END,
-                                        "probe block ended/cancelled", idx, iso)
+        if name == "probe_end":
+            # Operator aborts a running unrewarded probe block (probe_blocks.py).
+            # There is no manual start (the trigger is automatic - docs/decisions/
+            # 0134); publish so the control bar/readout drop the PROBE tag promptly.
+            self._task.end_probe_block()
+            self._emit_intervention(AUTO_PROBE_END, "probe block aborted", idx, iso)
             self._publish_state(armed=snap.gate_open)
             return
         if name == "skip":
@@ -1035,10 +1019,20 @@ class Phase3ControlView(VisionActuator):
                 self._correct += 1
             elif dec.outcome == INCORRECT:
                 self._incorrect += 1
+            # A correct-choice PROBE just fired on THIS trial (docs/decisions/0134):
+            # note where it landed in the session log (the trigger is automatic, so
+            # this is the only START marker).
+            if dec.probe_trigger:
+                self._emit_intervention(AUTO_PROBE_START,
+                                        "probe block triggered (correct choice)",
+                                        idx, iso)
             # Tally scored PROBE trials separately for the status readout (they are
             # still counted in _correct/_incorrect above - the session accuracy is
-            # over all scored trials; the probe segment is an extra breakdown).
-            if dec.probe and dec.outcome in (CORRECT, INCORRECT):
+            # over all scored trials; the probe segment is an extra breakdown). The
+            # always-correct trigger trial is EXCLUDED so it can't inflate the latent
+            # probe accuracy (docs/decisions/0134).
+            if dec.probe and not dec.probe_trigger \
+                    and dec.outcome in (CORRECT, INCORRECT):
                 self._probe_done += 1
                 if dec.outcome == CORRECT:
                     self._probe_correct += 1
@@ -1244,17 +1238,17 @@ class Phase3ControlView(VisionActuator):
         # show the count so the operator knows the run survived the reopen.
         if self._reopen_resumes:
             extra += f"  resumes:{self._reopen_resumes}"
-        # Conditional probe segment: only after the first scored probe trial (so a
-        # normal session's status line is unchanged), plus a live PROBE tag while a
-        # probe block is running/pending. See probe_blocks.py / docs/decisions/0115-probe.
+        # Conditional probe segment: only after the first scored probe BLOCK trial
+        # (so a normal session's status line is unchanged), plus a live PROBE tag
+        # while a probe block is running. See probe_blocks.py / docs/decisions/0134.
         probe = ""
         st = self._state
         probe_state = getattr(st, "probe_state", "NORMAL") if st is not None else "NORMAL"
         if self._probe_done:
             ppct = 100.0 * self._probe_correct / self._probe_done
             probe = f"  probe:{self._probe_correct}/{self._probe_done} ({ppct:.0f}%)"
-        if probe_state in ("ACTIVE", "PENDING"):
-            probe += f"  [PROBE {probe_state}]"
+        if probe_state == "ACTIVE":
+            probe += "  [PROBE ACTIVE]"
         self._status_text = (
             warn +
             f"ARMED  seed:{self._active_seed}  trial:{min(idx + 1, n)}/{n}  "
@@ -1543,11 +1537,15 @@ class Phase3ControlView(VisionActuator):
         seed = s.get("seed")
         seed_txt = "random each launch" if seed is None else str(seed)
         # Read-only probe-block summary (params are file-only per ADR-0070, like the
-        # tones/seed; the only live control is the Rig-view "Start probe block"
-        # button). See probe_blocks.py / docs/decisions/0115-probe.
+        # tones/seed; the only live control is the Rig-view abort button). Probes fire
+        # automatically on a correct choice inside a context window (docs/decisions/
+        # 0134), so summarise the windows. See probe_blocks.py / docs/decisions/0115.
         pb = s.get("probe_blocks", {})
         if pb.get("enabled", False):
-            probe_txt = f" \u00b7 probe {int(pb.get('block_len', 10))} (manual)"
+            windows = pb.get("windows", []) or []
+            win_txt = (",".join(f"{int(w[0])}-{int(w[1])}" for w in windows)
+                       if windows else "no windows")
+            probe_txt = f" \u00b7 probe {int(pb.get('block_len', 10))} @ {win_txt}"
         else:
             probe_txt = " \u00b7 probe off"
         self._seq_info_var.set(

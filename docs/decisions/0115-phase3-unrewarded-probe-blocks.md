@@ -17,7 +17,9 @@
   `host/tmaze/analysis/` (`bundle_reader.py`, `choice_signals.py`,
   `choice_model.py`, `rolling_metrics.py`) + `host/notebooks/animal_progress.ipynb`;
   `host/phase3.json`; `PROGRAMS.md`, `docs/glossary.md`, `docs/future-work.md`
-- **Supersedes / Superseded by:** —
+- **Supersedes / Superseded by:** the **trigger mechanism** (decision 5, manual +
+  boundary-aligned start) is superseded by ADR-0134 (automatic correct-choice
+  window trigger); the rest of this ADR still holds.
 
 ## Context
 

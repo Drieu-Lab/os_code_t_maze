@@ -175,6 +175,7 @@ class _Point:
     trial: int
     oob: bool                       # reinforced (uncoerced, non-probe) trial
     probe: bool                     # unrewarded probe trial (probe_blocks.py)
+    probe_trigger: bool             # the always-correct probe trigger trial (0134)
     correct: bool
     choice: Optional[str]           # LEFT / RIGHT / None
     cue: Optional[str]              # HIGH / LOW / None (planned choice cue)
@@ -282,6 +283,7 @@ def build_traces(snapshot: Optional[Phase3StateSnapshot], *,
         choice = row.chosen_arm if row.chosen_arm in (LEFT_LABEL, RIGHT_LABEL) else None
         cue = row.choice_cue if row.choice_cue in (HIGH, LOW) else None
         probe = row.probe == "1"
+        probe_trigger = row.probe_trigger == "1"
         # Reinforced (uncoerced) trials feed the accuracy/strategy series: neither
         # an intervention block trial NOR an unrewarded probe (probe extinction must
         # not drag the reinforced line down). See docs/decisions/0115-probe.
@@ -310,7 +312,7 @@ def build_traces(snapshot: Optional[Phase3StateSnapshot], *,
                 prev_incorrect = prev_completed.outcome == INCORRECT
 
         pts.append(_Point(
-            x=x, trial=row.trial, oob=oob, probe=probe,
+            x=x, trial=row.trial, oob=oob, probe=probe, probe_trigger=probe_trigger,
             correct=row.outcome == CORRECT,
             choice=choice, cue=cue, cue_side=_cue_side(cue, high_left),
             correct_arm=row.correct_arm if row.correct_arm in (LEFT_LABEL, RIGHT_LABEL) else None,
@@ -436,15 +438,20 @@ def _block_spans(pts: List[_Point]) -> List[BlockSpan]:
 def _probe_spans(pts: List[_Point]) -> List[ProbeBlockSummary]:
     """Contiguous runs of unrewarded PROBE completed trials, each as an x-span plus
     its per-block accuracy (correct / scored), for shading + the accuracy marker.
-    A run with no usable x is skipped. See docs/decisions/0115-probe."""
+    The span covers the whole run (including the correct-choice trigger trial), but
+    the accuracy + ``n`` are computed over the BLOCK trials only - the always-correct
+    trigger (probe_trigger; docs/decisions/0134) is excluded so it can't inflate the
+    latent-knowledge read-out. A run with no usable x is skipped. See
+    docs/decisions/0115-probe."""
     spans: List[ProbeBlockSummary] = []
     run: List[_Point] = []
 
     def flush() -> None:
         xs = [q.x for q in run if q.x is not None]
         if xs:
-            n = len(run)
-            acc = (sum(1 for q in run if q.correct) / n) if n else None
+            block = [q for q in run if not q.probe_trigger]
+            n = len(block)
+            acc = (sum(1 for q in block if q.correct) / n) if n else None
             spans.append(ProbeBlockSummary(start_t=min(xs), end_t=max(xs),
                                            n=n, accuracy=acc))
         run.clear()

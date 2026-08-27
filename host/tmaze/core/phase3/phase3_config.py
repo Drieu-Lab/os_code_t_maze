@@ -75,9 +75,9 @@ _SCHEMA = {
              "'enabled' interventions in 'debias_blocks' and/or 'alternation_blocks' "
              "run concurrently, one active at a time). 'probe_blocks' adds "
              "unrewarded, internally-counterbalanced probe blocks (block_len trials) "
-             "started MANUALLY from the Rig-view button; they work under ANY "
-             "generator and read out latent cue->side knowledge (docs/decisions/"
-             "0115-probe)."),
+             "AUTO-triggered by a correct choice inside a 'windows' trial-number "
+             "range; they work under ANY generator and read out latent cue->side "
+             "knowledge (docs/decisions/0115-probe, 0134)."),
 }
 
 
@@ -140,19 +140,21 @@ def default_config() -> dict:
                 "max_block_len": al.max_block_len,
                 "signal": al.signal,
             },
-            # Unrewarded probe blocks (docs/decisions/0115-probe): a short block
-            # where the cue plays and the choice is scored but no reward is given,
-            # to read out latent cue->side knowledge vs reinforced performance.
-            # MANUAL-only for now (started from the Rig-view "Start probe block"
-            # button); automatic triggers are deferred (see docs/future-work.md),
-            # so this section carries just the two knobs the button needs. Works
-            # under ANY generator (orthogonal to the intervention stack).
-            # Derived from the dataclass default (enabled False) so default_config
-            # mirrors a bare TrialConfig (no drift; test_phase3_config). The live
-            # host/phase3.json turns it on to expose the "Start probe block" button.
+            # Unrewarded probe blocks (docs/decisions/0115-probe, trigger per
+            # docs/decisions/0134): a short block where the cue plays and the choice
+            # is scored but no reward is given, to read out latent cue->side
+            # knowledge vs reinforced performance. AUTO-triggered by a correct choice
+            # inside a "context window": in each trial-number range in ``windows``,
+            # the first correct choice on a NORMAL trial withholds reward and starts a
+            # ``block_len`` unrewarded block on the following trials. Works under ANY
+            # generator (orthogonal to the intervention stack). Derived from the
+            # dataclass default (enabled False, no windows) so default_config mirrors
+            # a bare TrialConfig (no drift; test_phase3_config). The live
+            # host/phase3.json turns it on and sets the windows.
             "probe_blocks": {
                 "enabled": pb.enabled,
                 "block_len": pb.block_len,
+                "windows": [list(w) for w in pb.windows],
             },
         },
     }
@@ -294,13 +296,29 @@ def _to_probe_config(d: dict) -> ProbeBlockConfig:
     """Build + range-check the unrewarded-probe `ProbeBlockConfig` from the
     ``sequence.probe_blocks`` sub-section (missing keys fall back to defaults).
     ``block_len`` must be > 0; there is no upper bound beyond the session length
-    (a probe that runs off the end simply ends with the session)."""
+    (a probe that runs off the end simply ends with the session). ``windows`` is a
+    list of ``[start, end]`` inclusive 1-based trial-number ranges (each
+    ``1 <= start <= end``) in which a correct choice arms a probe (docs/decisions/
+    0134); an empty list means the feature never fires."""
     pb = ProbeBlockConfig()
     enabled = bool(d.get("enabled", pb.enabled))
     block_len = int(d.get("block_len", pb.block_len))
     if block_len <= 0:
         raise ValueError("sequence.probe_blocks.block_len must be > 0")
-    return ProbeBlockConfig(enabled=enabled, block_len=block_len)
+    windows: list = []
+    for w in d.get("windows", list(pb.windows)):
+        try:
+            start, end = int(w[0]), int(w[1])
+        except (TypeError, ValueError, IndexError):
+            raise ValueError(
+                "sequence.probe_blocks.windows entries must be [start, end] pairs")
+        if not (1 <= start <= end):
+            raise ValueError(
+                "sequence.probe_blocks.windows needs 1 <= start <= end "
+                f"(got [{start}, {end}])")
+        windows.append((start, end))
+    return ProbeBlockConfig(enabled=enabled, block_len=block_len,
+                            windows=tuple(windows))
 
 
 def to_trial_config(config: dict) -> TrialConfig:

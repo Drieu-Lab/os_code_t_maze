@@ -78,7 +78,9 @@ class Phase3Decision:
     intervention ("side_bias"/"alternation"); ``alt_rate`` is the cue-aware
     alternation rate (None when no alternation detector is running). ``probe`` is
     True on an unrewarded probe trial (probe_blocks.py) - the choice is scored
-    normally but ``reward`` is forced False.
+    normally but ``reward`` is forced False. ``probe_trigger`` is True only on the
+    correct-choice trial that STARTED the block (always correct, so excluded from
+    probe accuracy downstream).
     """
     trial_index: int
     correct_arm: Optional[int]
@@ -94,6 +96,7 @@ class Phase3Decision:
     block_kind: str = ""
     alt_rate: Optional[float] = None
     probe: bool = False
+    probe_trigger: bool = False
 
 
 class Phase3Task:
@@ -196,13 +199,10 @@ class Phase3Task:
     def end_alternation_block(self) -> None:
         self.seq.end_alternation_block()
 
-    def force_probe_block(self) -> None:
-        """Operator: request an unrewarded probe block (probe_blocks.py). Takes
-        effect at the next counterbalanced boundary. No-op if probe is disabled."""
-        self.seq.force_probe_block()
-
     def end_probe_block(self) -> None:
-        """Operator: end a running probe early, or cancel a pending request."""
+        """Operator: end a running probe block early (abort). There is no manual
+        START - a probe fires automatically on the correct-choice window trigger
+        (probe_blocks.py / docs/decisions/0134). No-op if probe is disabled."""
         self.seq.end_probe_block()
 
     def debias_state(self) -> str:
@@ -261,6 +261,15 @@ class Phase3Task:
             # block counters update for the NEXT trial's decision (no-op balanced).
             if correct is not None:
                 self.seq.record_outcome(idx, correct, chosen)
+            # Correct-choice PROBE trigger (docs/decisions/0134): a correct choice
+            # on a NORMAL trial inside a probe window withholds reward and starts an
+            # unrewarded block on the following trials. Evaluated here because it
+            # needs the OUTCOME; if it fires, this trial is reclassified as a probe
+            # (its meta gains probe/probe_trigger), so re-read meta before scoring.
+            if self.seq.probe_trigger_on_score(
+                    idx, is_correct,
+                    intervention_active=(meta.get("sched_state") == "INTERVENTION")):
+                meta = self._meta()
             # Suppress reward on a probe trial: the cue plays and the choice is
             # scored as usual, but no prime fires (and, because the controller only
             # tops up after a prime, no top-ups) and reward_incorrect is ignored -

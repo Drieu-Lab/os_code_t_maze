@@ -207,7 +207,10 @@ class Phase3Stats:
     # Probe trials are EXCLUDED from every reinforced/out-of-block measure above
     # (they are neither reinforced nor coerced), and summarised on their own: their
     # accuracy is the "latent knowledge" read-out to compare against ``accuracy_cum``
-    # (expressed/reinforced performance). See docs/decisions/0115-probe.
+    # (expressed/reinforced performance). The correct-choice trigger trial is
+    # excluded from this read-out too (always correct by construction; docs/
+    # decisions/0134), so ``probe_completed`` counts only the forced block trials.
+    # See docs/decisions/0115-probe.
     probe_completed: int = 0
     probe_correct: int = 0
     probe_accuracy: Optional[float] = None
@@ -333,15 +336,20 @@ def compute(snapshot: Optional[Phase3StateSnapshot], *,
     # Probe trials (unrewarded read-out; probe_blocks.py) are their OWN partition:
     # excluded from both the in-block (coerced) and out-of-block (reinforced) sets,
     # so probe extinction never drags the reinforced accuracy down. Summarised
-    # separately as the latent-knowledge accuracy. See docs/decisions/0115-probe.
-    probe_rows = [r for r in completed if r.probe == "1"]
+    # separately as the latent-knowledge accuracy. The correct-choice TRIGGER trial
+    # (probe_trigger; docs/decisions/0134) is unrewarded and excluded from the
+    # reinforced sets like any probe trial, but is ALSO excluded from the probe
+    # accuracy read-out (it is correct by construction, so counting it would inflate
+    # latent accuracy). See docs/decisions/0115-probe.
     inb = [r for r in completed
            if r.sched_state == INTERVENTION_LABEL and r.probe != "1"]
     oob = [r for r in completed
            if r.sched_state != INTERVENTION_LABEL and r.probe != "1"]
     noob = len(oob)
-    probe_completed = len(probe_rows)
-    probe_correct = sum(1 for r in probe_rows if r.outcome == CORRECT)
+    probe_block_rows = [r for r in completed
+                        if r.probe == "1" and r.probe_trigger != "1"]
+    probe_completed = len(probe_block_rows)
+    probe_correct = sum(1 for r in probe_block_rows if r.outcome == CORRECT)
     probe_accuracy = (probe_correct / probe_completed) if probe_completed else None
 
     correct_oob = sum(1 for r in oob if r.outcome == CORRECT)

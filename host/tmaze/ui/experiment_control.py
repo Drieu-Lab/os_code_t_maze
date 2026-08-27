@@ -922,8 +922,9 @@ def main() -> int:
                 # intervention_blocks is active with the alternation child enabled).
                 # See alternation.py / intervention_stack.py / ADR.
                 "alt": _p3_call("toggle_alternation_block"),
-                # Manual unrewarded probe block (works under any generator; no-op
-                # unless probe blocks are enabled this run). See probe_blocks.py.
+                # Abort a running unrewarded probe block (works under any generator;
+                # no manual start - probes fire on the correct-choice window trigger,
+                # docs/decisions/0134). See probe_blocks.py.
                 "probe": _p3_call("toggle_probe_block"),
             }
             ctrl_bar = TrialControlBar(

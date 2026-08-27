@@ -367,15 +367,14 @@ class TrialSequence:
         return side
 
     def _commit_one(self, i: int) -> None:
-        # Probe blocks take PRIORITY over the intervention stack and suspend it
-        # while active: a probe trial forces its own counterbalanced side, does NOT
-        # consume the spine, and does NOT poll the stack (so no intervention block
-        # advances during a probe). See probe_blocks.py / docs/decisions/0115-probe.
-        if self._probe is not None:
-            interv_active = self._ctl is not None and self._ctl.target is not None
-            pdec = self._probe.decide(
-                spine_pos=self._spine_pos, block_size=self.cfg.block_size,
-                intervention_active=interv_active)
+        # An ACTIVE probe block INSERTS its forced trials on top of the spine and
+        # takes PRIORITY over the intervention stack (suspended while a probe runs):
+        # a probe-block trial forces its own counterbalanced side, does NOT consume
+        # the spine, and does NOT poll the stack. The probe's TRIGGER trial is an
+        # ordinary spine trial reclassified at scoring (probe_trigger_on_score), not
+        # here. See probe_blocks.py / docs/decisions/0134.
+        if self._probe is not None and self._probe.active:
+            pdec = self._probe.advance()
             if pdec.active:
                 self._committed[i] = pdec.side
                 self._meta[i] = None          # a probe carries no stack decision
@@ -398,22 +397,50 @@ class TrialSequence:
         if self._ctl is not None:
             self._ctl.record(cued_side, chosen_side)
 
+    def probe_trigger_on_score(self, index: int, correct: bool,
+                               intervention_active: bool) -> bool:
+        """Evaluate the correct-choice probe trigger for a just-scored trial.
+
+        Called by phase3_task at scoring time (the trigger needs the OUTCOME). If it
+        fires, the just-scored TRIGGER trial (``index``) is reclassified as a probe
+        trial - flagged both ``probe`` and ``probe_trigger`` - and the following
+        ``block_len`` trials become a forced counterbalanced probe block handed out
+        by :meth:`_commit_one`. ``index`` is 0-based; the window is checked against
+        the 1-based trial number. Returns whether a probe just fired; a no-op (False)
+        when probe blocks are not enabled this run. See probe_blocks.py /
+        docs/decisions/0134."""
+        if self._probe is None:
+            return False
+        fired = self._probe.on_scored(
+            trial_no=index + 1, correct=correct,
+            intervention_active=intervention_active)
+        if fired:
+            # The trigger trial is block position 0 (marks it probe_trigger); the
+            # following forced block trials get positions 1..block_len via advance().
+            self._probe_meta[index] = (self._probe.block_id, 0)
+        return fired
+
     def trial_meta(self, index: int):
         """The per-trial scheduler metadata for trial ``index`` as a dict:
         ``{sched_state, block_id, block_trigger, bias, block_kind, alt_rate,
-        probe}``. For a committed trial these are its decided values; otherwise a
-        provisional read of the current controller state. ``block_kind`` names the
-        active intervention ("side_bias"/"alternation"; "" when NORMAL) and
+        probe, probe_trigger}``. For a committed trial these are its decided values;
+        otherwise a provisional read of the current controller state. ``block_kind``
+        names the active intervention ("side_bias"/"alternation"; "" when NORMAL) and
         ``alt_rate`` is the cue-aware alternation rate (None when no alternation
         detector is running). ``probe`` is True on an unrewarded probe trial
-        (orthogonal to the intervention state, which stays NORMAL). In plain
-        balanced mode every non-probe trial is NORMAL."""
+        (orthogonal to the intervention state, which stays NORMAL); ``probe_trigger``
+        is True only on the correct-choice trigger trial that started the block. In
+        plain balanced mode every non-probe trial is NORMAL."""
         d = {"sched_state": "NORMAL", "block_id": 0, "block_trigger": "",
-             "bias": 0.0, "block_kind": "", "alt_rate": None, "probe": False}
+             "bias": 0.0, "block_kind": "", "alt_rate": None, "probe": False,
+             "probe_trigger": False}
         # A committed probe trial: NORMAL scheduler state, just flagged probe (it
-        # carries no intervention decision - the stack was suspended).
+        # carries no intervention decision - the stack was suspended). Block position
+        # 0 is the correct-choice TRIGGER trial (always correct by construction, so
+        # excluded from probe accuracy downstream); positions 1.. are the block.
         if index in self._probe_meta:
             d["probe"] = True
+            d["probe_trigger"] = (self._probe_meta[index][1] == 0)
             return d
         if not self._lazy_commit or self._ctl is None:
             return d
@@ -451,29 +478,22 @@ class TrialSequence:
         if self._ctl is not None:
             self._ctl.end_block()
 
-    def force_probe_block(self) -> None:
-        """Operator: request an unrewarded probe block. It starts at the next
-        counterbalanced block boundary with no intervention active (probe_blocks.py).
-        A no-op when probe blocks are not enabled this run."""
-        if self._probe is not None:
-            self._probe.force_block()
-
     def end_probe_block(self) -> None:
-        """Operator: end a running probe early, or cancel a still-pending request.
-        A no-op when probe blocks are not enabled this run."""
+        """Operator: end a running probe block early (abort). There is no manual
+        START - a probe fires automatically on the correct-choice window trigger
+        (probe_trigger_on_score). A no-op when probe is disabled or none is running."""
         if self._probe is not None:
             self._probe.end_block()
 
     @property
     def probe_enabled(self) -> bool:
-        """Whether unrewarded probe blocks are available this run (the operator
-        button is live only then)."""
+        """Whether unrewarded probe blocks are available this run (the abort button
+        is live only then)."""
         return self._probe is not None
 
     def probe_state(self) -> str:
         """Probe scheduler state for the snapshot/readout: ``ACTIVE`` while a probe
-        runs, ``PENDING`` once requested but not started, else ``NORMAL`` (also when
-        probe is disabled)."""
+        block runs, else ``NORMAL`` (also when probe is disabled)."""
         return self._probe.state() if self._probe is not None else "NORMAL"
 
     def force_alternation_block(self) -> None:

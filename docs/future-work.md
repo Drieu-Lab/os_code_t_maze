@@ -94,7 +94,7 @@ criteria).
 | [FW-0040](#fw-0040-latent-state-glm-hmm-model-of-behavioural-mode) | Latent-state (GLM-HMM) model of behavioural mode | Cross-session analysis (`analysis/`) | Deferred |
 | [FW-0041](#fw-0041-reward-pressure--mode-transition-characterization) | Reward-pressure / mode-transition characterization | Cross-session analysis (`analysis/`) | Deferred |
 | [FW-0042](#fw-0042-live-excursion-based-engagement-traces) | Live excursion-based engagement traces (trips/min, non-stem fraction) | Phase 3 host + live trace panel | Proposed |
-| [FW-0043](#fw-0043-automatic-probe-block-triggers) | Automatic probe-block triggers (position / elapsed time / reward volume) | Phase 3 host (`core/phase3/probe_blocks.py`) | Proposed |
+| [FW-0043](#fw-0043-automatic-probe-block-triggers) | Automatic probe-block triggers (position / elapsed time / reward volume) | Phase 3 host (`core/phase3/probe_blocks.py`) | Done (ADR-0134) |
 | [FW-0044](#fw-0044-closed-loop-scheduler-rollback-on-a-manual-scored-re-run) | Closed-loop scheduler rollback on a manual scored re-run | Phase 3 closed-loop schedulers (`core/phase3/`) | Deferred |
 | [FW-0045](#fw-0045-in-fov-event-led-visual-fiducial-for-videoserial-alignment) | In-FOV event-LED visual fiducial (sensor/solenoid) for video<->serial alignment | Camera vision + sidecar + rig LED wiring | Proposed |
 
@@ -2102,15 +2102,25 @@ definitions), likely folded into a follow-up to ADR-0114.
 
 ### FW-0043: Automatic probe-block triggers
 
-- **Status:** Proposed
+- **Status:** Done — the automatic trigger shipped as a CORRECT-CHOICE-in-WINDOW
+  rule (see [ADR-0134](decisions/0134-probe-correct-choice-trigger.md)): after
+  piloting, the operator wanted probes to start when the animal demonstrates it
+  knows the map inside a chosen phase, so `ProbeBlockController.on_scored` fires on
+  the first correct choice inside a config `sequence.probe_blocks.windows` range
+  (evaluated at scoring, since it needs the outcome). The other flavours this entry
+  originally sketched (fixed spine-boundary position, elapsed wall-clock, cumulative
+  reward volume) were NOT built - the behavioural trigger addressed the need
+  directly; re-open a fresh backlog entry if a time/volume trigger is later wanted.
 - **Date added:** 2026-08-21
 - **Author / Agent:** Agent (Cursor) on behalf of Celine
 - **Area / modules:** `host/tmaze/core/phase3/probe_blocks.py` (a trigger
   evaluator on `ProbeBlockController`), `host/tmaze/core/phase3/phase3_config.py`
   (`sequence.probe_blocks` trigger parameters), `host/tmaze/core/phase3/phase3_task.py`
   (feed the evaluator the per-trial context it needs), `host/tmaze/ui/phase3_controller.py`
-- **Related ADRs:** [ADR-0115](decisions/0115-phase3-unrewarded-probe-blocks.md)
-  (probe blocks - manual only), [ADR-0114](decisions/0114-live-session-metric-traces.md)
+- **Related ADRs:** [ADR-0134](decisions/0134-probe-correct-choice-trigger.md)
+  (the correct-choice window trigger that resolved this),
+  [ADR-0115](decisions/0115-phase3-unrewarded-probe-blocks.md)
+  (probe blocks - originally manual only), [ADR-0114](decisions/0114-live-session-metric-traces.md)
   (the disengagement signal a time/volume trigger would key off),
   [ADR-0110](decisions/0110-per-trial-reward-magnitude.md) (per-trial reward
   magnitude, the source for a cumulative-volume trigger)

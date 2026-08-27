@@ -209,9 +209,18 @@ dissociation of Drieu et al. 2025. Like an [intervention block](#intervention-ta
 it is *inserted on top of* the counterbalanced schedule (it doesn't consume the
 seed-deterministic left/right spine) and it is internally 5/5 balanced, but it is
 orthogonal to the debias/alternation corrections and takes priority over them.
-Manual-only for now (an operator button); marked by a `probe` column in the log
-and excluded from reinforced accuracy everywhere. See
-[ADR-0115](decisions/0115-phase3-unrewarded-probe-blocks.md).
+A probe fires **automatically** on a *correct choice*: the config gives one or more
+trial-number *windows* (e.g. trials 40–60), and the first correct choice on a
+normal trial inside an un-fired window has its reward withheld (the **trigger**
+trial, marked `probe_trigger`) and starts an unrewarded block of `block_len`
+(default 10) trials — so the unrewarded run is `block_len + 1` (11) trials. The
+trigger trial is always correct by construction, so it is kept out of the probe
+accuracy read-out (but still shown as a probe trial). There is no manual start (an
+operator button only *aborts* a running probe); each probe is marked by the `probe`
+column in the log and excluded from reinforced accuracy everywhere. See
+[ADR-0115](decisions/0115-phase3-unrewarded-probe-blocks.md) (why) and
+[ADR-0134](decisions/0134-probe-correct-choice-trigger.md) (the correct-choice
+trigger).
 
 ### Protocol
 The agreed format of the messages between firmware and host — the
@@ -329,7 +338,7 @@ shortly after a block ended (to see carryover). Blocks are kept, not thrown away
 baseline strategy is measured on *free* trials, the animal's response on *in-block*
 trials, and persistence on *post-block* trials. A [probe block](#probe-block)
 trial is tagged as its own **probe** epoch, kept out of all three reinforced sets.
-See ADR-0112 and ADR-0115.
+See ADR-0112, ADR-0115, and ADR-0134.
 
 ### USB CDC
 The USB standard that lets a device pretend to be an old-style serial port, so

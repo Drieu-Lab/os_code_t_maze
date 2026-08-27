@@ -75,6 +75,10 @@ _COLUMN_DEFAULTS: Dict[str, object] = {
     # Unrewarded probe-trial marker ("1" / ""); absent in pre-probe sessions, so it
     # back-fills to "" (= not a probe). See docs/decisions/0115-probe.
     "probe": "",
+    # Correct-choice probe TRIGGER marker ("1" / ""); absent before docs/decisions/
+    # 0134, back-filling to "" (= not a trigger, so it never gets excluded from probe
+    # accuracy in an older session that had none).
+    "probe_trigger": "",
     # Trial-edit lifecycle (docs/decisions/0119; absent before it, back-filling to
     # a single natural attempt). ``superseded`` == "1" marks a preserved attempt a
     # later Repeat/Back replaced - dropped below so the tidy frame counts each

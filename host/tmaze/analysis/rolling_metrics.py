@@ -101,6 +101,10 @@ def build_traces(
             "in_block": c["in_block"].fillna(False).to_numpy(),
             "probe": bool_series(c["probe"]).to_numpy() if "probe" in c
             else np.zeros(len(c), dtype=bool),
+            # The always-correct probe TRIGGER (docs/decisions/0134), excluded from
+            # the per-block probe accuracy in probe_epochs.
+            "probe_trigger": bool_series(c["probe_trigger"]).to_numpy()
+            if "probe_trigger" in c else np.zeros(len(c), dtype=bool),
             "block_kind": c["block_kind"].replace("", pd.NA).to_numpy(),
             "complying": (c["choice"] == c["correct_arm"]).to_numpy(),
         }
@@ -203,11 +207,15 @@ def probe_epochs(c: pd.DataFrame) -> List[dict]:
     session/run (probe blocks are inserted at runtime and carry no block_id, so
     they are grouped by contiguity, not id). Returns one dict per block:
     ``session_id, start_seq, end_seq, length, n, accuracy`` - the spans the
-    notebook shades and the per-block latent-knowledge accuracy it marks. See
-    docs/decisions/0115-probe."""
+    notebook shades and the per-block latent-knowledge accuracy it marks. ``length``
+    is the whole run (span); ``n`` + ``accuracy`` cover the BLOCK trials only - the
+    always-correct trigger (``probe_trigger``; docs/decisions/0134) is excluded so it
+    can't inflate the read-out. See docs/decisions/0115-probe."""
     if "probe" not in c.columns:
         return []
     probe = bool_series(c["probe"])
+    trigger = (bool_series(c["probe_trigger"]) if "probe_trigger" in c.columns
+               else pd.Series(False, index=c.index))
     out: List[dict] = []
     run: List[int] = []
 
@@ -215,13 +223,14 @@ def probe_epochs(c: pd.DataFrame) -> List[dict]:
         if not run:
             return
         grp = c.loc[run]
-        n = len(grp)
-        acc = (float(bool_series(grp["correct"]).sum()) / n) if n else None
+        block = grp[~bool_series(trigger.loc[run]).to_numpy()]
+        n = len(block)
+        acc = (float(bool_series(block["correct"]).sum()) / n) if n else None
         out.append({
             "session_id": sid,
             "start_seq": int(grp["seq"].min()),
             "end_seq": int(grp["seq"].max()),
-            "length": n,
+            "length": len(grp),
             "n": n,
             "accuracy": acc,
         })

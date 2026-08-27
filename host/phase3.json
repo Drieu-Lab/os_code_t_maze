@@ -44,7 +44,13 @@
     },
     "probe_blocks": {
       "enabled": true,
-      "block_len": 10
+      "block_len": 10,
+      "windows": [
+        [
+          30,
+          70
+        ]
+      ]
     }
   }
 }

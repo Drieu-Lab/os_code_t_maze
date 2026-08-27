@@ -105,6 +105,11 @@ def add_signals(
     # Unrewarded probe trial marker (string "1" in the CSV -> bool). Absent/"" in a
     # pre-probe session => all False. See docs/decisions/0115-probe.
     df["probe"] = df.get("probe", pd.Series("", index=df.index)).eq("1")
+    # Correct-choice probe TRIGGER marker (docs/decisions/0134): the always-correct
+    # trial that started a probe block. Excluded from the probe accuracy read-out
+    # downstream (rolling_metrics). Absent/"" in an older session => all False.
+    df["probe_trigger"] = df.get(
+        "probe_trigger", pd.Series("", index=df.index)).eq("1")
 
     htl = df.get("high_tone_is_left")
     if htl is None:

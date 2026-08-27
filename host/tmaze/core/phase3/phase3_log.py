@@ -79,7 +79,10 @@ COLUMNS = (
     # Unrewarded PROBE trial marker (docs/decisions/0115-probe): "1" on a probe
     # trial (cue + scoring normal, reward suppressed), blank otherwise. Orthogonal
     # to sched_state (a probe stays NORMAL - it is not an intervention block).
-    "probe",
+    # ``probe_trigger`` is "1" only on the correct-choice trial that STARTED the
+    # block (docs/decisions/0134): it is always correct by construction, so
+    # downstream accuracy readouts exclude it while still treating it as a probe.
+    "probe", "probe_trigger",
     # Trial-edit lifecycle (docs/decisions/0119, bug #260810): with append-only
     # trial edits the file is one row per (trial, ATTEMPT). ``attempt`` is the
     # 1-based attempt number for that trial; ``superseded`` is "1" on a preserved
@@ -135,8 +138,11 @@ class _Row:
     prime_ms: Optional[str] = None
     topup_ms_total: Optional[str] = None
     # Unrewarded probe-trial marker ("1" / None); set in :meth:`set_decision` from
-    # the sequence's per-trial metadata (docs/decisions/0115-probe).
+    # the sequence's per-trial metadata (docs/decisions/0115-probe). ``probe_trigger``
+    # is "1" only on the correct-choice trial that started the block (docs/decisions/
+    # 0134), so it can be excluded from probe accuracy.
     probe: Optional[str] = None
+    probe_trigger: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -176,6 +182,7 @@ class Phase3RowView:
     prime_ms: Optional[str]
     topup_ms_total: Optional[str]
     probe: Optional[str]
+    probe_trigger: Optional[str]
 
 
 @dataclass(frozen=True)
@@ -235,9 +242,9 @@ class Phase3StateSnapshot:
     alt_min_samples: int = 0
     alt_window_samples: int = 0
     # Unrewarded probe-block scheduler context (probe_blocks.py). ``probe_enabled``
-    # is whether probe blocks are available this run (the Rig-view button is live
-    # only then); ``probe_state`` is the CURRENT probe state at snapshot time
-    # ("ACTIVE" while a probe runs / "PENDING" once requested / "NORMAL").
+    # is whether probe blocks are available this run (the Rig-view abort button is
+    # live only then); ``probe_state`` is the CURRENT probe state at snapshot time
+    # ("ACTIVE" while a probe block runs / "NORMAL").
     probe_enabled: bool = False
     probe_state: str = "NORMAL"
 
@@ -247,8 +254,10 @@ class SupersedeResult:
     """What :meth:`Phase3Log.supersede_trial` archived, so the shell can reconcile
     its live tallies (docs/decisions/0119). ``outcome`` is the archived attempt's
     scored outcome (CORRECT/INCORRECT/ABANDONED/None) and ``probe`` whether it was
-    a probe trial. Only returned when an attempt with recorded behavior was
-    actually preserved; None means nothing was archived (an empty row)."""
+    a probe trial that COUNTED toward the probe tally (i.e. a block trial, not the
+    always-correct trigger, which is excluded from probe accuracy; docs/decisions/
+    0134). Only returned when an attempt with recorded behavior was actually
+    preserved; None means nothing was archived (an empty row)."""
     outcome: Optional[str]
     probe: bool
 
@@ -362,6 +371,7 @@ class Phase3Log:
         alt = m.get("alt_rate")
         r.alt_rate = None if alt is None else f"{alt:.4f}"
         r.probe = "1" if m.get("probe") else None
+        r.probe_trigger = "1" if m.get("probe_trigger") else None
 
     def refresh_provisional(self, current_index: int) -> None:
         """Re-align the DISPLAY cue columns of not-yet-scored trials from
@@ -520,7 +530,9 @@ class Phase3Log:
         if self._has_behavior(r):
             self._archive.append(
                 (index, self._attempt[index], self._edit[index], replace(r)))
-            result = SupersedeResult(outcome=r.outcome, probe=(r.probe == "1"))
+            result = SupersedeResult(
+                outcome=r.outcome,
+                probe=(r.probe == "1" and r.probe_trigger != "1"))
             self._attempt[index] += 1
             self._edit[index] = edit
         self._clear_live(r)
@@ -602,7 +614,7 @@ class Phase3Log:
         c = self.cfg
         lines = [
             f"# phase3_session animal={self.animal} session_id={self.session_id} "
-            f"seed={self.seed} proto=9",
+            f"seed={self.seed} proto=10",
             f"# high_tone_is_left={c.high_tone_is_left} "
             f"high_tone_hz={c.high_tone_hz} low_tone_hz={c.low_tone_hz}",
             f"# block_size={c.block_size} max_same_run={c.max_same_run} "
