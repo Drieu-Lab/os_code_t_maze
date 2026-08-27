@@ -1021,8 +1021,12 @@ class Phase3ControlView(VisionActuator):
                 self._incorrect += 1
             # A correct-choice PROBE just fired on THIS trial (docs/decisions/0134):
             # note where it landed in the session log (the trigger is automatic, so
-            # this is the only START marker).
-            if dec.probe_trigger:
+            # this is the only START marker). Gate on the SCORING edge
+            # (``dec.outcome`` set) like the probe tally below: ``probe_trigger`` is a
+            # LEVEL read from the trial's meta (it stays set for the trigger trial
+            # until the return lap advances the index), so an ungated emit would post
+            # an identical note on every tick between the choice and the rat's return.
+            if dec.probe_trigger and dec.outcome in (CORRECT, INCORRECT):
                 self._emit_intervention(AUTO_PROBE_START,
                                         "probe block triggered (correct choice)",
                                         idx, iso)
