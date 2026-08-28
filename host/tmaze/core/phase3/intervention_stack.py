@@ -159,9 +159,23 @@ class InterventionStackController:
 
     # -------------------------------------------------------------- per trial
     def record(self, cued_side: int, chosen_side: int) -> None:
-        """Feed a scored trial's (cued, chosen) to ALL enabled children so every
-        detector's window stays warm, even the one whose block isn't running."""
-        for _kind, ctl in self._children:
+        """Feed a scored trial's (cued, chosen) to the enabled children so every
+        detector's window stays warm, even the one whose block isn't running.
+
+        One exception (see docs/decisions/0136): while a DE-ALTERNATION block owns
+        the active block, the side-bias child is NOT fed. In that block the cued
+        side is forced from the animal's own choices (last choice / bridge arm,
+        ADR-0129), not the counterbalanced spine, so the side-bias directional-
+        error signal is invalid - an alternating rat's errors all land on the same
+        non-cued side and read as a growing bias, which fires a debias block right
+        after the de-alt block and cascades. Freezing (not clearing) the side-bias
+        window here stops that accumulation while preserving genuine pre-block
+        evidence; the detector resumes when the de-alt block exits. A stopgap until
+        a schedule-aware bias score exists (FW-0047)."""
+        freeze_side_bias = (self.active_kind == KIND_ALTERNATION)
+        for kind, ctl in self._children:
+            if kind == KIND_SIDE_BIAS and freeze_side_bias:
+                continue
             ctl.record(cued_side, chosen_side)
 
     def decide(self) -> StackDecision:

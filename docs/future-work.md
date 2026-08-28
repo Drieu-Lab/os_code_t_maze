@@ -97,6 +97,7 @@ criteria).
 | [FW-0043](#fw-0043-automatic-probe-block-triggers) | Automatic probe-block triggers (position / elapsed time / reward volume) | Phase 3 host (`core/phase3/probe_blocks.py`) | Done (ADR-0134) |
 | [FW-0044](#fw-0044-closed-loop-scheduler-rollback-on-a-manual-scored-re-run) | Closed-loop scheduler rollback on a manual scored re-run | Phase 3 closed-loop schedulers (`core/phase3/`) | Deferred |
 | [FW-0045](#fw-0045-in-fov-event-led-visual-fiducial-for-videoserial-alignment) | In-FOV event-LED visual fiducial (sensor/solenoid) for video<->serial alignment | Camera vision + sidecar + rig LED wiring | Proposed |
+| [FW-0047](#fw-0047-schedule-aware-side-bias-score-inside-intervention-blocks) | Schedule-aware side-bias score inside intervention blocks | Phase 3 closed-loop schedulers (`core/phase3/debias.py`, `intervention_stack.py`) | Proposed |
 
 ## Entries
 
@@ -2277,6 +2278,63 @@ sensor/port fired? Fixed ROI vs background-difference auto-location? How to keep
 the flash out of the tracker's way (colour channel, brightness, placement)?
 
 **ADR needed?** Yes - when built (detector + sidecar schema + alignment method).
+
+### FW-0047: Schedule-aware side-bias score inside intervention blocks
+
+- **Status:** Proposed
+- **Date added:** 2026-08-28
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** `host/tmaze/core/phase3/debias.py` (the bias signal),
+  `host/tmaze/core/phase3/intervention_stack.py` (fan-out / composition),
+  `host/tests/`
+- **Related ADRs:** [ADR-0136](decisions/0136-freeze-side-bias-during-dealternation.md)
+  (the freeze stopgap this would replace),
+  [ADR-0090](decisions/0090-debias-bias-normalized-by-errors.md) (the current
+  directional-error bias), [ADR-0129](decisions/0129-phase3-de-alternation-two-sided-exit.md)
+  (why the de-alternation block's cued side is non-counterbalanced)
+
+**Motivation / context.** The side-bias score is a signed *directional-error*
+bias (left-pull `(cued RIGHT, chose LEFT)` vs right-pull `(cued LEFT, chose
+RIGHT)`, normalised by the error count; ADR-0090). It is only valid when the cued
+side is drawn from the COUNTERBALANCED spine. Inside a de-alternation block the
+cued side is forced from the animal's own choices (last choice / bridge arm,
+ADR-0129) and can repeat on one arm, so an UNBIASED alternator's ~50% errors all
+land on the same pull and read as a growing bias - which fired a debias block
+right after the de-alt block and cascaded on the bench (ADR-0136). ADR-0136 is a
+stopgap: it FREEZES the side-bias detector during a de-alternation block, so no
+bias evidence is gathered there at all. A real bias that develops during a long
+block is therefore invisible until the block exits. A schedule-aware score would
+let those in-block trials contribute correctly instead of being discarded.
+
+**Sketch of approach.** Make the bias signal condition on the trial's SCHEDULE
+context, not just `(cued, chosen)`. Options to evaluate: (a) weight or normalise
+each error by how "available" each pull was given the forced cued side over the
+window (e.g. condition the directional-error rate on the cued side, so a run of
+one-sided cues can't manufacture a one-sided pull count); (b) measure bias from
+the CHOICE stream corrected for the forced schedule (the balanced-spine
+expectation), so alternation reads as ~0 bias even under one-sided forcing;
+(c) keep the current score for out-of-block trials but add a separate, in-block
+estimator the stack can consult. Whichever is chosen, replace the ADR-0136 freeze
+in `InterventionStackController.record` so the side-bias detector can safely see
+in-block trials again.
+
+**Evaluation / acceptance.** Headless tests: a pure alternator inside a
+de-alternation block yields ~0 bias (no spurious trigger / no cascade), while a
+genuinely biased animal inside a block is still detected. Re-run
+`test_intervention_stack` / `test_debias` / `test_alternation`; add a simulated
+alternator-in-block case. Bench check: the 8/27-style cascade does not recur and a
+real bias is still corrected.
+
+**Effort / risk.** Medium: it changes a core scientific signal used on the bench,
+so it needs careful design and a matching test update; the main risk is a score
+that over- or under-corrects at the block boundary.
+
+**Open questions.** Which formulation (a/b/c above) best matches the intended
+"is the animal side-biased?" semantics; whether the in-block score should also
+feed triggering (it currently can't, since only one child owns the active block);
+whether to unify with the alternation detector's cue-aware conditioning.
+
+**ADR needed?** Yes - it would supersede ADR-0136 and refine ADR-0090.
 
 ## Completed
 

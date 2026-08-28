@@ -105,6 +105,56 @@ class TestAlternationOnly(unittest.TestCase):
         self.assertEqual(s.bias(), 0.0)                      # no side-bias child
 
 
+class TestSideBiasFrozenDuringAlternation(unittest.TestCase):
+    """While a de-alternation block owns the active block, the side-bias child is
+    not fed (docs/decisions/0136): in that block the cued side is forced from the
+    animal's own choices, so its directional-error bias is invalid. The window is
+    frozen (not cleared) and resumes once the block exits."""
+
+    def _stack(self):
+        # High auto-trigger gates so neither child fires on its own - we drive the
+        # alternation block by hand and watch what reaches the side-bias child.
+        return InterventionStackController(
+            DebiasBlockConfig(window=20, min_errors=100),
+            AlternationBlockConfig(window=30, min_samples=100))
+
+    def test_side_bias_window_frozen_then_resumes(self):
+        s = self._stack()
+        s.record(LEFT, LEFT)                       # NORMAL, correct -> no error
+        s.force_block(kind=KIND_ALTERNATION)
+        d = s.decide()
+        self.assertEqual(d.kind, KIND_ALTERNATION)  # de-alt block now active
+        self.assertEqual(s.window_errors(), 0)
+        self.assertEqual(s.bias(), 0.0)
+
+        # In-block trials that WOULD (under the old fan-out) look like left-pull
+        # errors (cued RIGHT, chose LEFT) and drive bias to +1.0.
+        for _ in range(3):
+            s.record(RIGHT, LEFT)
+        self.assertEqual(s.window_errors(), 0)      # frozen: nothing accumulated
+        self.assertEqual(s.bias(), 0.0)
+
+        # End the de-alt block; the side-bias detector resumes on the next trial.
+        s.end_block()
+        self.assertEqual(s.decide().state, NORMAL)
+        s.record(RIGHT, LEFT)                       # now a real left-pull error
+        self.assertEqual(s.window_errors(), 1)
+        self.assertGreater(s.bias(), 0.0)
+
+    def test_other_children_still_fed_during_alternation_block(self):
+        # The freeze is scoped to the side-bias child only: the alternation child
+        # keeps seeing every trial (its own detector must stay warm).
+        s = self._stack()
+        s.record(LEFT, LEFT)
+        s.force_block(kind=KIND_ALTERNATION)
+        s.decide()
+        before = s.window_samples()
+        for _ in range(4):                          # repeat-cued switches = samples
+            s.record(LEFT, RIGHT)
+            s.record(RIGHT, LEFT)
+        self.assertGreater(s.window_samples(), before)
+
+
 class TestForceRouting(unittest.TestCase):
     def _never_auto(self):
         return InterventionStackController(
