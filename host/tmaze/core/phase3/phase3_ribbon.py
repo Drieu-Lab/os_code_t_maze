@@ -72,6 +72,26 @@ def cue_side(cue: str, high_tone_is_left: bool) -> str:
     return LEFT_LABEL if is_left else RIGHT_LABEL
 
 
+def _make_row(state: Phase3StateSnapshot, i: int, current: int) -> RibbonRow:
+    """Build one ``RibbonRow`` for planned trial index ``i`` (``current`` is the
+    clamped current-trial index, used only to set ``is_current``). Shared by the
+    windowed ``ribbon_rows`` and the full-plan ``all_ribbon_rows``."""
+    row = state.rows[i]
+    return RibbonRow(
+        trial=row.trial,
+        is_current=(i == current),
+        choice_cue=row.choice_cue,
+        choice_side=cue_side(row.choice_cue, state.high_tone_is_left),
+        return_cue_left=row.return_cue_left,
+        return_cue_right=row.return_cue_right,
+        resolved=row.outcome is not None,
+        chosen_arm=row.chosen_arm,
+        outcome=row.outcome,
+        corrective=(row.sched_state == "INTERVENTION"),
+        probe=(row.probe == "1"),
+    )
+
+
 def ribbon_rows(state: Optional[Phase3StateSnapshot], *,
                 before: int = RIBBON_BEFORE,
                 after: int = RIBBON_AFTER) -> List[RibbonRow]:
@@ -88,20 +108,20 @@ def ribbon_rows(state: Optional[Phase3StateSnapshot], *,
     current = max(0, min(state.current_index, state.total - 1))
     lo = max(0, current - before)
     hi = min(state.total - 1, current + after)
-    rows: List[RibbonRow] = []
-    for i in range(lo, hi + 1):
-        row = state.rows[i]
-        rows.append(RibbonRow(
-            trial=row.trial,
-            is_current=(i == current),
-            choice_cue=row.choice_cue,
-            choice_side=cue_side(row.choice_cue, state.high_tone_is_left),
-            return_cue_left=row.return_cue_left,
-            return_cue_right=row.return_cue_right,
-            resolved=row.outcome is not None,
-            chosen_arm=row.chosen_arm,
-            outcome=row.outcome,
-            corrective=(row.sched_state == "INTERVENTION"),
-            probe=(row.probe == "1"),
-        ))
-    return rows
+    return [_make_row(state, i, current) for i in range(lo, hi + 1)]
+
+
+def all_ribbon_rows(state: Optional[Phase3StateSnapshot]) -> List[RibbonRow]:
+    """Build a row for every planned trial (the full session), current-highlighted.
+
+    The unwindowed twin of :func:`ribbon_rows`, for a scrollable strip that shows
+    the whole plan rather than a fixed window (docs/decisions/0135). Returns one
+    row per trial ``0..total-1`` with ``is_current`` set from the clamped
+    ``current_index`` (so a completed session marks the last trial current); an
+    empty list when there is nothing to show (``state`` is None or the plan is
+    empty).
+    """
+    if state is None or state.total == 0:
+        return []
+    current = max(0, min(state.current_index, state.total - 1))
+    return [_make_row(state, i, current) for i in range(state.total)]

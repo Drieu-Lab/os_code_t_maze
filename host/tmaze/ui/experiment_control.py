@@ -862,7 +862,12 @@ def main() -> int:
         # has no Phase 3 poll; registered as a module so its self-poll is cancelled
         # on exit.
         if TrialRibbonView is not None:
-            ribbon = TrialRibbonView(left_col, state_getter=phase3_state)
+            # Scrollable on the Rig view so the operator can scroll back/forward
+            # through the whole plan during a run (auto-follows the current trial
+            # until scrolled away). The Phase 3 tab keeps the fixed window next to
+            # its own trial list. See docs/decisions/0135.
+            ribbon = TrialRibbonView(left_col, state_getter=phase3_state,
+                                     scrollable=True)
             ribbon.widget().pack(side=tk.TOP, fill=tk.X, padx=4, pady=(4, 0))
             add_module(ribbon)
         behavior = BehaviorView(left_col, tracker=tracker,

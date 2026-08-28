@@ -18,7 +18,7 @@ import unittest
 from tmaze.core.phase3.debias import DebiasBlockConfig
 from tmaze.core.phase3.phase3_log import Phase3Log
 from tmaze.core.phase3.phase3_ribbon import (LEFT_LABEL, RIGHT_LABEL, RIBBON_AFTER, RIBBON_BEFORE,
-                           RibbonRow, cue_side, ribbon_rows)
+                           RibbonRow, all_ribbon_rows, cue_side, ribbon_rows)
 from tmaze.core.phase3.phase3_task import CORRECT, INCORRECT
 from tmaze.core.phase3.trial_sequence import (
     GEN_DEBIAS_BLOCKS, HIGH, LEFT, LOW, RIGHT, TrialConfig, TrialSequence)
@@ -147,6 +147,37 @@ class TestResolvedFields(unittest.TestCase):
             self.assertEqual(r.return_cue_left, seq.return_cue(0, i))   # LEFT arm
             self.assertEqual(r.return_cue_right, seq.return_cue(1, i))  # RIGHT arm
             self.assertIn(r.choice_cue, (HIGH, LOW))
+
+
+class TestAllRibbonRows(unittest.TestCase):
+    """The unwindowed full-plan variant for the scrollable Rig-view strip
+    (docs/decisions/0135)."""
+
+    def test_returns_every_trial_in_order(self):
+        rows = all_ribbon_rows(_log(n=20).snapshot(7, armed=True))
+        self.assertEqual(len(rows), 20)
+        self.assertEqual([r.trial for r in rows], list(range(1, 21)))
+
+    def test_exactly_one_current_at_the_clamped_index(self):
+        rows = all_ribbon_rows(_log(n=20).snapshot(7, armed=True))
+        current = [r for r in rows if r.is_current]
+        self.assertEqual(len(current), 1)
+        self.assertEqual(current[0].trial, 8)          # 1-based index of trial 7
+
+    def test_completed_session_marks_the_last_trial(self):
+        # current_index == total clamps the current marker onto the final trial.
+        rows = all_ribbon_rows(_log(n=20).snapshot(20, armed=False))
+        self.assertEqual(len(rows), 20)
+        self.assertEqual(sum(r.is_current for r in rows), 1)
+        self.assertTrue(rows[-1].is_current)
+
+    def test_none_snapshot_is_empty(self):
+        # Not armed yet -> nothing to show (same guard as ribbon_rows).
+        self.assertEqual(all_ribbon_rows(None), [])
+
+    def test_returns_ribbon_row_instances(self):
+        rows = all_ribbon_rows(_log(n=5, block=2).snapshot(0, armed=True))
+        self.assertTrue(all(isinstance(r, RibbonRow) for r in rows))
 
 
 class TestCorrectiveFlag(unittest.TestCase):
