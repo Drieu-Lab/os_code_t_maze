@@ -213,14 +213,22 @@ A probe fires **automatically** on a *correct choice*: the config gives one or m
 trial-number *windows* (e.g. trials 40–60), and the first correct choice on a
 normal trial inside an un-fired window has its reward withheld (the **trigger**
 trial, marked `probe_trigger`) and starts an unrewarded block of `block_len`
-(default 10) trials — so the unrewarded run is `block_len + 1` (11) trials. The
+(default 10) trials — so the unrewarded run is `block_len + 1` (11) trials. That
+block is internally 5/5 counterbalanced and honours the session's anti-bias run
+caps (`max_same_run`/`max_alt_run`), so it is never more biased than the main
+schedule ([ADR-0138](decisions/0138-probe-block-honors-session-run-caps.md)). The
 trigger trial is always correct by construction, so it is kept out of the probe
-accuracy read-out (but still shown as a probe trial). There is no manual start (an
-operator button only *aborts* a running probe); each probe is marked by the `probe`
-column in the log and excluded from reinforced accuracy everywhere. See
-[ADR-0115](decisions/0115-phase3-unrewarded-probe-blocks.md) (why) and
+accuracy read-out (but still shown as a probe trial). There is no manual start, but a
+single control-bar toggle can turn probes **off** (and back on) mid-session: off stops
+any further window from firing and aborts a running block, so the experimenter can call
+off probes after a session has started (a Restart re-arms). Each probe is marked by the
+`probe` column in the log and excluded from reinforced accuracy everywhere; a
+mid-session disable is recorded in the session notes and flagged in the CSV header so
+the saved data shows it. See
+[ADR-0115](decisions/0115-phase3-unrewarded-probe-blocks.md) (why),
 [ADR-0134](decisions/0134-probe-correct-choice-trigger.md) (the correct-choice
-trigger).
+trigger), and [ADR-0137](decisions/0137-probe-mid-session-disable.md) (the mid-session
+on/off toggle).
 
 ### Protocol
 The agreed format of the messages between firmware and host — the

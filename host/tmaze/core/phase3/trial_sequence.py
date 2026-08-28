@@ -18,14 +18,20 @@ earlier design where the return cue was a random hi/lo drawn per onset
 (``next_return_freq``); the return cue actually played is now looked up by the
 physical return arm the rat enters and the current trial index.
 
-Why port it verbatim. The generator here is a faithful Python port of
-``generateSequence`` / ``cueFor`` / ``lcg`` in
-``firmware/cue-guided-task/task_core.h``: the same 32-bit LCG, the same
-per-block balance + Fisher-Yates shuffle, and the same ``MAX_SAME_RUN`` re-roll
-(Holleman et al. 2019, cf. ADR-0009). Keeping the algorithm identical means the
-task's statistical properties are unchanged by the move to the host and that a
-sequence stays reproducible from its seed. The same balanced generator is reused
-for the two return-arm schedules so they share that structure. This module is
+Randomness source. The shuffle draws from Python's stdlib ``random.Random``
+(the Mersenne Twister). ONE seeded generator is threaded through all three
+schedules (and any later ``extend``), so the whole session stays reproducible
+from the one seed. This replaces the earlier byte-exact port of the firmware's
+32-bit LCG (``generateSequence`` / ``lcg`` in
+``firmware/cue-guided-task/task_core.h``); the per-block exact balance, the
+Fisher-Yates shuffle, and the ``MAX_SAME_RUN`` re-roll (Holleman et al. 2019)
+are unchanged in structure - only the number stream driving the shuffle differs.
+See docs/decisions/0140 (superseding the firmware-parity rationale of ADR-0009).
+CONSEQUENCE: the same integer seed now yields a DIFFERENT schedule than the LCG
+did, so reproducing a pre-0140 session's exact L/R order from its seed alone
+requires the old LCG code (the pre-0140 revision of this file in git history);
+each run's realized per-trial schedule is also written to the session log, so
+historical data is fully recoverable from the log regardless. This module is
 also the natural home for the deferred richer generators (FW-0001's 60/40
 transition bias, FW-0008's correction trials), which are far easier to write and
 test in Python.
@@ -36,6 +42,7 @@ single-threaded (the Phase 3 actuation thread); it takes no locks.
 
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
@@ -43,9 +50,6 @@ if TYPE_CHECKING:               # avoid a runtime import cycle (debias imports u
     from tmaze.core.phase3.alternation import AlternationBlockConfig
     from tmaze.core.phase3.debias import DebiasBlockConfig
     from tmaze.core.phase3.probe_blocks import ProbeBlockConfig
-
-# 32-bit mask so the LCG matches the firmware's uint32_t wraparound exactly.
-_U32 = 0xFFFFFFFF
 
 # Sides (match task_core.h: 0 = LEFT, 1 = RIGHT).
 LEFT = 0
@@ -107,11 +111,6 @@ class TrialConfig:
     probe: Optional["ProbeBlockConfig"] = None
 
 
-def lcg(state: int) -> int:
-    """One step of the firmware's threaded LCG (``s*1664525 + 1013904223``, u32)."""
-    return (state * 1664525 + 1013904223) & _U32
-
-
 def _is_high(correct_arm: int, cfg: TrialConfig) -> bool:
     """True if a trial's correct arm maps to the HIGH tone (port of ``cueFor``'s
     predicate): high when the correct arm matches the configured high-tone side."""
@@ -167,57 +166,54 @@ def alt_run_ok(seq: List[int], n: int, max_alt: int) -> bool:
 
 
 def generate_balanced(n: int, block: int, max_run: int,
-                      rng: int, max_alt: int = 0) -> Tuple[List[int], int]:
+                      rng: random.Random, max_alt: int = 0) -> List[int]:
     """Build a balanced, per-block-shuffled, anti-bias binary (0/1) schedule.
 
     The shared engine behind BOTH the choice L/R schedule and the two return-arm
-    hi/lo schedules (0/1 there meaning LOW/HIGH). Takes the incoming PRNG state
-    and returns ``(seq, rng)``: the schedule and the ADVANCED PRNG state, so a
-    caller can thread one seed through several schedules (choice, then each return
-    arm) and keep the whole session reproducible.
+    hi/lo schedules (0/1 there meaning LOW/HIGH). Takes a stdlib ``random.Random``
+    and DRAWS from it in place, returning just the schedule, so a caller threads
+    ONE seeded generator through several schedules (choice, then each return arm)
+    and keeps the whole session reproducible (see docs/decisions/0140).
 
-    Faithful port of ``generateSequence``: each block keeps an exact 0/1 balance,
-    but a block whose shuffle would create a run of the same value longer than
-    ``max_run`` (counting across the boundary with the already-fixed previous
-    blocks) is re-rolled up to ``MAX_ATTEMPTS`` times; the PRNG is threaded across
-    attempts and blocks, and the last attempt is accepted unconditionally.
-    ``max_alt`` adds a second anti-bias constraint checked the same way: a block
-    that would alternate for more than ``max_alt`` trials in a row is also
-    re-rolled (0 disables; see docs/decisions/0126).
+    Each block keeps an exact 0/1 balance, but a block whose shuffle would create
+    a run of the same value longer than ``max_run`` (counting across the boundary
+    with the already-fixed previous blocks) is re-rolled up to ``MAX_ATTEMPTS``
+    times; the generator is drawn across attempts and blocks, and the last attempt
+    is accepted unconditionally. ``max_alt`` adds a second anti-bias constraint
+    checked the same way: a block that would alternate for more than ``max_alt``
+    trials in a row is also re-rolled (0 disables; see docs/decisions/0126).
     """
     half = block // 2
     MAX_ATTEMPTS = 200
     seq = [0] * n
-    rng &= _U32
+    # One balanced multiset per block; ``block - half`` keeps the exact even/odd
+    # split the old hand-rolled Fisher-Yates produced (even -> half/half; odd ->
+    # one extra 0). ``rng.shuffle`` draws a uniform permutation each attempt.
+    vals = [0] * (block - half) + [1] * half
     off = 0
     while off + block <= n:
         for _attempt in range(MAX_ATTEMPTS):
-            for i in range(half):
-                seq[off + i] = 0
-                seq[off + i + half] = 1
-            for i in range(block - 1, 0, -1):   # Fisher-Yates within the block
-                rng = lcg(rng)
-                j = (rng >> 16) % (i + 1)
-                seq[off + i], seq[off + j] = seq[off + j], seq[off + i]
+            rng.shuffle(vals)
+            seq[off:off + block] = vals
             # Validate the prefix so far (catches runs spanning the block boundary).
             if (max_run_ok(seq, off + block, max_run)
                     and alt_run_ok(seq, off + block, max_alt)):
                 break
         off += block
-    return seq, rng
+    return seq
 
 
-def generate_sequence(cfg: TrialConfig, seed: int) -> Tuple[List[int], int]:
+def generate_sequence(cfg: TrialConfig, rng: random.Random) -> List[int]:
     """Build the balanced, per-block-shuffled, anti-bias L/R choice schedule.
 
-    Returns ``(seq, rng)``: the trial sequence (0=LEFT, 1=RIGHT) and the ADVANCED
-    PRNG state after generation. ``TrialSequence`` threads that state on to build
-    the two return-arm hi/lo schedules, so one seed reproduces all three (see
-    docs/decisions/0047). Thin wrapper over :func:`generate_balanced` (LEFT/RIGHT
-    are 0/1), kept for back-compat and to name the choice-schedule intent.
+    Returns the trial sequence (0=LEFT, 1=RIGHT), drawing from ``rng`` in place.
+    ``TrialSequence`` threads that same ``random.Random`` on to build the two
+    return-arm hi/lo schedules, so one seed reproduces all three (see
+    docs/decisions/0047, 0140). Thin wrapper over :func:`generate_balanced`
+    (LEFT/RIGHT are 0/1), kept to name the choice-schedule intent.
     """
     return generate_balanced(cfg.max_trials, cfg.block_size, cfg.max_same_run,
-                             seed & _U32, max_alt=cfg.max_alt_run)
+                             rng, max_alt=cfg.max_alt_run)
 
 
 class TrialSequence:
@@ -233,22 +229,25 @@ class TrialSequence:
 
     def __init__(self, cfg: Optional[TrialConfig] = None, seed: int = 0) -> None:
         self.cfg = cfg or TrialConfig()
-        self.seed = seed & _U32
+        self.seed = seed
+        # ONE seeded PRNG threaded through all three schedules (and later extend),
+        # so the whole session is reproducible from the one seed (docs/decisions/
+        # 0140, superseding the firmware LCG of ADR-0009/0047).
+        self._rng = random.Random(self.seed)
         # ``self.seq`` is the counterbalanced spine (the choice L/R schedule). In
         # "balanced" mode it IS the realized schedule; in "debias_blocks" mode it
         # is the pool of NORMAL-trial sides, consumed in order as normal trials run
         # while corrective blocks insert forced sides on top (see below).
-        self.seq, rng = generate_sequence(self.cfg, self.seed)
+        self.seq = generate_sequence(self.cfg, self._rng)
         # Two independent balanced hi/lo schedules, one per physical return arm,
-        # threaded off the SAME PRNG after the choice schedule so the whole
-        # session is reproducible from the one seed. (0=LOW, 1=HIGH.) Return cues
-        # are navigational and index-keyed, so they are unaffected by debias mode.
+        # drawn from the SAME PRNG after the choice schedule so the whole session
+        # is reproducible from the one seed. (0=LOW, 1=HIGH.) Return cues are
+        # navigational and index-keyed, so they are unaffected by debias mode.
         n, block, run = len(self.seq), self.cfg.block_size, self.cfg.max_same_run
         alt = self.cfg.max_alt_run
-        left_bits, rng = generate_balanced(n, block, run, rng, max_alt=alt)
-        right_bits, rng = generate_balanced(n, block, run, rng, max_alt=alt)
+        left_bits = generate_balanced(n, block, run, self._rng, max_alt=alt)
+        right_bits = generate_balanced(n, block, run, self._rng, max_alt=alt)
         self._return_bits = {LEFT: left_bits, RIGHT: right_bits}
-        self._rng = rng
 
         # Closed-loop state (used in "debias_blocks" / "intervention_blocks" mode).
         # The correct side of a trial is then decided lazily, IN ORDER, the first
@@ -280,7 +279,13 @@ class TrialSequence:
         self._probe = None
         if self.cfg.probe is not None and self.cfg.probe.enabled:
             from tmaze.core.phase3.probe_blocks import ProbeBlockController
-            self._probe = ProbeBlockController(self.cfg.probe, seed=self.seed)
+            # Thread the session's anti-bias caps through so the forced probe block
+            # honours the same max_same_run / max_alt_run as the main schedule
+            # (docs/decisions/0138).
+            self._probe = ProbeBlockController(
+                self.cfg.probe, seed=self.seed,
+                max_same_run=self.cfg.max_same_run,
+                max_alt_run=self.cfg.max_alt_run)
         # The lazy, in-order commit machinery (correct side decided the first time
         # a trial is reached) is needed whenever something inserts trials on top of
         # the spine: a closed-loop generator OR a probe block under any generator.
@@ -485,11 +490,33 @@ class TrialSequence:
         if self._probe is not None:
             self._probe.end_block()
 
+    def set_probe_armed(self, armed: bool) -> None:
+        """Operator: arm/disarm the correct-choice probe trigger mid-session
+        (docs/decisions/0137). Disarming stops any future window firing and aborts a
+        running block; re-arming lets remaining un-fired windows trigger again. A
+        no-op when probe blocks were not built this run."""
+        if self._probe is not None:
+            self._probe.set_armed(armed)
+
     @property
     def probe_enabled(self) -> bool:
-        """Whether unrewarded probe blocks are available this run (the abort button
+        """Whether unrewarded probe blocks are available this run (the on/off toggle
         is live only then)."""
         return self._probe is not None
+
+    @property
+    def probe_armed(self) -> bool:
+        """Whether the correct-choice trigger is currently live (True unless the
+        operator disabled probes mid-session; docs/decisions/0137). False when probe
+        blocks were not built this run."""
+        return self._probe.armed if self._probe is not None else False
+
+    @property
+    def probe_ever_disarmed(self) -> bool:
+        """Whether the operator disabled probes at any point this run, so a planned
+        window may never have fired (recorded in the CSV header; docs/decisions/0137).
+        False when probe blocks were not built this run."""
+        return self._probe.ever_disarmed if self._probe is not None else False
 
     def probe_state(self) -> str:
         """Probe scheduler state for the snapshot/readout: ``ACTIVE`` while a probe
@@ -612,9 +639,10 @@ class TrialSequence:
 
         Used when the rat runs past the planned count (docs/decisions/0059): the
         session is extended rather than ending. The extra trials continue the ONE
-        stored PRNG cursor (``self._rng``, the state left after the initial three
-        schedules), so the result is deterministic per seed + how much was appended
-        and the existing prefix is left byte-identical (append-only). ``n_more`` is
+        stored PRNG (``self._rng``, the ``random.Random`` left after the initial
+        three schedules), so the result is deterministic per seed + how much was
+        appended and the existing prefix is left byte-identical (append-only).
+        ``n_more`` is
         rounded up to a whole ``block_size`` so each appended segment keeps the same
         exact per-block L/R (and hi/lo) balance as the initial plan; ``None`` adds
         one block. The anti-bias run caps (same-side and alternating) are enforced
@@ -628,12 +656,10 @@ class TrialSequence:
         if n_more <= 0:
             return len(self.seq)
         n_more = ((n_more + block - 1) // block) * block   # whole blocks only
-        rng = self._rng
-        choice_ext, rng = generate_balanced(n_more, block, run, rng, max_alt=alt)
-        left_ext, rng = generate_balanced(n_more, block, run, rng, max_alt=alt)
-        right_ext, rng = generate_balanced(n_more, block, run, rng, max_alt=alt)
+        choice_ext = generate_balanced(n_more, block, run, self._rng, max_alt=alt)
+        left_ext = generate_balanced(n_more, block, run, self._rng, max_alt=alt)
+        right_ext = generate_balanced(n_more, block, run, self._rng, max_alt=alt)
         self.seq.extend(choice_ext)
         self._return_bits[LEFT].extend(left_ext)
         self._return_bits[RIGHT].extend(right_ext)
-        self._rng = rng
         return len(self.seq)

@@ -440,10 +440,11 @@ TIPS: Dict[str, Entry] = {
     "phase3.alt_exit_repeats_per_side": "How many rewarded repeats the rat must "
                                         "earn on EACH arm before a de-alternation "
                                         "block ends on success (ADR-0129). A "
-                                        "one-sided repeat run no longer exits, so "
-                                        "the rat can't escape by camping - and "
-                                        "reinforcing - a side bias; it must show it "
-                                        "repeats on both arms.",
+                                        "one-sided repeat run does not end the block: "
+                                        "completing a run on one arm offers a one-off "
+                                        "'bridge' to the other (ADR-0139), and the "
+                                        "block exits only once the rat has repeated "
+                                        "on both arms (else it rides to the cap).",
     "phase3.alt_max_block_len": "Welfare failsafe: the maximum trials a "
                                 "de-alternation block may run before it auto-reverts "
                                 "(flagged as capped) even if the animal never "
@@ -453,16 +454,17 @@ TIPS: Dict[str, Entry] = {
                          "'intervention_blocks' generator with the de-alternation "
                          "block enabled). A manual block forces the last choice and "
                          "is flagged 'manual' in the log. Applies on the next trial.",
-    "phase3.probe_toggle": "End (abort) a running unrewarded PROBE block early. In a "
-                           "probe the cue plays and the choice is scored normally, "
-                           "but no water is given - a read-out of what the animal "
-                           "KNOWS vs what it works for. Probes fire AUTOMATICALLY: the "
-                           "first correct choice inside a configured trial 'window' "
-                           "withholds reward (the trigger trial) and starts a "
-                           "counterbalanced unrewarded block on the following trials. "
-                           "There is no manual start; this button is live only while "
-                           "a probe is running. Works under any generator (see "
-                           "docs/decisions/0115-probe, 0134).",
+    "phase3.probe_toggle": "Turn unrewarded PROBE blocks OFF or ON for the rest of "
+                           "this session. In a probe the cue plays and the choice is "
+                           "scored normally, but no water is given - a read-out of "
+                           "what the animal KNOWS vs what it works for. Probes fire "
+                           "AUTOMATICALLY: the first correct choice inside a configured "
+                           "trial 'window' withholds reward (the trigger trial) and "
+                           "starts a counterbalanced unrewarded block on the following "
+                           "trials. There is no manual start; this toggle DISABLES the "
+                           "trigger (no window will fire, and any running block is "
+                           "aborted) or re-ENABLES it. Restart re-arms. Works under any "
+                           "generator (see docs/decisions/0115-probe, 0134, 0137).",
 
     # ---- phase3_traces_view.py: Metrics tab (live rolling traces) ----
     "phase3.traces": "Live rolling traces of the current Phase 3 session, plotted "

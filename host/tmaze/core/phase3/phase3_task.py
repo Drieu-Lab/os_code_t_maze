@@ -205,6 +205,13 @@ class Phase3Task:
         (probe_blocks.py / docs/decisions/0134). No-op if probe is disabled."""
         self.seq.end_probe_block()
 
+    def set_probe_armed(self, armed: bool) -> None:
+        """Operator: arm/disarm the correct-choice probe trigger mid-session
+        (docs/decisions/0137). Disarming stops any future window firing and aborts a
+        running block; re-arming lets remaining un-fired windows trigger again. No-op
+        if probe blocks were not built this run."""
+        self.seq.set_probe_armed(armed)
+
     def debias_state(self) -> str:
         return self.seq.debias_state()
 

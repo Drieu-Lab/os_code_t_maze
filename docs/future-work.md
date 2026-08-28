@@ -97,6 +97,7 @@ criteria).
 | [FW-0043](#fw-0043-automatic-probe-block-triggers) | Automatic probe-block triggers (position / elapsed time / reward volume) | Phase 3 host (`core/phase3/probe_blocks.py`) | Done (ADR-0134) |
 | [FW-0044](#fw-0044-closed-loop-scheduler-rollback-on-a-manual-scored-re-run) | Closed-loop scheduler rollback on a manual scored re-run | Phase 3 closed-loop schedulers (`core/phase3/`) | Deferred |
 | [FW-0045](#fw-0045-in-fov-event-led-visual-fiducial-for-videoserial-alignment) | In-FOV event-LED visual fiducial (sensor/solenoid) for video<->serial alignment | Camera vision + sidecar + rig LED wiring | Proposed |
+| [FW-0046](#fw-0046-live-core-metrics-tab-fixes-engagement-definition--others) | Live-core Metrics-tab fixes (engagement definition + others) | Phase 3 live metrics (`core/phase3/phase3_traces.py`, `phase3_stats.py`) | Deferred |
 | [FW-0047](#fw-0047-schedule-aware-side-bias-score-inside-intervention-blocks) | Schedule-aware side-bias score inside intervention blocks | Phase 3 closed-loop schedulers (`core/phase3/debias.py`, `intervention_stack.py`) | Proposed |
 
 ## Entries
@@ -2278,6 +2279,55 @@ sensor/port fired? Fixed ROI vs background-difference auto-location? How to keep
 the flash out of the tracker's way (colour channel, brightness, placement)?
 
 **ADR needed?** Yes - when built (detector + sidecar schema + alignment method).
+
+### FW-0046: Live-core Metrics-tab fixes (engagement definition + others)
+
+- **Status:** Deferred
+- **Date added:** 2026-08-26
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** `host/tmaze/core/phase3/phase3_traces.py`,
+  `host/tmaze/core/phase3/phase3_stats.py`, and the Metrics-tab views
+  (`host/tmaze/ui/phase3_traces_view.py` and siblings)
+- **Related ADRs / work:** [ADR-0114](decisions/0114-live-session-metric-traces.md)
+  (live traces; defines the dead-time ITI), [ADR-0132](decisions/0132-offline-baseline-out-of-block.md)
+  (offline/GUI baseline reconciliation - this is its deferred companion),
+  FW-0042 (live excursion-based engagement)
+
+**Motivation / context.** Reconciling the offline analysis against the live GUI
+(ADR-0132) surfaced live-core metric issues the operator wants handled together
+as one dedicated task, rather than piecemeal. The clearest is the ENGAGEMENT
+definition: the Metrics tab uses the DEAD-TIME inter-trial interval
+`trial_start[N] - trial_end[N-1]` (time not spent initiating the next trial;
+ADR-0114), while the offline layer uses the START-TO-START gap
+`trial_start[N] - trial_start[N-1]`. The offline start-to-start gap is the
+intended engagement signal (it captures the whole between-choice interval,
+including the return/consummatory leg), so the live and offline disengagement
+lines are not measuring the same thing and the fixed 45 s threshold means
+different things on each. The operator has flagged additional Metrics-tab metric
+problems to review in the same pass.
+
+**Sketch of approach.** Audit the live Metrics-tab metric definitions against the
+offline `tmaze.analysis` twins and the scientific intent; change the live
+engagement ITI to the start-to-start gap (or make the definition explicit and
+consistent across live + offline), re-derive the disengaged threshold for the
+chosen definition, and fix the other flagged metric issues. Keep live and offline
+in step so a future divergence is caught by the round-trip symmetry the analysis
+layer already relies on.
+
+**Evaluation / acceptance.** Updated `test_phase3_traces` ITI cases; the live
+disengagement line and the offline engagement proxy agree in definition on the
+same recorded session; the other flagged metrics validated case by case.
+
+**Effort / risk.** Medium: touches the live core (used on the bench during
+sessions), so changes need care and a matching test update; low scientific risk
+once the definition is pinned in an ADR.
+
+**Open questions.** Exactly which additional Metrics-tab metrics the operator wants
+changed (to be enumerated when the task is picked up); whether to wait for the
+excursion-based engagement (FW-0042) rather than refine the gap proxy.
+
+**ADR needed?** Yes - a live-core metrics ADR when built (it changes an on-bench
+readout definition and would refine/relate to ADR-0114).
 
 ### FW-0047: Schedule-aware side-bias score inside intervention blocks
 

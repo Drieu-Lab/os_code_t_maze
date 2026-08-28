@@ -1,34 +1,23 @@
 """
 test_trial_sequence.py - headless tests for the host trial-sequence core.
 
-Mirrors the firmware's ``test_task_core.cpp`` sequence/cue asserts so the Python
-port stays faithful (see docs/decisions/0046): the 32-bit LCG, per-block L/R
-balance, the ``MAX_SAME_RUN`` anti-bias cap, seed-determinism, and the
-``cue_for`` identity mapping. Pure stdlib; no hardware/Tk.
+Covers the schedule invariants that must hold regardless of the RNG: per-block
+L/R balance, the ``MAX_SAME_RUN`` / alternation anti-bias caps, seed-determinism
+(now off stdlib ``random.Random``; see docs/decisions/0140), and the ``cue_for``
+identity mapping. Pure stdlib; no hardware/Tk.
 
 Run from host/:  python -m unittest test_trial_sequence
 """
 
 from __future__ import annotations
 
+import random
 import unittest
 
 from tmaze.core.phase3.trial_sequence import (
     HIGH, LEFT, LOW, RIGHT, TrialConfig, TrialSequence, alt_run_ok, cue_for,
-    generate_balanced, generate_sequence, lcg, max_run_ok,
+    generate_balanced, generate_sequence, max_run_ok,
 )
-
-
-class TestLcg(unittest.TestCase):
-    def test_known_vector(self):
-        # Anchors the arithmetic to the firmware's uint32_t s*1664525+1013904223.
-        self.assertEqual(lcg(12345), 87628868)
-
-    def test_stays_in_u32(self):
-        s = 0xFFFFFFFF
-        for _ in range(1000):
-            s = lcg(s)
-            self.assertTrue(0 <= s <= 0xFFFFFFFF)
 
 
 class TestCueFor(unittest.TestCase):
@@ -67,7 +56,7 @@ class TestAltRunOk(unittest.TestCase):
 class TestGenerateSequence(unittest.TestCase):
     def test_block_balanced(self):
         c = TrialConfig(max_trials=20, block_size=20, max_same_run=3)
-        seq, _ = generate_sequence(c, 12345)
+        seq = generate_sequence(c, random.Random(12345))
         self.assertEqual(len(seq), 20)
         self.assertTrue(all(v in (LEFT, RIGHT) for v in seq))
         self.assertEqual(seq.count(LEFT), 10)
@@ -75,7 +64,7 @@ class TestGenerateSequence(unittest.TestCase):
 
     def test_anti_bias_and_balance_over_blocks(self):
         c = TrialConfig(max_trials=200, block_size=20, max_same_run=3)
-        seq, r1 = generate_sequence(c, 24680)
+        seq = generate_sequence(c, random.Random(24680))
         # never more than 3 consecutive same-side trials
         self.assertTrue(max_run_ok(seq, 200, 3))
         # exact balance within each block
@@ -83,15 +72,14 @@ class TestGenerateSequence(unittest.TestCase):
             block = seq[off:off + 20]
             self.assertEqual(block.count(LEFT), 10)
             self.assertEqual(block.count(RIGHT), 10)
-        # deterministic from the seed (sequence AND advanced rng)
-        seq2, r2 = generate_sequence(c, 24680)
+        # deterministic from the seed: a fresh generator on the same seed matches
+        seq2 = generate_sequence(c, random.Random(24680))
         self.assertEqual(seq, seq2)
-        self.assertEqual(r1, r2)
 
     def test_different_seeds_differ(self):
         c = TrialConfig(max_trials=200, block_size=20, max_same_run=3)
-        seq_a, _ = generate_sequence(c, 1)
-        seq_b, _ = generate_sequence(c, 2)
+        seq_a = generate_sequence(c, random.Random(1))
+        seq_b = generate_sequence(c, random.Random(2))
         self.assertNotEqual(seq_a, seq_b)
 
 
@@ -120,7 +108,7 @@ class TestTrialSequence(unittest.TestCase):
 
 class TestGenerateBalanced(unittest.TestCase):
     def test_balanced_binary_and_run_cap(self):
-        seq, _ = generate_balanced(200, 20, 3, 12345)
+        seq = generate_balanced(200, 20, 3, random.Random(12345))
         self.assertEqual(len(seq), 200)
         self.assertTrue(all(v in (0, 1) for v in seq))
         self.assertTrue(max_run_ok(seq, 200, 3))
@@ -128,32 +116,33 @@ class TestGenerateBalanced(unittest.TestCase):
             self.assertEqual(seq[off:off + 20].count(0), 10)  # exact per-block balance
 
     def test_choice_is_balanced_binary(self):
-        # generate_sequence is just the choice-flavored generate_balanced.
+        # generate_sequence is just the choice-flavored generate_balanced: fed the
+        # same fresh generator + params, they draw identically.
         c = TrialConfig(max_trials=40, block_size=20, max_same_run=3)
-        self.assertEqual(generate_sequence(c, 999),
-                         generate_balanced(40, 20, 3, 999))
+        self.assertEqual(generate_sequence(c, random.Random(999)),
+                         generate_balanced(40, 20, 3, random.Random(999)))
 
     def test_alt_run_cap_enforced_and_balance_kept(self):
         # With an alternation cap set, no block alternates for more than the cap,
         # yet every block keeps its exact per-block balance.
-        seq, _ = generate_balanced(200, 20, 4, 12345, max_alt=4)
+        seq = generate_balanced(200, 20, 4, random.Random(12345), max_alt=4)
         self.assertTrue(alt_run_ok(seq, 200, 4))
         self.assertTrue(max_run_ok(seq, 200, 4))
         for off in range(0, 200, 20):
             self.assertEqual(seq[off:off + 20].count(0), 10)
 
     def test_alt_default_disabled_is_backcompat(self):
-        # Default max_alt (0) must leave the schedule byte-identical to a call that
-        # omits the arg, so existing seeds/sessions are unaffected.
-        self.assertEqual(generate_balanced(200, 20, 3, 555),
-                         generate_balanced(200, 20, 3, 555, max_alt=0))
+        # Default max_alt (0) must leave the schedule identical to a call that omits
+        # the arg (same seed), so existing seeds/sessions are unaffected.
+        self.assertEqual(generate_balanced(200, 20, 3, random.Random(555)),
+                         generate_balanced(200, 20, 3, random.Random(555), max_alt=0))
 
 
 class TestAltRunSequence(unittest.TestCase):
     def test_generate_sequence_respects_alt_cap(self):
         c = TrialConfig(max_trials=200, block_size=20, max_same_run=4,
                         max_alt_run=4)
-        seq, _ = generate_sequence(c, 24680)
+        seq = generate_sequence(c, random.Random(24680))
         self.assertTrue(alt_run_ok(seq, 200, 4))
         self.assertTrue(max_run_ok(seq, 200, 4))
 

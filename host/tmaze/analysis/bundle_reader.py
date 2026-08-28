@@ -5,18 +5,23 @@ The rig writes one self-describing bundle per session under the recordings root
 docs/decisions/0113): a directory ``<animal>_<YYYYMMDD>_<HHMMSS>/``
 holding the per-trial CSV in ``task/``, the per-excursion log beside it (when that
 feature is deployed), and JSON context in ``config/`` / ``summary/``. This module
-folds a chosen animal set + date span into three tidy pandas frames the rest of the
+folds a chosen animal set + date span into four tidy pandas frames the rest of the
 analysis stack consumes:
 
-- ``trials``     - one row per trial, every session concatenated and time-ordered,
-  with a global ``seq`` order column and per-session context attached.
+- ``trials``     - one row per ATTEMPTED trial (planned-but-unrun placeholder rows
+  are dropped; see docs/decisions/0131), every session concatenated and
+  time-ordered, with a global ``seq`` order column and per-session context attached.
 - ``excursions`` - one row per outbound trip (empty when no ``*_excursions.csv``
   exists yet - the log is new, so all current recordings lack it; everything
   downstream degrades gracefully).
 - ``sessions``   - one row per session: identity, timing, the parsed ``#``-header
   config (cue->side mapping, tones, generator, block params) and husbandry/stage
   context read straight from the bundle's ``config/`` JSON (no built registry
-  required).
+  required), plus probe-planned/disabled flags (docs/decisions/0137).
+- ``notes``      - one row per session-timeline note entry (operator notes + auto
+  events: manual rewards, debias/alt/probe start-end, skips/backs, and the probe
+  enable/disable events of docs/decisions/0137), or empty when no session had a
+  notes file.
 
 Read-only and pure aside from the file reads: no Tk/OpenCV/serial. The token
 constants (CORRECT/INCORRECT, HIGH/LOW) are imported from the live cores so the
@@ -34,6 +39,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Union
 import pandas as pd
 
 from tmaze.core.phase3.phase3_task import ABANDONED, CORRECT, INCORRECT
+from tmaze.core.session import session_notes
 
 # Arm labels as the CSV stores them (phase3_log upper-cases chosen_arm/correct_arm);
 # the trial_sequence LEFT/RIGHT are ints, so we keep the string labels locally to
@@ -110,15 +116,30 @@ class SessionInfo:
     hours_since_water: Optional[float] = None
     header: Dict[str, str] = field(default_factory=dict)
     bundle: str = ""
+    # Unrewarded probe-block context (docs/decisions/0137). ``probe_planned`` is read
+    # from the CSV header (a probe WAS armed by config); ``probe_disabled`` is True
+    # when the operator turned probes off at some point this session (an
+    # ``AUTO_PROBE_DISABLED`` note). Together they let a reader tell a manually
+    # disabled session apart from one where a planned window simply never fired -
+    # the archived config alone can't show that.
+    probe_planned: bool = False
+    probe_disabled: bool = False
 
 
 @dataclass
 class AnimalData:
-    """The three tidy frames for one or more animals over a date span."""
+    """The tidy frames for one or more animals over a date span.
+
+    ``notes`` is one row per operator/auto note entry across all sessions (the
+    session timeline: manual rewards, debias/alt/probe events, skips/backs, and the
+    probe enable/disable events of docs/decisions/0137), or an empty frame when no
+    session had a notes file. A defaulted field so existing ``trials``/``excursions``/
+    ``sessions`` consumers are unaffected."""
 
     trials: pd.DataFrame
     excursions: pd.DataFrame
     sessions: pd.DataFrame
+    notes: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 
 # --------------------------------------------------------------- header parsing
@@ -255,6 +276,24 @@ def _read_json(path: str) -> Optional[dict]:
     return obj if isinstance(obj, dict) else None
 
 
+def _read_notes(bundle: str) -> List[dict]:
+    """The session's operator/auto notes as a list of entry dicts, or ``[]`` when the
+    file is absent/unreadable (older bundles, or a session that jotted none).
+
+    Read from ``summary/notes_<id>.jsonl`` via the same pure parser the rig writes
+    with (``session_notes.parse_jsonl``), so the analysis can't drift from the
+    on-disk note format (docs/decisions/0074/0137). Best-effort like the JSON reads.
+    """
+    session_id = os.path.basename(os.path.normpath(bundle))
+    path = os.path.join(bundle, "summary", f"notes_{session_id}.jsonl")
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        return []
+    return [e.as_dict() for e in session_notes.parse_jsonl(text).entries()]
+
+
 # --------------------------------------------------------------- per-bundle load
 def _read_trial_csv(path: str) -> pd.DataFrame:
     """Read one trial CSV (skipping ``#`` header lines), normalising the schema.
@@ -284,11 +323,16 @@ def _read_trial_csv(path: str) -> pd.DataFrame:
 
 
 def load_bundle(bundle: str) -> Optional[tuple]:
-    """Load one bundle -> (trials_df, excursions_df, SessionInfo), or None if empty.
+    """Load one bundle -> (trials_df, excursions_df, SessionInfo, notes_df), or None
+    if empty.
 
     Concatenates all per-trial CSVs in ``task/`` (restarts add ``_r<n>`` files),
     tagging each with a ``run_idx`` and preserving per-run ``trial`` order. Reads
-    header config from the first file and husbandry/stage from ``config/`` JSON.
+    header config from the first file and husbandry/stage from ``config/`` JSON, and
+    folds the session timeline notes (``summary/notes_<id>.jsonl``) into a per-session
+    notes frame + the probe-planned/disabled flags (docs/decisions/0137). Only
+    ATTEMPTED trials are kept (started or scored); a bundle with none (an aborted
+    start) returns ``None`` and is skipped. See docs/decisions/0131.
     """
     csvs = _task_trial_csvs(bundle)
     if not csvs:
@@ -312,6 +356,21 @@ def load_bundle(bundle: str) -> Optional[tuple]:
         frames.append(df)
     trials = pd.concat(frames, ignore_index=True)
 
+    # Keep only trials the rat actually attempted. phase3_log pre-writes the full
+    # planned cue matrix up front (docs/decisions/0046/0047), so un-run trials sit
+    # as placeholder rows (planned cue only, no trial_start_iso / chosen_arm /
+    # outcome). Counting them pads every session to its planned length and scatters
+    # the animal-wide ``seq`` with empty gaps that render as long connecting lines;
+    # keep a trial only if it was STARTED or SCORED (abandoned trials are kept - they
+    # matter for the engagement gap and for breaking own-choice pairs). A session
+    # with zero attempted trials (an aborted start) then yields an empty frame and
+    # is skipped below. See docs/decisions/0131.
+    started = trials["trial_start_iso"].astype(str).str.strip().ne("")
+    scored = trials["outcome"].isin(COMPLETED_OUTCOMES + (ABANDONED,))
+    trials = trials[started | scored].reset_index(drop=True)
+    if trials.empty:
+        return None
+
     astate = _read_json(os.path.join(bundle, "config", "animal_state.json")) or {}
     meta = _read_json(os.path.join(bundle, "config", "session_meta.json")) or {}
     animal = str(astate.get("animal") or id_animal or "")
@@ -322,6 +381,16 @@ def load_bundle(bundle: str) -> Optional[tuple]:
     # agrees with the session registry (docs/decisions/0124).
     gate_arm_iso = str(header.get("session_start_iso", ""))
     start_iso = str(header.get("session_t0_iso", "")) or gate_arm_iso
+
+    # Session timeline notes (docs/decisions/0074/0137): fold into a per-session frame
+    # and derive the probe flags. ``probe_planned`` comes from the CSV header token
+    # (a probe was armed by config); ``probe_disabled`` is True if the operator turned
+    # probes off at any point (an AUTO_PROBE_DISABLED note) - so a manually disabled
+    # session is not misread as "planned but the window never fired".
+    note_dicts = _read_notes(bundle)
+    probe_planned = bool(_to_bool(header.get("probe_enabled")))
+    probe_disabled = any(
+        d.get("tag") == session_notes.AUTO_PROBE_DISABLED for d in note_dicts)
 
     trials.insert(0, "session_id", session_id)
     trials.insert(1, "animal", animal)
@@ -347,7 +416,17 @@ def load_bundle(bundle: str) -> Optional[tuple]:
         hours_since_water=_to_float(astate.get("hours_since_water")),
         header=header,
         bundle=os.path.abspath(bundle),
+        probe_planned=probe_planned,
+        probe_disabled=probe_disabled,
     )
+
+    if note_dicts:
+        notes_df = pd.DataFrame(note_dicts)
+        notes_df.insert(0, "session_id", session_id)
+        notes_df.insert(1, "animal", animal)
+        notes_df.insert(2, "date", date)
+    else:
+        notes_df = pd.DataFrame()
 
     exc_frames: List[pd.DataFrame] = []
     for path in _task_excursion_csvs(bundle):
@@ -361,7 +440,7 @@ def load_bundle(bundle: str) -> Optional[tuple]:
         exc_frames.append(edf)
     excursions = pd.concat(exc_frames, ignore_index=True) if exc_frames else pd.DataFrame()
 
-    return trials, excursions, info
+    return trials, excursions, info, notes_df
 
 
 # --------------------------------------------------------------- top level
@@ -379,7 +458,8 @@ def load_animals(
     is loaded as one (docs/decisions/0113). Pass a single path or a sequence to
     override. ``trials`` gets a global ``seq`` order column (session start, then
     run, then trial) so downstream traces run straight through the animal's
-    history. Sessions with no loadable trial CSV are skipped.
+    history. Sessions with no loadable trial CSV, or with no attempted trials
+    (an aborted start), are skipped.
     """
     if root is None:
         # Imported lazily so a test can point elsewhere without importing paths.
@@ -390,15 +470,18 @@ def load_animals(
     bundles = discover_bundles(root, animals, start_date, end_date)
     trial_frames: List[pd.DataFrame] = []
     exc_frames: List[pd.DataFrame] = []
+    note_frames: List[pd.DataFrame] = []
     infos: List[SessionInfo] = []
     for bundle in bundles:
         loaded = load_bundle(bundle)
         if loaded is None:
             continue
-        tdf, edf, info = loaded
+        tdf, edf, info, ndf = loaded
         trial_frames.append(tdf)
         if not edf.empty:
             exc_frames.append(edf)
+        if not ndf.empty:
+            note_frames.append(ndf)
         infos.append(info)
 
     trials = (
@@ -408,6 +491,9 @@ def load_animals(
     )
     excursions = (
         pd.concat(exc_frames, ignore_index=True) if exc_frames else pd.DataFrame()
+    )
+    notes = (
+        pd.concat(note_frames, ignore_index=True) if note_frames else pd.DataFrame()
     )
     sessions = pd.DataFrame([_info_row(i) for i in infos])
 
@@ -423,7 +509,8 @@ def load_animals(
         trials["seq"] = trials.groupby("animal").cumcount()
         trials = trials.drop(columns=["_sort_start"])
 
-    return AnimalData(trials=trials, excursions=excursions, sessions=sessions)
+    return AnimalData(trials=trials, excursions=excursions, sessions=sessions,
+                      notes=notes)
 
 
 def _session_sort_key(session_id: str) -> str:
@@ -451,5 +538,7 @@ def _info_row(info: SessionInfo) -> dict:
         "pct_baseline": info.pct_baseline,
         "weight_g": info.weight_g,
         "hours_since_water": info.hours_since_water,
+        "probe_planned": info.probe_planned,
+        "probe_disabled": info.probe_disabled,
         "bundle": info.bundle,
     }

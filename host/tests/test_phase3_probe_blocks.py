@@ -25,7 +25,7 @@ from tmaze.core.phase3.probe_blocks import (
 from tmaze.core.phase3.phase3_task import (
     CORRECT, INCORRECT, Phase3Config, Phase3Task)
 from tmaze.core.phase3.trial_sequence import (
-    LEFT, RIGHT, TrialConfig, TrialSequence)
+    LEFT, RIGHT, TrialConfig, TrialSequence, alt_run_ok, max_run_ok)
 
 
 def _drain_block(ctrl):
@@ -40,10 +40,11 @@ def _drain_block(ctrl):
 
 
 class TestProbeBlockController(unittest.TestCase):
-    def _ctrl(self, block_len=10, seed=1, windows=((40, 60),)):
+    def _ctrl(self, block_len=10, seed=1, windows=((40, 60),),
+             max_same_run=0, max_alt_run=0):
         return ProbeBlockController(
             ProbeBlockConfig(enabled=True, block_len=block_len, windows=windows),
-            seed=seed)
+            seed=seed, max_same_run=max_same_run, max_alt_run=max_alt_run)
 
     def test_idle_by_default(self):
         c = self._ctrl()
@@ -108,6 +109,40 @@ class TestProbeBlockController(unittest.TestCase):
         self.assertFalse(c.active)
         self.assertEqual(c.state(), "NORMAL")
 
+    def test_block_honors_max_same_run(self):
+        # The forced block re-rolls so no single-side run exceeds the session cap
+        # (docs/decisions/0138). Check across several seeds, still 5/5 balanced.
+        for seed in range(1, 30):
+            c = self._ctrl(block_len=10, seed=seed, max_same_run=3)
+            c.on_scored(trial_no=40, correct=True, intervention_active=False)
+            sides = _drain_block(c)
+            self.assertEqual(len(sides), 10)
+            self.assertEqual(sides.count(LEFT), 5)
+            self.assertTrue(max_run_ok(sides, len(sides), 3),
+                            f"seed={seed} run cap violated: {sides}")
+
+    def test_block_honors_max_alt_run(self):
+        for seed in range(1, 30):
+            c = self._ctrl(block_len=10, seed=seed, max_alt_run=3)
+            c.on_scored(trial_no=40, correct=True, intervention_active=False)
+            sides = _drain_block(c)
+            self.assertEqual(len(sides), 10)
+            self.assertTrue(alt_run_ok(sides, len(sides), 3),
+                            f"seed={seed} alt cap violated: {sides}")
+
+    def test_no_cap_leaves_block_unconstrained(self):
+        # With both caps 0 (the phase3.json default) the block is only balanced, and
+        # at least one seed produces a run longer than 3 - proving the cap is real.
+        saw_long_run = False
+        for seed in range(1, 60):
+            c = self._ctrl(block_len=10, seed=seed)
+            c.on_scored(trial_no=40, correct=True, intervention_active=False)
+            sides = _drain_block(c)
+            if not max_run_ok(sides, len(sides), 3):
+                saw_long_run = True
+                break
+        self.assertTrue(saw_long_run)
+
     def test_second_block_increments_id_and_differs(self):
         c = self._ctrl(block_len=10, windows=((40, 60), (120, 160)))
         c.on_scored(trial_no=40, correct=True, intervention_active=False)
@@ -143,6 +178,50 @@ class TestProbeBlockController(unittest.TestCase):
         dec = c.advance()                    # aborts rather than issuing trial 3
         self.assertFalse(dec.active)
         self.assertFalse(c.active)
+
+    # ---- mid-session arm/disarm (docs/decisions/0137) ----
+    def test_armed_by_default(self):
+        c = self._ctrl()
+        self.assertTrue(c.armed)
+        self.assertFalse(c.ever_disarmed)
+
+    def test_disarmed_never_fires_in_window(self):
+        c = self._ctrl(windows=((40, 60),))
+        c.set_armed(False)
+        self.assertFalse(c.armed)
+        self.assertTrue(c.ever_disarmed)
+        self.assertFalse(c.on_scored(trial_no=45, correct=True,
+                                     intervention_active=False))
+        self.assertFalse(c.active)
+
+    def test_rearm_allows_a_later_window(self):
+        c = self._ctrl(windows=((40, 60), (120, 160)))
+        c.set_armed(False)
+        self.assertFalse(c.on_scored(trial_no=45, correct=True,
+                                     intervention_active=False))
+        c.set_armed(True)
+        self.assertTrue(c.armed)
+        self.assertTrue(c.on_scored(trial_no=130, correct=True,
+                                    intervention_active=False))
+        self.assertTrue(c.active)
+
+    def test_disarm_aborts_running_block(self):
+        c = self._ctrl(block_len=10)
+        c.on_scored(trial_no=40, correct=True, intervention_active=False)
+        c.advance()                          # issue one block trial
+        c.set_armed(False)                   # "off" also aborts the running block
+        dec = c.advance()
+        self.assertFalse(dec.active)
+        self.assertFalse(c.active)
+        self.assertTrue(c.ever_disarmed)
+
+    def test_reset_rearms_and_clears_ever_disarmed(self):
+        c = self._ctrl()
+        c.set_armed(False)
+        self.assertTrue(c.ever_disarmed)
+        c.reset()
+        self.assertTrue(c.armed)
+        self.assertFalse(c.ever_disarmed)
 
 
 class TestTrialSequenceProbe(unittest.TestCase):
@@ -200,6 +279,20 @@ class TestTrialSequenceProbe(unittest.TestCase):
         self.assertEqual(seq._spine_pos, 2)
         self.assertEqual(seq.probe_state(), "NORMAL")
 
+    def test_block_honors_session_max_same_run(self):
+        # _seq() sets max_same_run=3; the forced probe block should inherit it
+        # (docs/decisions/0138), across several seeds.
+        for seed in range(1, 20):
+            seq = self._seq(seed=seed, block_len=10, windows=((1, 40),))
+            seq.commit(0)
+            seq.probe_trigger_on_score(0, correct=True, intervention_active=False)
+            sides = []
+            for i in range(1, 11):
+                seq.commit(i)
+                sides.append(seq.correct_arm(i))
+            self.assertTrue(max_run_ok(sides, len(sides), 3),
+                            f"seed={seed} run cap violated: {sides}")
+
     def test_incorrect_or_out_of_window_does_not_trigger(self):
         seq = self._seq(windows=((1, 40),))
         seq.commit(0)
@@ -222,6 +315,29 @@ class TestTrialSequenceProbe(unittest.TestCase):
         self.assertEqual(seq._spine_pos, 0)
         self.assertEqual(seq._frontier, 0)
         self.assertFalse(seq.trial_meta(0)["probe"])
+
+    def test_set_probe_armed_gates_trigger(self):
+        seq = self._seq(windows=((1, 40),))
+        self.assertTrue(seq.probe_armed)
+        self.assertFalse(seq.probe_ever_disarmed)
+        seq.set_probe_armed(False)           # operator disables mid-session
+        self.assertFalse(seq.probe_armed)
+        self.assertTrue(seq.probe_ever_disarmed)
+        seq.commit(0)
+        self.assertFalse(seq.probe_trigger_on_score(0, correct=True,
+                                                    intervention_active=False))
+        self.assertFalse(seq.trial_meta(0)["probe"])
+        # reset_debias re-arms (fresh session).
+        seq.reset_debias()
+        self.assertTrue(seq.probe_armed)
+        self.assertFalse(seq.probe_ever_disarmed)
+
+    def test_probe_armed_false_when_disabled(self):
+        seq = self._seq(enabled=False)
+        self.assertFalse(seq.probe_armed)
+        self.assertFalse(seq.probe_ever_disarmed)
+        seq.set_probe_armed(False)           # no-op, must not raise
+        self.assertFalse(seq.probe_armed)
 
 
 def _frame(**kw):
@@ -293,6 +409,16 @@ class TestPhase3TaskProbeReward(unittest.TestCase):
         self.assertFalse(dec.probe)
         self.assertEqual(dec.outcome, CORRECT)
         self.assertTrue(dec.reward, "a correct reinforced trial should pay out")
+
+    def test_disarm_prevents_trigger_and_pays_out(self):
+        task = self._task(windows=((1, 40),))
+        task.set_probe_armed(False)          # operator turns probes off
+        dec = self._score_correct(task)
+        self.assertFalse(dec.probe)
+        self.assertFalse(dec.probe_trigger)
+        self.assertEqual(dec.outcome, CORRECT)
+        self.assertTrue(dec.reward,
+                        "a correct trial should pay out when probes are disabled")
 
     def test_reward_incorrect_is_ignored_under_probe(self):
         task = self._task(reward_incorrect=True)

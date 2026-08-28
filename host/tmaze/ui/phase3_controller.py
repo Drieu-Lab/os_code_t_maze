@@ -75,8 +75,8 @@ from tmaze.core.phase3.excursion_log import (
 from tmaze.core.phase3.phase3_log import Phase3Log, Phase3StateSnapshot
 from tmaze.core.session.session_notes import (
     AUTO_ALT_END, AUTO_ALT_START, AUTO_BACK, AUTO_DEBIAS_END,
-    AUTO_DEBIAS_START, AUTO_PROBE_END, AUTO_PROBE_START, AUTO_REPEAT, AUTO_RESUME,
-    AUTO_SKIP)
+    AUTO_DEBIAS_START, AUTO_PROBE_DISABLED, AUTO_PROBE_ENABLED, AUTO_PROBE_END,
+    AUTO_PROBE_START, AUTO_REPEAT, AUTO_RESUME, AUTO_SKIP)
 from tmaze.core.phase3.phase3_task import ABANDONED, CORRECT, INCORRECT, Phase3Config, Phase3Task
 from tmaze.core.reward.reward_dispenser import WellDispenser
 from tmaze.core.reward.reward_volume import format_volume, reward_volume_ul
@@ -105,7 +105,8 @@ except Exception:  # pragma: no cover
 FREEROAM_TOKENS = ("FREEROAM", "FREE")
 
 POLL_INTERVAL_MS = 100          # snapshot publish + status refresh (Tk)
-SEED_MASK = 0xFFFFFFFF          # the sequence PRNG is 32-bit (trial_sequence.lcg)
+SEED_MASK = 0xFFFFFFFF          # normalise a pinned seed to a stable 32-bit range
+                                # (the sequence PRNG accepts any int; see ADR-0140)
 
 # Reward top-ups at the central well after the correct-choice prime (ADR-0069),
 # delivered via the SAME shared WellDispenser the reward-shaping phases use
@@ -557,19 +558,24 @@ class Phase3ControlView(VisionActuator):
         st = self._state
         return st is not None and st.generator != "balanced"
 
-    # The unrewarded probe-block abort (Rig-view / control-bar button). There is NO
-    # manual start: a probe fires automatically on the correct-choice window trigger
-    # (probe_blocks.py / docs/decisions/0134). This works under ANY generator (probes
+    # The unrewarded probe-block controls (Rig-view / control-bar button). There is
+    # NO manual start: a probe fires automatically on the correct-choice window
+    # trigger (probe_blocks.py / docs/decisions/0134). The operator can DISABLE
+    # probes mid-session so no window fires (docs/decisions/0137) and re-enable them;
+    # a disable also aborts any running block. This works under ANY generator (probes
     # are orthogonal to the closed-loop stack). Enqueued like the other overrides and
-    # applied on the next committed trial.
+    # applied on the actuation thread.
     def end_probe_block(self) -> None:
         """Operator: end a running probe block early (abort)."""
         self._enqueue_act(("cmd", "probe_end"))
 
-    def toggle_probe_block(self) -> None:
-        """Abort a running probe block (the button is live only while one is ACTIVE;
-        there is no manual start - the trigger is automatic)."""
-        self.end_probe_block()
+    def toggle_probe_armed(self) -> None:
+        """Operator: flip probes on<->off mid-session (docs/decisions/0137). The
+        control-bar button is a persistent On/Off toggle live whenever probes were
+        built for the run. The flip is resolved on the actuation thread from the
+        controller's current armed state, so it stays correct regardless of the
+        published snapshot's age."""
+        self._enqueue_act(("cmd", "probe_toggle"))
 
     # --------------------------------------------------------------- thread
     def _process_act_item(self, item, snap) -> None:
@@ -701,6 +707,26 @@ class Phase3ControlView(VisionActuator):
             # 0134); publish so the control bar/readout drop the PROBE tag promptly.
             self._task.end_probe_block()
             self._emit_intervention(AUTO_PROBE_END, "probe block aborted", idx, iso)
+            self._publish_state(armed=snap.gate_open)
+            return
+        if name == "probe_toggle":
+            # Operator flips probes on<->off mid-session (docs/decisions/0137):
+            # DISABLE stops any further correct-choice window from firing AND aborts a
+            # running block; ENABLE re-arms the remaining windows. Resolve the flip
+            # from the CURRENT armed state (not the possibly-stale snapshot), record
+            # it on the timeline (so it is recoverable from the saved notes/summary -
+            # the archived config can't show a mid-session disable), then publish so
+            # the toggle label / [PROBE OFF] tag update promptly.
+            was_armed = (bool(getattr(self._seq, "probe_armed", False))
+                         if self._seq is not None else False)
+            self._task.set_probe_armed(not was_armed)
+            if was_armed:
+                self._emit_intervention(
+                    AUTO_PROBE_DISABLED,
+                    "probe blocks disabled (no window will fire)", idx, iso)
+            else:
+                self._emit_intervention(
+                    AUTO_PROBE_ENABLED, "probe blocks re-enabled", idx, iso)
             self._publish_state(armed=snap.gate_open)
             return
         if name == "skip":
@@ -1244,15 +1270,20 @@ class Phase3ControlView(VisionActuator):
             extra += f"  resumes:{self._reopen_resumes}"
         # Conditional probe segment: only after the first scored probe BLOCK trial
         # (so a normal session's status line is unchanged), plus a live PROBE tag
-        # while a probe block is running. See probe_blocks.py / docs/decisions/0134.
+        # while a probe block is running and a [PROBE OFF] tag when the operator has
+        # disabled probes mid-session (docs/decisions/0134/0137).
         probe = ""
         st = self._state
         probe_state = getattr(st, "probe_state", "NORMAL") if st is not None else "NORMAL"
+        probe_enabled = bool(getattr(st, "probe_enabled", False)) if st is not None else False
+        probe_armed = bool(getattr(st, "probe_armed", True)) if st is not None else True
         if self._probe_done:
             ppct = 100.0 * self._probe_correct / self._probe_done
             probe = f"  probe:{self._probe_correct}/{self._probe_done} ({ppct:.0f}%)"
         if probe_state == "ACTIVE":
             probe += "  [PROBE ACTIVE]"
+        elif probe_enabled and not probe_armed:
+            probe += "  [PROBE OFF]"
         self._status_text = (
             warn +
             f"ARMED  seed:{self._active_seed}  trial:{min(idx + 1, n)}/{n}  "

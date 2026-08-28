@@ -53,7 +53,9 @@ from tmaze.core.phase3.trial_sequence import (
 # the tab both start from.
 DEFAULT_MAX_TOPUPS = 3
 
-# 32-bit mask so a pinned seed matches the sequence PRNG (trial_sequence.lcg).
+# A pinned seed is normalised to 32 bits so it round-trips in a stable range in
+# phase3.json. The sequence PRNG (trial_sequence, random.Random since ADR-0140)
+# accepts any int, so this mask is just a config-surface convention now.
 _SEED_MASK = 0xFFFFFFFF
 
 # The three config sections; any other top-level key (``_schema``, ...) is left

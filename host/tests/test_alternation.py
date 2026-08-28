@@ -120,9 +120,11 @@ class TestAutoTrigger(unittest.TestCase):
         self.assertEqual(c.alt_rate(), 0.0)        # window cleared on exit
 
     def test_bias_camper_cannot_exit_one_sided(self):
-        # A rat that camps ONE arm (its bias) earns its repeats there, but the block
-        # then forces the OTHER arm; the camper never repeats there, so it can't exit
-        # by one-sided camping and rides to the welfare cap (ADR-0129).
+        # A rat that camps ONE arm (its bias) earns its repeats there and is offered
+        # a one-off "bridge" to the OTHER arm each time a run completes (ADR-0139);
+        # it never repeats on that far arm, so it can't exit by one-sided camping and
+        # rides to the welfare cap. (The camper IS rewarded on its camp trials now -
+        # the accepted trade-off - but still cannot end the block one-sided.)
         c = self._ctl(max_block_len=10)
         _prime_alternator(c, 4)
         forced, states = [], []
@@ -137,6 +139,34 @@ class TestAutoTrigger(unittest.TestCase):
         self.assertIn(LEFT, forced)                # forced onto the avoided arm
         self.assertIn(NORMAL, states)              # the block did end...
         self.assertEqual(states.index(NORMAL), 10)  # ...only at max_block_len (cap)
+
+    def test_alternator_not_rewarded_every_other_trial_after_one_arm(self):
+        # Regression for the ADR-0129 held-far-arm leak (ADR-0139): a rat complies
+        # on ONE arm, then reverts to alternating. The old code held the far arm as
+        # a fixed target, so the alternator landed on it every other trial and
+        # collected ~50% to the cap. Now the far arm is only a one-off bridge and the
+        # forced side REVERTS to the last choice, so alternation earns ~0% (at most
+        # the single bridge catch) and the forced side tracks the last choice rather
+        # than staying pinned on the far arm.
+        c = self._ctl(max_block_len=30)
+        _prime_alternator(c, 4)                    # prev choice = LEFT, block arms
+        # Satisfy the LEFT arm with two rewarded stays.
+        for _ in range(2):
+            d = c.decide()
+            self.assertEqual(d.side, LEFT)
+            c.record(d.side, LEFT)
+        # Now alternate forever, ignoring the cue.
+        chosen, rewards, forced_after = LEFT, 0, []
+        for _ in range(12):
+            d = c.decide()
+            self.assertEqual(d.state, INTERVENTION)
+            forced_after.append(d.side)
+            chosen = RIGHT if chosen == LEFT else LEFT
+            if d.side == chosen:
+                rewards += 1
+            c.record(d.side, chosen)
+        self.assertLessEqual(rewards, 1)           # only the single bridge catch
+        self.assertIn(LEFT, forced_after)          # reverts to last choice, not held R
 
     def test_cap_exit_when_never_complies(self):
         c = self._ctl()                            # only the cap can end it

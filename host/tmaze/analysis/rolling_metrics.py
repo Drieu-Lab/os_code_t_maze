@@ -8,10 +8,13 @@ and an engagement proxy.
 
 Every rate is a masked rolling ratio ``sum(numerator) / sum(denominator)`` over the
 window, so conditional measures (win-stay is only defined after a correct trial,
-etc.) use the correct denominator. Baseline-strategy rates use FREE trials only
-(the animal's uncoerced behaviour); a block deliberately breaks counterbalancing, so
-pooling it in would distort side bias / cue-follow (see the ADR on trial
-partitioning).
+etc.) use the correct denominator. Baseline accuracy/strategy rates use OUT-OF-BLOCK
+trials - not an intervention block, not an unrewarded probe - matching the live GUI
+(``phase3_traces``) and the scalar readout (``phase3_stats``); post-block recovery
+trials ARE included (an intervention block breaks counterbalancing and is excluded,
+but the free trials after it are ordinary behaviour). See docs/decisions/0132. The
+``epoch`` column (``free``/``in_block``/``post_block``) is still carried for the mode
+labeler and the peri-intervention baselines.
 
 Engagement: with no per-excursion log on disk yet (the feature is new), engagement
 is a PROXY - the rolling median inter-trial gap in seconds from ``trial_start_iso``
@@ -30,7 +33,8 @@ import numpy as np
 import pandas as pd
 
 from tmaze.analysis.bundle_reader import LEFT_LABEL
-from tmaze.analysis.choice_signals import EPOCH_FREE, bool_series
+from tmaze.analysis.choice_signals import bool_series
+from tmaze.core.phase3.trial_sequence import HIGH, LOW
 
 DEFAULT_WINDOW = 20
 # A rate needs at least this many denominator samples in the window to be plotted,
@@ -85,7 +89,11 @@ def build_traces(
     if c.empty:
         return TraceResult(traces=pd.DataFrame())
 
-    free = c["epoch"].eq(EPOCH_FREE)
+    # Baseline accuracy/strategy rates run over OUT-OF-BLOCK trials (not an
+    # intervention block, not an unrewarded probe), matching the live GUI
+    # (phase3_traces) and phase3_stats - post-block recovery trials are included.
+    # See docs/decisions/0132.
+    oob = ~bool_series(c["in_block"]) & ~bool_series(c["probe"])
     own = bool_series(c["own_pair"])
     prev_correct = bool_series(c["prev_correct"])
     prev_incorrect = own & ~prev_correct
@@ -109,8 +117,22 @@ def build_traces(
             "complying": (c["choice"] == c["correct_arm"]).to_numpy(),
         }
     )
+    # Rolling accuracy (over out-of-block trials) + per-choice-cue accuracy, the
+    # offline twin of phase3_traces' accuracy / high_acc / low_acc.
+    correct = bool_series(c["correct"])
+    traces["accuracy"] = _masked_rate(
+        correct & oob, oob, window, min_den
+    ).to_numpy()
+    is_high = c["choice_cue"].eq(HIGH)
+    is_low = c["choice_cue"].eq(LOW)
+    traces["high_acc"] = _masked_rate(
+        correct & oob & is_high, oob & is_high, window, min_den
+    ).to_numpy()
+    traces["low_acc"] = _masked_rate(
+        correct & oob & is_low, oob & is_low, window, min_den
+    ).to_numpy()
     traces["side_bias_left"] = _masked_rate(
-        (c["choice"].eq(LEFT_LABEL) & free), (free & c["choice"].notna()),
+        (c["choice"].eq(LEFT_LABEL) & oob), (oob & c["choice"].notna()),
         window, min_den,
     ).to_numpy()
     switch = bool_series(c["switch"])
@@ -125,7 +147,7 @@ def build_traces(
         ~stay & prev_incorrect, prev_incorrect, window, min_den
     ).to_numpy()
     traces["cue_follow"] = _masked_rate(
-        bool_series(c["cue_followed"]) & free, free & c["cue_followed"].notna(),
+        bool_series(c["cue_followed"]) & oob, oob & c["cue_followed"].notna(),
         window, min_den,
     ).to_numpy()
     cue_switched = bool_series(c["cue_switched"])
@@ -133,7 +155,7 @@ def build_traces(
         switch & own & cue_switched, own & cue_switched, window, min_den
     ).to_numpy()
     traces["reward_rate"] = _masked_rate(
-        c["reward"].eq(1) & free, free, window, min_den
+        c["reward"].eq(1) & oob, oob, window, min_den
     ).to_numpy()
     traces["gap_s_med"] = (
         c["_gap_s"].rolling(window, min_periods=1).median().to_numpy()

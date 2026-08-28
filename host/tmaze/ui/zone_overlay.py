@@ -34,7 +34,7 @@ AXIS_HEX = "#ffffff"
 # Zone-name label styling. Labels are pushed OUTSIDE the rig outline (each
 # zone's own outer edge / the maze bounding box) into the surrounding border so
 # they never sit on top of the rat: the top zones (choices + junction) go above
-# the maze, HUB to its left, WELL below the well, and the two RETURN labels are
+# the maze, HUB to its left, REWARD below the well, and the two RETURN labels are
 # rotated to run along the slanted side walls. CENTRAL_STEM is intentionally
 # left near the corridor (its outward-from-centre anchor) per current request.
 LABEL_FONT_SCALE = 0.28
@@ -232,11 +232,11 @@ def draw_zone_overlay(disp, zone_map, current_zone: Optional[str] = None,
                            np.int32)
             well_color = _hex_to_bgr(WELL_HEX)
             cv2.polylines(disp, [pts], True, well_color, 3 if in_well else 1)
-            # WELL label below the whole rig (max y over zones + well).
+            # REWARD label below the whole rig (max y over zones + well).
             wcx = sum(p[0] for p in zone_map.well) / len(zone_map.well)
             bottom = max([p[1] for z in drawn for p in z.polygon]
                          + [p[1] for p in zone_map.well])
-            _text_at(disp, "WELL", wcx * dw, (bottom + LABEL_MARGIN) * dh,
+            _text_at(disp, "REWARD", wcx * dw, (bottom + LABEL_MARGIN) * dh,
                      well_color, dw, dh, halign="center", valign="top")
         if zone_map.stem_base is not None and zone_map.stem_tip is not None:
             a = (int(zone_map.stem_base[0] * dw), int(zone_map.stem_base[1] * dh))

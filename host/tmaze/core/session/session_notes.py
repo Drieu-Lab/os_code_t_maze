@@ -55,6 +55,13 @@ AUTO_ALT_START = "auto:alt_start"
 AUTO_ALT_END = "auto:alt_end"
 AUTO_PROBE_START = "auto:probe_start"
 AUTO_PROBE_END = "auto:probe_end"
+# Operator DISABLED / re-ENABLED unrewarded probe blocks mid-session
+# (docs/decisions/0137): a disable stops any further correct-choice window from
+# firing (and aborts a running block); an enable re-arms the remaining windows.
+# Recorded on the timeline so a reader can tell a session the operator turned
+# probes off apart from one where a planned window simply never fired.
+AUTO_PROBE_DISABLED = "auto:probe_disabled"
+AUTO_PROBE_ENABLED = "auto:probe_enabled"
 AUTO_REPEAT = "auto:repeat"
 AUTO_SKIP = "auto:skip"
 AUTO_BACK = "auto:back"

@@ -927,10 +927,12 @@ def main() -> int:
                 # intervention_blocks is active with the alternation child enabled).
                 # See alternation.py / intervention_stack.py / ADR.
                 "alt": _p3_call("toggle_alternation_block"),
-                # Abort a running unrewarded probe block (works under any generator;
-                # no manual start - probes fire on the correct-choice window trigger,
-                # docs/decisions/0134). See probe_blocks.py.
-                "probe": _p3_call("toggle_probe_block"),
+                # Persistent On/Off toggle for unrewarded probe blocks (works under
+                # any generator). There is no manual start - probes fire on the
+                # correct-choice window trigger (docs/decisions/0134); this turns the
+                # trigger off/on mid-session (off also aborts a running block,
+                # docs/decisions/0137). See probe_blocks.py.
+                "probe": _p3_call("toggle_probe_armed"),
             }
             ctrl_bar = TrialControlBar(
                 upper, callbacks=controls, state_getter=phase3_state,

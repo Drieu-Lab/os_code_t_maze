@@ -4,8 +4,8 @@
   },
   "reward": {
     "port": 2,
-    "pulse_ms": 300,
-    "max_topups": 1,
+    "pulse_ms": 465,
+    "max_topups": 0,
     "reward_incorrect": false
   },
   "cue": {
@@ -17,8 +17,8 @@
   "sequence": {
     "max_trials": 200,
     "block_size": 20,
-    "max_same_run": 4,
-    "max_alt_run": 4,
+    "max_same_run": 0,
+    "max_alt_run": 0,
     "high_tone_is_left": true,
     "high_tone_hz": 8000,
     "low_tone_hz": 4000,

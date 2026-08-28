@@ -56,10 +56,12 @@ _BUTTONS = (
     ("alt", "Start alt block", "phase3.alt_toggle"),
     # Unrewarded probe block (probe_blocks.py). There is NO manual start: a probe
     # fires automatically on the correct-choice window trigger (docs/decisions/0134).
-    # This button ABORTS a running probe, so it is live only while one is ACTIVE
-    # (and under ANY generator - probes are orthogonal to the closed-loop stack).
-    # Enable set in _refresh from the published probe state.
-    ("probe", "End probe block", "phase3.probe_toggle"),
+    # This is a persistent On/Off toggle: it DISABLES/re-enables the trigger
+    # mid-session (docs/decisions/0137; disabling also aborts a running block), so it
+    # is live whenever probes were built for the run (under ANY generator - probes
+    # are orthogonal to the closed-loop stack). Label + enable set in _refresh from
+    # the published probe state.
+    ("probe", "Disable probes", "phase3.probe_toggle"),
 )
 
 
@@ -154,12 +156,12 @@ class TrialControlBar:
         in_block = bool(has_state
                         and getattr(state, "debias_state", "NORMAL") == "INTERVENTION")
         active_kind = getattr(state, "active_kind", "") if has_state else ""
-        # Probe is orthogonal to the generator. The abort button is live only while a
-        # probe block is actually running (there is no manual start; the trigger is
-        # automatic - docs/decisions/0134). See probe_blocks.py.
-        probe_state = getattr(state, "probe_state", "NORMAL") if has_state else "NORMAL"
-        probe_active = bool(has_state and getattr(state, "probe_enabled", False)
-                            and probe_state == "ACTIVE")
+        # Probe is orthogonal to the generator. The On/Off toggle is live whenever
+        # probes were built for the run (there is no manual start; the trigger is
+        # automatic - docs/decisions/0134), so the operator can disable it before any
+        # probe fires (docs/decisions/0137). See probe_blocks.py.
+        probe_enabled = bool(has_state and getattr(state, "probe_enabled", False))
+        probe_armed = bool(getattr(state, "probe_armed", True)) if has_state else True
         enabled = {
             "skip": armed,
             "repeat": armed,
@@ -169,7 +171,7 @@ class TrialControlBar:
             "pause": armed,
             "debias": armed and debias_on,
             "alt": armed and alt_on,
-            "probe": armed and probe_active,
+            "probe": armed and probe_enabled,
         }
         for key, b in self._buttons.items():
             b.configure(state=("normal" if enabled.get(key) else "disabled"))
@@ -190,5 +192,9 @@ class TrialControlBar:
             alt_active = in_block and active_kind == "alternation"
             self._buttons["alt"].configure(
                 text="End alt block" if alt_active else "Start alt block")
-        # The probe button is abort-only ("End probe block"); its label is fixed and
-        # it simply enables/disables with whether a probe block is running.
+        # The probe button is a persistent On/Off toggle: "Disable probes" while
+        # armed, "Enable probes" once the operator has turned it off (docs/decisions/
+        # 0137). It enables whenever probes were built for the run (above).
+        if "probe" in self._buttons:
+            self._buttons["probe"].configure(
+                text="Disable probes" if probe_armed else "Enable probes")

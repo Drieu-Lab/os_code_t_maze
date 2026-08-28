@@ -11,11 +11,13 @@ Run from host/tests:  python -m unittest test_analysis_bundle_reader
 """
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import unittest
 
 from tmaze.analysis import bundle_reader as br
+from tmaze.core.session import session_notes
 
 _HEADER = (
     "# phase3_session animal=600 session_id={sid} seed=42 proto=7\n"
@@ -40,6 +42,22 @@ def _row(trial, cue, choice, outcome, rewarded):
     )
 
 
+def _blank_row(trial, cue):
+    """A planned-but-unrun trial: the cue matrix is filled up front but there is no
+    start stamp / chosen arm / outcome yet (phase3_log pre-writes the plan)."""
+    vals = [str(trial), "LEFT", cue, "HIGH", "LOW"] + [""] * 15 + ["NORMAL"] + [""] * 5
+    return ",".join(vals) + "\n"
+
+
+def _abandoned_row(trial, cue):
+    """An abandoned trial: STARTED (has a start stamp) and scored ABANDONED, but no
+    chosen arm - it must be kept (it breaks own-choice pairs and counts as activity)."""
+    ts = f"2026-01-01T12:00:{trial:02d}"
+    vals = [str(trial), "LEFT", cue, "HIGH", "LOW", "", "ABANDONED", "0", "", "", "",
+            ts, ts, "", "", "", "", ts, "", "", "NORMAL", "", "", "0.0", "", "0.0"]
+    return ",".join(vals) + "\n"
+
+
 def _make_bundle(root, sid, n=5):
     bundle = os.path.join(root, sid)
     os.makedirs(os.path.join(bundle, "task"))
@@ -51,6 +69,50 @@ def _make_bundle(root, sid, n=5):
         fh.write(_COLS)
         for t in range(1, n + 1):
             fh.write(_row(t, "HIGH", "LEFT", "CORRECT", 1))
+    return bundle
+
+
+def _make_bundle_with_unrun(root, sid, n_real, n_blank):
+    """A bundle whose CSV has ``n_real`` attempted trials followed by ``n_blank``
+    planned-but-unrun placeholder rows (the shape phase3_log writes)."""
+    bundle = os.path.join(root, sid)
+    os.makedirs(os.path.join(bundle, "task"))
+    with open(os.path.join(bundle, f"session_{sid}.json"), "w") as fh:
+        fh.write("{}")
+    with open(os.path.join(bundle, "task", f"phase3_{sid}.csv"), "w") as fh:
+        fh.write(_HEADER.format(sid=sid))
+        fh.write(_COLS)
+        for t in range(1, n_real + 1):
+            fh.write(_row(t, "HIGH", "LEFT", "CORRECT", 1))
+        for t in range(n_real + 1, n_real + n_blank + 1):
+            fh.write(_blank_row(t, "HIGH"))
+    return bundle
+
+
+def _make_probe_bundle(root, sid, *, planned=True, disabled=False, n=5):
+    """A bundle carrying an optional probe_blocks header line and an optional
+    summary/notes_<id>.jsonl with an AUTO_PROBE_DISABLED entry (docs/decisions/0137)."""
+    bundle = os.path.join(root, sid)
+    os.makedirs(os.path.join(bundle, "task"))
+    os.makedirs(os.path.join(bundle, "summary"))
+    with open(os.path.join(bundle, f"session_{sid}.json"), "w") as fh:
+        fh.write("{}")
+    header = _HEADER.format(sid=sid)
+    if planned:
+        header += ("# probe_blocks probe_enabled=True probe_block_len=10 "
+                   "probe_windows=30-70\n")
+    with open(os.path.join(bundle, "task", f"phase3_{sid}.csv"), "w") as fh:
+        fh.write(header)
+        fh.write(_COLS)
+        for t in range(1, n + 1):
+            fh.write(_row(t, "HIGH", "LEFT", "CORRECT", 1))
+    if disabled:
+        with open(os.path.join(bundle, "summary", f"notes_{sid}.jsonl"),
+                  "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({
+                "id": 0, "iso": "2026-01-01T12:00:03", "text": "probes disabled",
+                "trial_index": 3, "tag": session_notes.AUTO_PROBE_DISABLED,
+                "count": 1, "source": "auto"}) + "\n")
     return bundle
 
 
@@ -135,6 +197,48 @@ class TestLoadAnimals(unittest.TestCase):
             self.assertEqual(row2["outcome"], "INCORRECT")
 
 
+class TestDropsUnrunPlaceholders(unittest.TestCase):
+    """ADR-0131: phase3_log pre-writes the full planned cue matrix, so un-run trials
+    sit as placeholder rows. The tidy frame keeps only ATTEMPTED trials, so ``seq``
+    stays contiguous and ``n_trials`` reflects real activity."""
+
+    def test_unrun_rows_dropped_seq_contiguous(self):
+        with tempfile.TemporaryDirectory() as root:
+            _make_bundle_with_unrun(root, "600_20260101_120000", n_real=3, n_blank=17)
+            _make_bundle_with_unrun(root, "600_20260102_120000", n_real=2, n_blank=18)
+            data = br.load_animals(("600",), root=root)
+            self.assertEqual(len(data.trials), 5)                 # attempted only
+            self.assertEqual(list(data.trials["seq"]), list(range(5)))  # contiguous
+            self.assertEqual(list(data.sessions["n_trials"]), [3, 2])
+
+    def test_all_placeholder_session_skipped(self):
+        with tempfile.TemporaryDirectory() as root:
+            _make_bundle_with_unrun(root, "600_20260101_120000", n_real=0, n_blank=20)
+            _make_bundle(root, "600_20260102_120000", n=4)
+            data = br.load_animals(("600",), root=root)
+            self.assertEqual(len(data.sessions), 1)               # aborted start dropped
+            self.assertEqual(data.sessions.iloc[0]["session_id"],
+                             "600_20260102_120000")
+            self.assertEqual(len(data.trials), 4)
+
+    def test_abandoned_trial_kept(self):
+        with tempfile.TemporaryDirectory() as root:
+            sid = "600_20260101_120000"
+            bundle = os.path.join(root, sid)
+            os.makedirs(os.path.join(bundle, "task"))
+            with open(os.path.join(bundle, f"session_{sid}.json"), "w") as fh:
+                fh.write("{}")
+            with open(os.path.join(bundle, "task", f"phase3_{sid}.csv"), "w") as fh:
+                fh.write(_HEADER.format(sid=sid))
+                fh.write(_COLS)
+                fh.write(_row(1, "HIGH", "LEFT", "CORRECT", 1))   # completed -> kept
+                fh.write(_abandoned_row(2, "LOW"))                # started -> kept
+                fh.write(_blank_row(3, "HIGH"))                   # never run -> dropped
+            data = br.load_animals(("600",), root=root)
+            self.assertEqual(sorted(data.trials["trial"].tolist()), [1, 2])
+            self.assertEqual(data.sessions.iloc[0]["n_trials"], 2)
+
+
 class TestSessionAnchor(unittest.TestCase):
     """ADR-0124: the sessions frame anchors to the canonical session t0 when the
     header carries it, and falls back to the gate-arm time for older bundles; the
@@ -217,6 +321,44 @@ class TestMultiRoot(unittest.TestCase):
             self.assertEqual(list(data.trials["seq"]), list(range(5)))
             self.assertEqual(data.trials.iloc[0]["session_id"],
                              "600_20260101_120000")
+
+
+class TestProbeNotesAndFlags(unittest.TestCase):
+    """The notes frame + probe_planned/probe_disabled session flags
+    (docs/decisions/0137)."""
+
+    def test_probe_planned_but_not_disabled(self):
+        with tempfile.TemporaryDirectory() as root:
+            _make_probe_bundle(root, "600_20260101_120000",
+                               planned=True, disabled=False)
+            data = br.load_animals(("600",), root=root)
+            s = data.sessions.iloc[0]
+            self.assertTrue(bool(s["probe_planned"]))
+            self.assertFalse(bool(s["probe_disabled"]))
+            self.assertTrue(data.notes.empty)      # no notes file written
+
+    def test_probe_disabled_flag_and_notes_frame(self):
+        with tempfile.TemporaryDirectory() as root:
+            _make_probe_bundle(root, "600_20260101_120000",
+                               planned=True, disabled=True)
+            data = br.load_animals(("600",), root=root)
+            s = data.sessions.iloc[0]
+            self.assertTrue(bool(s["probe_planned"]))
+            self.assertTrue(bool(s["probe_disabled"]))
+            self.assertFalse(data.notes.empty)
+            self.assertIn(session_notes.AUTO_PROBE_DISABLED,
+                          set(data.notes["tag"]))
+            self.assertEqual(data.notes.iloc[0]["session_id"],
+                             "600_20260101_120000")
+
+    def test_no_notes_or_probe_plan_still_loads(self):
+        with tempfile.TemporaryDirectory() as root:
+            _make_bundle(root, "600_20260101_120000", n=3)  # plain bundle
+            data = br.load_animals(("600",), root=root)
+            s = data.sessions.iloc[0]
+            self.assertFalse(bool(s["probe_planned"]))
+            self.assertFalse(bool(s["probe_disabled"]))
+            self.assertTrue(data.notes.empty)
 
 
 if __name__ == "__main__":

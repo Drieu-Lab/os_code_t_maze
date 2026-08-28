@@ -19,6 +19,7 @@ from dataclasses import fields
 from tmaze.core.phase3.debias import DebiasBlockConfig
 from tmaze.core.phase3.phase3_log import (COLUMNS, Phase3Log, Phase3RowView, Phase3StateSnapshot,
                         _Row)
+from tmaze.core.phase3.probe_blocks import ProbeBlockConfig
 from tmaze.core.phase3.trial_sequence import (
     GEN_DEBIAS_BLOCKS, HIGH, LEFT, LOW, RIGHT, TrialConfig, TrialSequence)
 
@@ -523,6 +524,45 @@ class TestTrialEditArchive(unittest.TestCase):
         res = log.supersede_trial(0, "back")
         self.assertIsNotNone(res)
         self.assertTrue(res.probe)
+
+
+def _probe_log(block_len=10, windows=((40, 60),), seed=123):
+    cfg = TrialConfig(max_trials=60, block_size=20, max_same_run=3,
+                      probe=ProbeBlockConfig(enabled=True, block_len=block_len,
+                                             windows=windows))
+    seq = TrialSequence(cfg, seed=seed)
+    return Phase3Log(seq, animal="RAT600", session_start_iso="t"), seq
+
+
+class TestProbeDisableLogging(unittest.TestCase):
+    """The mid-session probe on/off gate surfaced in the snapshot + CSV header
+    (docs/decisions/0137)."""
+
+    def test_snapshot_carries_probe_armed(self):
+        log, seq = _probe_log()
+        self.assertTrue(log.snapshot(0, armed=True).probe_armed)
+        seq.set_probe_armed(False)
+        self.assertFalse(log.snapshot(0, armed=True).probe_armed)
+
+    def test_header_records_probe_plan(self):
+        log, _seq = _probe_log(block_len=10, windows=((30, 70),))
+        header = [ln for ln in log.render_csv().split("\n") if ln.startswith("#")]
+        self.assertTrue(any("probe_enabled=True" in ln for ln in header))
+        self.assertTrue(any("probe_block_len=10" in ln for ln in header))
+        self.assertTrue(any("probe_windows=30-70" in ln for ln in header))
+        # No manual-disable caveat until the operator actually disables.
+        self.assertFalse(any("manually DISABLED" in ln for ln in header))
+
+    def test_header_flags_manual_disable(self):
+        log, seq = _probe_log()
+        seq.set_probe_armed(False)
+        header = [ln for ln in log.render_csv().split("\n") if ln.startswith("#")]
+        self.assertTrue(any("manually DISABLED" in ln for ln in header))
+
+    def test_header_omits_probe_line_when_disabled(self):
+        # A run with probes off in config carries no probe_blocks header line.
+        header = [ln for ln in _log().render_csv().split("\n") if ln.startswith("#")]
+        self.assertFalse(any("probe_enabled=" in ln for ln in header))
 
 
 if __name__ == "__main__":

@@ -21,17 +21,23 @@ REPEAT to be rewarded and a relentless alternator earns nothing until it breaks
 the habit. The forced side is recomputed each trial from the realized choices
 (unlike debias's fixed per-block side).
 
-Bias-aware forced side (see ADR-0129). Forcing "repeat your last choice" has one
-escape that ALSO reinforces a side bias: the rat can camp its preferred arm and
-be rewarded for every repeat, driving the in-block rate down and exiting - the
-block then trains the very bias we don't want. So a block does not exit on a
-one-sided repeat run. It requires ``exit_repeats_per_side`` (k) rewarded repeats
-on BOTH arms: while neither arm has k yet the forced side is the last choice (the
-original de-alternation contract, 0% for a pure alternator); once one arm reaches
-k the block forces the OTHER arm (a one-off "bridge" switch demand) and then
-requires repeats there. A rat can only leave by showing it repeats regardless of
-side, and in-block rewards end up split across both arms rather than piled on a
-bias.
+Forced side: repeat-last-choice with an edge-triggered bridge (see ADR-0139,
+amending ADR-0129). The default forced side is the animal's LAST CHOICE, so a
+pure alternator (which always switches) is wrong on every trial - 0% until the
+cap. To also require the rat to show it can repeat on BOTH arms (the two-sided
+exit, below), the block offers a ONE-OFF "bridge" trial to the far arm the moment
+a run of ``exit_repeats_per_side`` (k) rewarded repeats completes on the current
+arm; if the rat does not repeat on the far arm, the forced side REVERTS to the
+last choice on the next trial (it is not a held fixed side). This edge-trigger is
+deliberate: an earlier version (ADR-0129) HELD the far arm until it was satisfied,
+which let an alternator that had complied once then land on the held side every
+other trial (a correct SWITCH onto it, never a stay) and collect ~50% to the cap -
+observed on the bench as "mindless alternation, rewarded every other trial". With
+the revert, that far-arm reward is at most the single bridge catch, so alternation
+stays ~0%. The cost (accepted, ADR-0139): a rat that instead CAMPS one arm is
+rewarded on its camp trials and only eats each bridge error, so this block no
+longer strongly starves a camper - side-bias correction is the concurrent debias
+block's job (frozen during a de-alternation block, ADR-0136).
 
 Detector (cue-aware alternation rate). We do NOT just count switches in the choice
 stream: a rat correctly FOLLOWING an (alternating stretch of the) cue would then
@@ -156,6 +162,12 @@ class AlternationBlockController:
         # Rewarded repeats earned on each arm within the current block - the
         # two-sided exit gate (ADR-0129). Reset at each block start/end.
         self._rep = {LEFT: 0, RIGHT: 0}
+        # Consecutive rewarded stays on the current arm and a latched request for
+        # a one-off "bridge" trial to the far arm (edge-triggered, ADR-0139): a
+        # completed k-run sets _flip_pending; otherwise the forced side reverts to
+        # the last choice (see decide()).
+        self._consec = 0
+        self._flip_pending = False
         self._trigger = ""
         self._manual_force = False
         self._manual_end = False
@@ -237,6 +249,17 @@ class AlternationBlockController:
                 # onto it) are not repeats and don't count toward the exit.
                 if chosen_side == self._target and chosen_side == self._prev_chosen:
                     self._rep[chosen_side] += 1
+                    # A completed run of k rewarded stays owes a one-off bridge to
+                    # the far arm, if that arm still needs its repeats (ADR-0139).
+                    self._consec += 1
+                    other = RIGHT if chosen_side == LEFT else LEFT
+                    k = self.cfg.exit_repeats_per_side
+                    if self._consec >= k and self._rep[other] < k:
+                        self._flip_pending = True
+                        self._consec = 0
+                else:
+                    # Any switch / off-cue trial breaks the current run.
+                    self._consec = 0
         self._prev_chosen = chosen_side
 
     def decide(self) -> AlternationDecision:
@@ -273,15 +296,18 @@ class AlternationBlockController:
                 and rate >= self.cfg.trigger_rate and self._prev_chosen is not None:
             self._start_block(AUTO)
 
-        # 4) Issue the trial with the bias-aware forced side (ADR-0129): while
-        # neither arm has k repeats, force a repeat of the last choice (0% for a
-        # pure alternator); once one arm is satisfied, force the OTHER arm (a bridge
-        # switch demand, then repeats there) so the rat can't exit one-sided.
+        # 4) Issue the trial with the edge-triggered forced side (ADR-0139): by
+        # default force a repeat of the last choice (0% for a pure alternator);
+        # when record() has latched a bridge (a k-run just completed and the far
+        # arm still needs repeats), force that far arm for ONE trial, then revert
+        # to the last choice - so a rat that doesn't repeat on the far arm can't
+        # camp a held side for ~50% (the ADR-0129 leak).
         if self._state == INTERVENTION:
-            if self._rep[LEFT] < k and self._rep[RIGHT] < k:
-                self._target = self._prev_chosen
-            else:
+            if self._flip_pending:
                 self._target = LEFT if self._rep[LEFT] < k else RIGHT
+                self._flip_pending = False
+            else:
+                self._target = self._prev_chosen
             self._block_len += 1
             return AlternationDecision(INTERVENTION, self._target, self._block_id,
                                        self._trigger, self._block_rate())
@@ -296,6 +322,8 @@ class AlternationBlockController:
         self._block_samples = 0
         self._block_switched = 0
         self._rep = {LEFT: 0, RIGHT: 0}
+        self._consec = 0
+        self._flip_pending = False
         self._trigger = trigger
 
     def _end_block(self) -> None:
@@ -306,4 +334,6 @@ class AlternationBlockController:
         self._block_samples = 0
         self._block_switched = 0
         self._rep = {LEFT: 0, RIGHT: 0}
+        self._consec = 0
+        self._flip_pending = False
         self._hist.clear()      # fresh evidence needed before another block

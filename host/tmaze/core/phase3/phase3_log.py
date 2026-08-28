@@ -242,11 +242,14 @@ class Phase3StateSnapshot:
     alt_min_samples: int = 0
     alt_window_samples: int = 0
     # Unrewarded probe-block scheduler context (probe_blocks.py). ``probe_enabled``
-    # is whether probe blocks are available this run (the Rig-view abort button is
+    # is whether probe blocks are available this run (the Rig-view on/off toggle is
     # live only then); ``probe_state`` is the CURRENT probe state at snapshot time
-    # ("ACTIVE" while a probe block runs / "NORMAL").
+    # ("ACTIVE" while a probe block runs / "NORMAL"); ``probe_armed`` is whether the
+    # correct-choice trigger is currently live (False after an operator mid-session
+    # disable - docs/decisions/0137; drives the toggle label + the [PROBE OFF] tag).
     probe_enabled: bool = False
     probe_state: str = "NORMAL"
+    probe_armed: bool = True
 
 
 @dataclass(frozen=True)
@@ -607,7 +610,8 @@ class Phase3Log:
             alt_trigger_rate=(al.trigger_rate if al is not None else 0.0),
             alt_min_samples=(al.min_samples if al is not None else 0),
             alt_window_samples=seq.alt_samples(),
-            probe_enabled=seq.probe_enabled, probe_state=seq.probe_state())
+            probe_enabled=seq.probe_enabled, probe_state=seq.probe_state(),
+            probe_armed=seq.probe_armed)
 
     # ------------------------------------------------------------- render
     def _header_comment(self) -> List[str]:
@@ -645,6 +649,25 @@ class Phase3Log:
             lines.append(
                 "# note: intervention schedule is closed-loop - seed alone does NOT "
                 "reproduce it; it also depends on realized choices + overrides")
+        # Unrewarded probe-block plan (probe_blocks.py; docs/decisions/0115/0134).
+        # Recorded so the data file is self-describing about whether a probe was
+        # planned, and - crucially - so a reader can tell a session the operator
+        # DISABLED mid-session (docs/decisions/0137) apart from one where a window
+        # simply never had a qualifying correct trial. The archived config alone
+        # can't show that (it still says enabled). Precise on/off timing lives in
+        # the session notes/summary; keys are ``probe_``-prefixed so the offline
+        # header parser reads them unambiguously.
+        pb = getattr(c, "probe", None)
+        if pb is not None and pb.enabled:
+            win = ",".join(f"{int(s)}-{int(e)}" for s, e in pb.windows) or "none"
+            lines.append(
+                f"# probe_blocks probe_enabled=True "
+                f"probe_block_len={pb.block_len} probe_windows={win}")
+            if self._sequence.probe_ever_disarmed:
+                lines.append(
+                    "# note: probe blocks were manually DISABLED by the operator "
+                    "during this session - a planned window may not have fired; "
+                    "see the session notes/summary for timing")
         if self.session_t0:
             lines.append(
                 f"# session_t0_iso={self.session_t0.get('iso', '')} "

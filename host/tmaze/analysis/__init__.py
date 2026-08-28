@@ -28,6 +28,10 @@ Layers (each a small, headlessly testable module):
   fitting) plus the in-block response labels.
 - ``choice_model``    - per-session logistic regression of choice on cue + history
   + return-cue carryover (the "is it using the cue" signal).
+- ``progression``     - per-session accuracy + left-choice bias over out-of-block
+  trials (the notebook's per-session progression rows; see docs/decisions/0132).
+- ``return_cue``      - return-cue carryover summary (Wilson-CI P(switch) by N-1
+  return-cue congruency, and P(choice == N-1 return-cue side)).
 
 Requires ``pandas``/``numpy`` (and ``statsmodels`` for ``choice_model``); these are
 analysis-only deps, not needed by the live rig tools. See docs/decisions for the
