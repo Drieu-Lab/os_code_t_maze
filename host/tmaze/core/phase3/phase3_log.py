@@ -250,6 +250,11 @@ class Phase3StateSnapshot:
     probe_enabled: bool = False
     probe_state: str = "NORMAL"
     probe_armed: bool = True
+    # Whether the return-arm cue is played this run (CueParams.return_enabled). The
+    # planned return-cue columns are always generated/recorded, so panels use this
+    # to suppress the return-cue readout when it is off (nothing is actually cued).
+    # See docs/decisions/0141.
+    return_enabled: bool = True
 
 
 @dataclass(frozen=True)
@@ -280,10 +285,14 @@ class Phase3Log:
                  session_start_iso: str, reward_incorrect: bool = False,
                  reward_pulse_ms: int = 500, max_topups: int = 0,
                  session_id: str = "",
-                 session_t0: Optional[Dict[str, Any]] = None) -> None:
+                 session_t0: Optional[Dict[str, Any]] = None,
+                 return_enabled: bool = True) -> None:
         self.animal = animal
         self.seed = sequence.seed
         self.cfg = sequence.cfg
+        # Whether the return-arm cue is played this run (a display hint for panels;
+        # the planned return-cue columns are recorded regardless). See snapshot().
+        self.return_enabled = return_enabled
         # Kept so a snapshot can read the CURRENT closed-loop debias state (state +
         # bias) for panels; the snapshot copies those readings out by value.
         self._sequence = sequence
@@ -611,7 +620,8 @@ class Phase3Log:
             alt_min_samples=(al.min_samples if al is not None else 0),
             alt_window_samples=seq.alt_samples(),
             probe_enabled=seq.probe_enabled, probe_state=seq.probe_state(),
-            probe_armed=seq.probe_armed)
+            probe_armed=seq.probe_armed,
+            return_enabled=self.return_enabled)
 
     # ------------------------------------------------------------- render
     def _header_comment(self) -> List[str]:

@@ -57,6 +57,7 @@ class RibbonRow:
     outcome: Optional[str]         # CORRECT / INCORRECT once scored, else None
     corrective: bool = False       # part of a closed-loop debias corrective block
     probe: bool = False            # part of an unrewarded probe block (probe_blocks.py)
+    return_enabled: bool = True    # is the return cue played? False -> hide ret info
 
 
 def cue_side(cue: str, high_tone_is_left: bool) -> str:
@@ -89,6 +90,7 @@ def _make_row(state: Phase3StateSnapshot, i: int, current: int) -> RibbonRow:
         outcome=row.outcome,
         corrective=(row.sched_state == "INTERVENTION"),
         probe=(row.probe == "1"),
+        return_enabled=state.return_enabled,
     )
 
 

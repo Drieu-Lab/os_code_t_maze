@@ -379,9 +379,17 @@ class TrialRibbonView:
             cell["trial"].configure(text=f"#{row.trial}")
         cell["choice"].configure(
             text=f"{row.choice_cue}->{_ARM_SHORT.get(row.choice_side, '?')}")
-        cell["ret"].configure(
-            text=f"ret L:{_CUE_SHORT.get(row.return_cue_left, '?')} "
-                 f"R:{_CUE_SHORT.get(row.return_cue_right, '?')}")
+        # Show the planned return-arm cues only when the return cue is actually
+        # played this run; otherwise drop the line (pack_forget shrinks the cell).
+        # Cells are reused across renders, so this toggles on every fill.
+        # See docs/decisions/0141.
+        if row.return_enabled:
+            cell["ret"].configure(
+                text=f"ret L:{_CUE_SHORT.get(row.return_cue_left, '?')} "
+                     f"R:{_CUE_SHORT.get(row.return_cue_right, '?')}")
+            cell["ret"].pack(anchor="w", before=cell["outcome"])
+        else:
+            cell["ret"].pack_forget()
         if row.outcome == ABANDONED:
             # Operator-abandoned trial (Skip / Repeat): neutral, not a scored
             # correct/incorrect (docs/decisions/0058).

@@ -149,6 +149,28 @@ class TestResolvedFields(unittest.TestCase):
             self.assertIn(r.choice_cue, (HIGH, LOW))
 
 
+class TestReturnEnabled(unittest.TestCase):
+    """The return-cue on/off flag flows from the log into every ribbon row, so the
+    view can suppress the return-cue readout when it is disabled."""
+
+    def test_default_is_enabled(self):
+        rows = ribbon_rows(_log(n=20).snapshot(0, armed=True))
+        self.assertTrue(rows)
+        self.assertTrue(all(r.return_enabled for r in rows))
+
+    def test_disabled_propagates_to_rows(self):
+        log = Phase3Log(_seq(n=20), animal="RAT600",
+                        session_start_iso="2026-07-23T12:00:00",
+                        return_enabled=False)
+        snap = log.snapshot(0, armed=True)
+        self.assertFalse(snap.return_enabled)
+        rows = ribbon_rows(snap)
+        self.assertTrue(rows)
+        self.assertTrue(all(not r.return_enabled for r in rows))
+        # The full-plan variant carries it too (the Rig-view scrollable strip).
+        self.assertTrue(all(not r.return_enabled for r in all_ribbon_rows(snap)))
+
+
 class TestAllRibbonRows(unittest.TestCase):
     """The unwindowed full-plan variant for the scrollable Rig-view strip
     (docs/decisions/0135)."""

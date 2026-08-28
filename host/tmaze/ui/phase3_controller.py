@@ -641,7 +641,8 @@ class Phase3ControlView(VisionActuator):
                               reward_pulse_ms=snap.reward_pulse_ms,
                               max_topups=snap.max_topups,
                               session_id=snap.session_id,
-                              session_t0=snap.session_t0)
+                              session_t0=snap.session_t0,
+                              return_enabled=snap.params.return_enabled)
         # Write into the session's task/ folder when armed via a session, else the
         # default host/data/ tree (docs/decisions/0049). _write_log makes the dir.
         out_dir = snap.session_out_dir or DATA_DIR
@@ -2009,20 +2010,19 @@ class Phase3ControlView(VisionActuator):
             return
         current = max(0, min(state.current_index, state.total - 1))
         for row in state.rows:
-            lb.insert(tk.END, self._seq_line(row, current))
+            lb.insert(tk.END, self._seq_line(row, current, state.return_enabled))
         if 0 <= current < lb.size():
             lb.itemconfig(current, background=_CELL_CURRENT_BG)
             lb.see(current)                  # keep the current trial in view
 
     @staticmethod
-    def _seq_line(row, current: int) -> str:
+    def _seq_line(row, current: int, return_enabled: bool = True) -> str:
         """One monospace planned-trial row for the scrollable list. ``row`` is a
         phase3_log.Phase3RowView; ``correct_arm`` is the arm the choice cue maps
-        to (identity checked in test_phase3_ribbon)."""
+        to (identity checked in test_phase3_ribbon). The return-cue segment is
+        dropped when ``return_enabled`` is False (nothing is actually cued)."""
         mark = ">" if (row.trial - 1) == current else " "
         arm = _ARM_SHORT.get(row.correct_arm, "?")
-        left = _CUE_SHORT.get(row.return_cue_left, "?")
-        right = _CUE_SHORT.get(row.return_cue_right, "?")
         if row.outcome == ABANDONED:
             result = "skipped"
         elif row.outcome is not None:
@@ -2033,5 +2033,11 @@ class Phase3ControlView(VisionActuator):
         # Tag an unrewarded probe trial (probe_blocks.py); probes are inserted at
         # runtime, so they only appear once committed (docs/decisions/0115-probe).
         tag = " PROBE" if row.probe == "1" else ""
+        if return_enabled:
+            left = _CUE_SHORT.get(row.return_cue_left, "?")
+            right = _CUE_SHORT.get(row.return_cue_right, "?")
+            ret = f"ret L:{left} R:{right}"
+        else:
+            ret = ""
         return (f"{mark}{row.trial:>4}  {row.choice_cue:<4}->{arm}  "
-                f"ret L:{left} R:{right}{tag}   {result}")
+                f"{ret}{tag}   {result}")
