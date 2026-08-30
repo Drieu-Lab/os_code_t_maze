@@ -1325,9 +1325,11 @@ class SessionControlView:
             except Exception:
                 pass
         try:
+            from tmaze.core.phase3 import bundle_format
             result = session_config.write_config_snapshot(
                 config_dir, session_id=self._session_id,
-                extra_sources=extra_sources, runtime_params=runtime_params)
+                extra_sources=extra_sources, runtime_params=runtime_params,
+                format_manifest=bundle_format.format_manifest())
         except Exception:
             return False
         if self._manifest is not None:

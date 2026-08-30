@@ -89,15 +89,23 @@ def _atomic_json(path: str, obj: Any) -> None:
 def write_config_snapshot(dest_dir: str, *, session_id: str = "",
                           extra_sources: Optional[Mapping[str, str]] = None,
                           runtime_params: Optional[Mapping[str, Any]] = None,
+                          format_manifest: Optional[Mapping[str, Any]] = None,
                           host_dir: str = _HOST) -> Dict[str, Any]:
     """Copy every existing config source into ``dest_dir`` and write the index.
 
     ``extra_sources`` adds/overrides files by ``{filename: source path}`` (e.g.
     the lens calibration JSON, the active model ``.npz``). ``runtime_params``, if
-    given, is written verbatim as ``runtime_params.json``. Creates ``dest_dir``.
-    Returns a summary dict (``config_dir``, ``snapshot_path``,
-    ``runtime_params_path``, ``present``, ``missing``). Best-effort per file: a
-    missing/unreadable source is recorded ``present: false`` and never raises.
+    given, is written verbatim as ``runtime_params.json``. ``format_manifest``, if
+    given, is written verbatim as ``format.json`` - the bundle's machine-readable
+    DATA-FORMAT contract (token vocabularies, proto version, zone names, trial-CSV
+    column dictionary), kept separate from this file-integrity index so an offline
+    reader can learn the format from the bundle itself (see the phase3
+    ``bundle_format`` core + the analysis decoupling ADR). This core just writes
+    the dict it is handed; the caller assembles it from the live cores. Creates
+    ``dest_dir``. Returns a summary dict (``config_dir``, ``snapshot_path``,
+    ``runtime_params_path``, ``format_path``, ``present``, ``missing``).
+    Best-effort per file: a missing/unreadable source is recorded ``present:
+    false`` and never raises.
     """
     os.makedirs(dest_dir, exist_ok=True)
 
@@ -130,6 +138,11 @@ def write_config_snapshot(dest_dir: str, *, session_id: str = "",
         runtime_params_path = os.path.join(dest_dir, "runtime_params.json")
         _atomic_json(runtime_params_path, dict(runtime_params))
 
+    format_path: Optional[str] = None
+    if format_manifest is not None:
+        format_path = os.path.join(dest_dir, "format.json")
+        _atomic_json(format_path, dict(format_manifest))
+
     snapshot = {
         "schema_version": SCHEMA_VERSION,
         "session_id": session_id,
@@ -145,6 +158,7 @@ def write_config_snapshot(dest_dir: str, *, session_id: str = "",
         "config_dir": dest_dir,
         "snapshot_path": snapshot_path,
         "runtime_params_path": runtime_params_path,
+        "format_path": format_path,
         "present": [e["name"] for e in entries if e["present"]],
         "missing": [e["name"] for e in entries if not e["present"]],
     }

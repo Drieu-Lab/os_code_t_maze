@@ -1,0 +1,97 @@
+"""bundle_format.py - assemble the session bundle's self-describing data contract.
+
+The rig writes one ``config/format.json`` per session so an offline reader (the
+``tmaze.analysis`` stack, and MATLAB / other tools) can learn the on-disk *format*
+- the token vocabularies, the protocol version, the zone names, and the trial-CSV
+column dictionary - from the bundle itself, without importing the rig-control code.
+This lets the analysis layer be versioned (and later split into its own repo)
+against a stable, machine-readable contract instead of a shared Python import (see
+the analysis-core decoupling ADR).
+
+Single source of truth: every value here is derived from the live cores that
+actually shape the data (``phase3_task`` outcomes, ``trial_sequence`` cue tones,
+``phase3_log`` arm labels + columns + proto, ``maze_state`` zone names), so the
+manifest can't drift from what the rig writes. The analysis package keeps its own
+mirror of these tokens; a same-repo parity test asserts the two agree.
+
+Pure core: stdlib only, no Tk/OpenCV. Headless tests: python -m unittest
+test_session_config (which exercises the write path) and test_analysis_phase3_format
+(which checks the manifest enumerations against the analysis mirror).
+"""
+from __future__ import annotations
+
+from typing import Any, Dict
+
+from tmaze.core import maze_state
+from tmaze.core.phase3 import phase3_log
+from tmaze.core.phase3.phase3_task import ABANDONED, CORRECT, INCORRECT
+from tmaze.core.phase3.trial_sequence import HIGH, LEFT, LOW, RIGHT
+
+# Bump when the format.json layout / semantics change. Kept in lockstep with the
+# analysis mirror (tmaze.analysis.phase3_format.FORMAT_VERSION), which the reader
+# checks to fail loudly on a newer format.
+FORMAT_VERSION = 1
+
+# One-line meaning per trial-CSV column, keyed by the phase3_log.COLUMNS names.
+# Columns without an entry still appear in the manifest (with an empty string), so
+# adding a column to phase3_log.COLUMNS never silently drops it from the contract.
+_COLUMN_DOC: Dict[str, str] = {
+    "trial": "1-based trial index within the session",
+    "correct_arm": "planned rewarded arm (LEFT/RIGHT)",
+    "choice_cue": "choice-point cue tone (HIGH/LOW)",
+    "return_cue_left": "planned left return-arm cue tone (HIGH/LOW)",
+    "return_cue_right": "planned right return-arm cue tone (HIGH/LOW)",
+    "chosen_arm": "arm the rat actually chose (LEFT/RIGHT)",
+    "outcome": "trial result (CORRECT/INCORRECT/ABANDONED)",
+    "rewarded": "1 if a reward was delivered, else 0",
+    "topups": "count of lick top-up reward pulses delivered",
+    "return_arm_used": "return arm the rat took back to the hub (LEFT/RIGHT)",
+    "return_cue_played": "return cue tone actually played (HIGH/LOW), if any",
+    "trial_start_iso": "host wall-clock ISO time the trial started",
+    "choice_cue_on_iso": "host ISO time the choice cue turned on",
+    "choice_cue_off_iso": "host ISO time the choice cue turned off",
+    "choice_time_iso": "host ISO time the choice was scored (entered a choice arm)",
+    "reward_cmd_iso": "host ISO time the reward command was issued",
+    "return_cue_on_iso": "host ISO time the return cue turned on",
+    "return_cue_off_iso": "host ISO time the return cue turned off",
+    "trial_end_iso": "host ISO time the trial ended",
+    "lick_time_iso": "host ISO time of the rewarded lick (blank if none)",
+    "lick_fw_ms": "firmware hardware-clock ms of the lick (see docs/decisions/0047)",
+    "sched_state": "NORMAL or INTERVENTION (in a corrective/adversarial block)",
+    "block_id": "1-based index within an intervention block (blank in NORMAL)",
+    "block_trigger": "how the block started (auto/manual)",
+    "bias": "signed directional-error bias at this trial's decision",
+    "block_kind": "which intervention owns the block (side_bias/alternation)",
+    "alt_rate": "cue-aware alternation rate at this trial's decision",
+    "prime_ms": "raw prime reward pulse width (ms) on a rewarded trial",
+    "topup_ms_total": "sum of this trial's lick top-up pulse widths (ms)",
+    "probe": "1 on an unrewarded probe trial, else blank",
+    "probe_trigger": "1 on the correct trial that started a probe block",
+    "attempt": "1-based attempt number for this trial (append-only edits)",
+    "superseded": "1 on a preserved attempt a later Repeat/Back replaced",
+    "edit": "operator action that created a >1 attempt (repeat/back)",
+}
+
+
+def _columns() -> Dict[str, str]:
+    """Ordered {column name: one-line meaning} for the trial CSV."""
+    return {name: _COLUMN_DOC.get(name, "") for name in phase3_log.COLUMNS}
+
+
+def format_manifest() -> Dict[str, Any]:
+    """The ``config/format.json`` payload: the bundle's machine-readable contract.
+
+    Enumerates the token vocabularies, the protocol version, the maze zone names,
+    and the trial-CSV column dictionary - all derived from the live cores so the
+    manifest is always consistent with what the rig writes.
+    """
+    return {
+        "format_version": FORMAT_VERSION,
+        "proto": phase3_log.PROTO_VERSION,
+        "zones_version": maze_state.ZONES_VERSION,
+        "outcome_labels": [CORRECT, INCORRECT, ABANDONED],
+        "cue_labels": [HIGH, LOW],
+        "arm_labels": [phase3_log._ARM_LABEL[LEFT], phase3_log._ARM_LABEL[RIGHT]],
+        "zone_names": list(maze_state.EDITABLE_ZONES),
+        "columns": _columns(),
+    }

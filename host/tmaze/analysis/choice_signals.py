@@ -42,8 +42,7 @@ from tmaze.analysis.bundle_reader import (
     LEFT_LABEL,
     RIGHT_LABEL,
 )
-from tmaze.core.phase3.phase3_task import CORRECT
-from tmaze.core.phase3.trial_sequence import HIGH, LOW
+from tmaze.analysis.phase3_format import CORRECT, HIGH, LOW
 
 DEFAULT_POST_WINDOW = 10
 

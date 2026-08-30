@@ -25,7 +25,7 @@ from typing import List, Optional
 import pandas as pd
 
 from tmaze.analysis.choice_signals import EPOCH_FREE
-from tmaze.core.phase3.phase3_task import CORRECT
+from tmaze.analysis.phase3_format import CORRECT
 
 DEFAULT_PRE_WINDOW = 15
 DEFAULT_POST_WINDOW = 15

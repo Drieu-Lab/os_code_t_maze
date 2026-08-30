@@ -38,14 +38,21 @@ from typing import Dict, Iterable, List, Optional, Sequence, Union
 
 import pandas as pd
 
-from tmaze.core.phase3.phase3_task import ABANDONED, CORRECT, INCORRECT
-from tmaze.core.session import session_notes
+from tmaze.analysis import phase3_format
+from tmaze.analysis.phase3_format import (
+    ABANDONED,
+    CORRECT,
+    INCORRECT,
+    LEFT_LABEL,
+    RIGHT_LABEL,
+)
 
-# Arm labels as the CSV stores them (phase3_log upper-cases chosen_arm/correct_arm);
-# the trial_sequence LEFT/RIGHT are ints, so we keep the string labels locally to
-# match the file, exactly as phase3_stats does.
-LEFT_LABEL = "LEFT"
-RIGHT_LABEL = "RIGHT"
+# Token constants (outcomes, cue tones, arm labels) + the notes-JSONL parser come
+# from the analysis-side data contract (tmaze.analysis.phase3_format), which mirrors
+# what the rig writes, so the analysis stack needn't import the live rig core. A
+# same-repo parity test asserts the mirror still matches tmaze.core. Arm labels are
+# the CSV's uppercase strings (phase3_log upper-cases chosen_arm/correct_arm; the
+# trial_sequence LEFT/RIGHT are ints).
 
 # Outcome tokens re-exported for downstream modules (single import site).
 COMPLETED_OUTCOMES = (CORRECT, INCORRECT)
@@ -280,9 +287,11 @@ def _read_notes(bundle: str) -> List[dict]:
     """The session's operator/auto notes as a list of entry dicts, or ``[]`` when the
     file is absent/unreadable (older bundles, or a session that jotted none).
 
-    Read from ``summary/notes_<id>.jsonl`` via the same pure parser the rig writes
-    with (``session_notes.parse_jsonl``), so the analysis can't drift from the
-    on-disk note format (docs/decisions/0074/0137). Best-effort like the JSON reads.
+    Read from ``summary/notes_<id>.jsonl`` via a parser that mirrors the pure one
+    the rig writes with (``phase3_format.parse_notes_jsonl`` == the analysis-side
+    copy of ``session_notes.parse_jsonl(...).entries()``), so the analysis can't
+    drift from the on-disk note format (docs/decisions/0074/0137). Best-effort like
+    the JSON reads.
     """
     session_id = os.path.basename(os.path.normpath(bundle))
     path = os.path.join(bundle, "summary", f"notes_{session_id}.jsonl")
@@ -291,7 +300,7 @@ def _read_notes(bundle: str) -> List[dict]:
             text = fh.read()
     except OSError:
         return []
-    return [e.as_dict() for e in session_notes.parse_jsonl(text).entries()]
+    return phase3_format.parse_notes_jsonl(text)
 
 
 # --------------------------------------------------------------- per-bundle load
@@ -337,6 +346,10 @@ def load_bundle(bundle: str) -> Optional[tuple]:
     csvs = _task_trial_csvs(bundle)
     if not csvs:
         return None
+    # Fail loudly on a genuinely newer on-disk format rather than silently
+    # misreading it; a legacy bundle without config/format.json is allowed and its
+    # compatibility is inferred from zones.json + the CSV proto stamp.
+    phase3_format.assert_supported(bundle)
     session_id = os.path.basename(os.path.normpath(bundle))
     id_animal, id_date = _animal_date_from_id(session_id)
 
@@ -390,7 +403,7 @@ def load_bundle(bundle: str) -> Optional[tuple]:
     note_dicts = _read_notes(bundle)
     probe_planned = bool(_to_bool(header.get("probe_enabled")))
     probe_disabled = any(
-        d.get("tag") == session_notes.AUTO_PROBE_DISABLED for d in note_dicts)
+        d.get("tag") == phase3_format.AUTO_PROBE_DISABLED for d in note_dicts)
 
     trials.insert(0, "session_id", session_id)
     trials.insert(1, "animal", animal)
@@ -462,10 +475,7 @@ def load_animals(
     (an aborted start), are skipped.
     """
     if root is None:
-        # Imported lazily so a test can point elsewhere without importing paths.
-        from tmaze.paths import phase3_recordings_roots
-
-        root = [str(p) for p in phase3_recordings_roots()]
+        root = [str(p) for p in phase3_format.phase3_recordings_roots()]
 
     bundles = discover_bundles(root, animals, start_date, end_date)
     trial_frames: List[pd.DataFrame] = []

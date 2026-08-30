@@ -34,7 +34,7 @@ import pandas as pd
 
 from tmaze.analysis.bundle_reader import LEFT_LABEL
 from tmaze.analysis.choice_signals import bool_series
-from tmaze.core.phase3.trial_sequence import HIGH, LOW
+from tmaze.analysis.phase3_format import HIGH, LOW
 
 DEFAULT_WINDOW = 20
 # A rate needs at least this many denominator samples in the window to be plotted,

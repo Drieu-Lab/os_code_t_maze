@@ -92,6 +92,24 @@ class SnapshotTest(unittest.TestCase):
         with open(os.path.join(dest, "config_snapshot.json"), encoding="utf-8") as fh:
             self.assertIsNone(json.load(fh)["runtime_params_file"])
 
+    def test_format_manifest_written_verbatim(self):
+        dest = os.path.join(self.root, "config")
+        manifest = {"format_version": 1, "proto": 10,
+                    "outcome_labels": ["CORRECT", "INCORRECT", "ABANDONED"]}
+        out = session_config.write_config_snapshot(
+            dest, format_manifest=manifest, host_dir=self.host)
+        fp = os.path.join(dest, "format.json")
+        self.assertTrue(os.path.isfile(fp))
+        self.assertTrue(out["format_path"].endswith("format.json"))
+        with open(fp, encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh), manifest)
+
+    def test_no_format_manifest_omits_file(self):
+        dest = os.path.join(self.root, "config")
+        out = session_config.write_config_snapshot(dest, host_dir=self.host)
+        self.assertIsNone(out["format_path"])
+        self.assertFalse(os.path.isfile(os.path.join(dest, "format.json")))
+
 
 if __name__ == "__main__":
     unittest.main()

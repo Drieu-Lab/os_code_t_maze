@@ -99,6 +99,7 @@ criteria).
 | [FW-0045](#fw-0045-in-fov-event-led-visual-fiducial-for-videoserial-alignment) | In-FOV event-LED visual fiducial (sensor/solenoid) for video<->serial alignment | Camera vision + sidecar + rig LED wiring | Proposed |
 | [FW-0046](#fw-0046-live-core-metrics-tab-fixes-engagement-definition--others) | Live-core Metrics-tab fixes (engagement definition + others) | Phase 3 live metrics (`core/phase3/phase3_traces.py`, `phase3_stats.py`) | Deferred |
 | [FW-0047](#fw-0047-schedule-aware-side-bias-score-inside-intervention-blocks) | Schedule-aware side-bias score inside intervention blocks | Phase 3 closed-loop schedulers (`core/phase3/debias.py`, `intervention_stack.py`) | Proposed |
+| [FW-0048](#fw-0048-carve-the-analysis-layer-into-its-own-repo) | Carve the analysis layer into its own repo | Cross-session analysis (`tmaze.analysis`) + packaging | Deferred |
 
 ## Entries
 
@@ -2385,6 +2386,55 @@ feed triggering (it currently can't, since only one child owns the active block)
 whether to unify with the alternation detector's cue-aware conditioning.
 
 **ADR needed?** Yes - it would supersede ADR-0136 and refine ADR-0090.
+
+### FW-0048: Carve the analysis layer into its own repo
+
+- **Status:** Deferred
+- **Date added:** 2026-08-30
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** `host/tmaze/analysis/` (the whole package + its
+  `host/tests/test_analysis_*.py`), `host/notebooks/` (analysis notebooks),
+  `pyproject.toml` / `host/requirements.txt` (packaging + deps), `PROGRAMS.md`
+- **Related ADRs:** [ADR-0142](decisions/0142-analysis-core-decoupling-data-contract.md)
+  (the decoupling this builds on), [ADR-0112](decisions/0112-longitudinal-strategy-analysis.md)
+  (the analysis layer), [ADR-0083](decisions/0083-host-tools-become-tmaze-package.md)
+  (package layout)
+
+**Motivation / context.** The analysis code grows on a different cadence and risk
+profile from the stabilizing rig/task code, and leans on heavy
+`pandas`/`numpy`/`statsmodels`/`matplotlib` deps the lean rig env doesn't need.
+ADR-0142 already severed the code coupling: `tmaze.analysis` imports nothing from
+`tmaze.core`/`tmaze.paths`, and the bundle is self-describing (`config/format.json`
++ version guards). The only remaining coupling is the on-disk bundle FORMAT, which
+is now explicit and versioned - so an independent repo is a mechanical move, not a
+redesign.
+
+**Sketch of approach.** Pre-decided direction (see ADR-0142 Consequences): rename
+the import root to a top-level package `tmaze_analysis` (mechanical
+`from tmaze.analysis.X` -> `from tmaze_analysis.X` sweep across modules, tests,
+notebooks); a FRESH copy into the new repo (no `git filter-repo`/history
+preservation required); the human creates/authorizes the remote (a future agent
+only prepares the local repo). At the split: delete the temporary
+`test_analysis_phase3_format.TestCoreParity` (the new repo can't import
+`tmaze.core`; the `format_version`/`proto`/`zones.version` guards become the sole
+contract), move the analysis notebooks + their `PROGRAMS.md` rows and the heavy
+analysis deps into the new repo, and exclude `tmaze.analysis` from this repo's
+`pyproject.toml` package discovery.
+
+**Evaluation / acceptance.** The analysis repo installs + tests standalone
+(`pip install -e . && pytest`) with no `tmaze` (rig) dependency; the rig repo's
+tests still pass and `grep tmaze.analysis` in rig `core/io/ui/tools` stays empty;
+the notebooks run against real bundles resolved via `TMAZE_RECORDINGS_DIR`.
+
+**Effort / risk.** Medium (mostly mechanical). Main risk is silent format drift
+once the parity test is gone - mitigated by the bundle version guards and by
+bumping `format_version`/`proto` on any rig-side format change.
+
+**Open questions.** Repo host (GitHub org vs. Cursor-hosted); whether to publish
+the analysis package to an internal index or keep it editable-install only.
+
+**ADR needed?** Yes - a short ADR in the NEW repo establishing it, plus a note in
+this repo's ADR log that analysis moved out.
 
 ## Completed
 

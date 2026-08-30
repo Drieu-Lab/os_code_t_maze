@@ -20,8 +20,9 @@ these zones?", so they are pinned in ADR-0128):
   reproduces this ADR-0128 window (which the VTE dwell/velocity panels rely on).
 - **VTE dwell** = seconds the centroid spends in ``CENTRAL_STEM`` u ``JUNCTION``
   during that window: the stem captures a pause at cue onset, the junction the
-  head-swinging deliberation at the choice point. Zone membership reuses the LIVE
-  classifier (:class:`tmaze.core.maze_state.ZoneMap`) so offline == on-rig.
+  head-swinging deliberation at the choice point. Zone membership reuses a
+  vendored copy of the live classifier (:class:`tmaze.analysis.phase3_format
+  .ZoneMap`, byte-for-byte the rig's ``maze_state`` logic) so offline == on-rig.
 
 Peri-junction VELOCITY (ADR-0130) is a finer deliberation readout layered on top:
 the rats usually blast through the mid-stem (~130 cm/s peak) straight into an arm,
@@ -44,9 +45,10 @@ image; zones are normalized 0..1 (ADR-0015). :func:`load_sidecar` divides by the
 header ``width``/``height`` so ``cx_n``/``cy_n`` overlay the zone polygons and the
 ``_background.png`` directly.
 
-Read-only, pure pandas/numpy + stdlib (may import ``tmaze.core`` - allowed for the
-analysis layer). NO Tk/OpenCV/matplotlib: plotting stays in the notebook. Headless
-tests: ``python -m unittest test_analysis_trajectories``.
+Read-only, pure pandas/numpy + stdlib. Tokens + the zone classifier come from the
+analysis-side data contract (:mod:`tmaze.analysis.phase3_format`), so this module
+does not import the live rig core. NO Tk/OpenCV/matplotlib: plotting stays in the
+notebook. Headless tests: ``python -m unittest test_analysis_trajectories``.
 """
 from __future__ import annotations
 
@@ -61,9 +63,8 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import pandas as pd
 
-from tmaze.core import maze_state
-from tmaze.core.phase3.phase3_task import CORRECT
-from tmaze.core.phase3.trial_sequence import HIGH, LOW
+from tmaze.analysis import phase3_format
+from tmaze.analysis.phase3_format import CORRECT, HIGH, LOW
 
 # Cue A / cue B are the proposal's plain labels for the two tones. Cue A = the HIGH
 # tone, cue B = the LOW tone (the notebook maps A->blue, B->green). Pinned here so
@@ -75,7 +76,7 @@ _TONE_TO_CUE = {HIGH: CUE_A, LOW: CUE_B}
 # Zones whose union defines the VTE dwell region (stem pause + junction
 # deliberation). Names come from the live vocabulary so a rename can't silently
 # drift. See ADR-0128.
-VTE_ZONES: Tuple[str, ...] = (maze_state.CENTRAL_STEM, maze_state.JUNCTION)
+VTE_ZONES: Tuple[str, ...] = (phase3_format.CENTRAL_STEM, phase3_format.JUNCTION)
 
 # Default validity gate on the tracker, matching the live scoring path: keep only
 # frames the tracker actually locked onto (ADR-0014 track states).
@@ -125,15 +126,13 @@ PROFILE_BIN_CM = 2.5
 def find_bundle(session_id: str, root: Optional[Sequence[str]] = None) -> Optional[str]:
     """Absolute path to a session bundle dir, searching the recordings roots.
 
-    ``root`` defaults to :func:`tmaze.paths.phase3_recordings_roots` (primary +
-    archives), so a history split across drives is found. Returns ``None`` if no
+    ``root`` defaults to :func:`tmaze.analysis.phase3_format.phase3_recordings_roots`
+    (primary + archives), so a history split across drives is found. Returns ``None`` if no
     bundle with a ``session_<id>.json`` manifest is present. In a notebook you can
     also read the ``bundle`` column of ``bundle_reader``'s sessions frame instead.
     """
     if root is None:
-        from tmaze.paths import phase3_recordings_roots
-
-        roots = [str(p) for p in phase3_recordings_roots()]
+        roots = [str(p) for p in phase3_format.phase3_recordings_roots()]
     else:
         roots = [root] if isinstance(root, str) else list(root)
     for one in roots:
@@ -251,14 +250,14 @@ def load_sidecar(
     return Sidecar(frames=df, width=width, height=height, header=header)
 
 
-def load_zone_map(bundle: str) -> maze_state.ZoneMap:
+def load_zone_map(bundle: str) -> phase3_format.ZoneMap:
     """The per-session :class:`ZoneMap` from ``config/zones.json`` in the bundle.
 
     Each bundle snapshots the zones in force when it recorded (geometry is re-tuned
     across days), so always read the bundle's own copy, not the live ``host/``
     file. Reuses the live loader so the polygons/classification match the rig.
     """
-    return maze_state.load_zone_map(os.path.join(bundle, "config", "zones.json"))
+    return phase3_format.load_zone_map(os.path.join(bundle, "config", "zones.json"))
 
 
 # ------------------------------------------------------------------ windows
@@ -331,7 +330,7 @@ def slice_xy(sidecar: Sidecar, t0: float, t1: float) -> pd.DataFrame:
 
 # ------------------------------------------------------------------ dwell / VTE
 def dwell_seconds(
-    seg: pd.DataFrame, zone_map: maze_state.ZoneMap,
+    seg: pd.DataFrame, zone_map: phase3_format.ZoneMap,
     names: Sequence[str] = VTE_ZONES,
 ) -> float:
     """Seconds the centroid spends inside the union of ``names`` zones over ``seg``.
@@ -360,7 +359,7 @@ def dwell_seconds(
 
 
 def dwell_per_trial(
-    sidecar: Sidecar, zone_map: maze_state.ZoneMap, windows: pd.DataFrame,
+    sidecar: Sidecar, zone_map: phase3_format.ZoneMap, windows: pd.DataFrame,
     *, names: Sequence[str] = VTE_ZONES,
 ) -> pd.DataFrame:
     """Add a ``dwell_s`` column to ``windows`` (VTE dwell per outbound run).
@@ -400,7 +399,7 @@ def load_scale(bundle: str) -> float:
     return DEFAULT_CM_PER_PX
 
 
-def _zone_centroid(zone_map: maze_state.ZoneMap, name: str):
+def _zone_centroid(zone_map: phase3_format.ZoneMap, name: str):
     for z in zone_map.zones:
         if z.name == name and len(z.polygon) >= 3:
             a = np.asarray(z.polygon, dtype=float)
@@ -408,7 +407,7 @@ def _zone_centroid(zone_map: maze_state.ZoneMap, name: str):
     return None
 
 
-def stem_axis(zone_map: maze_state.ZoneMap):
+def stem_axis(zone_map: phase3_format.ZoneMap):
     """The stem axis ``(base_xy, tip_xy)`` in normalized coords, junction at the tip.
 
     Prefers an explicit ``stem_axis`` if the zones file carries one (base = HUB/well
@@ -419,8 +418,8 @@ def stem_axis(zone_map: maze_state.ZoneMap):
     """
     if zone_map.stem_base is not None and zone_map.stem_tip is not None:
         return zone_map.stem_base, zone_map.stem_tip
-    base = _zone_centroid(zone_map, maze_state.HUB)
-    tip = _zone_centroid(zone_map, maze_state.JUNCTION)
+    base = _zone_centroid(zone_map, phase3_format.HUB)
+    tip = _zone_centroid(zone_map, phase3_format.JUNCTION)
     if base is None or tip is None:
         return None
     return base, tip
@@ -505,7 +504,7 @@ def peri_junction_profile(seg: pd.DataFrame) -> pd.DataFrame:
 
 
 def junction_kinematics(
-    seg: pd.DataFrame, zone_map: maze_state.ZoneMap,
+    seg: pd.DataFrame, zone_map: phase3_format.ZoneMap,
     *, pause_speed_cms: float = DEFAULT_PAUSE_SPEED_CMS,
     band_before_cm: float = DEFAULT_JUNCTION_BEFORE_CM,
     band_after_cm: float = DEFAULT_JUNCTION_AFTER_CM,
@@ -551,7 +550,7 @@ def junction_kinematics(
     else:
         in_band = np.zeros(len(seg), dtype=bool)
     in_stem = np.array(
-        [zone_map.classify_point(xs[i], ys[i]) == maze_state.CENTRAL_STEM
+        [zone_map.classify_point(xs[i], ys[i]) == phase3_format.CENTRAL_STEM
          for i in range(len(seg))]
     )
 
@@ -577,7 +576,7 @@ def junction_kinematics(
 
 
 def kinematics_per_trial(
-    sidecar: Sidecar, zone_map: maze_state.ZoneMap, windows: pd.DataFrame,
+    sidecar: Sidecar, zone_map: phase3_format.ZoneMap, windows: pd.DataFrame,
     *, pause_speed_cms: float = DEFAULT_PAUSE_SPEED_CMS,
     band_before_cm: float = DEFAULT_JUNCTION_BEFORE_CM,
     band_after_cm: float = DEFAULT_JUNCTION_AFTER_CM,

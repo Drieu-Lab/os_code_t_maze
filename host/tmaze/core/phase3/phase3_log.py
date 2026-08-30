@@ -55,6 +55,11 @@ from tmaze.core.phase3.trial_sequence import HIGH, LEFT, LOW, RIGHT, TrialSequen
 # and task_events/cue_gate use lowercase "left"/"right", so normalize on the way in.
 _ARM_LABEL = {LEFT: "LEFT", RIGHT: "RIGHT", "left": "LEFT", "right": "RIGHT"}
 
+# Trial-log protocol version, stamped into the ``#`` header (``proto=``) so an
+# offline reader can branch on the schema. Bump when the column set / semantics
+# change; also surfaced in the bundle's config/format.json (see bundle_format.py).
+PROTO_VERSION = 10
+
 # CSV column order. The planned block is the "Nx3 cue matrix" (choice + the two
 # return arms) plus the explicit correct_arm; the rest is filled live.
 COLUMNS = (
@@ -628,7 +633,7 @@ class Phase3Log:
         c = self.cfg
         lines = [
             f"# phase3_session animal={self.animal} session_id={self.session_id} "
-            f"seed={self.seed} proto=10",
+            f"seed={self.seed} proto={PROTO_VERSION}",
             f"# high_tone_is_left={c.high_tone_is_left} "
             f"high_tone_hz={c.high_tone_hz} low_tone_hz={c.low_tone_hz}",
             f"# block_size={c.block_size} max_same_run={c.max_same_run} "
