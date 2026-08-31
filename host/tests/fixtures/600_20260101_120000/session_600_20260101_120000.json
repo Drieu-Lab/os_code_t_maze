@@ -1,0 +1,20 @@
+{
+  "session_id": "600_20260101_120000",
+  "animal": "600",
+  "t0": {
+    "wall": 1000000.0,
+    "mono": 2.0,
+    "iso": "2026-01-01T12:00:00.000"
+  },
+  "t_end": null,
+  "streams": {
+    "phase3_task": "task/phase3_600_20260101_120000.csv",
+    "camera_video": "video/600_20260101_120000.mp4",
+    "camera_sidecar": "video/600_20260101_120000.csv"
+  },
+  "fiducial": {
+    "method": "host-t0",
+    "pending": "firmware SYNC TTL + camera LED barcode (see docs/future-work.md FW-0018)"
+  },
+  "schema_version": 2
+}

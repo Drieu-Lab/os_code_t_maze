@@ -1,0 +1,11 @@
+# animal: 600
+# session_id: 600_20260101_120000
+# width: 1280
+# height: 1024
+# start_wall_clock: 2026-01-01 12:00:00
+frame_idx,host_unix_s,track_state,track_smooth_cx,track_smooth_cy,track_confidence
+0,1000000.10,TRACKING,640.0,700.0,0.95
+1,1000000.20,TRACKING,642.0,560.0,0.94
+2,1000000.30,ACQUIRING,,,0.0
+3,1000000.40,TRACKING,648.0,300.0,0.90
+4,1000000.50,TRACKING,520.0,260.0,0.88

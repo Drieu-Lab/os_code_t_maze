@@ -23,6 +23,10 @@ requires-python = ">=3.13"
 [tool.setuptools.packages.find]
 where = ["host"]
 include = ["tmaze*"]
+# The offline analysis layer was carved into its own repo (drieu_lab_analysis;
+# ADR-0142 / FW-0048); it is not part of the rig package. The folder is gone, so
+# this exclude is belt-and-suspenders against a stray tmaze/analysis/ reappearing.
+exclude = ["tmaze.analysis*"]
 
 # Formatter / linter config for the host tools. This is ADVISORY, not a gate:
 # there is no CI and no pre-commit hook enforcing it (a deliberate choice for a

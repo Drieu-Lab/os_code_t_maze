@@ -29,19 +29,7 @@ av>=12.0
 # See docs/decisions/0085.
 openpyxl>=3.1
 
-# Offline cross-session analysis only (tmaze.analysis + the animal_progress
-# notebook, ADR-0112). NOT needed by the live rig tools: pandas is the tidy-frame
-# engine, statsmodels fits the per-session choice logit (guarded - choice_model
-# degrades to "not installed" without it). numpy/matplotlib are already required
-# above. Add jupyterlab by hand if you want to run the notebook interactively.
-pandas>=2.1
-statsmodels>=0.14
-
-# Offline INTERCHANGE exporters only (tmaze.analysis.export_parquet / export_nwb;
-# docs/decisions/0143, proof of concept). OPTIONAL - install by hand only if you
-# want to derive Parquet / NWB from a bundle; both are import-guarded and NOT
-# needed by the live rig tools or the analysis notebook. pyarrow backs
-# pandas.to_parquet; pynwb pulls in HDF5 (h5py).
-#   pip install pyarrow pynwb
-# pyarrow>=16.0
-# pynwb>=2.8
+# NOTE: the offline cross-session ANALYSIS layer (pandas / statsmodels / pyarrow /
+# pynwb + the analysis notebooks) was carved into its own repo,
+# `drieu_lab_analysis` (ADR-0142 / FW-0048). Its dependencies live in that repo's
+# requirements.txt and are intentionally NOT installed in the lean rig env.

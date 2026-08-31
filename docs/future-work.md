@@ -99,9 +99,9 @@ criteria).
 | [FW-0045](#fw-0045-in-fov-event-led-visual-fiducial-for-videoserial-alignment) | In-FOV event-LED visual fiducial (sensor/solenoid) for video<->serial alignment | Camera vision + sidecar + rig LED wiring | Proposed |
 | [FW-0046](#fw-0046-live-core-metrics-tab-fixes-engagement-definition--others) | Live-core Metrics-tab fixes (engagement definition + others) | Phase 3 live metrics (`core/phase3/phase3_traces.py`, `phase3_stats.py`) | Deferred |
 | [FW-0047](#fw-0047-schedule-aware-side-bias-score-inside-intervention-blocks) | Schedule-aware side-bias score inside intervention blocks | Phase 3 closed-loop schedulers (`core/phase3/debias.py`, `intervention_stack.py`) | Proposed |
-| [FW-0048](#fw-0048-carve-the-analysis-layer-into-its-own-repo) | Carve the analysis layer into its own repo | Cross-session analysis (`tmaze.analysis`) + packaging | Deferred |
+| [FW-0048](#fw-0048-carve-the-analysis-layer-into-its-own-repo) | Carve the analysis layer into its own repo | Cross-session analysis (`tmaze.analysis`) + packaging | Done (ADR-0146) |
 | [FW-0049](#fw-0049-relative-stream-paths-in-the-session-manifest) | Relative stream paths in the session manifest (archive-drive portability) | Session manifest (`core/session/session_log.py`, `session_controller.py`) + analysis readers | Proposed |
-| [FW-0050](#fw-0050-golden-fixture-bundle--schema-migration-tooling) | Golden fixture bundle + schema-migration tooling for the bundle contract | `host/tests/` fixtures + analysis readers/exporters | Proposed |
+| [FW-0050](#fw-0050-golden-fixture-bundle--schema-migration-tooling) | Golden fixture bundle + schema-migration tooling for the bundle contract | `host/tests/` fixtures + analysis readers/exporters | Partly done (ADR-0146: fixture shipped; migration tooling still open) |
 | [FW-0051](#fw-0051-productionize-nwb-export--dandiephys-integration) | Productionize NWB export + DANDI / Neuropixels integration | Offline exporters (`tmaze.analysis.export_nwb`) + ephys | Deferred |
 | [FW-0052](#fw-0052-video-storage-footprint--retention-policy) | Video storage-footprint / retention + derived-preview policy | Camera video (`ui/camera_view.py`) + recordings storage | Proposed |
 | [FW-0053](#fw-0053-author-the-rigor-guidance-spokes--slim-the-agentsmd-hubs) | Author the rigor guidance spokes + slim the `AGENTS.md` hubs | Agent guidance (`AGENTS.md` both repos, `docs/guidance/`) | Proposed |
@@ -2396,7 +2396,12 @@ whether to unify with the alternation detector's cue-aware conditioning.
 
 ### FW-0048: Carve the analysis layer into its own repo
 
-- **Status:** Deferred
+- **Status:** Done — executed 2026-08-30 (see [ADR-0146](decisions/0146-split-analysis-into-separate-repo.md)).
+  The layer now lives in the separate `drieu_lab_analysis` repo
+  (`git@github.com:ravipjk/drieu_lab_analysis.git`, package `tmaze_analysis`);
+  the rig keeps the writer-side contract (`core/phase3/bundle_format.py`) + the
+  golden-fixture generator. Original context kept below for the record.
+- **Status (original):** Deferred
 - **Date added:** 2026-08-30
 - **Author / Agent:** Agent (Cursor) on behalf of Celine
 - **Area / modules:** `host/tmaze/analysis/` (the whole package + its
@@ -2516,7 +2521,13 @@ bump in the commit.
 
 ### FW-0050: Golden fixture bundle + schema-migration tooling
 
-- **Status:** Proposed
+- **Status:** Partly done (2026-08-30, [ADR-0146](decisions/0146-split-analysis-into-separate-repo.md)).
+  The GOLDEN FIXTURE half shipped with the split: `tools/make_golden_bundle.py`
+  regenerates a committed `host/tests/fixtures/` bundle from the real writer, this
+  repo's `test_golden_bundle` diffs it, and the analysis repo round-trips it. The
+  SCHEMA-MIGRATION tooling half (a `format_version` upgrade path / migration
+  helpers) is still open. Original context kept below.
+- **Status (original):** Proposed
 - **Date added:** 2026-08-30
 - **Author / Agent:** Agent (Cursor) on behalf of Ravi
 - **Area / modules:** `host/tests/` (a small checked-in reference bundle),

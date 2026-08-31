@@ -7,6 +7,10 @@
     {
       "name": "os_code_t_maze_resources (planning / hardware / notes)",
       "path": "../os_code_t_maze_resources"
+    },
+    {
+      "name": "drieu_lab_analysis (offline analysis)",
+      "path": "../drieu_lab_analysis"
     }
   ],
   "settings": {

@@ -1,22 +1,26 @@
 """bundle_format.py - assemble the session bundle's self-describing data contract.
 
 The rig writes one ``config/format.json`` per session so an offline reader (the
-``tmaze.analysis`` stack, and MATLAB / other tools) can learn the on-disk *format*
-- the token vocabularies, the protocol version, the zone names, and the trial-CSV
-column dictionary - from the bundle itself, without importing the rig-control code.
-This lets the analysis layer be versioned (and later split into its own repo)
-against a stable, machine-readable contract instead of a shared Python import (see
-the analysis-core decoupling ADR).
+analysis stack in the separate ``drieu_lab_analysis`` repo, and MATLAB / other
+tools) can learn the on-disk *format* - the token vocabularies, the protocol
+version, the zone names, and the trial-CSV column dictionary - from the bundle
+itself, without importing the rig-control code. This is what let the analysis
+layer be carved into its own repo (ADR-0142 / FW-0048): it versions against this
+stable, machine-readable contract instead of a shared Python import.
 
 Single source of truth: every value here is derived from the live cores that
 actually shape the data (``phase3_task`` outcomes, ``trial_sequence`` cue tones,
 ``phase3_log`` arm labels + columns + proto, ``maze_state`` zone names), so the
-manifest can't drift from what the rig writes. The analysis package keeps its own
-mirror of these tokens; a same-repo parity test asserts the two agree.
+manifest can't drift from what the rig writes. The analysis repo keeps its own
+mirror of these tokens; the shared golden fixture (``tools/make_golden_bundle.py``
+-> ``tests/fixtures/``) is what now keeps the two in agreement across the repos:
+this repo's ``test_golden_bundle`` regenerates it and the analysis repo's reader/
+exporter tests round-trip it, so a format change surfaces on both sides (bump
+``FORMAT_VERSION`` and re-issue the fixture when that happens).
 
 Pure core: stdlib only, no Tk/OpenCV. Headless tests: python -m unittest
-test_session_config (which exercises the write path) and test_analysis_phase3_format
-(which checks the manifest enumerations against the analysis mirror).
+test_session_config (which exercises the write path) and test_golden_bundle (which
+regenerates the committed fixture from this manifest + the trial writer).
 """
 from __future__ import annotations
 
@@ -28,8 +32,8 @@ from tmaze.core.phase3.phase3_task import ABANDONED, CORRECT, INCORRECT
 from tmaze.core.phase3.trial_sequence import HIGH, LEFT, LOW, RIGHT
 
 # Bump when the format.json layout / semantics change. Kept in lockstep with the
-# analysis mirror (tmaze.analysis.phase3_format.FORMAT_VERSION), which the reader
-# checks to fail loudly on a newer format.
+# analysis mirror (drieu_lab_analysis: tmaze_analysis.phase3_format.FORMAT_VERSION),
+# which the reader checks to fail loudly on a newer format.
 FORMAT_VERSION = 1
 
 # One-line meaning per trial-CSV column, keyed by the phase3_log.COLUMNS names.
