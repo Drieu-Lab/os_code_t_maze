@@ -100,6 +100,13 @@ criteria).
 | [FW-0046](#fw-0046-live-core-metrics-tab-fixes-engagement-definition--others) | Live-core Metrics-tab fixes (engagement definition + others) | Phase 3 live metrics (`core/phase3/phase3_traces.py`, `phase3_stats.py`) | Deferred |
 | [FW-0047](#fw-0047-schedule-aware-side-bias-score-inside-intervention-blocks) | Schedule-aware side-bias score inside intervention blocks | Phase 3 closed-loop schedulers (`core/phase3/debias.py`, `intervention_stack.py`) | Proposed |
 | [FW-0048](#fw-0048-carve-the-analysis-layer-into-its-own-repo) | Carve the analysis layer into its own repo | Cross-session analysis (`tmaze.analysis`) + packaging | Deferred |
+| [FW-0049](#fw-0049-relative-stream-paths-in-the-session-manifest) | Relative stream paths in the session manifest (archive-drive portability) | Session manifest (`core/session/session_log.py`, `session_controller.py`) + analysis readers | Proposed |
+| [FW-0050](#fw-0050-golden-fixture-bundle--schema-migration-tooling) | Golden fixture bundle + schema-migration tooling for the bundle contract | `host/tests/` fixtures + analysis readers/exporters | Proposed |
+| [FW-0051](#fw-0051-productionize-nwb-export--dandiephys-integration) | Productionize NWB export + DANDI / Neuropixels integration | Offline exporters (`tmaze.analysis.export_nwb`) + ephys | Deferred |
+| [FW-0052](#fw-0052-video-storage-footprint--retention-policy) | Video storage-footprint / retention + derived-preview policy | Camera video (`ui/camera_view.py`) + recordings storage | Proposed |
+| [FW-0053](#fw-0053-author-the-rigor-guidance-spokes--slim-the-agentsmd-hubs) | Author the rigor guidance spokes + slim the `AGENTS.md` hubs | Agent guidance (`AGENTS.md` both repos, `docs/guidance/`) | Proposed |
+| [FW-0054](#fw-0054-measurement-rigor-checklist--grounded-uncertainty-norm-in-the-workflow) | Measurement-rigor checklist + grounded-uncertainty norm in the workflow | Agent guidance (`CONTRIBUTING.md`, `AGENTS.md`) | Proposed |
+| [FW-0055](#fw-0055-glossary-terms-for-scientific--epistemic-rigor) | Glossary terms for scientific + epistemic rigor | `docs/glossary.md` | Proposed |
 
 ## Entries
 
@@ -2421,6 +2428,39 @@ contract), move the analysis notebooks + their `PROGRAMS.md` rows and the heavy
 analysis deps into the new repo, and exclude `tmaze.analysis` from this repo's
 `pyproject.toml` package discovery.
 
+**Environment / installation split (revisit at the split).** Today everything lives
+in one env: `tmaze.analysis` installs with the rig via `pip install -e .` from the
+repo root, and its deps sit in `host/requirements.txt` (the always-on `pandas` /
+`statsmodels`, plus the OPTIONAL, import-guarded `pyarrow` / `pynwb` for the
+docs/decisions/0143 exporters, currently listed commented-out). At the split:
+
+- **New analysis repo owns its own deps.** Move the analysis-only deps out of
+  `host/requirements.txt` into the new repo's `pyproject.toml` / requirements:
+  `pandas`, `numpy`, `statsmodels` (+ Jupyter for the notebooks), with `pyarrow`
+  and `pynwb` as OPTIONAL extras (e.g. an `[export]`/`[interchange]` extra) so the
+  two-tier exporters (`export_parquet` / `export_nwb`) install on demand, not by
+  default. `host/requirements.txt` then slims to the live-rig deps only.
+- **Two separate conda envs.** `drieu_t_maze` = rig only (no pandas/pyarrow/pynwb);
+  a separate analysis env (Python 3.13, matching the rig at the time of writing)
+  does `pip install -e .` IN THE NEW REPO + the export extras. The analysis env no
+  longer needs the rig package installed at all.
+- **Launch paths + doc references move.** If the import root becomes
+  `tmaze_analysis`, update the exporter/notebook run commands (currently
+  `python -m tmaze.analysis.export_parquet` / `export_nwb`) and repoint the
+  `PROGRAMS.md` rows, the ADR-0143/0144 command references, and
+  `docs/design/data-format-review.md` at the new home (the ADRs/design doc stay
+  here as the decision record; they just link out).
+- **Move the exporter test + fixtures.** `host/tests/test_analysis_exporters.py`
+  and the shared `bundle_data_dictionary.py` travel with the analysis repo; the
+  skip-if-missing guards keep them green whether or not the export extras are
+  installed. A golden fixture bundle (FW-0050) is what lets those tests + the
+  readers run without importing `tmaze.core`.
+- **Cross-repo format handshake.** ADR-0144's units/dtype enrichment touches
+  `bundle_format.py`, which stays in the RIG repo; a `format_version` bump then
+  becomes a two-repo step (rig bumps what it writes, analysis bumps what it
+  accepts). The version guards make a mismatch fail loudly, so this is safe but
+  must be coordinated.
+
 **Evaluation / acceptance.** The analysis repo installs + tests standalone
 (`pip install -e . && pytest`) with no `tmaze` (rig) dependency; the rig repo's
 tests still pass and `grep tmaze.analysis` in rig `core/io/ui/tools` stays empty;
@@ -2435,6 +2475,300 @@ the analysis package to an internal index or keep it editable-install only.
 
 **ADR needed?** Yes - a short ADR in the NEW repo establishing it, plus a note in
 this repo's ADR log that analysis moved out.
+
+### FW-0049: Relative stream paths in the session manifest
+
+- **Status:** Proposed
+- **Date added:** 2026-08-30
+- **Author / Agent:** Agent (Cursor) on behalf of Ravi
+- **Area / modules:** `host/tmaze/core/session/session_log.py` (the `streams`
+  map), `host/tmaze/ui/session_controller.py` (writer), the analysis readers that
+  resolve stream paths
+- **Related ADRs:** [ADR-0048](decisions/0048-session-orchestration-and-manifest.md)
+  (manifest as correlation index), [ADR-0113](decisions/0113-multi-location-recordings.md)
+  (archive roots), [ADR-0142](decisions/0142-analysis-core-decoupling-data-contract.md)
+  (bundle-as-contract), [ADR-0143](decisions/0143-two-tier-data-model-offline-interchange.md)
+
+**Motivation / context.** The manifest `session_<id>.json` records every stream
+with an ABSOLUTE Windows path (e.g.
+`C:\Users\Celine\...\phase3_recordings\<id>\task\phase3_<id>.csv`). When a bundle
+is moved to an archive drive (ADR-0113) or copied to another machine, those
+absolute paths no longer resolve. Analysis works around this today by reconstructing
+paths from the bundle directory + known filenames rather than trusting the manifest
+`streams` map, so the map is effectively decorative for a moved bundle.
+
+**Sketch of approach.** Store each stream path RELATIVE to the bundle root (e.g.
+`task/phase3_<id>.csv`) alongside (or instead of) the absolute path; a reader joins
+it to the bundle directory it actually found. Keep back-compat: prefer the relative
+path when present, fall back to the absolute path, and (as today) fall back to
+filename reconstruction. Bump the manifest `schema_version` if the shape changes.
+Small change, but it touches the live write path, so it is out of scope for the
+data-format review task.
+
+**Evaluation / acceptance.** A bundle copied to a new drive resolves every stream
+from the manifest alone; old bundles with absolute-only paths still load.
+
+**Effort / risk.** Low. Risk: a reader that trusted absolute paths; mitigated by
+the prefer-relative-then-absolute fallback.
+
+**ADR needed?** Minor - can ride under ADR-0143/0048; note the `schema_version`
+bump in the commit.
+
+### FW-0050: Golden fixture bundle + schema-migration tooling
+
+- **Status:** Proposed
+- **Date added:** 2026-08-30
+- **Author / Agent:** Agent (Cursor) on behalf of Ravi
+- **Area / modules:** `host/tests/` (a small checked-in reference bundle),
+  `host/tmaze/analysis/` (readers + the ADR-0143 exporters)
+- **Related ADRs:** [ADR-0142](decisions/0142-analysis-core-decoupling-data-contract.md)
+  (version guards), [ADR-0143](decisions/0143-two-tier-data-model-offline-interchange.md)
+  (exporters), [ADR-0144](decisions/0144-enrich-bundle-data-dictionary.md)
+  (data dictionary), [ADR-0112](decisions/0112-longitudinal-strategy-analysis.md)
+
+**Motivation / context.** There is no checked-in reference ("golden") bundle; the
+disk-based tests build synthetic temp bundles inline. Once analysis is a separate
+repo (FW-0048), it can no longer render CSVs via `Phase3Log.render_csv()` to
+fabricate fixtures, and the only thing pinning the contract will be the bundle
+FORMAT. A tiny, real (or realistically-rendered) golden bundle - one short session
+with a handful of trials, an excursions file, a few sidecar rows, notes, and a
+`config/format.json` - would let both repos test the reader/exporter contract, and
+would give schema-migration work something concrete to migrate.
+
+**Sketch of approach.** Commit a minimal bundle under `host/tests/fixtures/`
+(small enough to version: no real `.mp4`; a truncated sidecar). Add tests that load
+it via `bundle_reader` and round-trip it through the ADR-0143 exporters. Pair it
+with a small migration helper that upgrades an older bundle to the current
+`format_version` (or asserts the version guards behave), so a future format bump
+(e.g. ADR-0144's v1->v2) has a tested upgrade path.
+
+**Evaluation / acceptance.** The analysis repo's tests pass against the golden
+bundle with no `tmaze.core` import; a deliberately-old fixture exercises the
+legacy-inference path (missing `format.json`).
+
+**Effort / risk.** Low-medium. Risk: fixture drift as the format evolves;
+mitigated by regenerating it from the writer in the rig repo and version-stamping
+it.
+
+**ADR needed?** No - test/tooling change; reference ADR-0142/0143/0144.
+
+### FW-0051: Productionize NWB export + DANDI/ephys integration
+
+- **Status:** Deferred
+- **Date added:** 2026-08-30
+- **Author / Agent:** Agent (Cursor) on behalf of Ravi
+- **Area / modules:** a new analysis-repo `preprocess_session` pipeline built on
+  `export_nwb.py` / `export_parquet.py` (POC -> production), the Neuropixels
+  acquisition pipeline, packaging (`pynwb` dep), the golden fixture (FW-0050)
+- **Related ADRs:** [ADR-0145](decisions/0145-nwb-primary-derived-format-preprocessing-pipeline.md)
+  (NWB primary + the pipeline; the direction this implements),
+  [ADR-0143](decisions/0143-two-tier-data-model-offline-interchange.md)
+  (two-tier + NWB target), [ADR-0124](decisions/0124-self-anchoring-session-bundle.md)
+  (session anchor), [ADR-0144](decisions/0144-enrich-bundle-data-dictionary.md)
+  (units feed `TimeSeries.unit`)
+
+**Motivation / context.** ADR-0143 shipped proof-of-concept exporters that map a
+finished bundle into `.nwb` (behaviour: trials table + position + cue/lick events,
+anchored at the manifest `t0`) and Parquet. The lab has decided NWB is the adopted
+sharing format (ADR-0145), and wants a **preprocessing step** that turns a raw
+bundle into a per-session NWB (+ optional Parquet) with optional preprocessing
+applied. The scientific payoff - unifying behaviour with the Neuropixels recordings
+in one standard file and sharing via DANDI (a K99/R00 expectation) - lands once
+ephys recording begins and the mapping is firmed up.
+
+**Sketch of approach.** Build an offline, analysis-repo pipeline
+`preprocess_session(bundle) -> session.nwb (+ optional .parquet)` (ADR-0145):
+
+- **Read-only + regenerable**, importing only the bundle contract (`bundle_reader`
+  / `phase3_format` / `bundle_data_dictionary`), never the rig core. A batch driver
+  runs it over the recordings roots.
+- **Declarative registry of OPTIONAL steps**, each deterministic given
+  `(bundle, step_config)` (e.g. trajectory smoothing, derived per-trial features,
+  spike-time alignment when ephys lands). Default = the current POC mapping.
+- **Text provenance sidecar:** stamp applied steps + params + tool/code version +
+  bundle `format_version` into a JSON sidecar next to the outputs (so it is
+  value-comparable and reproducible for sharing, not buried inside the `.nwb`).
+- **Idempotency keyed on INPUTS:** a skip-if-fresh cache hashes the input bundle
+  content + step config, never the output bytes (NWB/Parquet embed library
+  versions, compression, and an NWB creation timestamp, so bytes vary run-to-run).
+- **Firm up the mapping:** trial columns, cue/lick events (already the modern
+  `EventsTable`), `SpatialSeries` with real spatial units once ADR-0144 lands; add
+  the electrical-series / probe geometry when Neuropixels data exists; validate with
+  the NWB Inspector; add a DANDI upload path.
+
+**Golden-fixture implications (from the analysis-repo-separation Phase 2 plan;
+FW-0050).** The committed golden bundle is the pipeline's primary regression anchor,
+and its design constrains the pipeline:
+
+- **Fixture coverage tracks the steps.** It must carry every stream a step reads
+  (trial CSV incl. the ISO event columns, manifest `t0`, `config/format.json` +
+  `zones.json`, a truncated sidecar; optionally excursions + notes). A step that
+  reads a new field makes that field mandatory in the fixture.
+- **Cross-repo fixture handshake (mirrors `format_version`).** The authoritative
+  generator (`make_golden_bundle.py`) lives in the RIG repo; the analysis repo gets
+  a copy. Adding a step that needs a new bundle field means: extend the generator ->
+  regenerate the fixture in the rig repo -> copy it into the analysis repo.
+- **Determinism discipline in tests.** Never byte-compare `.nwb`/`.parquet`;
+  round-trip (write, re-read) and assert derived VALUES, and byte/JSON-compare only
+  the text dictionary + provenance sidecars.
+- **Keep the synthetic builder for edge cases** (legacy/no-`format.json`) alongside
+  the real-artifact golden fixture.
+
+**Evaluation / acceptance.** A session's `.nwb` passes NWB Inspector, opens in
+`matnwb`, and (with ephys) aligns spikes to the behavioural trials table on one
+clock; the pipeline is deterministic per `(bundle, step_config)` and idempotent
+(skip-if-fresh on inputs); its tests pass against the golden fixture (value-level +
+text-sidecar equality); a test dandiset validates.
+
+**Effort / risk.** Medium-high (depends on the ephys pipeline). Risks: timing
+alignment across behaviour/video/ephys clocks (leans on ADR-0124 + FW-0018); and
+fixture/generator drift across the two repos (mitigated by the cross-repo handshake
+above + the version guards).
+
+**ADR needed?** Direction is set by ADR-0145; add a follow-up ADR only if the
+production mapping makes a non-obvious modelling choice (e.g. how ephys + behaviour
+share the clock) beyond what ADR-0145 records.
+
+### FW-0052: Video storage-footprint / retention policy
+
+- **Status:** Proposed
+- **Date added:** 2026-08-30
+- **Author / Agent:** Agent (Cursor) on behalf of Ravi
+- **Area / modules:** `host/tmaze/ui/camera_view.py` (codec/CRF), recordings
+  storage + archive workflow (ADR-0113)
+- **Related ADRs:** [ADR-0011](decisions/0011-camera-tab.md)/[ADR-0013](decisions/0013-camera-codec-choice.md)
+  (camera recording + codec choice), [ADR-0020](decisions/0020-save-background-image.md),
+  [ADR-0113](decisions/0113-multi-location-recordings.md)
+
+**Motivation / context.** A single session's `.mp4` dominates the bundle (~12 GB
+in the inspected example); the rest of the bundle is a few tens of MB. Across many
+sessions/animals this drives the archive-drive workflow and backup cost, and it
+makes casual copying/sharing of a bundle impractical.
+
+**Sketch of approach.** Options to weigh (not mutually exclusive): a documented
+retention policy (which sessions keep full video vs. a compressed proxy); an
+optional lower-bitrate H.264 "preview" derivative generated offline (Tier 2)
+alongside Parquet/NWB for quick review; codec/CRF defaults tuned for size vs.
+tracking fidelity; and confirming the tracking sidecar (the analysis-relevant part)
+is always retained even when raw video is archived/pruned.
+
+**Evaluation / acceptance.** A clear rule for what video is kept where; a
+size-vs-quality comparison for any proposed codec/CRF change; the analysis path
+never depends on the full-resolution `.mp4`.
+
+**Effort / risk.** Low-medium. Risk: over-compressing loses tracking/behaviour
+detail; mitigated by keeping the sidecar + validating tracking on a proxy.
+
+**ADR needed?** Yes if a codec/CRF default or a retention rule changes; a note
+otherwise.
+
+### FW-0053: Author the rigor guidance spokes + slim the `AGENTS.md` hubs
+
+- **Status:** Proposed
+- **Date added:** 2026-08-30
+- **Author / Agent:** Agent (Cursor) on behalf of Ravi
+- **Area / modules:** `AGENTS.md` (both repos), a new `docs/guidance/` folder,
+  `CONTRIBUTING.md` (unchanged content, becomes an explicit spoke), the resources
+  repo `AGENTS.md` Change Log
+- **Related ADRs:** ADR-0146 (to be written - agent-guidance hub-and-spoke, per
+  [`docs/design/agent-guidance-rigor-review.md`](design/agent-guidance-rigor-review.md));
+  builds on the reasoning in ADR-0029 (advisory guardrails), ADR-0083 (package
+  layout precedent for "one home per concern")
+
+**Motivation / context.** The agent frameworks are strong on software-engineering
+craft and thin on *scientific / data / reproducibility / epistemic* rigor. The
+design review [`agent-guidance-rigor-review.md`](design/agent-guidance-rigor-review.md)
+diagnoses the gaps (measurement validity, confounds, clocks/units, reproducibility,
+grant grounding, welfare, agent epistemics) from concrete ADR/bug evidence and
+recommends a hub-and-spoke restructuring rather than growing the monolith.
+
+**Sketch of approach.** Keep each repo's `AGENTS.md` as a thin always-loaded *hub*
+that routes to scoped *spokes* read on demand. Author four new spokes under
+`docs/guidance/`: `scientific-rigor.md` (measurement + statistics; the
+*is-this-number-what-it-claims* checklist; descriptive-vs-inferential; confound/causal
+discipline), `data-and-reproducibility.md` (the bundle as a contract; declare
+clock+units; seeds/provenance/idempotent rebuilds; cross-repo records sources of
+truth), `experiment-and-welfare.md` (grant/hypothesis grounding + the welfare
+invariant), and `agent-collaboration.md` (ask-before-assuming + grounded uncertainty).
+Cross-reference the data/records and welfare spokes from the resources repo `AGENTS.md`
+so the discipline is shared, not duplicated. Write each spoke worked-example-first from
+the ADRs the review cites. Land as small stages: ADR-0146 first, then the spokes, then
+the hub slim-down.
+
+**Evaluation / acceptance.** Each spoke is short, plain-language (glosses/links
+`docs/glossary.md`), and cites real ADRs as examples; the hubs read as accurate
+routers with a one-line-per-spoke table; no guidance is duplicated across docs; the
+resources repo Change Log records the change.
+
+**Effort / risk.** Medium (writing, not code). Risk: bloating the always-loaded hub
+(mitigated - the point is to *shrink* it) or duplicating content (mitigated by the
+single-source-of-truth/routing rule).
+
+**ADR needed?** Yes - ADR-0146 records the restructuring decision (named but not yet
+written; the review is recommend-only).
+
+### FW-0054: Measurement-rigor checklist + grounded-uncertainty norm in the workflow
+
+- **Status:** Proposed
+- **Date added:** 2026-08-30
+- **Author / Agent:** Agent (Cursor) on behalf of Ravi
+- **Area / modules:** `CONTRIBUTING.md` ("Before you commit"), `AGENTS.md`
+  (autonomy/collaboration guidance), the `agent-collaboration.md` + `scientific-rigor.md`
+  spokes (FW-0053)
+- **Related ADRs:** ADR-0146 (to be written); evidence in ADR-0092/0093/0094/0095
+  (misleading stats) and the epistemics discussion in
+  [`agent-guidance-rigor-review.md`](design/agent-guidance-rigor-review.md) §4.1, §4.8
+
+**Motivation / context.** The `#260720_BehaviorStatError` cluster shows agents
+repeatedly shipped numbers whose definition/denominator/units didn't match their
+label; and two human-adopted practices (checking whether the agent has questions;
+the agent stating grounded certainty and flagging work that needs checking) have no
+home in the frameworks.
+
+**Sketch of approach.** Add a short *is-this-number-what-it-claims* checklist to the
+pre-commit reminders (numerator/denominator + set; descriptive vs inferential; name
+matches definition; clock/units honest; caveat travels with the number). Add an
+ask-before-assuming rule (surface open questions + key assumptions on consequential/
+ambiguous forks; don't over-ask on reversible defaults) and a grounded-uncertainty
+rule (mark verified vs inferred vs recalled/guess; flag unverified claims and name
+what would verify them; no numeric self-confidence). Keep the canonical wording in
+the spokes and only *nudge* from `CONTRIBUTING.md`/`AGENTS.md`.
+
+**Evaluation / acceptance.** The checklist is short enough to actually run; the
+uncertainty norm is grounding-based (not a percentage); both are referenced from the
+workflow docs without duplicating the spoke text.
+
+**Effort / risk.** Low. Risk: checklist fatigue (mitigated by keeping it to ~5
+questions) or over-asking (mitigated by the "reversible defaults" carve-out).
+
+**ADR needed?** Covered by ADR-0146 (part of the same guidance decision).
+
+### FW-0055: Glossary terms for scientific + epistemic rigor
+
+- **Status:** Proposed
+- **Date added:** 2026-08-30
+- **Author / Agent:** Agent (Cursor) on behalf of Ravi
+- **Area / modules:** `docs/glossary.md`
+- **Related ADRs:** ADR-0146 (to be written); supports FW-0053/FW-0054
+
+**Motivation / context.** The rigor spokes (FW-0053) introduce recurring terms that
+should be defined once and pointed to, per the "point to the glossary instead of
+re-defining" rule in `AGENTS.md`.
+
+**Sketch of approach.** Add short, plain-language entries for: *measurement
+provenance* (a number stating what it is, its units, and its caveats), *grounded
+uncertainty / verification status* (verified vs inferred vs recalled - the reliable
+alternative to a numeric confidence), *descriptive vs inferential* (observing vs
+drawing a statistical conclusion that needs an uncertainty), and *hub-and-spoke* (a
+thin always-loaded index routing to scoped docs). Reuse the existing *endogeneity*
+and *source of truth* entries rather than re-defining them.
+
+**Evaluation / acceptance.** Each entry is a sentence or two, links a relevant ADR
+where one exists, and is referenced (not re-explained) by the spokes.
+
+**Effort / risk.** Low.
+
+**ADR needed?** No - covered by ADR-0146; glossary additions are mechanical.
 
 ## Completed
 
