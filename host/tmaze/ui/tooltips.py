@@ -112,6 +112,34 @@ def add_tooltip(widget: tk.Misc, text: str) -> None:
     widget.bind("<ButtonPress>", lambda _e: state.hide(), add="+")
 
 
+def add_dynamic_tooltip(widget: tk.Misc, text_fn) -> None:
+    """Attach a hover tooltip whose text is computed at show time by ``text_fn``.
+
+    Like add_tooltip but for LIVE values (e.g. camera transport stats): the
+    callback runs on each hover and may return "" to show nothing. Guarded so a
+    torn-down widget or a raising callback never escapes the <Enter> handler.
+    """
+    state = _Tip(widget)
+
+    def on_enter(_event: "tk.Event") -> None:
+        try:
+            text = text_fn() or ""
+        except Exception:
+            text = ""
+        if not text:
+            return
+        try:
+            x = widget.winfo_rootx() + 12
+            y = widget.winfo_rooty() + widget.winfo_height() + 4
+        except tk.TclError:
+            return
+        state.schedule(text, x, y)
+
+    widget.bind("<Enter>", on_enter, add="+")
+    widget.bind("<Leave>", lambda _e: state.hide(), add="+")
+    widget.bind("<ButtonPress>", lambda _e: state.hide(), add="+")
+
+
 def add_canvas_tooltip(canvas: tk.Canvas, item_id: int, text: str) -> None:
     """Attach a hover tooltip to a single canvas item (e.g. a rig_view marker)."""
     if not text:

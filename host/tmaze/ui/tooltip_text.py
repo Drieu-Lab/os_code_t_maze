@@ -156,9 +156,11 @@ TIPS: Dict[str, Entry] = {
                           "undistortion.",
     "camera.calib_status": "Active lens calibration (file, resolution, RMS "
                            "reprojection error).",
-    "camera.status": "Live acquisition health: grab rate (fps), frames saved, "
-                     "source drops, incomplete grabs, encode-queue drops, and "
-                     "queue fill.",
+    "camera.status": "Live acquisition health. fps = grab rate; saved = frames "
+                     "written; src-drop = camera frames NEVER received (BlockID "
+                     "gaps); incomplete = partial/corrupt grabs; q-drop = "
+                     "encode-queue drops; queue = encode-queue fill. The inline "
+                     "'net: Nr/Mu' token is resend-requests / buffer-underruns.",
     "camera.show_zones": "Overlay the maze zone outlines on the live preview "
                          "(the current zone is drawn bold while tracking runs). "
                          "Display only - does not affect recording or tracking.",

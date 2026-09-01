@@ -33,6 +33,7 @@ the rig camera's known IP, so it always grabs the right interface.
 from __future__ import annotations
 
 import csv
+import json
 import os
 import queue
 import sys
@@ -48,11 +49,12 @@ from tmaze.ui.gui_deps import (  # noqa: E402
 )
 from tmaze.vision.calibration import Undistorter, load_calibration  # noqa: E402
 from tmaze.core import protocol  # noqa: E402  (shared serial-line parser; see docs/decisions/0024)
+from tmaze.core.camera_health import account_block_gap  # noqa: E402  (pure BlockID-gap accounting; ADR-0147)
 from tmaze.core.records.animals import resources_root  # noqa: E402  (sibling resources-repo resolver)
 from tmaze.paths import camera_output_dir  # noqa: E402  (single source for the recordings root; ADR-0088)
 from tmaze.core.maze_state import IN_WELL as _IN_WELL  # noqa: E402  (HUB well substate label)
 from tmaze.ui.preview import render_bgr_to_label, safe_after  # noqa: E402
-from tmaze.ui.tooltips import tip  # noqa: E402
+from tmaze.ui.tooltips import add_dynamic_tooltip, tip  # noqa: E402
 from tmaze.vision.tracker import TRACK_COLUMNS, track_row  # noqa: E402
 from tmaze.vision.track_worker import LatestFrameSlot, TrackPublisher  # noqa: E402
 
@@ -97,6 +99,16 @@ PREVIEW_INTERVAL_MS = 66      # ~15 fps preview, decoupled from capture rate
 PREVIEW_MAX_W = 480           # downscale preview to keep the GUI light
 RETRIEVE_TIMEOUT_MS = 1000    # how long RetrieveResult waits before we re-check stop
 QUEUE_SECONDS = 2.0           # bounded queue holds ~this many seconds of frames
+
+# GigE acquisition tuning (see docs/decisions/0147). The app loads no .pfs by
+# default, so WITHOUT these the camera streams at its power-up packet size
+# (~1500 B) even on the rig's jumbo-frame NIC (MTU 9014) - many more packets per
+# frame, each an extra chance to drop one (the steady incomplete-frame climb in
+# bug #260810). All are applied guarded (a non-GigE / read-only node is skipped).
+GRAB_MAX_NUM_BUFFER = 32      # receive-buffer pool; headroom vs encode-thread CPU spikes
+TARGET_PACKET_SIZE = 8192     # GevSCPSPacketSize target, CLAMPED to the node max (<= NIC MTU)
+INTER_PACKET_DELAY = 0        # GevSCPD ticks; raise only if resends persist after jumbo
+TRANSPORT_STATS_INTERVAL_S = 1.0  # how often the grab thread refreshes Basler stream stats
 
 # Smoothing factor for the displayed tracker.process() time (exponential moving
 # average). Small alpha => stable readout that still tracks sustained load; the
@@ -159,12 +171,24 @@ class _Counters:
     """Live acquisition health, shown in the status bar. Guarded by a lock."""
     grabbed: int = 0       # frames successfully retrieved from the camera
     saved: int = 0         # frames written to the current/last recording
-    src_drops: int = 0     # frames the camera produced but we never received (BlockID gaps)
-    incomplete: int = 0    # grabs that arrived corrupt/partial
+    # BlockID gaps between DELIVERED buffers = frames the camera produced but the
+    # host never received at all. Counted via account_block_gap on every delivered
+    # buffer (complete OR incomplete), so an incomplete grab no longer manufactures
+    # a phantom gap for the next good frame (the pre-0147 double-count; ADR-0147).
+    src_drops: int = 0
+    incomplete: int = 0    # grabs that arrived corrupt/partial (GrabSucceeded() == False)
     queue_drops: int = 0   # frames dropped because the encode queue was full
     track_skips: int = 0   # frames handed to the tracker but dropped unprocessed (worker behind)
     track_ms_avg: float = 0.0   # EMA of tracker.process() wall time, ms (0 = no samples)
     track_ms_peak: float = 0.0  # peak-hold tracker.process() time, ms
+    # Basler stream-grabber transport statistics - the driver's OWN view of the
+    # link, ground truth vs our BlockID-derived counts (None = node unavailable /
+    # not GigE). Refreshed ~1/s by the grab thread. See ADR-0147.
+    stat_failed_buffer: Optional[int] = None    # driver's own incomplete-frame count
+    stat_buffer_underrun: Optional[int] = None  # frames dropped: no free buffer (PC/buffers too small)
+    stat_failed_packet: Optional[int] = None    # GigE packets that never arrived (link loss)
+    stat_resend_request: Optional[int] = None   # GigE packet-resend requests (link loss)
+    stat_total_packet: Optional[int] = None     # total GigE packets seen (context)
 
     def note_track_ms(self, ms: float) -> None:
         """Fold one process() timing into the EMA + peak-hold (caller holds lock)."""
@@ -185,6 +209,7 @@ class _RecParams:
     header: dict
     codec: str = "ffv1"     # "ffv1" (lossless) or "h264" (compressed)
     crf: int = DEFAULT_CRF  # H.264 quality (ignored for FFV1)
+    stats_path: str = ""    # companion <id>_camera_stats.json written at close (ADR-0147)
 
 
 class _VideoWriter:
@@ -299,6 +324,11 @@ class CameraView:
         self._pfs_lock = threading.Lock()
         self._pfs_path: Optional[str] = None
         self._pfs_pending = False
+
+        # Applied transport settings (packet size, buffers, ...), written by the
+        # grab thread at open and read for the recording provenance (ADR-0147).
+        self._cam_settings_lock = threading.Lock()
+        self._cam_settings: dict = {}
 
         # Lens-distortion correction. The Undistorter (shared with the tracker
         # prototype) builds/applies the remap on the grab thread; the calibration
@@ -502,7 +532,9 @@ class CameraView:
         status_lbl = ttk.Label(self.frame, textvariable=self._status_var,
                                anchor="w")
         status_lbl.pack(side=tk.TOP, fill=tk.X, padx=6)
-        tip(status_lbl, "camera.status")
+        # Live tooltip: the field key description plus the current Basler transport
+        # stats (the inline line stays tiny; full breakdown on hover). See ADR-0147.
+        add_dynamic_tooltip(status_lbl, self._status_tooltip_text)
 
         # Controls.
         controls = ttk.Frame(self.frame)
@@ -808,8 +840,41 @@ class CameraView:
             if track_on:
                 line += (f"   track: {c.track_ms_avg:.1f}/{c.track_ms_peak:.1f} ms"
                          f"   track-skip: {c.track_skips}")
+            net = self._net_token(c)  # tiny transport-health token; detail on hover
+        if net:
+            line += "   " + net
         rec = "  [RECORDING]" if self._recording.is_set() else ""
         self._status_var.set(self._conn_status + "   |   " + line + rec)
+
+    @staticmethod
+    def _net_token(c) -> str:
+        """A tiny inline link-health token: resend-requests / buffer-underruns.
+
+        Kept small because the status line lives in the cramped Rig-view tab; the
+        full Basler stat breakdown is in the status hover tooltip (ADR-0147).
+        Empty when no transport stats are available (e.g. not a GigE camera).
+        """
+        r, u = c.stat_resend_request, c.stat_buffer_underrun
+        if r is None and u is None:
+            return ""
+        return f"net: {'-' if r is None else r}r/{'-' if u is None else u}u"
+
+    def _status_tooltip_text(self) -> str:
+        """Field-key description + the current Basler transport stats (ADR-0147)."""
+        from tmaze.ui.tooltip_text import resolve
+        base = resolve("camera.status") or ""
+        with self._counters_lock:
+            c = self._counters
+            rows = (
+                ("failed buffers", c.stat_failed_buffer),
+                ("buffer underruns (PC / buffers too small)", c.stat_buffer_underrun),
+                ("packet resend requests (link loss)", c.stat_resend_request),
+                ("failed packets (link loss)", c.stat_failed_packet),
+                ("total packets", c.stat_total_packet),
+            )
+        detail = "\n".join(f"  {label}: {'n/a' if v is None else v}"
+                           for label, v in rows)
+        return f"{base}\n\nBasler transport stats (ground truth):\n{detail}"
 
     # set by the grab thread via _post; read on the Tk thread
     _conn_status = "Opening camera..."
@@ -943,6 +1008,10 @@ class CameraView:
                         bg_name = os.path.basename(bg_path)
                 except Exception:
                     bg_name = ""
+        # Applied transport settings (packet size, buffers) for provenance; the
+        # grab thread set these at open, before recording could be enabled (ADR-0147).
+        with self._cam_settings_lock:
+            cam_settings = dict(self._cam_settings)
         header = {
             "animal": animal,
             "session_id": session_id or "",
@@ -950,6 +1019,10 @@ class CameraView:
             "width": w,
             "height": h,
             "pfs": self._pfs_var.get(),
+            "packet_size": cam_settings.get("packet_size", ""),
+            "packet_size_max": cam_settings.get("packet_size_max", ""),
+            "max_num_buffer": cam_settings.get("max_num_buffer", ""),
+            "inter_packet_delay": cam_settings.get("inter_packet_delay", ""),
             "codec": codec,
             "crf": (crf if codec == "h264" else ""),
             "start_wall_clock": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -971,7 +1044,8 @@ class CameraView:
         }
         self._rec_params = _RecParams(
             video_path=base + ext, csv_path=base + ".csv",
-            fps=self._cam_fps, size=(w, h), header=header, codec=codec, crf=crf)
+            fps=self._cam_fps, size=(w, h), header=header, codec=codec, crf=crf,
+            stats_path=base + "_camera_stats.json")
 
         # Clear any stale frames so frame_idx starts clean at 0.
         self._drain_queue()
@@ -1013,6 +1087,9 @@ class CameraView:
             camera = pylon.InstantCamera(factory.CreateDevice(device))
             camera.Open()
             self._apply_pfs_if_pending(camera)
+            settings = self._configure_transport(camera)  # buffers + packet size (ADR-0147)
+            with self._cam_settings_lock:
+                self._cam_settings = settings
             converter = pylon.ImageFormatConverter()
             converter.OutputPixelFormat = pylon.PixelType_BGR8packed
             converter.OutputBitAlignment = pylon.OutputBitAlignment_MsbAligned
@@ -1027,11 +1104,19 @@ class CameraView:
             self._safe_close_camera(camera)
             return
 
+        last_stats_mono = 0.0
         try:
             while not self._stop.is_set():
                 # Apply a freshly chosen .pfs (we own the camera here).
                 if self._pfs_pending:
                     self._reload_pfs(camera)
+
+                # Refresh the Basler transport stats ~1/s (cheap, guarded); the
+                # status readout + recording provenance read the cached snapshot.
+                now_mono = time.monotonic()
+                if now_mono - last_stats_mono >= TRANSPORT_STATS_INTERVAL_S:
+                    last_stats_mono = now_mono
+                    self._refresh_transport_stats(camera)
 
                 try:
                     grab = camera.RetrieveResult(
@@ -1043,20 +1128,24 @@ class CameraView:
                 try:
                     if not grab.IsValid():
                         continue
-                    if not grab.GrabSucceeded():
+
+                    # Account the BlockID on EVERY delivered buffer (complete or
+                    # not) so an incomplete grab advances last_block instead of
+                    # manufacturing a phantom src-drop for the next good frame
+                    # (the pre-0147 double-count; ADR-0147, bug #260810).
+                    block_id = self._safe_block_id(grab)
+                    last_block, gap = account_block_gap(last_block, block_id)
+                    succeeded = grab.GrabSucceeded()
+                    if gap or not succeeded:
                         with self._counters_lock:
-                            self._counters.incomplete += 1
+                            if gap:
+                                self._counters.src_drops += gap
+                            if not succeeded:
+                                self._counters.incomplete += 1
+                    if not succeeded:
                         continue
 
-                    block_id = self._safe_block_id(grab)
                     cam_ts = self._safe_timestamp(grab)
-                    if last_block is not None and block_id is not None \
-                            and block_id > last_block + 1:
-                        with self._counters_lock:
-                            self._counters.src_drops += block_id - last_block - 1
-                    if block_id is not None:
-                        last_block = block_id
-
                     arr = converter.Convert(grab).GetArray()  # HxWx3 BGR uint8
                     arr = self._maybe_undistort(arr)          # lens correction (ADR-0015)
                     frame = self._orient(arr)
@@ -1140,6 +1229,7 @@ class CameraView:
         csv_file = None
         csv_writer = None
         saved_idx = 0
+        active_params: Optional[_RecParams] = None
         try:
             while not self._stop.is_set():
                 recording = self._recording.is_set()
@@ -1149,6 +1239,7 @@ class CameraView:
                     if params is not None:
                         self._encode_error_posted = False
                         writer, csv_file, csv_writer = self._open_outputs(params)
+                        active_params = params
                         saved_idx = 0
                         with self._counters_lock:
                             self._counters.saved = 0
@@ -1160,7 +1251,8 @@ class CameraView:
                 if not recording and writer is not None:
                     self._flush_remaining(writer, csv_writer, saved_idx)
                     path = self._close_outputs(writer, csv_file)
-                    writer = csv_file = csv_writer = None
+                    self._write_camera_stats(active_params)
+                    writer = csv_file = csv_writer = active_params = None
                     self._post(self._set_conn_status_keep(path))
 
                 try:
@@ -1181,6 +1273,7 @@ class CameraView:
             if writer is not None:
                 self._flush_remaining(writer, csv_writer, saved_idx)
                 self._close_outputs(writer, csv_file)
+                self._write_camera_stats(active_params)
 
     # ------------------------------------------------------ encode helpers
     def _open_outputs(self, params: _RecParams):
@@ -1242,6 +1335,48 @@ class CameraView:
             pass
         return path
 
+    def _write_camera_stats(self, params: "Optional[_RecParams]") -> None:
+        """Write the per-recording camera provenance JSON at close (ADR-0147).
+
+        Captures WHAT WAS CONFIGURED (packet size, buffers) and WHAT THE LINK
+        ACTUALLY DID (our final saved/incomplete/src-drop counts + the Basler
+        transport stats), so each session bundle carries a self-contained record
+        of the acquisition health. Best-effort: a failure is logged, never fatal.
+        """
+        if params is None or not params.stats_path:
+            return
+        with self._counters_lock:
+            c = self._counters
+            counters = {
+                "saved": c.saved,
+                "src_drops": c.src_drops,
+                "incomplete": c.incomplete,
+                "queue_drops": c.queue_drops,
+            }
+            transport = {
+                "failed_buffer": c.stat_failed_buffer,
+                "buffer_underrun": c.stat_buffer_underrun,
+                "failed_packet": c.stat_failed_packet,
+                "resend_request": c.stat_resend_request,
+                "total_packet": c.stat_total_packet,
+            }
+        with self._cam_settings_lock:
+            settings = dict(self._cam_settings)
+        payload = {
+            "session_id": params.header.get("session_id", ""),
+            "video": os.path.basename(params.video_path),
+            "settings": settings,
+            "counters": counters,
+            "transport": transport,
+            "written_wall_clock": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        try:
+            with open(params.stats_path, "w", newline="") as f:
+                json.dump(payload, f, indent=2)
+        except Exception as e:  # provenance is best-effort; never break a recording
+            print(f"[camera_view] camera stats write failed: {e}",
+                  file=sys.stderr, flush=True)
+
     def _set_conn_status_keep(self, video_or_csv_path: str):
         name = os.path.basename(video_or_csv_path).rsplit(".", 1)[0] if video_or_csv_path else ""
         msg = f"Saved recording: {name}" if name else "Recording stopped"
@@ -1278,6 +1413,83 @@ class CameraView:
         serial = self._dev_attr(device, "GetSerialNumber")
         extra = f" @ {ip}" if ip else (f" #{serial}" if serial else "")
         return f"Connected: {model}{extra}"
+
+    def _configure_transport(self, camera) -> dict:
+        """Size the receive-buffer pool + GigE packet size before grabbing.
+
+        The app loads no .pfs by default, so the camera would otherwise stream at
+        its power-up packet size (~1500 B) even on the rig's jumbo NIC. Every
+        write is guarded so a non-GigE camera or a read-only node can never break
+        camera open. Returns the applied/observed values for recording provenance
+        (ADR-0147).
+        """
+        settings: dict = {}
+        # Receive-buffer pool (USB + GigE): headroom for encode-thread CPU spikes.
+        try:
+            camera.MaxNumBuffer.SetValue(GRAB_MAX_NUM_BUFFER)
+        except Exception:
+            pass
+        try:
+            settings["max_num_buffer"] = int(camera.MaxNumBuffer.GetValue())
+        except Exception:
+            pass
+        # GigE packet size: match the jumbo NIC. Read the node max, clamp, set.
+        try:
+            node = camera.GevSCPSPacketSize
+            pmax = int(node.GetMax())
+            node.SetValue(min(TARGET_PACKET_SIZE, pmax))
+            settings["packet_size"] = int(node.GetValue())
+            settings["packet_size_max"] = pmax
+        except Exception:
+            pass
+        # Inter-packet delay (GevSCPD): only nudge it if configured non-zero.
+        try:
+            if INTER_PACKET_DELAY:
+                camera.GevSCPD.SetValue(INTER_PACKET_DELAY)
+            settings["inter_packet_delay"] = int(camera.GevSCPD.GetValue())
+        except Exception:
+            pass
+        return settings
+
+    def _refresh_transport_stats(self, camera) -> None:
+        """Cache the Basler stream-grabber statistics into the counters (guarded).
+
+        These are the driver's OWN view of the link (failed buffers, buffer
+        underruns, packet resends/loss) - ground truth that tells apart PC/buffer
+        pressure (underruns) from link packet loss (resends) vs. our BlockID-
+        derived counts. All access is guarded; missing nodes stay None (ADR-0147).
+        """
+        try:
+            nodemap = camera.GetStreamGrabberNodeMap()
+        except Exception:
+            return
+
+        def val(name):
+            # Raw INodeMap needs a typed pointer; fall back to attribute access.
+            try:
+                from pypylon import genicam
+                node = nodemap.GetNode(name)
+                if node is not None:
+                    return int(genicam.CIntegerPtr(node).GetValue())
+            except Exception:
+                pass
+            try:
+                return int(getattr(nodemap, name).GetValue())
+            except Exception:
+                return None
+
+        failed_buffer = val("Statistic_Failed_Buffer_Count")
+        buffer_underrun = val("Statistic_Buffer_Underrun_Count")
+        failed_packet = val("Statistic_Failed_Packet_Count")
+        resend_request = val("Statistic_Resend_Request_Count")
+        total_packet = val("Statistic_Total_Packet_Count")
+        with self._counters_lock:
+            c = self._counters
+            c.stat_failed_buffer = failed_buffer
+            c.stat_buffer_underrun = buffer_underrun
+            c.stat_failed_packet = failed_packet
+            c.stat_resend_request = resend_request
+            c.stat_total_packet = total_packet
 
     def _read_fps(self, camera) -> None:
         for attr in ("ResultingFrameRate", "ResultingFrameRateAbs",
