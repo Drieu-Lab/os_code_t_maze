@@ -61,7 +61,7 @@ from tkinter import messagebox, ttk
 from typing import Callable, Optional
 
 from tmaze.core import protocol
-from tmaze.core import cue_volume
+from tmaze.core import cue_calibration
 from tmaze.core.cue_gate import CHOICE, RETURN, CueGate, CueParams
 from tmaze.core.phase3.alternation import AlternationBlockConfig
 from tmaze.core.phase3.debias import DebiasBlockConfig
@@ -979,7 +979,10 @@ class Phase3ControlView(VisionActuator):
                             outbound, on_leg)
         if d.started == CHOICE:
             freq = self._task.current_choice_freq()
-            self._send_cmd(f"CUE_ON,CHOICE,{freq},{cue_volume.gain_pct_for(freq)}"
+            # Command the frequency-corrected tone so the speaker EMITS the target,
+            # but key the volume balance to the TARGET freq (ADR-0148 extends 0125).
+            cf = cue_calibration.commanded_hz_for(freq)
+            self._send_cmd(f"CUE_ON,CHOICE,{cf},{cue_calibration.gain_pct_for(freq)}"
                            if freq is not None else "CUE_ON,CHOICE")
             self._active_cue = CHOICE
             # Remember this trip's cue-on stamp so a scored excursion can carry the
@@ -993,7 +996,8 @@ class Phase3ControlView(VisionActuator):
             side = _SIDE_OF_ARM.get(d.return_arm)
             freq = self._seq.return_freq(side, idx) if side is not None else None
             cue = self._seq.return_cue(side, idx) if side is not None else None
-            self._send_cmd(f"CUE_ON,RETURN,{freq},{cue_volume.gain_pct_for(freq)}"
+            cf = cue_calibration.commanded_hz_for(freq)
+            self._send_cmd(f"CUE_ON,RETURN,{cf},{cue_calibration.gain_pct_for(freq)}"
                            if freq is not None else "CUE_ON,RETURN")
             self._active_cue = RETURN
             self._log_call(lambda: self._log.return_cue_started(

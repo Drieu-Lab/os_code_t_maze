@@ -84,14 +84,23 @@ TIPS: Dict[str, Entry] = {
     "cue.burst": "How long each test tone plays before the host auto-stops it, "
                  "in ms (1-5000).",
 
-    # ---- cue_volume_view.py: per-cue speaker volume calibration (ADR-0125) ----
+    # ---- cue_calibration_view.py: per-cue speaker calibration (ADR-0125/0148) ----
     "cue.volume": "Playback volume for this cue, as a percent of full amplitude "
                   "(0-100). Turn the LOUDER cue down to match the quieter one; "
                   "100 % is the firmware's full level (volume only attenuates).",
     "cue.volume.play": "Play this cue at the volume set above (auto-stops after "
                        "the burst) so you can measure it with a dB meter.",
-    "cue.volume.save": "Save the HIGH/LOW balance to host/cue_calibration.json. "
-                       "It is auto-applied to Phase 3 cues and the speaker test.",
+    "cue.volume.save": "Save the calibration (volume + frequency) to "
+                       "host/cue_calibration.json. It is auto-applied to Phase 3 "
+                       "cues and the speaker test.",
+    "cue.freq": "Measured actual frequency (Hz) you read on a spectrum app while "
+                "this cue plays. Enter it, then Set to correct the commanded tone "
+                "so the speaker emits the target frequency.",
+    "cue.freq.set": "Compute the corrected commanded frequency from your measured "
+                    "value (commanded = commanded x target / measured) and update "
+                    "the display. Re-play and re-measure to refine.",
+    "cue.freq.play": "Play this cue at the CURRENT commanded frequency (auto-stops "
+                     "after the burst) so you can measure the emitted tone.",
 
     # ---- experiment_control.py: training mode ----
     "mode.free": "Switch the firmware to Free Roam (no cues/trials); refill the "

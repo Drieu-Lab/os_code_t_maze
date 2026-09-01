@@ -56,7 +56,7 @@ HOST_CONFIG_FILES = (
     "rig_scale.json",    # rules_view.SCALE_PATH - cm/px scale (+ optional homography)
     "phase3.json",       # phase3_controller.PHASE3_PATH - cued-task reward/cue/sequence
     "rules.json",        # rules_view.RULES_PATH - rules-engine profiles
-    "cue_calibration.json",  # cue_volume - per-cue speaker volume balance (ADR-0125)
+    "cue_calibration.json",  # cue_calibration - per-cue speaker volume + frequency (ADR-0125/0148)
 )
 
 

@@ -47,7 +47,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 from tmaze.core import protocol
-from tmaze.core import cue_volume
+from tmaze.core import cue_calibration
 from tmaze.io.rig_io import RigClient
 from tmaze.ui.rig_view import RigView
 from tmaze.ui.camera_view import (CameraView, DEFAULT_OUTPUT_DIR, ORIENTATION,
@@ -88,13 +88,14 @@ try:
 except Exception as e:  # pragma: no cover
     MazeStateControlView = None  # type: ignore
     _TRACKER_ERR = _TRACKER_ERR or f"{type(e).__name__}: {e}"
-# Cue-volume calibration subtab (Setup): balance HIGH vs LOW speaker loudness and
-# save it to host/cue_calibration.json (auto-applied to Phase 3 + the speaker
-# test). Pure Tk + the broker send; no tracker/camera. See docs/decisions/0125.
+# Cue calibration subtab (Setup): balance HIGH vs LOW speaker loudness AND correct
+# the emitted frequency, saved to host/cue_calibration.json (auto-applied to Phase
+# 3 + the speaker test). Pure Tk + the broker send; no tracker/camera. See
+# docs/decisions/0125 (volume) and 0148 (frequency).
 try:
-    from tmaze.ui.cue_volume_view import CueVolumeView
+    from tmaze.ui.cue_calibration_view import CueCalibrationView
 except Exception:  # pragma: no cover
-    CueVolumeView = None  # type: ignore
+    CueCalibrationView = None  # type: ignore
 # Phase 3 tab: the host-owned cued task (firmware = actuator). Composes the cue
 # gate + trial FSM over the shared pipeline; drives CUE_ON,<kind>,<hz> / reward.
 # Optional; guarded like the tabs above. See docs/decisions/0046.
@@ -395,10 +396,12 @@ def build_cue_panel(parent: tk.Misc, client: RigClient) -> None:
         hz = max(CUE_HZ_MIN, min(CUE_HZ_MAX, hz))
         # The firmware no-ops CUE_ON while a tone is already playing, so stop
         # any current/pending tone first, then start the new one. Apply the saved
-        # per-cue volume balance so the test bar previews what Phase 3 will play
-        # (the "Cue volume" Setup subtab is where that balance is tuned; ADR-0125).
+        # per-cue volume balance AND frequency correction so the test bar previews
+        # what Phase 3 will play (the "Cue calibration" Setup subtab is where both
+        # are tuned; ADR-0125/0148). Gain is keyed by the TARGET freq.
         stop()
-        client.send(f"CUE_ON,{kind_var.get()},{hz},{cue_volume.gain_pct_for(hz)}")
+        cf = cue_calibration.commanded_hz_for(hz) or hz
+        client.send(f"CUE_ON,{kind_var.get()},{cf},{cue_calibration.gain_pct_for(hz)}")
         raw = burst_var.get().strip()
         try:
             ms = int(raw)
@@ -669,8 +672,8 @@ def main() -> int:
     # broker (to play test tones), resolved lazily like make_task since subtab
     # factories run before the client exists; no tracker/camera, so it is offered
     # even when the vision deps are missing.
-    if CueVolumeView is not None:
-        setup_subtabs.append(("Cue volume", lambda parent: CueVolumeView(
+    if CueCalibrationView is not None:
+        setup_subtabs.append(("Cue calibration", lambda parent: CueCalibrationView(
             parent, send=lambda cmd: client.send(cmd))))
     if setup_subtabs:
         labels = [label for label, _ in setup_subtabs]
