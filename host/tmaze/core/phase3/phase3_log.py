@@ -654,7 +654,8 @@ class Phase3Log:
                     f"# debias_blocks window={db.window} "
                     f"min_errors={db.min_errors} trigger_bias={db.trigger_bias} "
                     f"exit_consecutive={db.exit_consecutive} "
-                    f"max_block_len={db.max_block_len} signal={db.signal}")
+                    f"max_block_len={db.max_block_len} signal={db.signal} "
+                    f"alt_veto_rate={db.alt_veto_rate}")
             if al is not None:
                 lines.append(
                     f"# alternation_blocks window={al.window} "

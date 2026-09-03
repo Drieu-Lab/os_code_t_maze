@@ -1407,7 +1407,8 @@ class Phase3ControlView(VisionActuator):
                 "min_errors": _i(self._db_min_errors_var, db.min_errors),
                 "trigger_bias": _f(self._db_trigger_var, db.trigger_bias),
                 "exit_consecutive": _i(self._db_exit_var, db.exit_consecutive),
-                "max_block_len": _i(self._db_cap_var, db.max_block_len)}
+                "max_block_len": _i(self._db_cap_var, db.max_block_len),
+                "alt_veto_rate": _f(self._db_alt_veto_var, db.alt_veto_rate)}
 
     def _current_alternation_dict(self) -> dict:
         """The de-alternation-block params from the GUI fields (safe parse; range
@@ -1500,6 +1501,7 @@ class Phase3ControlView(VisionActuator):
         self._db_trigger_var.set(str(db.get("trigger_bias", dc.trigger_bias)))
         self._db_exit_var.set(str(db.get("exit_consecutive", dc.exit_consecutive)))
         self._db_cap_var.set(str(db.get("max_block_len", dc.max_block_len)))
+        self._db_alt_veto_var.set(str(db.get("alt_veto_rate", dc.alt_veto_rate)))
         al = s.get("alternation_blocks", {})
         ac = AlternationBlockConfig()
         self._alt_enabled_var.set(bool(al.get("enabled", True)))
@@ -1831,6 +1833,8 @@ class Phase3ControlView(VisionActuator):
             value=str(db.get("exit_consecutive", dc.exit_consecutive)))
         self._db_cap_var = tk.StringVar(
             value=str(db.get("max_block_len", dc.max_block_len)))
+        self._db_alt_veto_var = tk.StringVar(
+            value=str(db.get("alt_veto_rate", dc.alt_veto_rate)))
         db_box = ttk.LabelFrame(frame, text="Side-bias debias block")
         db_box.grid(row=2, column=0, sticky="ew", pady=(4, 2))
         self._debias_spinboxes = self._build_spin_grid(db_box, (
@@ -1844,6 +1848,8 @@ class Phase3ControlView(VisionActuator):
              "phase3.debias_exit_consecutive", 1, 20, 1, False),
             ("Max block length:", self._db_cap_var, "phase3.debias_max_block_len",
              1, 200, 1, False),
+            ("Alt veto rate:", self._db_alt_veto_var, "phase3.debias_alt_veto_rate",
+             0.0, 1.0, 0.05, True),
         ))
 
         # De-alternation knobs.

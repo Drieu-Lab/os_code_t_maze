@@ -135,6 +135,17 @@ class TestValidation(unittest.TestCase):
             with self.assertRaises((ValueError, TypeError)):
                 validate_phase3_config(cfg)
 
+    def test_bad_debias_alt_veto_rate(self):
+        # A rate in [0, 1]; 0 is allowed (veto off, ADR-0149), out-of-range is not.
+        for bad in (-0.1, 1.5):
+            cfg = default_config()
+            cfg["sequence"]["debias_blocks"]["alt_veto_rate"] = bad
+            with self.assertRaises((ValueError, TypeError)):
+                validate_phase3_config(cfg)
+        cfg = default_config()
+        cfg["sequence"]["debias_blocks"]["alt_veto_rate"] = 0
+        validate_phase3_config(cfg)                    # off is valid
+
     def test_bad_tone(self):
         self._bad("sequence", "high_tone_hz", -1)
 

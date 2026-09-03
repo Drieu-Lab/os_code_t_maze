@@ -72,6 +72,16 @@ class DebiasBlockConfig:
     ``trigger_bias`` is the |b| threshold that starts a block. ``exit_consecutive``
     correct non-preferred choices end a block; ``max_block_len`` caps it as a
     welfare failsafe (auto-revert + flagged).
+
+    ``alt_veto_rate`` is NOT read by this controller: it is a cross-intervention
+    arbitration parameter consumed by ``intervention_stack.py`` (ADR-0149). A
+    debias block forces a FIXED side, which an alternating rat lands on every
+    other trial - a reliable 50% "oasis" that trains a figure-8 loop. So the stack
+    refuses to AUTO-start a debias block while the de-alternation child's cue-aware
+    ``alt_rate`` (P(switch | told to repeat) - ~0 for a camper, ~1 for an
+    alternator) is at or above this level: a debias block presupposes a camper.
+    0 disables the veto. It lives here so it rides the ``debias_blocks`` config /
+    header / GUI plumbing with the other trigger parameters.
     """
     window: int = 20
     min_errors: int = 5
@@ -79,6 +89,7 @@ class DebiasBlockConfig:
     exit_consecutive: int = 3
     max_block_len: int = 15
     signal: str = "directional_errors"
+    alt_veto_rate: float = 0.5
 
 
 @dataclass(frozen=True)
@@ -183,6 +194,13 @@ class DebiasBlockController:
         """Request an end to the current block on the next decision (operator)."""
         self._manual_end = True
         self._manual_force = False
+
+    @property
+    def manual_pending(self) -> bool:
+        """True while an operator ``force_block`` is latched and not yet applied.
+        The intervention stack reads this so a deliberate operator force bypasses
+        its switch-dominant veto (ADR-0149)."""
+        return self._manual_force
 
     # -------------------------------------------------------------- per trial
     def record(self, cued_side: int, chosen_side: int) -> None:

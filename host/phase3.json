@@ -31,7 +31,8 @@
       "trigger_bias": 0.6,
       "exit_consecutive": 3,
       "max_block_len": 15,
-      "signal": "directional_errors"
+      "signal": "directional_errors",
+      "alt_veto_rate": 0.5
     },
     "alternation_blocks": {
       "enabled": true,

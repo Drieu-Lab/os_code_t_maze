@@ -132,6 +132,7 @@ def default_config() -> dict:
                 "exit_consecutive": db.exit_consecutive,
                 "max_block_len": db.max_block_len,
                 "signal": db.signal,
+                "alt_veto_rate": db.alt_veto_rate,
             },
             "alternation_blocks": {
                 "enabled": True,
@@ -245,6 +246,7 @@ def _to_debias_config(d: dict) -> DebiasBlockConfig:
     exit_consecutive = int(d.get("exit_consecutive", db.exit_consecutive))
     max_block_len = int(d.get("max_block_len", db.max_block_len))
     signal = str(d.get("signal", db.signal))
+    alt_veto_rate = float(d.get("alt_veto_rate", db.alt_veto_rate))
     if window <= 0:
         raise ValueError("sequence.debias_blocks.window must be > 0")
     if not 0 < min_errors <= window:
@@ -255,10 +257,13 @@ def _to_debias_config(d: dict) -> DebiasBlockConfig:
         raise ValueError("sequence.debias_blocks.exit_consecutive must be > 0")
     if max_block_len <= 0:
         raise ValueError("sequence.debias_blocks.max_block_len must be > 0")
+    if not 0.0 <= alt_veto_rate <= 1.0:      # 0 = veto off (ADR-0149)
+        raise ValueError("sequence.debias_blocks.alt_veto_rate must be in [0, 1]")
     return DebiasBlockConfig(window=window, min_errors=min_errors,
                              trigger_bias=trigger_bias,
                              exit_consecutive=exit_consecutive,
-                             max_block_len=max_block_len, signal=signal)
+                             max_block_len=max_block_len, signal=signal,
+                             alt_veto_rate=alt_veto_rate)
 
 
 def _to_alternation_config(d: dict) -> AlternationBlockConfig:

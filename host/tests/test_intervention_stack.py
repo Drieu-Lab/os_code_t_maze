@@ -4,9 +4,10 @@ composes the side-bias (debias) and de-alternation blocks (see
 intervention_stack.py, debias.py, alternation.py, and the ADR).
 
 Covers: only one block active at a time with side-bias priority when both arm
-together; record() fanned out to every enabled child; per-kind force/end routing
-with a stack-owned monotonic block id; and the inert (balanced) stack when neither
-child is enabled. Pure stdlib.
+together; record() fanned out to every enabled child; the switch-dominant veto on
+the side-bias auto-trigger + its post-de-alt grace (ADR-0149); per-kind force/end
+routing with a stack-owned monotonic block id; and the inert (balanced) stack when
+neither child is enabled. Pure stdlib.
 
 Run from host/:  python -m unittest test_intervention_stack
 """
@@ -26,8 +27,11 @@ from tmaze.core.phase3.trial_sequence import LEFT, RIGHT
 
 
 def _both(**kw):
+    # alt_veto_rate=0 turns the switch-dominant veto OFF so these arbitration
+    # tests exercise the raw side-bias-first priority; the veto has its own class
+    # (TestDebiasVetoWhenSwitchDominant).
     db = DebiasBlockConfig(window=10, min_errors=3, trigger_bias=0.3,
-                           exit_consecutive=3, max_block_len=5)
+                           exit_consecutive=3, max_block_len=5, alt_veto_rate=0.0)
     al = AlternationBlockConfig(window=10, min_samples=3, trigger_rate=0.8,
                                 exit_repeats_per_side=2, max_block_len=5)
     return InterventionStackController(db, al)
@@ -153,6 +157,132 @@ class TestSideBiasFrozenDuringAlternation(unittest.TestCase):
             s.record(LEFT, RIGHT)
             s.record(RIGHT, LEFT)
         self.assertGreater(s.window_samples(), before)
+
+
+def _veto_stack(veto=0.5):
+    """Both children with the switch-dominant veto ON (ADR-0149). Debias window is
+    wide so refilling the alt window never ages the armed errors out."""
+    db = DebiasBlockConfig(window=20, min_errors=3, trigger_bias=0.3,
+                           exit_consecutive=3, max_block_len=5, alt_veto_rate=veto)
+    al = AlternationBlockConfig(window=10, min_samples=3, trigger_rate=0.8,
+                                exit_repeats_per_side=2, max_block_len=5)
+    return InterventionStackController(db, al)
+
+
+def _arm_bias_as_camper(s):
+    """Arm the side-bias detector with a REPEAT-dominant rat: three left-pull errors
+    (cued RIGHT, chose LEFT) then repeat-cued stays on RIGHT (alt_rate 0 with
+    >= min_samples samples). Bias +1.0, errors 3; alt_rate 0.0, samples 3."""
+    for _ in range(3):
+        s.record(RIGHT, LEFT)                   # errors; not repeat-cued (prev LEFT)
+    s.record(RIGHT, RIGHT)                      # correct; not a sample (prev LEFT)
+    for _ in range(3):
+        s.record(RIGHT, RIGHT)                  # repeat-cued stays -> samples, no switch
+
+
+class TestDebiasVetoWhenSwitchDominant(unittest.TestCase):
+    """A debias block forces a FIXED side - a reliable 50% oasis for an alternator.
+    So the stack refuses to AUTO-start one while the rat reads switch-dominant
+    (alt_rate >= alt_veto_rate with enough repeat-cued samples), staying NORMAL /
+    letting de-alt fire on its own; a post-de-alt grace keeps the veto up while the
+    cleared alt window refills; operator force bypasses it (ADR-0149)."""
+
+    def test_switch_dominant_rat_is_not_given_a_debias_block(self):
+        # Same stream that made side-bias win under raw priority: with the veto on,
+        # the switch-dominant rat is routed to the de-alternation block instead.
+        s = _veto_stack()
+        _arm_both(s)                                # bias +1.0 AND alt_rate 1.0
+        self.assertTrue(s.debias_vetoed)
+        d = s.decide()
+        self.assertEqual(d.state, INTERVENTION)
+        self.assertEqual(d.kind, KIND_ALTERNATION)  # not KIND_SIDE_BIAS
+
+    def test_between_veto_and_trigger_stays_normal(self):
+        # alt_rate 0.6: above the veto (0.5) but below de-alt's trigger (0.8), with
+        # the bias armed -> no block at all (NORMAL is no worse than the oasis).
+        s = _veto_stack()
+        s.record(RIGHT, RIGHT)
+        s.record(RIGHT, LEFT)                       # sample, switch, left-pull error
+        s.record(RIGHT, RIGHT)
+        s.record(RIGHT, LEFT)                       # sample, switch, error
+        s.record(RIGHT, RIGHT)
+        s.record(RIGHT, RIGHT)                      # sample, stay
+        s.record(RIGHT, RIGHT)                      # sample, stay
+        s.record(RIGHT, LEFT)                       # sample, switch, error
+        self.assertAlmostEqual(s.alt_rate(), 0.6)
+        self.assertGreaterEqual(s.window_errors(), 3)
+        self.assertGreaterEqual(abs(s.bias()), 0.3)  # debias WOULD fire...
+        self.assertTrue(s.debias_vetoed)
+        d = s.decide()
+        self.assertEqual(d.state, NORMAL)             # ...but is vetoed
+
+    def test_camper_still_gets_a_debias_block(self):
+        # Low alt_rate with enough samples: the live read says "repeat-dominant",
+        # so the veto is off and the established debias behaviour is unchanged.
+        s = _veto_stack()
+        _arm_bias_as_camper(s)
+        self.assertGreaterEqual(s.window_samples(), 3)
+        self.assertEqual(s.alt_rate(), 0.0)
+        self.assertFalse(s.debias_vetoed)
+        d = s.decide()
+        self.assertEqual(d.kind, KIND_SIDE_BIAS)
+
+    def test_manual_force_bypasses_veto(self):
+        s = _veto_stack()
+        _arm_both(s)
+        self.assertTrue(s.debias_vetoed)
+        s.force_block(RIGHT, kind=KIND_SIDE_BIAS)    # deliberate operator choice
+        d = s.decide()
+        self.assertEqual(d.kind, KIND_SIDE_BIAS)
+        self.assertEqual(d.side, RIGHT)
+
+    def test_too_few_samples_and_no_prior_block_is_not_vetoed(self):
+        # Session start: bias armed but the alt window has no repeat-cued samples
+        # yet and no block has run -> nothing to veto on, debias fires as before.
+        s = _veto_stack()
+        for _ in range(4):
+            s.record(RIGHT, LEFT)                   # errors, never repeat-cued
+        self.assertEqual(s.window_samples(), 0)
+        self.assertFalse(s.debias_vetoed)
+        self.assertEqual(s.decide().kind, KIND_SIDE_BIAS)
+
+    def test_post_dealt_grace_holds_veto_while_alt_window_refills(self):
+        # The handoff seam: a de-alt block clears its window on exit (0 samples)
+        # while the ADR-0136-frozen bias is still over threshold. The grace keeps
+        # the veto up until fresh evidence refills the window.
+        s = _veto_stack()
+        _arm_both(s)                                # both armed, switch-dominant
+        self.assertEqual(s.decide().kind, KIND_ALTERNATION)
+        s.end_block()                               # exit the de-alt block
+        self.assertEqual(s.decide().state, NORMAL)
+        self.assertEqual(s.window_samples(), 0)     # alt window cleared on exit
+        self.assertGreaterEqual(s.window_errors(), 3)   # bias still armed (frozen)
+        self.assertGreaterEqual(abs(s.bias()), 0.3)
+        self.assertTrue(s.debias_vetoed)             # grace: last block was de-alt
+        for _ in range(3):
+            self.assertEqual(s.decide().state, NORMAL)   # no debias oasis
+        # Fresh evidence: the rat now REPEATS when told to -> window refills with
+        # alt_rate 0 -> veto lifts -> debias may fire on a real camper.
+        for _ in range(3):
+            s.record(RIGHT, RIGHT)                  # repeat-cued stays
+        self.assertGreaterEqual(s.window_samples(), 3)
+        self.assertFalse(s.debias_vetoed)
+        self.assertEqual(s.decide().kind, KIND_SIDE_BIAS)
+
+    def test_veto_off_restores_raw_priority(self):
+        s = _veto_stack(veto=0.0)
+        _arm_both(s)
+        self.assertFalse(s.debias_vetoed)
+        self.assertEqual(s.decide().kind, KIND_SIDE_BIAS)
+
+    def test_no_alternation_child_means_no_veto(self):
+        s = InterventionStackController(
+            DebiasBlockConfig(window=10, min_errors=3, trigger_bias=0.3,
+                              alt_veto_rate=0.5), None)
+        for _ in range(4):
+            s.record(RIGHT, LEFT)
+        self.assertFalse(s.debias_vetoed)
+        self.assertEqual(s.decide().kind, KIND_SIDE_BIAS)
 
 
 class TestForceRouting(unittest.TestCase):

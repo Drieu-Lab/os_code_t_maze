@@ -18,6 +18,28 @@ first to trigger owns the block until it exits. A broken alternator that then
 settles into a side bias is caught by the side-bias child on a later window (and
 vice versa).
 
+Switch-dominant veto on the side-bias AUTO-trigger (ADR-0149). The two cheats are
+not always exclusive on the bench: an alternating rat with a left "default" after
+long pauses racks up right-pull errors that inflate the bias score AND deflate the
+cue-aware ``alt_rate`` at once, so the debias child (polled first) wins the race.
+But a debias block forces a FIXED side, and any held fixed side is a reliable 50%
+oasis for an alternator (it lands on the side every other trial and, never
+stringing ``exit_consecutive`` correct, rides to the cap) - the block then trains
+the very figure-8 loop it should break. A debias block presupposes a CAMPER, and
+``alt_rate = P(switch | told to repeat)`` is exactly the camper-vs-switcher
+discriminator (camper / cue-user ~0, alternator ~1). So the stack does not
+auto-start a debias block while the animal reads switch-dominant:
+``alt_rate >= debias.alt_veto_rate`` with at least ``alt.min_samples`` repeat-cued
+samples in the window. It simply stays NORMAL (no worse than the oasis; the
+de-alternation child fires on its own trigger, and debias re-enables once the rat
+drops to camper levels). A post-de-alt GRACE closes the handoff seam: a de-alt
+block clears its own window on exit (fresh evidence), which would disarm a
+samples-gated veto for ~2x``min_samples`` trials while the (ADR-0136-frozen) bias
+may still be over threshold - so the veto also holds while the alt window is
+refilling and the most recent block was a de-alt block ("we just showed it
+alternates; until fresh evidence says otherwise, don't hand it a fixed side").
+An operator ``force_block`` bypasses the veto.
+
 Which children exist is set by the caller: pass a config for each intervention you
 want enabled (``None`` = that intervention off), so the tab's two enable
 checkboxes map directly onto the constructed children. With neither enabled the
@@ -88,6 +110,9 @@ class InterventionStackController:
         self._active: Optional[int] = None      # index into _children, or None
         self._block_id = 0                       # stack-owned monotonic id
         self._active_block_id = 0
+        # Kind of the most recently EXITED block ("" until one has). Drives the
+        # post-de-alt grace of the switch-dominant veto (see _debias_vetoed).
+        self._last_kind = ""
 
     # ------------------------------------------------------------------ reads
     @property
@@ -125,6 +150,31 @@ class InterventionStackController:
         """The alternation child's window repeat-cued sample count (0 if disabled) -
         the count its auto-trigger gates on (``min_samples``)."""
         return self._alt_ctl.window_samples() if self._alt_ctl is not None else 0
+
+    @property
+    def debias_vetoed(self) -> bool:
+        """True while the switch-dominant veto is holding the side-bias AUTO-trigger
+        off (ADR-0149) - surfaced so a readout can explain why a bias over threshold
+        is not starting a block. Operator force is not affected."""
+        return self._debias_vetoed()
+
+    def _debias_vetoed(self) -> bool:
+        """The switch-dominant veto (module docstring, ADR-0149).
+
+        Needs both children: no alternation child (or ``alt_veto_rate <= 0``) means
+        no veto. With enough repeat-cued samples in the alt window the live
+        ``alt_rate`` decides; while the window is still refilling, hold the veto
+        only if the most recent block was a de-alt block (the post-de-alt grace),
+        so at session start - no prior block - nothing is vetoed."""
+        alt = self._alt_ctl
+        if alt is None or self._debias_ctl is None:
+            return False
+        veto = self._debias_ctl.cfg.alt_veto_rate
+        if veto <= 0:
+            return False
+        if alt.window_samples() >= alt.cfg.min_samples:
+            return alt.alt_rate() >= veto
+        return self._last_kind == KIND_ALTERNATION
 
     # -------------------------------------------------------- operator overrides
     def force_block(self, side: Optional[int] = None,
@@ -184,17 +234,23 @@ class InterventionStackController:
         If a block is active, delegate only to its child (and clear it on exit).
         Otherwise poll children in priority order and let the first to trigger own
         the block. A non-triggering NORMAL child ``decide()`` is side-effect-free,
-        so polling and stopping at the first trigger never advances the others."""
+        so polling and stopping at the first trigger never advances the others -
+        and so skipping the side-bias poll under the switch-dominant veto
+        (ADR-0149) is safe too; a latched operator force is never skipped."""
         if self._active is not None:
             kind, ctl = self._children[self._active]
             dec = ctl.decide()
             if dec.side is None:                 # the active block just exited
                 self._active = None
+                self._last_kind = kind
                 return self._normal_decision()
             return StackDecision(INTERVENTION, dec.side, self._active_block_id,
                                  dec.trigger, kind, self.bias(), self.alt_rate())
 
         for i, (kind, ctl) in enumerate(self._children):
+            if (kind == KIND_SIDE_BIAS and self._debias_vetoed()
+                    and not ctl.manual_pending):
+                continue                         # switch-dominant: no fixed side
             dec = ctl.decide()
             if dec.side is not None:             # this child triggered a block
                 self._active = i

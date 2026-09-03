@@ -108,6 +108,7 @@ criteria).
 | [FW-0054](#fw-0054-measurement-rigor-checklist--grounded-uncertainty-norm-in-the-workflow) | Measurement-rigor checklist + grounded-uncertainty norm in the workflow | Agent guidance (`CONTRIBUTING.md`, `AGENTS.md`) | Proposed |
 | [FW-0055](#fw-0055-glossary-terms-for-scientific--epistemic-rigor) | Glossary terms for scientific + epistemic rigor | `docs/glossary.md` | Proposed |
 | [FW-0056](#fw-0056-camera-visible-cue-leds-on-spare-optocoupler-channels) | Camera-visible cue LEDs on spare optocoupler channels (hardware + firmware + `LEDTEST` roll-call) | Rig electronics board + `firmware/cue-guided-task` (`handleCueOn/Off`, `rig_config.h`, `PROTOCOL.md`) | Proposed |
+| [FW-0057](#fw-0057-live-alt-veto-readout-for-the-suppressed-debias-trigger) | Live `[ALT-VETO]` readout for the suppressed debias trigger | Phase 3 live readout (`intervention_stack.py` -> snapshot -> `phase3_stats.py` -> `behavior_view.py`) | Proposed |
 
 ## Entries
 
@@ -2903,6 +2904,48 @@ the Phase 3 sync LED exists? Should the host ever pass an explicit LED index on
 **ADR needed?** Yes for the firmware/protocol part (new pins with a deliberate
 level-not-pulse choice, and the `LEDTEST` command if added). The hardware
 install is documented in the resources repo's rig manual, not an ADR.
+
+### FW-0057: Live `[ALT-VETO]` readout for the suppressed debias trigger
+
+- **Status:** Proposed
+- **Date added:** 2026-09-03
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** `host/tmaze/core/phase3/intervention_stack.py` (already
+  exposes `debias_vetoed`), `host/tmaze/core/phase3/trial_sequence.py` (surface
+  it), `host/tmaze/core/phase3/phase3_log.py` (`Phase3StateSnapshot` field),
+  `host/tmaze/core/phase3/phase3_stats.py`, `host/tmaze/ui/behavior_view.py`
+  (the "Side-bias b=.../trigger" line)
+- **Related ADRs:** [ADR-0149](decisions/0149-debias-veto-when-switch-dominant.md)
+  (the veto this makes visible), [ADR-0107](decisions/0107-phase3-alternation-intervention-stack.md)
+
+**Motivation / context.** ADR-0149 makes the stack *silently* refuse to auto-start
+a debias block while the animal is switch-dominant (or during the post-de-alt
+grace). Per trial nothing is logged - no block starts - so an operator watching
+the live readout sees a bias over `trigger_bias` with `errors >= min_errors` and
+no block, and has to know about the veto to understand why. Post hoc it is
+reconstructable (header `alt_veto_rate` + per-trial `bias` / `alt_rate` /
+`sched_state`), but the live panel should say so.
+
+**Sketch of approach.** Thread the stack's existing `debias_vetoed` bool through
+`TrialSequence` into `Phase3StateSnapshot` -> `phase3_stats` (a `debias_vetoed`
+field, false when the stack/veto is absent) and append a short tag to the
+side-bias readout line in `behavior_view.py`, e.g. `[ALT-VETO alt=0.71]`, with a
+tooltip pointing at the `Alt veto rate` knob. Optionally also a
+`auto:debias_vetoed` timeline note the first trial the veto engages (rate-limited
+so a long vetoed stretch is one note, not one per trial). No CSV column or
+protocol change.
+
+**Evaluation / acceptance.** Headless: a snapshot from a switch-dominant armed
+stack reports `debias_vetoed=True`; a camper reports `False`. Bench: the tag
+appears exactly on the trials where a bias over threshold is not starting a
+block, and disappears once the alt window refills / the rat drops to camper
+levels.
+
+**Effort / risk.** Small (one bool through five files). Risk: readout clutter -
+keep it a terse tag.
+
+**ADR needed?** No - a pure observability surface for a decision already recorded
+in ADR-0149.
 
 ## Completed
 

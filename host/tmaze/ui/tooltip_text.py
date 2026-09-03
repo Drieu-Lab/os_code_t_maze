@@ -422,6 +422,16 @@ TIPS: Dict[str, Entry] = {
                                    "corrective block may run before it auto-reverts "
                                    "to counterbalanced (flagged as capped in the "
                                    "log) even if the animal never complies.",
+    "phase3.debias_alt_veto_rate": "Don't AUTO-start a debias block while the "
+                                   "animal is switch-dominant: the de-alternation "
+                                   "alt_rate (how often it switches when told to "
+                                   "repeat; ~0 camper, ~1 alternator) is at or "
+                                   "above this (0-1). A debias block forces one "
+                                   "fixed side, which an alternator lands on every "
+                                   "other trial - a reliable 50% that trains a "
+                                   "figure-8 loop (ADR-0149). The stack just stays "
+                                   "counterbalanced instead. 0 = off; manual force "
+                                   "always bypasses it.",
     "phase3.debias_toggle": "Manually start or end a corrective debias block, "
                             "overriding the closed-loop scheduler (only active "
                             "under the 'debias_blocks' generator). A manual block "
