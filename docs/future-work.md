@@ -107,6 +107,7 @@ criteria).
 | [FW-0053](#fw-0053-author-the-rigor-guidance-spokes--slim-the-agentsmd-hubs) | Author the rigor guidance spokes + slim the `AGENTS.md` hubs | Agent guidance (`AGENTS.md` both repos, `docs/guidance/`) | Proposed |
 | [FW-0054](#fw-0054-measurement-rigor-checklist--grounded-uncertainty-norm-in-the-workflow) | Measurement-rigor checklist + grounded-uncertainty norm in the workflow | Agent guidance (`CONTRIBUTING.md`, `AGENTS.md`) | Proposed |
 | [FW-0055](#fw-0055-glossary-terms-for-scientific--epistemic-rigor) | Glossary terms for scientific + epistemic rigor | `docs/glossary.md` | Proposed |
+| [FW-0056](#fw-0056-camera-visible-cue-leds-on-spare-optocoupler-channels) | Camera-visible cue LEDs on spare optocoupler channels (hardware + firmware + `LEDTEST` roll-call) | Rig electronics board + `firmware/cue-guided-task` (`handleCueOn/Off`, `rig_config.h`, `PROTOCOL.md`) | Proposed |
 
 ## Entries
 
@@ -871,6 +872,28 @@ behavior.
 - **Author / Agent:** Agent (Cursor) on behalf of Celine
 - **Area / modules:** `firmware/cue-guided-task/cue-guided-task.ino` (+ `firmware/common/rig_config.h`, `firmware/PROTOCOL.md`, `PROTO_VERSION` bump) for a `SYNC` command that pulses an Open Ephys TTL and drives an LED in the camera FOV; `host/session_controller.py` (`mark_session_start` — the seam it attaches to), `host/session_log.py` (fiducial record), `host/camera_view.py` (detect/record the LED barcode in the sidecar), later `host/rig_logger.py`
 - **Related ADRs:** [ADR-0048](decisions/0048-host-session-orchestration-and-manifest.md) (the host-only session orchestrator + the single fiducial seam this replaces the host-t0 anchor at), [ADR-0011](decisions/0011-camera-tab-freerun-ffv1.md) (free-run camera + the `cam_block_id`/`cam_timestamp` sidecar columns future-proofed for hardware triggering), [ADR-0002](decisions/0002-transparent-line-passthrough.md) (why a host marker must loop through firmware), [ADR-0009](decisions/0009-runtime-training-modes-and-logging.md) (the serial log the TTL/echo would anchor)
+- **Design doc (2026-09-02):** this entry is now **Phase 3** of
+  [`docs/design/cross-stream-sync-design.md`](design/cross-stream-sync-design.md)
+  (§5), which retargets the sketch below in three ways. (1) **Acquisition
+  target:** the neural recording will be **Neuropixels over PXI** (SpikeGLX or
+  Open Ephys Neuropix-PXI), not the Open Ephys acquisition board's I/O BNCs. Those
+  systems already lock the probes to the NI digital-input card via the imec
+  basestation's 1 Hz SMA sync, so the Due only has to reach **one NI digital-in
+  line** (3.3 V TTL; confirm the card's threshold). (2) **Two rates from one
+  sequence:** the standard Allen / Open Ephys 32-bit, 10 ms-per-bit barcode is
+  right for NI (existing decoders) but invisible at ~30 fps, so a second Due pin
+  drives a camera-facing LED - via a **spare optocoupler-module channel** on the
+  electronics board, like the cue LEDs (FW-0056) - with a slow pattern (bits of
+  >= 3 frame periods, e.g. 100 ms; 8-bit code every ~10 s). Both are generated
+  from the same PRNG sequence number so a camera-decoded and an NI-decoded code
+  name the same `seq`; the simpler one-slow-pattern-for-both variant is the bench
+  alternative. (3) **Relation to Phase 1:** the board-LED fit (FW-0045) already
+  gives video<->Arduino from natural events; this line adds the Arduino<->NI leg
+  and a behaviour-independent, drift-proof fiducial, and its LED is a guaranteed
+  time-labelled anchor for the constellation registration and the session-start
+  roll-call. Everything below (the `SYNC` command, `<ms>,SYNC,<seq>` echo,
+  `mark_session_start` seam, manifest `fiducial` record, graceful fallback) still
+  applies.
 
 **Motivation / context.** ADR-0048's session anchor is deliberately coarse: a
 host-t0 in wall/monotonic clocks plus an optional `PING`→`PONG` in the serial
@@ -2245,8 +2268,37 @@ block be disallowed or warned-and-allowed (current behavior)?
   (`host/tmaze/tools/maze_state_validate.py`)
 - **Related ADRs / work:** [ADR-0124](decisions/0124-self-anchoring-session-bundle.md)
   (software self-anchoring; this is the middle rung between it and the hardware
-  fiducial), FW-0018 (hardware `SYNC` TTL + LED barcode), FW-0017 (cue-onset
-  latency from firmware echoes)
+  fiducial), FW-0018 (hardware `SYNC` TTL + LED barcode), FW-0056 (cue LEDs on
+  spare optocoupler channels), FW-0017 (cue-onset latency from firmware echoes)
+- **Design doc (2026-09-02):** this entry is now **Phase 1** of
+  [`docs/design/cross-stream-sync-design.md`](design/cross-stream-sync-design.md)
+  (§3), which supersedes the sketch below where they differ. Key refinements
+  agreed there: (1) the video clock to fit is the sidecar's `cam_timestamp`
+  (Basler hardware ticks, written every frame), bridged to the host via
+  `host_unix_s`, not the host clock itself; (2) LED positions are NOT hard-coded
+  pixel ROIs but derived each session by **constellation registration** - the
+  board is flat and the camera fixed, so the LED pattern moves as one rigid
+  shape; a max-minus-median image over the first minutes yields the blinking
+  blobs, which are matched (Procrustes/RANSAC similarity, homography if tilted)
+  to a stored board-frame constellation in a new `host/led_map.json` (snapshotted
+  into `config/` like `zones.json`), with the Arduino-driven LEDs and the
+  always-lit power LED as time-labelled anchors that break the four-identical-
+  channels-per-module ambiguity; (3) LED->event bindings and polarities are
+  learned once by cross-correlating blob traces against serial event trains in a
+  no-rat mapping session (`tmaze_test`), then verified passively every session
+  with a per-LED verdict `matched / silent / displaced` (no manual beam
+  triggering); (4) the fit is a robust straight line per MODE segment (firmware
+  clock resets on MODE, ADR-0064) with residuals reported as the measured
+  camera+serial offset - the number that answers `#260720_DataVideoSync`;
+  (5) outputs land in the bundle as a new `sync/` stream
+  (`sync/led_events_<id>.csv`, `sync/clock_fit_<id>.json`, manifest
+  `fiducial.method: led-fit`), written by a rig-repo runnable
+  `tmaze.tools.sync_fit` (modelled on `maze_state_validate.py`) over a pure core
+  `tmaze/core/sync/` + `tmaze/vision/led_detector.py`; the analysis repo only
+  READS `clock_fit`. Offline first; a live preflight in `camera_view` is a
+  follow-on (no generic per-frame detector hook exists - ADR-0040 pattern).
+  Retroreflective markers were considered and rejected: the LEDs are
+  self-illuminating landmarks in a dark room.
 
 **Motivation / context.** The rig has LEDs in the camera's field of view that
 flash on body-sensor and solenoid activations - i.e. the video ALREADY contains
@@ -2780,6 +2832,77 @@ where one exists, and is referenced (not re-explained) by the spokes.
 **Effort / risk.** Low.
 
 **ADR needed?** No - covered by ADR-0146; glossary additions are mechanical.
+
+### FW-0056: Camera-visible cue LEDs on spare optocoupler channels
+
+- **Status:** Proposed
+- **Date added:** 2026-09-02
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** the rig electronics board (two spare MT-301R4P-N channels,
+  wired from free Due pins); `firmware/common/rig_config.h` (new
+  `PIN_LED_CUE_LOW` / `PIN_LED_CUE_HIGH`, optional `PIN_LED_CUE_RETURN`);
+  `firmware/cue-guided-task/cue-guided-task.ino` (`handleCueOn`, `handleCueOff`,
+  the MODE-reset path); `firmware/PROTOCOL.md` + `PROTO_VERSION` and
+  `host/tmaze/core/protocol.py` if the optional `LEDTEST` command is added;
+  `host/led_map.json` (FW-0045) gains the two LEDs; the rig manual's pin table in
+  `os_code_t_maze_resources/rig-hardware/generate_rig_manual.py`
+- **Related ADRs / work:** [ADR-0044](decisions/0044-host-driven-cue-command.md)
+  / [ADR-0046](decisions/0046-host-owned-phase3.md) (host-driven `CUE_ON`, cue
+  identity as a frequency), [ADR-0063](decisions/0063-gate-the-tone-timer.md)
+  (TONE_ON/OFF TTLs next to the DAC), FW-0045 (Phase 1 board-LED detection this
+  feeds), FW-0018 (Phase 3 sync line, which reuses the same wiring trick);
+  design: [`docs/design/cross-stream-sync-design.md`](design/cross-stream-sync-design.md) §4
+
+**Motivation / context.** The electronics board's optocoupler indicator LEDs
+already flash for every beam break and solenoid pulse, so those events can be
+read out of the video (FW-0045). Cues cannot: the cue is an analog waveform on
+`DAC0`, and the only digital trace of it is a 5 ms TONE_ON TTL that no camera at
+~30 fps can see. A camera-visible marker per cue tone closes that gap and gives
+the constellation registration a time-labelled anchor that fires without the rat.
+
+**Sketch of approach.** *Hardware:* one wire per cue tone from a free Due pin to
+a spare input channel on an existing MT-301R4P-N 4-channel optocoupler module;
+the module's own indicator LED is the marker and the isolated output stays free
+(a future spare TTL). The Due is 3.3 V and sources only a few mA, so a bare LED
+must not hang off a pin - the module input is exactly the load it can drive.
+Checklist: count spare channels (two, three with a return-cue LED; OPI104-HS is
+the fallback), confirm the input side accepts 3.3 V logic and its polarity, wire
+common ground, use pins 8/9(/10) (unused; 0-1 are the console UART, 4-7 the
+TTLs), photograph, update the rig manual pin table (which also still omits TTL
+pins 4-7). *Firmware:* a **level held for the whole tone**, not a pulse. Cue
+identity in firmware is a frequency (low/high tone), not a side - `handleCueOn`
+resolves `freq` from the correct arm, the return-cue coin flip, or a host Hz - so
+pick the LED by which band `freq` is nearer (`cfg.lowToneHz` vs
+`cfg.highToneHz`), set it HIGH where `startToneAsync()` is called, LOW in
+`handleCueOff()` next to `stopToneAsync()`, and clear both in the MODE-reset path
+so a mid-tone mode switch cannot leave an LED stuck on. *Optional `LEDTEST`
+command* (`LEDTEST,<mask>,<ms>`) drives the LED pins without the DAC for a
+silent session-start roll-call and echoes `<ms>,LEDTEST,<mask>` so the serial
+log carries it and it is never mistaken for a real cue (protocol change: bump
+`PROTO_VERSION`, document in `PROTOCOL.md`, teach `tmaze.core.protocol`).
+
+**Evaluation / acceptance.** Bench: the LED-on frame in the recording is the
+first frame whose exposure overlaps the `CUE,ON` serial line (within one frame
+period), and the LED goes dark within one frame of `CUE,OFF`; low- and high-tone
+cues light different LEDs; an `LEDTEST` echo appears in the serial log and is
+excluded from cue counts by every consumer. Regression: tone timing, the
+TONE_ON/OFF TTLs, and the DAC output are unchanged (the pin writes sit outside
+the 80 kHz ISR).
+
+**Effort / risk.** Small firmware diff plus an afternoon of wiring. Risks: no
+spare channel or a 5 V-only input (fallback: OPI104-HS breakout); an LED stuck on
+after an abnormal stop (mitigated by the MODE-reset clear); confusing the LEDs
+with the cue *side* - they mean low/high *tone*, which is the identity the
+firmware reliably has.
+
+**Open questions.** Two LEDs or three (return cue)? Is the `LEDTEST` roll-call
+worth a protocol bump now, or can the roll-call live on rinse/drain alone until
+the Phase 3 sync LED exists? Should the host ever pass an explicit LED index on
+`CUE_ON` instead of the band split?
+
+**ADR needed?** Yes for the firmware/protocol part (new pins with a deliberate
+level-not-pulse choice, and the `LEDTEST` command if added). The hardware
+install is documented in the resources repo's rig manual, not an ADR.
 
 ## Completed
 
