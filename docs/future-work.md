@@ -109,6 +109,7 @@ criteria).
 | [FW-0055](#fw-0055-glossary-terms-for-scientific--epistemic-rigor) | Glossary terms for scientific + epistemic rigor | `docs/glossary.md` | Proposed |
 | [FW-0056](#fw-0056-camera-visible-cue-leds-on-spare-optocoupler-channels) | Camera-visible cue LEDs on spare optocoupler channels (hardware + firmware + `LEDTEST` roll-call) | Rig electronics board + `firmware/cue-guided-task` (`handleCueOn/Off`, `rig_config.h`, `PROTOCOL.md`) | Proposed |
 | [FW-0057](#fw-0057-live-alt-veto-readout-for-the-suppressed-debias-trigger) | Live `[ALT-VETO]` readout for the suppressed debias trigger | Phase 3 live readout (`intervention_stack.py` -> snapshot -> `phase3_stats.py` -> `behavior_view.py`) | Proposed |
+| [FW-0058](#fw-0058-reconcile-the-beam-state-polarity-si1-is-the-resting-state-not-broken) | Reconcile the beam-state polarity (`S,<i>,1` is the resting state in recorded logs, not "broken" as `PROTOCOL.md` says) | `firmware/PROTOCOL.md`, `cue-guided-task.ino` sensor read, host consumers of the `S` `active` flag | Proposed |
 
 ## Entries
 
@@ -2300,6 +2301,27 @@ block be disallowed or warned-and-allowed (current behavior)?
   follow-on (no generic per-frame detector hook exists - ADR-0040 pattern).
   Retroreflective markers were considered and rejected: the LEDs are
   self-illuminating landmarks in a dark room.
+- **Feasibility measured (2026-09-04, design doc §3.7; exploratory runnable
+  `tmaze.tools.led_sync_prototype`).** On one real H.264 (CRF 18) session
+  (`600_20260903_134552`, 39 min): 11 board LEDs read cleanly (contrast 90-185
+  grey levels vs a ~25 noise floor); every one was bound to its serial event from
+  the rat's own session (reward `SOL`, beams S2-S5, lick detector) by matching
+  lit/dark spans at both ends; the `cam_timestamp <-> firmware_ms` fit on 3,500
+  pairs has residual MAD **9.5 ms** (p5-p95 within one 40 ms frame), flat over
+  the session. Numbers the production tool must reproduce and that answer
+  `#260720_DataVideoSync` today: the host-clock join (`host_unix_s` vs the
+  serial line's wall stamp) carries a **+59 ms systematic bias** (frame stamped
+  ~1.5 frames after the serial line; MAD 10 ms) and the camera and Arduino
+  clocks differ by **27 ppm (~97 ms/hour)**, so the fit needs the rate term.
+  `cam_timestamp` ticks at 1.0000 GHz. Refinements adopted for the build:
+  interval (both-ends) matching with a >= 60 ms visible-span floor,
+  polarity-agnostic beam spans (see FW-0058), local-maximum blob detection
+  (channel LEDs sit ~8-12 px apart and bloom), min-max hysteresis levels (a 1 %
+  duty reward LED defeats percentiles), and one fit offset per edge polarity
+  (LED turn-off registers one frame later than turn-on). **Open rig checks:**
+  beams S0/S1 (ENTRY/EXIT) showed *no* visible blinking LED in the board crop -
+  hidden by wiring or facing away - so they need to be located (or accepted as
+  camera-invisible) before the LED map is finalised.
 
 **Motivation / context.** The rig has LEDs in the camera's field of view that
 flash on body-sensor and solenoid activations - i.e. the video ALREADY contains
@@ -2946,6 +2968,58 @@ keep it a terse tag.
 
 **ADR needed?** No - a pure observability surface for a decision already recorded
 in ADR-0149.
+
+### FW-0058: Reconcile the beam-state polarity (`S,<i>,1` is the resting state, not "broken")
+
+- **Status:** Proposed
+- **Date added:** 2026-09-08
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** `firmware/PROTOCOL.md` (the `S` row), `firmware/cue-guided-task/cue-guided-task.ino`
+  (`raw = digitalRead(sensorPins[i]) == LOW`), `firmware/common/rig_config.h`
+  (sensor wiring notes), and every host consumer of the `S` edge's `active`
+  flag: `core/protocol.py` (`sensor_edge`), `core/session/session_serial.py`,
+  `core/serial_liveness.py`, `core/phase3/intervention_stack.py`,
+  `ui/rig_view.py`, `ui/maze_gui.py`, `ui/tooltip_text.py`,
+  `tools/maze_state_validate.py`; the analysis repo where it reads `S` lines
+- **Related ADRs / work:** FW-0045 (where this was found),
+  [`docs/design/cross-stream-sync-design.md`](design/cross-stream-sync-design.md) §3.7
+
+**Motivation / context.** `PROTOCOL.md` documents body-beam edges as
+`S,<i>,<state>` with `state 1 = broken, 0 = clear`. The recorded serial logs say
+otherwise: in session `600_20260903_134552` the `1` spans of every beam reach
+tens of seconds (p90 26-74 s) while the `0` spans never exceed ~0.4 s (median
+50-230 ms), and the board's channel indicator LEDs go **dark** during the `0`
+spans. So the beam's *resting* state is reported as `1` and the rat's crossing
+as `0`. The firmware sets state 1 when the pin reads LOW; the likely cause is the
+Banner sensors running in light-operate mode (output on while the beam is
+received) behind the MT-301R4P-N stage, so "input active" means "beam intact".
+Whether any host or firmware logic is actually wrong depends on whether it
+reads the flag as *a transition happened* (fine) or as *the beam is broken now*
+(inverted). The firmware FSM in Full task uses these edges to drive trials, so
+this needs a definitive answer, not a guess.
+
+**Sketch of approach.** (1) On the rig, with no rat, break each beam by hand and
+watch the `S` lines - one minute settles the physical polarity. (2) Grep the
+consumers above for places that interpret `active` as "broken" (as opposed to
+"edge of either sign") and list them. (3) Decide where to fix: flip the label in
+`PROTOCOL.md` + firmware comments (if every consumer only wants edges), or invert
+in firmware (`== HIGH`, a protocol-visible change -> `PROTO_VERSION` bump and an
+ADR), or make consumers polarity-agnostic. Old logs keep the old meaning either
+way, so the analysis layer needs a per-`PROTO_VERSION` (or per-date) rule. (4)
+Whatever the outcome, the LED map (FW-0045) records the *measured* polarity per
+LED, so the sync fit is unaffected.
+
+**Evaluation / acceptance.** The `S` row in `PROTOCOL.md` matches what a hand
+break produces on the rig; every consumer's reading of the flag is documented
+as edge-only or state-aware; recorded-log interpretation is stated per protocol
+version; `tests/test_protocol.py` pins the convention.
+
+**Effort / risk.** Small to verify, small-to-medium to reconcile. Risk: a firmware
+flip silently inverts the Full-task FSM's beam logic - do the consumer audit
+before touching firmware.
+
+**ADR needed?** Yes if the firmware/protocol meaning changes; otherwise a doc
+fix referencing this entry.
 
 ## Completed
 

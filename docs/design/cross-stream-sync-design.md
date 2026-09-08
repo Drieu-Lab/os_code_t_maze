@@ -2,7 +2,8 @@
 
 - **Author / Agent:** Agent (Cursor) on behalf of Celine
 - **Date:** 2026-09-02
-- **Status:** Proposal (no code changes in this document; later ADRs will cite it)
+- **Status:** Proposal, **Phase 1 feasibility confirmed** on real footage
+  (§3.7, 2026-09-04); later ADRs will cite it
 - **Scope:** How the three data streams a session produces — the overhead
   **video**, the **Arduino** event stream (beams, licks, rewards, cues), and the
   future **Neuropixels** recording — get put on one shared time axis, precisely
@@ -32,7 +33,9 @@ FW-0018 (dedicated sync line) in [`docs/future-work.md`](../future-work.md).
   Every one of those flashes is the *same electrical edge* the Arduino
   timestamps. Reading the LEDs out of the video gives a direct video↔Arduino
   clock fit with hundreds of points per session, **with no hardware or firmware
-  change** (Phase 1).
+  change** (Phase 1). **Measured on one real H.264 session (§3.7):** 11 LEDs read
+  cleanly, 3,500 matched points, residual spread ±10 ms (a quarter frame), and
+  the host-clock join was shown to carry a 59 ms bias plus a 27 ppm drift.
 - **Two cue LEDs on spare optocoupler channels** extend that to cue onsets, which
   currently have no visible marker (Phase 2). One wire per cue from a free Due
   pin; the module's own indicator LED does the rest.
@@ -85,17 +88,21 @@ nobody has measured it.
 
 ### 1.3 Camera facts that shape the design (verified in `ui/camera_view.py`)
 
-- Default recording is **lossless FFV1** (`RECORD_FORMATS[0]`); H.264 is an
-  operator choice. Small LEDs survive lossless recording intact; under H.264 they
-  can smear. The detector must be validated on FFV1 and warned about on H.264.
+- The GUI's default format is **lossless FFV1** (`RECORD_FORMATS[0]`), but in
+  practice operators pick **H.264** (CRF 18): 43 of the 48 session videos on the
+  rig PC are `.mp4`, including every recent one. So H.264 is the case that
+  matters, and the feasibility spike (§3.7) was run on it: the LEDs survive the
+  compression with a contrast of 90–180 grey levels against a noise floor of ~25,
+  so no lossless fallback is needed.
 - Frames are **undistorted at the source** (ADR-0015; `_maybe_undistort` on the
   grab thread), so preview, tracking, and the saved video share the corrected
   geometry. Any LED regions we define live in that corrected image space, and
   the sidecar header records whether undistortion was on.
 - `cam_timestamp` is `grab.TimeStamp` cast to int, written every frame, blank if
-  unavailable. Its tick rate is **not documented** in this repo and must be
-  measured (Basler documents it per model; a fit against `host_unix_s` over a
-  session will also reveal it).
+  unavailable. Its tick rate was **measured at 1.0000 GHz** (ticks vs
+  `host_unix_s` over a 39-minute session, §3.7), i.e. the value is nanoseconds
+  on the camera's own clock; it was present on every one of that session's
+  58,231 frames.
 - **Exposure and gain are left at the camera's power-up defaults**; no `.pfs` is
   loaded unless the operator picks one. If the camera auto-exposes, a blinking LED
   bank at the frame edge could nudge exposure and make thresholds unstable.
@@ -204,6 +211,9 @@ have already been wrong once (see the beam-name aliases in `rig_config.h`). So:
 1. **Mapping session.** With no rat, run `tmaze_test` and the camera: fire each
    solenoid a few times, break each beam by hand a few times, play each cue.
    The serial log then contains a clean, sparse event train per event type.
+   (The spike in §3.7 showed a normal training session binds every visible LED
+   on its own, so the dedicated session is mainly for LEDs that a rat's session
+   never fires — left/right reward, rinse/drain, the Phase 2 cue LEDs.)
 2. **Cross-correlate.** For every blinking blob found in the video (§3.4) and
    every event type in the serial log, cross-correlate the blob's on/off trace
    with the event train over a coarse window (the host-clock join gives the
@@ -303,6 +313,127 @@ Code map (respecting the pure-core / thin-shell rule in
 The analysis repo reads `clock_fit` and applies it when converting `firmware_ms`
 or `cam_timestamp` to the session axis; nothing else there changes.
 
+### 3.7 Feasibility findings (Slice 0 spike, 2026-09-04)
+
+Before writing production code, the question "can the LEDs actually be read out
+of the H.264 video?" was put to a real session with a throwaway tool,
+`python -m tmaze.tools.led_sync_prototype` (kept in the repo as an exploratory
+runnable, like `blob_tracker_prototype`; see `PROGRAMS.md`). Session
+`600_20260903_134552`: rat 600, 39 min, H.264 at CRF 18, 24.96 fps, 58,231
+frames, undistorted, `cam_timestamp` on every frame. Board crop
+`x 800–1120, y 470–800` in the recorded frame.
+
+**Verdict: go.** Every number below was measured on that session; the full
+39-minute run took 5.7 min on the rig PC (two sequential decode passes).
+
+![Board crop (median frame) with the 11 blinking LEDs found by max-minus-median / median-minus-min](figures/sync-spike-board-leds.jpg)
+
+- **Detection on H.264 is not marginal.** Eleven blinking blobs were found as
+  local maxima of the max-minus-median (LEDs that light up) and median-minus-min
+  (LEDs that go dark) images. Their contrast is 90–185 grey levels (0–255) against
+  a compression noise floor of ~25 in those extreme images, so a blob threshold of
+  30–35 separates them cleanly; 15 finds a thousand false blobs. A 2 px-radius
+  disk minus a background ring (3–7 px) gives per-frame traces that swing from
+  ~60–130 down to ~0 on a beam break, with no visible smear.
+- **Neighbouring LEDs need peak detection, not connected components.** Each
+  MT-301R4P-N channel shows **two** LEDs ~12 px apart (input and output side of
+  the optocoupler), and channels are stacked ~8 px apart vertically. Connected
+  components with dilation merged them; non-maximum suppression over a 7 px
+  window separates them.
+- **Blob positions are stable** across the first 6 min, minutes 8–16, and the full
+  session (within 0.1 px), so ROIs derived once per session are sound.
+
+![Per-LED traces for the first 120 s of the analysis window; red spans are the matched serial intervals](figures/sync-spike-traces.jpg)
+
+**Bootstrapped bindings.** No mapping session was needed: the rat's own events
+bind every blob. The match is by *interval* — the LED's dark (or lit) span must
+agree with the serial event's span at **both ends** within ±150 ms — which is what
+separates beams the rat crosses within a few hundred ms of each other (a
+nearest-edge match confused ENTRY/EXIT and gave 80–170 ms spreads). Recall is
+counted only against serial spans ≥ 60 ms, because a 40 ms frame cannot register
+a 15 ms flicker. Pixel positions are in the crop; add (800, 470) for full-frame.
+
+| Blob | Crop px (x, y) | Binds to | LED state during event | Matched / visible events | LED spans | Start lag (median ± MAD) | F1 |
+|---|---|---|---|---|---|---|---|
+| 0 | (80, 120) | `SOL,2,1` (centre reward, 300 ms) | lit | 54 / 56 | 56 | +32 ± 2 ms | 0.96 |
+| 1, 2 | (47, 213), (59, 216) | `L,2` lick detector (`L,2,1` span) | dark | 1385 / 3115, 1451 / 3115 | 1397, 1463 | +69 ± 9 ms | 0.61, 0.63 |
+| 3, 4 | (170, 232), (182, 235) | beam `S,2` — `S,2,0` span | dark | 73 / 86, 74 / 86 | 79, 79 | +65 ± 11 ms | 0.88, 0.90 |
+| 7, 8 | (168, 241), (181, 243) | beam `S,3` — `S,3,0` span | dark | 41 / 46, 40 / 46 | 45, 44 | +68 ± 13 ms | 0.90, 0.89 |
+| 5, 6 | (108, 236), (120, 239) | beam `S,5` — `S,5,0` span | dark | 46 / 58, 49 / 58 | 49, 50 | +69 ± 10 ms | 0.86, 0.91 |
+| 9, 10 | (106, 245), (118, 248) | beam `S,4` — `S,4,0` span | dark | 74 / 99, 77 / 99 | 78, 78 | +62 ± 9 ms | 0.84, 0.87 |
+
+Precision is 93–99 % everywhere (nearly every LED span the video shows is a real
+serial event); the lick pair's lower F1 is recall on very short lick spans, not
+false detections. Beams `S,0` and `S,1` (ENTRY/EXIT, 175 and 239 crossings) have
+**no visible blinking LED** in the crop — their channel LEDs are hidden by wiring
+or face away; to be checked on the rig. Only the centre solenoid fired in this
+session, so the other OPI104-HS LEDs (left/right reward, rinse/drain) are unbound
+but detectable by the same method whenever they fire.
+
+**Two facts about the serial log fell out of the matching:**
+
+1. **Beam polarity is inverted relative to `PROTOCOL.md`.** The doc says
+   `S,<i>,1` = broken. In the log the `1` spans reach tens of seconds (p90
+   26–74 s on every beam) while the `0` spans never do (median 50–230 ms, p90
+   0.2–0.4 s); the LEDs go dark during the `0` spans. So the resting state is `1` and the crossing is
+   `0`, consistent with the Banner sensors running in light-operate mode (output
+   on while the beam is received) behind an inverting optocoupler stage. Host
+   consumers that take `active` at face value should be reviewed; the LED map
+   simply records the measured polarity.
+2. **Sub-frame chatter is common.** 20–45 % of beam state spans are shorter than
+   one frame (median span of the `1` state on a busy beam can be ~100 ms because
+   of bounce). Irrelevant for the fit — it uses only matched spans — but it
+   means video-based beam recall will never approach 100 %.
+
+![Residuals of cam_timestamp = a + b·firmware_ms over the 39-minute session, 3,500 pairs](figures/sync-spike-residuals.png)
+
+**The clock fit** (Theil–Sen on 3,500 (`firmware_ms`, `cam_timestamp`) pairs,
+both ends of every matched span):
+
+- Residuals: median 0, **MAD 9.5 ms, p5–p95 = −26…+29 ms** — inside one 40 ms
+  frame period, flat over 39 minutes (the rate term absorbs the drift), with
+  ~10 mis-pairs at −150…−200 ms that the robust fit ignores.
+- Rate: **1.000027 camera-ns per firmware-ms**, i.e. the Arduino `millis()` and
+  the camera clock disagree by **27 ppm ≈ 63 ms over this session** (≈ 97 ms per
+  hour). A fixed-offset join would be off by 1.5 frames at the end; the rate
+  term is necessary, as §3.5 assumed.
+- `cam_timestamp` tick rate: **1.0000 GHz** (ns), from its slope against
+  `host_unix_s`.
+- **Host-clock bridge:** the frame that first shows an LED change is stamped
+  (`host_unix_s` at grab) **59 ms after** the serial line's host wall-clock
+  stamp, MAD 10 ms. That is the systematic bias of today's `host-t0` join —
+  roughly camera exposure + readout + GigE transfer minus serial latency — and
+  is **the measured answer to `#260720_DataVideoSync`**: video ↔ Arduino
+  alignment via host stamps is good to about 1.5 frames systematic and ±0.25
+  frame jitter; the LED fit removes the bias.
+- Onset vs offset asymmetry: LED **turn-on** lags the serial line by +32 ms
+  (SOL), LED **turn-off** by +62–69 ms (beams, lick), and the SOL span's end
+  lags +87 ms. The ~40 ms difference is one frame: a saturating LED that turns on
+  part-way through an exposure still clears the 60 % threshold in that frame,
+  while one that turns off part-way through still leaves enough light to stay
+  above 40 %, so the off edge lands one frame later. The production fit should
+  therefore fit **one offset per edge polarity** (or use only turn-on edges and
+  the LED-lit-for-`0`-span convention), rather than one per event type.
+
+**Consequences for Slices 1–4.** The design stands; the following refinements
+are adopted from the spike:
+
+- `core/sync` matches **intervals** (both ends), with a minimum visible span and
+  polarity-agnostic beam spans; per-polarity edge offsets in the fit.
+- `vision/led_detector` finds LEDs as **local maxima** of the extreme images,
+  radius-2 disk minus ring, hysteresis at 40/60 % of the min–max span of a
+  3-frame median-filtered trace (percentile-based levels miss a 1 %-duty LED).
+- Blob threshold default 30–35 on the extreme images; the report should print the
+  noise floor so a future CRF change is caught.
+- Two-pass sequential decode is fast enough (≈ 170 fps per pass, 5.7 min for a
+  39-min session); no need for a seekable index or a lossless ROI stream.
+- Open items carried forward: locate the ENTRY/EXIT LEDs on the rig; confirm the
+  beam polarity by hand and fix `PROTOCOL.md` or make consumers agnostic;
+  exposure pinning (§1.3) remains advisable but was not needed here.
+
+Raw outputs (figures, `bindings.csv`, `summary.json`) are regenerated by the
+prototype; the three figures above are the only copies kept in the repo.
+
 ---
 
 ## 4. Phase 2 — cue LEDs on spare optocoupler channels
@@ -400,10 +531,12 @@ Neuropixels PXI / NI digital-in.
 
 | Risk / question | Mitigation or how to settle it |
 |---|---|
-| LEDs are only a few pixels at the frame edge | Sum over the ROI; validate on real footage; consider a slightly wider lens crop or a small mirror only if detection is marginal |
-| H.264 smears small LEDs | Detector validated on FFV1 (the default); warn in the report when the sidecar header says H.264 |
+| LEDs are only a few pixels at the frame edge | **Settled (§3.7):** a 2 px-radius disk minus a background ring gives 90–180 grey levels of contrast on real footage; no lens or mirror change needed |
+| H.264 smears small LEDs | **Settled (§3.7):** at CRF 18 the LEDs are clean; the compression noise floor in a max-minus-median image is ~25 grey levels, so the blob threshold must stay above ~30. Re-check if a higher CRF is ever used |
 | Auto-exposure reacts to the LED bank | Pin exposure/gain with a `.pfs` loaded at start; the local-background-ring measure also desensitizes thresholds |
-| `cam_timestamp` tick rate unknown / blank frames | Measure from the sidecar (ticks vs `host_unix_s` slope); fall back to `host_unix_s` for frames with a blank tick |
+| `cam_timestamp` tick rate unknown / blank frames | **Settled (§3.7):** 1.0000 GHz, present on every frame of the spike session. Keep the `host_unix_s` fallback for blank ticks anyway |
+| Beam polarity in the serial log is the opposite of `PROTOCOL.md` | **Found (§3.7):** the resting state of every beam is `S,<i>,1`; the crossing is the `0` span. Verify on the rig by hand, then either fix the label in `PROTOCOL.md`/firmware or make consumers polarity-agnostic (tracked as FW-0058). The LED map records the measured polarity either way |
+| Sub-frame sensor spans | 20–45 % of the beam state spans are shorter than one 40 ms frame (chatter, tail flicks). The camera cannot see them; recall is measured only against spans ≥ 60 ms, and the fit never needs them |
 | Grid self-similarity mis-registers by one channel | Time-labelled anchors (§3.4 step 4); refuse to fit if no anchor blob is present |
 | Firmware clock resets on MODE | Per-segment offsets (§3.5); segment boundaries from the serial log's `MODE` lines |
 | Long-session drift | Rate term + residual-vs-time check; Phase 3 barcodes if Phase 1 events are too sparse |
@@ -442,7 +575,7 @@ Neuropixels PXI / NI digital-in.
 | Step | Change | ADR? |
 |---|---|---|
 | 1a | `led_detector` + `core/sync` registration/fit + `tools/sync_fit` (offline), `led_map.json`, `sync/` stream + manifest/format registration | Yes — detector, bundle schema, and alignment method |
-| 1b | Pin camera exposure via a default `.pfs`; measure `cam_timestamp` tick rate | Small ADR or note in 1a |
+| 1b | Pin camera exposure via a default `.pfs` (tick rate already measured, §3.7) | Small ADR or note in 1a |
 | 2a | Hardware: cue LEDs on spare channels; rig manual + pin table (incl. TTL 4–7) | No (hardware; documented in the resources repo) |
 | 2b | Firmware cue-LED pins + optional `LEDTEST`; `PROTOCOL.md`, `PROTO_VERSION` | Yes — protocol change |
 | 2c | Live preflight / roll-call in `camera_view` | Yes if it adds a second frame worker |
