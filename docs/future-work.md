@@ -109,7 +109,7 @@ criteria).
 | [FW-0055](#fw-0055-glossary-terms-for-scientific--epistemic-rigor) | Glossary terms for scientific + epistemic rigor | `docs/glossary.md` | Proposed |
 | [FW-0056](#fw-0056-camera-visible-cue-leds-on-spare-optocoupler-channels) | Camera-visible cue LEDs on spare optocoupler channels (hardware + firmware + `LEDTEST` roll-call) | Rig electronics board + `firmware/cue-guided-task` (`handleCueOn/Off`, `rig_config.h`, `PROTOCOL.md`) | Proposed |
 | [FW-0057](#fw-0057-live-alt-veto-readout-for-the-suppressed-debias-trigger) | Live `[ALT-VETO]` readout for the suppressed debias trigger | Phase 3 live readout (`intervention_stack.py` -> snapshot -> `phase3_stats.py` -> `behavior_view.py`) | Proposed |
-| [FW-0058](#fw-0058-reconcile-the-beam-state-polarity-si1-is-the-resting-state-not-broken) | Reconcile the beam-state polarity (`S,<i>,1` is the resting state in recorded logs, not "broken" as `PROTOCOL.md` says) | `firmware/PROTOCOL.md`, `cue-guided-task.ino` sensor read, host consumers of the `S` `active` flag | Proposed |
+| [FW-0058](#fw-0058-reconcile-the-beam--and-lick-state-polarity-si1--li1-are-the-resting-states-not-broken--active) | Reconcile the beam- and lick-state polarity (`S,<i>,1` and `L,<i>,1` are the resting states in recorded logs; `PROTOCOL.md` rows corrected 2026-09-08, firmware comment + consumer audit open) | `firmware/PROTOCOL.md`, `cue-guided-task.ino` sensor reads, host consumers of the `S`/`L` `active` flag | Proposed |
 
 ## Entries
 
@@ -2315,7 +2315,7 @@ block be disallowed or warned-and-allowed (current behavior)?
   clocks differ by **27 ppm (~97 ms/hour)**, so the fit needs the rate term.
   `cam_timestamp` ticks at 1.0000 GHz. Refinements adopted for the build:
   interval (both-ends) matching with a >= 60 ms visible-span floor,
-  polarity-agnostic beam spans (see FW-0058), local-maximum blob detection
+  the sensors' measured active states (`S<i>=0`, `L<i>=0`; FW-0058), local-maximum blob detection
   (channel LEDs sit ~8-12 px apart and bloom), min-max hysteresis levels (a 1 %
   duty reward LED defeats percentiles), and one fit offset per edge polarity
   (LED turn-off registers one frame later than turn-on). **Open rig checks:**
@@ -2969,20 +2969,38 @@ keep it a terse tag.
 **ADR needed?** No - a pure observability surface for a decision already recorded
 in ADR-0149.
 
-### FW-0058: Reconcile the beam-state polarity (`S,<i>,1` is the resting state, not "broken")
+### FW-0058: Reconcile the beam- and lick-state polarity (`S,<i>,1` / `L,<i>,1` are the resting states, not "broken" / "active")
 
 - **Status:** Proposed
 - **Date added:** 2026-09-08
 - **Author / Agent:** Agent (Cursor) on behalf of Celine
-- **Area / modules:** `firmware/PROTOCOL.md` (the `S` row), `firmware/cue-guided-task/cue-guided-task.ino`
-  (`raw = digitalRead(sensorPins[i]) == LOW`), `firmware/common/rig_config.h`
-  (sensor wiring notes), and every host consumer of the `S` edge's `active`
-  flag: `core/protocol.py` (`sensor_edge`), `core/session/session_serial.py`,
+- **Area / modules:** `firmware/PROTOCOL.md` (the `S` and `L` rows), `firmware/cue-guided-task/cue-guided-task.ino`
+  (`raw = digitalRead(sensorPins[i]) == LOW`, and the lick read), `firmware/common/rig_config.h`
+  (sensor wiring notes), and every host consumer of the `S`/`L` edge's `active`
+  flag: `core/protocol.py` (`sensor_edge`, `lick_edge`), `core/session/session_serial.py`,
   `core/serial_liveness.py`, `core/phase3/intervention_stack.py`,
-  `ui/rig_view.py`, `ui/maze_gui.py`, `ui/tooltip_text.py`,
-  `tools/maze_state_validate.py`; the analysis repo where it reads `S` lines
+  `core/rules_engine.py` (`_lick_port_of`: takes `L,<i>,1` as "a lick"),
+  `ui/rig_view.py`, `ui/maze_gui.py` (sensor labels green when `active`),
+  `ui/lick_tuner.py`, `ui/tooltip_text.py`,
+  `tools/maze_state_validate.py`; the analysis repo where it reads `S`/`L` lines
 - **Related ADRs / work:** FW-0045 (where this was found),
   [`docs/design/cross-stream-sync-design.md`](design/cross-stream-sync-design.md) §3.7
+
+**Update (2026-09-08, Slice 1 of FW-0045).** Two things done, the rest still
+open. (a) The **lick detector has the same inversion**: over the full session
+`600_20260903_134552`, `L2=1` runs unbroken for up to 257 s (1582 s in total)
+while `L2=0` never exceeds 0.3 s (median 92 ms), and the lick LED lights during
+`0`. So `L,<i>,0` is the tongue contact and `L,<i>,1` idle. (b) The `S` and `L`
+rows of `PROTOCOL.md` were **corrected to the measured polarity** (with the
+evidence and a pointer here), and `tmaze/core/sync/spans.py` hard-codes the
+active states (`BEAM_ACTIVE_STATE = LICK_ACTIVE_STATE = "0"`) with a fixture
+test that checks them against the real log
+(`tests/test_sync_fixture.py::test_active_states_are_the_brief_ones`). Still
+open: the hand check on the rig, the firmware source comment, and the consumer
+audit - note that `core/rules_engine.py` reads `L,<i>,1` as the lick, which
+under the measured polarity is the *release* edge (~90 ms after contact; the
+reward still follows a lick, just late), and `ui/maze_gui.py` / `ui/lick_tuner.py`
+show "active" while the sensors are idle.
 
 **Motivation / context.** `PROTOCOL.md` documents body-beam edges as
 `S,<i>,<state>` with `state 1 = broken, 0 = clear`. The recorded serial logs say

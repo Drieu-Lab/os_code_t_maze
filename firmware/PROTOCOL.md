@@ -102,8 +102,8 @@ log can contain several of them.
 | TYPE | Payload | Meaning |
 |------|---------|---------|
 | `TRIAL` | `<index>,LEFT\|RIGHT` | trial `<index>` (1-based) started; correct side |
-| `S` | `<i>,<state>` | body-beam `i` edge; `state` 1=broken, 0=clear |
-| `L` | `<i>,<state>` | lick `i` edge; `state` 1=active, 0=idle |
+| `S` | `<i>,<state>` | body-beam `i` edge; `state` **0 = beam broken (rat crossing), 1 = beam clear (resting)**. Measured on recorded logs 2026-09-08: the `1` spans run for tens of seconds, the `0` spans 50–400 ms, and the board's channel LED goes dark during `0` (`docs/design/cross-stream-sync-design.md` §3.7). Earlier revisions of this row said the opposite; the firmware source comment and the host consumers of the flag are being reconciled under `docs/future-work.md` FW-0058. |
+| `L` | `<i>,<state>` | lick `i` edge; `state` **0 = tongue contact (lick), 1 = idle**. Same inversion and same evidence as `S`: over a full session `1` runs unbroken for minutes while `0` never exceeds 0.3 s (median 92 ms); the lick LED lights during `0`. See FW-0058. |
 | `MODE` | `FREEROAM\|FULLTASK` | training mode entered (at boot or on a `MODE` command) |
 | `CHOICE` | `LEFT\|RIGHT` | arm chosen |
 | `OUTCOME` | `CORRECT\|INCORRECT` | choice correctness |

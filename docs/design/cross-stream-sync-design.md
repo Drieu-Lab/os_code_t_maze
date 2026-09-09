@@ -299,8 +299,10 @@ Code map (respecting the pure-core / thin-shell rule in
 
 - `tmaze/vision/led_detector.py` — ROI brightness, hysteresis, edge extraction
   (OpenCV/NumPy, no Tk).
-- `tmaze/core/sync/` — constellation registration, event matching, robust fit,
-  verdicts (stdlib + NumPy, headless-tested with synthetic traces).
+- `tmaze/core/sync/` — spans, event matching, robust fit, verdicts (stdlib only,
+  per the core purity rule; headless-tested with synthetic traces and a real
+  excerpt — landed in Slice 1, see the end of §3.7). Constellation registration
+  needs pixels and joins `led_detector` in the vision layer.
 - `tmaze/tools/sync_fit.py` — the offline runnable, modelled on
   `maze_state_validate.py`: reads a bundle, writes the two `sync/` artifacts,
   prints a report; `--selftest` on synthetic data; `--map` mode that builds
@@ -419,7 +421,8 @@ both ends of every matched span):
 are adopted from the spike:
 
 - `core/sync` matches **intervals** (both ends), with a minimum visible span and
-  polarity-agnostic beam spans; per-polarity edge offsets in the fit.
+  the sensors' measured active states (`S<i>=0`, `L<i>=0`; see Slice 1 below);
+  per-polarity edge offsets in the fit.
 - `vision/led_detector` finds LEDs as **local maxima** of the extreme images,
   radius-2 disk minus ring, hysteresis at 40/60 % of the min–max span of a
   3-frame median-filtered trace (percentile-based levels miss a 1 %-duty LED).
@@ -428,8 +431,73 @@ are adopted from the spike:
 - Two-pass sequential decode is fast enough (≈ 170 fps per pass, 5.7 min for a
   39-min session); no need for a seekable index or a lossless ROI stream.
 - Open items carried forward: locate the ENTRY/EXIT LEDs on the rig; confirm the
-  beam polarity by hand and fix `PROTOCOL.md` or make consumers agnostic;
-  exposure pinning (§1.3) remains advisable but was not needed here.
+  beam and lick polarity by hand on the rig (the `PROTOCOL.md` rows were
+  corrected from the logs in Slice 1; the firmware comment and consumer audit
+  are FW-0058); exposure pinning (§1.3) remains advisable but was not needed here.
+
+**Slice 1 (2026-09-08) — `tmaze/core/sync/` landed** (`spans`, `matching`,
+`clockfit`, `pipeline`; stdlib-only, tested on synthetic data and on a real
+five-minute excerpt of the spike session kept as a fixture). Further decisions
+were taken while making the real excerpt pass, most forced by sensor chatter or
+by the camera under-sampling fast channels:
+
+- **Coalesce on the firmware clock before judging visibility.** A `0→1→0→1`
+  bounce with a sub-frame `0` in the middle shows in the video as one lit span,
+  so the two serial `1` spans around it are merged (gap < 60 ms) before spans
+  shorter than 60 ms are dropped. Otherwise the LED's ON edge is attributed to
+  the *later* `S,i,1` line and lands as a −100…−150 ms outlier. Gaps and
+  durations must be measured on the firmware `ms`, not the host stamps: when
+  the PC reads several lines in one batch their host stamps are only ~40 ms
+  apart even when the firmware says 99 ms, and the wrong pair gets merged.
+- **Sensor polarity is hard-coded, and the lick detector is inverted too.** "LED
+  dark while `S4=0`" and "LED lit while `S4=1`" describe the same wire, and
+  letting both compete gave two labels for one LED (an earlier draft pooled
+  them, which made the reported counts and score come from different
+  phrasings). Since the polarity is a fixed property of the wiring, `core/sync`
+  now matches only the sensors' **active** states — `S<i>=0` (crossing) and
+  `L<i>=0` (tongue contact) — via `spans.active_spans`, and a fixture test
+  verifies the choice against the real log (the active state is the brief one).
+  That test caught the lick detector: over the full spike session `L2=1` runs up
+  to **257 s** unbroken (1582 s in total) while `L2=0` never exceeds **0.3 s**
+  (median 92 ms), so `L,2,0` is the contact and `L,2,1` idle — the mirror of
+  `PROTOCOL.md`'s `L` row, exactly like the beams. Both rows of `PROTOCOL.md`
+  were corrected (2026-09-08); the firmware comment and the audit of host
+  consumers that read the `L`/`S` `active` flag remain open under FW-0058. The
+  lick LEDs then read "**lit while `L2=0`**" — the LED lights on contact — with
+  the ON-edge lag (+40 ms), not the OFF-edge lag the spike table shows for the
+  `L,2,1` phrasing.
+- **The binding score is precision, not F1.** "Which wire is this LED on?" is
+  answered by the fraction of the LED's spans that a channel explains; recall
+  over the visible serial spans measures **camera coverage** and is reported
+  alongside. The camera catches only ~30–45 % of licks, so F1 would have
+  rejected a lick LED whose every blink is a real lick (F1 0.46 at precision
+  1.0). Lick precision itself is ~0.7 rather than 1.0 because a release shorter
+  than two frames is invisible to the 3-frame median filter, so one LED span
+  sometimes covers two serial contacts.
+- **A binding must lag its wire at both edges.** Precision alone cannot
+  separate a wire from a *behaviourally coupled* channel: the centre reward
+  fires as the rat crosses the centre beam, so 7 of the 8 centre-beam LED dark
+  spans in the excerpt also overlap a 300 ms `SOL` pulse (precision 0.88, a
+  tie). But that LED relights ~150 ms *before* the pulse ends, and an LED driven
+  by a wire cannot react before the wire does. `matching.lag_plausible` requires
+  the median start **and** end lags to be ≥ −20 ms (room for serial-stamp
+  jitter); it also rejects the wrong-LED-polarity lick candidate (lag −37 ms).
+- **Tolerance 200 ms, not 150.** The nominal worst case is ~140 ms (60 ms host
+  lag + one 40 ms frame of quantisation + one more frame on OFF edges); chatter
+  merged into a crossing can put its serial start a further 50–70 ms before the
+  LED visibly reacts, and at 150 ms those spans were rejected (a beam LED fell
+  to 4 of 8). 200 ms stays under the ~170 ms lick-burst period, so neighbouring
+  licks cannot pair at both ends. Cost: the fit's p5–p95 residual spread on the
+  excerpt widens from ~90 to ~110 ms (MAD 25 ms) as a few chatter-shifted edges
+  enter; Theil–Sen is unmoved.
+- Licks are **bound and reported but excluded from the fit by default**
+  (`pipeline.DEFAULT_FIT_CHANNEL_KINDS = ("S", "SOL")`): beams + valve already
+  give thousands of unambiguous points per session and licks were the one source
+  of mis-pairs; opt in per call.
+- Ordering is enforced: the matcher is an ordered, one-to-one longest chain
+  within the host-clock band (the localized piece of sequence alignment, §3.3),
+  and the fit checks the host lag for steps between blocks of pairs
+  (`host_clock_step` verdict).
 
 Raw outputs (figures, `bindings.csv`, `summary.json`) are regenerated by the
 prototype; the three figures above are the only copies kept in the repo.

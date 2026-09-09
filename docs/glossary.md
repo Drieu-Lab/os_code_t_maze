@@ -163,6 +163,14 @@ The code that runs *most often* — here, the work done on **every camera frame*
 tens of times per second. Anything added to the hot path (even a tiny delay)
 multiplies by the frame rate, so it is kept as lean as possible.
 
+### Hysteresis (thresholding)
+Using *two* thresholds instead of one to decide on/off: a signal must climb above
+the higher one to count as ON and fall below the lower one to count as OFF, so a
+value hovering near a single threshold cannot flicker between states. The sync
+core turns an LED's per-frame brightness into lit/dark spans this way (levels at
+40 % and 60 % of the trace's min-to-max range); the maze-state estimator's
+min-dwell is the same idea applied to time. See `host/tmaze/core/sync/spans.py`.
+
 ### Idempotent rebuild
 A regeneration step you can run any number of times and always get the same
 result — because it *re-derives everything from scratch* rather than adding to
@@ -224,6 +232,15 @@ event. The GUI runs a "Tk poll" roughly every 100 ms to refresh status and hand
 the actuation thread a fresh [snapshot](#snapshot). Polling is simple but adds up
 to a poll-interval of delay, which is why the fast/hot path avoids it.
 
+### Precision / recall (LED binding)
+Two fractions that describe how well a blinking LED lines up with a serial
+channel. *Precision*: of the LED's blinks, how many coincide with an event of
+that channel — this answers "which wire is the LED on?" and is the sync core's
+binding *score*. *Recall*: of the channel's visible events, how many the LED
+was seen blinking for — this measures how much the camera catches (it misses
+most licks, since they are faster than a frame or two) and is reported as
+coverage, not folded into the score. See `host/tmaze/core/sync/matching.py`.
+
 ### Probe block
 A short run of **unrewarded** trials dropped into an otherwise normal Phase 3
 session: the cue plays and the choice is scored as usual, but no reward is
@@ -282,6 +299,14 @@ recorded CSV is read back into the same [snapshot](#snapshot) shape and run
 through the *same* trace computation as the live line, so the two are directly
 comparable; a caption flags any run-config differences between them. See ADR-0117.
 
+### Robust fit (Theil–Sen)
+A way of fitting a straight line that a few wildly wrong points cannot pull off
+course: take the slope between every pair of points and use the *median* slope
+(then the median intercept), instead of least squares, which lets one outlier
+drag the whole line. The sync core's [clock fit](#clock-fit--drift) uses it so a
+handful of mis-matched LED/serial pairs do not bias the camera-vs-Arduino line.
+See `docs/design/cross-stream-sync-design.md` §3.5.
+
 ### Rolling window (trace)
 Instead of one number per session, compute a rate over the most recent *N* trials
 and slide that window forward trial by trial, giving a *trace* that shows the rate
@@ -304,6 +329,16 @@ files — `animals.json` (identity), `daily_log.csv` (daily husbandry),
 [upsert](#upsert-keyed-merge). Keeping a single source of truth is what lets the
 rig, the builders, and the [Records Manager](#tk--tkinter) GUI all read the same
 data without it drifting apart. See ADR-0076, ADR-0085.
+
+### Span (sync)
+"Channel X was in state Y from t0 to t1" — the one shape both streams are reduced
+to before they are compared: a beam that read `S,2,0` then `S,2,1` gives a span
+of `S2=0`; an LED that went dark then lit again gives a *dark* span. Each span
+carries the PC wall-clock time at both edges (for finding candidates) and the
+stream's own clock (firmware ms, camera ticks) for the [clock fit](#clock-fit--drift).
+Matching spans rather than single edges — both ends must agree — is what tells
+apart beams crossed within a few hundred ms of each other. See
+`host/tmaze/core/sync/spans.py`.
 
 ### Stamped note entry
 One operator observation recorded as a *timestamped event* rather than a line in
