@@ -226,6 +226,14 @@ animal starting to use the tone?" — the cue weight climbing above the
 history weights is the emergence signature a single accuracy number hides. See
 ADR-0112.
 
+### Noise floor (video)
+How much a pixel's brightness wanders when *nothing* is happening — here mostly
+video-compression noise, ~25 grey levels (of 255) in the "brightest ever minus
+typical" image of the board at the rig's H.264 setting. Anything blinking must
+stand clearly above it (the LEDs reach 80–190), so the LED detector reports the
+floor with every run: if a future recording setting lifts it toward the blob
+threshold, that number is the warning. See `tmaze/vision/led_detector.py`.
+
 ### Poll / poll loop
 Repeatedly checking or doing something on a timer, rather than reacting to an
 event. The GUI runs a "Tk poll" roughly every 100 ms to refresh status and hand
@@ -339,6 +347,15 @@ stream's own clock (firmware ms, camera ticks) for the [clock fit](#clock-fit--d
 Matching spans rather than single edges — both ends must agree — is what tells
 apart beams crossed within a few hundred ms of each other. See
 `host/tmaze/core/sync/spans.py`.
+
+### Similarity transform
+The simplest way one flat shape can move in a picture without distorting: a
+rotation, a shift, and one uniform scale factor (four numbers). It is what a
+fixed camera sees when a flat board is nudged, so it is the transform
+[constellation registration](#constellation-registration) fits between the stored
+LED positions and this session's blobs; the leftover distance between the two
+point sets after the fit (the *residual*) says how well the pattern was found.
+See `register` in `tmaze/vision/led_detector.py`.
 
 ### Stamped note entry
 One operator observation recorded as a *timestamped event* rather than a line in
