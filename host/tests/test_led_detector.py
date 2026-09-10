@@ -247,6 +247,111 @@ class TestRegistration(unittest.TestCase):
         self.assertAlmostEqual(r.transform.scale, 1.0, delta=0.02)
 
 
+# ----------------------------------------------------------------- fiducials
+
+# Persistent (always-on) colour LEDs spread in 2D, plus a blinking channel LED in
+# the middle and a brief bright "hand" that must NOT be mistaken for a fiducial.
+FIDS = {
+    "r_tl": (18.0, 18.0, (0.2, 0.3, 1.0)),
+    "g_tr": (98.0, 20.0, (0.2, 1.0, 0.3)),
+    "r_bl": (20.0, 82.0, (0.2, 0.3, 1.0)),
+    "g_br": (95.0, 80.0, (0.2, 1.0, 0.3)),
+    "g_top": (58.0, 12.0, (0.2, 1.0, 0.3)),
+}
+BLINK_XY = (56.0, 50.0)                 # a channel LED inside the fiducial hull
+BLINK_ON = [(a, a + 6) for a in range(20, 150, 18)]     # ~33% duty
+HAND_SPAN = (30, 44)                    # ~9% of frames: a transient bright smear
+
+
+def fid_render(k: int, rng: "np.random.Generator") -> np.ndarray:
+    f = np.full((H, W, 3), BG, np.float32)
+    f += rng.normal(0, 2.0, f.shape).astype(np.float32)
+    for _name, (x, y, gain) in FIDS.items():
+        _dot(f, x, y, 150.0, gain)                      # always on
+    if any(a <= k < b for a, b in BLINK_ON):
+        _dot(f, BLINK_XY[0], BLINK_XY[1], 150.0, (0.2, 0.3, 1.0))
+    if HAND_SPAN[0] <= k < HAND_SPAN[1]:                # a broad, bright, neutral smear
+        yy, xx = np.mgrid[0:H, 0:W]
+        smear = np.exp(-((xx - 40) ** 2 + (yy - 62) ** 2) / (2 * 6.0 ** 2)) * 170.0
+        for c in range(3):
+            f[:, :, c] += smear
+    return np.clip(f, 0, 255).astype(np.uint8)
+
+
+def fid_frames(n=150, seed=1):
+    rng = np.random.default_rng(seed)
+    return [fid_render(k, rng) for k in range(n)]
+
+
+@unittest.skipIf(np is None, "numpy not installed")
+class TestFiducials(unittest.TestCase):
+    def setUp(self):
+        self.p = LM.DetectorParams()
+        self.ext = D.Extremes(self.p.sample_every)
+        for fr in fid_frames():
+            self.ext.add(fr)
+
+    def test_finds_persistent_colour_leds_only(self):
+        fids = D.detect_fiducials(self.ext, self.p)
+        # exactly the five persistent LEDs - not the blinking one, not the hand
+        self.assertEqual(len(fids), 5, [(f.x, f.y, f.color) for f in fids])
+        by_pos = {(round(f.x), round(f.y)): f.color for f in fids}
+        for _n, (x, y, gain) in FIDS.items():
+            near = min(by_pos, key=lambda q: (q[0] - x) ** 2 + (q[1] - y) ** 2)
+            self.assertLess((near[0] - x) ** 2 + (near[1] - y) ** 2, 4.0)
+            self.assertEqual(by_pos[near], LM.RED if gain[2] > gain[1] else LM.GREEN)
+        # nothing found at the blinking LED or the hand smear
+        for f in fids:
+            self.assertGreater((f.x - BLINK_XY[0]) ** 2 + (f.y - BLINK_XY[1]) ** 2, 25.0)
+
+    def test_blinking_led_is_still_found_by_the_blink_detector(self):
+        blobs, _ = D.detect_blobs(self.ext, self.p)
+        self.assertTrue(any((b.x - BLINK_XY[0]) ** 2 + (b.y - BLINK_XY[1]) ** 2 < 4.0
+                            for b in blobs))
+
+    def test_fiducial_hull_roi_contains_the_channel_led(self):
+        fids = D.detect_fiducials(self.ext, self.p)
+        poly = LM.board_poly_around([(f.x, f.y) for f in fids], self.p.hull_margin_px, (W, H))
+        self.assertTrue(LM.point_in_poly(BLINK_XY, poly))
+
+    def test_colour_labels_break_registration_ambiguity(self):
+        ref = [(0.0, 0.0), (10.0, 0.0), (20.0, 0.0), (30.0, 0.0)]
+        obs = ref + [(40.0, 0.0)]                 # a shift-by-one-pitch also fits 4
+        plain = D.register(obs, ref, tol_px=1.5, min_inliers=4)
+        self.assertEqual(plain.verdict, D.REG_AMBIGUOUS)
+        colours = [LM.RED, LM.GREEN, LM.RED, LM.GREEN]
+        labelled = D.register(obs, ref, tol_px=1.5, min_inliers=4,
+                              ref_labels=colours, obs_labels=colours + [LM.RED])
+        self.assertEqual(labelled.verdict, D.REG_OK)
+        self.assertEqual(labelled.n_inliers, 4)
+        self.assertLess(labelled.transform.displacement(np.array(ref)), 1e-6)
+
+    def test_hybrid_blobs_fills_missing_leds_and_keeps_extras(self):
+        expected = [(10.0, 10.0), (20.0, 20.0), (30.0, 30.0)]
+        detected = [D.Blob(0, 10.2, 10.1, 3, 90.0, D.OFF), D.Blob(1, 99.0, 5.0, 2, 80.0, D.ON)]
+        out = D.hybrid_blobs(expected, detected, tol_px=2.0)
+        by_exp = {ei: (b, det) for b, ei, det in out}
+        self.assertTrue(by_exp[0][1])                       # LED0 matched a detected blob
+        self.assertFalse(by_exp[1][1])                      # LED1 synthetic (fallback)
+        self.assertFalse(by_exp[2][1])                      # LED2 synthetic (fallback)
+        self.assertAlmostEqual(by_exp[1][0].x, 20.0)
+        extras = [(b, ei) for b, ei, det in out if ei is None]
+        self.assertEqual(len(extras), 1)                    # the (99, 5) blob is unmatched
+        self.assertEqual(len(out), 4)
+        self.assertEqual([b.id for b, _e, _d in out], [0, 1, 2, 3])   # renumbered
+
+    @unittest.skipUnless(np is not None and D.cv2 is not None, "cv2 not available")
+    def test_overlay_draws_without_error(self):
+        canvas = np.full((H, W, 3), 40, np.uint8)
+        fids = D.detect_fiducials(self.ext, self.p)
+        blobs, _ = D.detect_blobs(self.ext, self.p)
+        poly = LM.board_poly_around([(f.x, f.y) for f in fids], self.p.hull_margin_px, (W, H))
+        img = D.draw_overlay(canvas, poly, fids, blobs, labels={blobs[0].id: "S2_a"})
+        self.assertEqual(img.shape, (H, W, 3))
+        self.assertEqual(img.dtype, np.uint8)
+        self.assertTrue((img != 40).any())                  # something was drawn
+
+
 # ------------------------------------------------------------------- led_map
 
 class TestLedMap(unittest.TestCase):

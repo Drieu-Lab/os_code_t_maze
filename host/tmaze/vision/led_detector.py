@@ -49,7 +49,7 @@ except Exception:  # pragma: no cover - the pure functions below still work
     cv2 = None  # type: ignore
 
 from tmaze.core.sync import pipeline, spans
-from tmaze.core.sync.led_map import DetectorParams
+from tmaze.core.sync.led_map import DetectorParams, GREEN, RED
 
 ON, OFF, BOTH = "on", "off", "both"
 
@@ -182,6 +182,67 @@ def noise_floor(bright: np.ndarray, dark: np.ndarray, blobs: Sequence[Blob], rad
     return float(np.percentile(vals, 99.9)) if vals.size else 0.0
 
 
+# ----------------------------------------------------------------- fiducials
+
+@dataclass
+class Fiducial:
+    """One persistently-lit colour LED (crop coordinates). Unlike a blinking Blob
+    it never changes, so it is invisible to the difference images; it is found in
+    the *persistence* images instead (ADR-0153)."""
+    id: int
+    x: float
+    y: float
+    color: str          # RED or GREEN
+    strength: float     # the persistent colour contrast at its peak
+
+
+def persistence_images(ext: Extremes, min_frac: float) -> Tuple[np.ndarray, np.ndarray]:
+    """(red, green): the persistent red-ness and green-ness of every pixel - the
+    ``100*(1-min_frac)``-th percentile over the sampled frames of ``R-max(G,B)``
+    and ``G-max(R,B)`` (BGR input). A steady red/green LED scores high in every
+    frame so even its low percentile is high; a dot lit only briefly (a hand or
+    the rat passing through) is dark most of the time, so its low percentile is
+    low and it is rejected. A neutral/white retroreflective marker has R~=G~=B, so
+    both scores are ~0 and it is ignored (markers stay a physical QA reference)."""
+    if not ext._samples:
+        raise ValueError("no sampled frames")
+    stack = np.stack(ext._samples).astype(np.float32)   # (n, h, w, 3) BGR
+    if stack.ndim != 4 or stack.shape[-1] != 3:
+        raise ValueError("persistence needs colour (BGR) frames")
+    b, g, r = stack[..., 0], stack[..., 1], stack[..., 2]
+    red = r - np.maximum(g, b)
+    green = g - np.maximum(r, b)
+    q = 100.0 * (1.0 - float(min_frac))
+    return np.percentile(red, q, axis=0), np.percentile(green, q, axis=0)
+
+
+def _merge_fiducials(fids: Sequence[Fiducial], radius: float) -> List[Fiducial]:
+    """Drop the weaker of any two fiducials within ``radius`` (a red and a green
+    peak at one spot is one LED); keep the stronger colour."""
+    out: List[Fiducial] = []
+    for f in sorted(fids, key=lambda f: -f.strength):
+        if any((o.x - f.x) ** 2 + (o.y - f.y) ** 2 <= radius * radius for o in out):
+            continue
+        out.append(f)
+    return out
+
+
+def detect_fiducials(ext: Extremes, p: DetectorParams) -> List[Fiducial]:
+    """The persistently-lit red/green LEDs, as local maxima of the persistence
+    images. Ids are renumbered top-to-bottom (round(y), x) so they are stable
+    run to run."""
+    red, green = persistence_images(ext, p.fid_min_frac)
+    found: List[Fiducial] = []
+    for color, img in ((RED, red), (GREEN, green)):
+        for b in find_blobs(img, p.fid_thresh, p.min_area, p.nms_radius, ON):
+            found.append(Fiducial(0, b.x, b.y, color, b.peak))
+    merged = _merge_fiducials(found, float(p.radius))
+    merged.sort(key=lambda f: (round(f.y), f.x))
+    for i, f in enumerate(merged):
+        f.id = i
+    return merged
+
+
 # -------------------------------------------------------------------- traces
 
 class TraceSampler:
@@ -261,23 +322,42 @@ def iter_frames(path: str, start: int = 0, n: Optional[int] = None,
         cap.release()
 
 
-def scan_video(path: str, crop: Optional[Tuple[int, int, int, int]], start: int, n: Optional[int],
-               p: DetectorParams) -> Tuple[List[Blob], float, np.ndarray, np.ndarray, int]:
-    """Pass 1 + pass 2 over a video window. Returns (blobs, noise_floor,
-    grey_traces, rmg_traces, n_frames_read); traces are (n_frames, n_blobs) and
-    blob positions are in crop coordinates (add the crop origin for full-frame)."""
+def accumulate_extremes(path: str, crop: Optional[Tuple[int, int, int, int]],
+                        start: int, n: Optional[int], p: DetectorParams) -> Extremes:
+    """Pass 1: read the window and accumulate the running max/min/median samples.
+    Shared by the blink detector, the fiducial detector, and the trace sampler so
+    one video read serves all three."""
     ext = Extremes(p.sample_every)
     for _, fr in iter_frames(path, start, n, crop):
         ext.add(fr)
     if ext.n == 0:
         raise RuntimeError("no frames read")
-    blobs, floor = detect_blobs(ext, p)
-    grey = np.full((ext.n, len(blobs)), np.nan, np.float32)
-    rmg = np.full((ext.n, len(blobs)), np.nan, np.float32)
+    return ext
+
+
+def sample_traces(path: str, crop: Optional[Tuple[int, int, int, int]], start: int,
+                  n: int, blobs: Sequence[Blob], shape: Tuple[int, int],
+                  p: DetectorParams) -> Tuple[np.ndarray, np.ndarray]:
+    """Pass 2: per-frame disk-minus-ring traces for a given blob list (which may
+    mix detected blobs with synthetic points at pose-transformed map positions -
+    the hybrid path). Returns (grey, rmg), each (n, n_blobs)."""
+    grey = np.full((n, len(blobs)), np.nan, np.float32)
+    rmg = np.full((n, len(blobs)), np.nan, np.float32)
     if blobs:
-        sampler = TraceSampler(ext.max.shape[:2], blobs, p)
-        for k, fr in iter_frames(path, start, ext.n, crop):
+        sampler = TraceSampler(shape, blobs, p)
+        for k, fr in iter_frames(path, start, n, crop):
             grey[k], rmg[k] = sampler.sample(fr)
+    return grey, rmg
+
+
+def scan_video(path: str, crop: Optional[Tuple[int, int, int, int]], start: int, n: Optional[int],
+               p: DetectorParams) -> Tuple[List[Blob], float, np.ndarray, np.ndarray, int]:
+    """Pass 1 + pass 2 over a video window. Returns (blobs, noise_floor,
+    grey_traces, rmg_traces, n_frames_read); traces are (n_frames, n_blobs) and
+    blob positions are in crop coordinates (add the crop origin for full-frame)."""
+    ext = accumulate_extremes(path, crop, start, n, p)
+    blobs, floor = detect_blobs(ext, p)
+    grey, rmg = sample_traces(path, crop, start, ext.n, blobs, ext.max.shape[:2], p)
     return blobs, floor, grey, rmg, ext.n
 
 
@@ -383,9 +463,12 @@ class Registration:
                 "n_alternatives": len(self.alternatives)}
 
 
-def _assign(pred: np.ndarray, obs: np.ndarray, tol: float) -> List[Tuple[int, int]]:
+def _assign(pred: np.ndarray, obs: np.ndarray, tol: float,
+            ref_labels: Optional[Sequence] = None,
+            obs_labels: Optional[Sequence] = None) -> List[Tuple[int, int]]:
     """Greedy one-to-one nearest pairing of predicted reference points to
-    observed blobs, closest pairs first, within ``tol`` px."""
+    observed blobs, closest pairs first, within ``tol`` px. When labels are given
+    (e.g. fiducial colour), only same-label points may pair."""
     if len(pred) == 0 or len(obs) == 0:
         return []
     d = np.linalg.norm(pred[:, None, :] - obs[None, :, :], axis=2)
@@ -398,6 +481,8 @@ def _assign(pred: np.ndarray, obs: np.ndarray, tol: float) -> List[Tuple[int, in
         if d[r, o] > tol:
             break
         if r in used_r or o in used_o:
+            continue
+        if ref_labels is not None and obs_labels is not None and ref_labels[r] != obs_labels[o]:
             continue
         used_r.add(r)
         used_o.add(o)
@@ -415,7 +500,9 @@ def _rms(t: Similarity, ref: np.ndarray, obs: np.ndarray, pairs: Sequence[Tuple[
 
 def register(observed: Sequence[Tuple[float, float]], reference: Sequence[Tuple[float, float]],
              tol_px: float = 2.0, scale_range: Tuple[float, float] = (0.8, 1.25),
-             max_rotation_deg: float = 20.0, min_inliers: int = 4) -> Registration:
+             max_rotation_deg: float = 20.0, min_inliers: int = 4,
+             obs_labels: Optional[Sequence] = None,
+             ref_labels: Optional[Sequence] = None) -> Registration:
     """Fit the stored constellation (``reference``) onto this session's blob
     centroids (``observed``) with a similarity transform.
 
@@ -428,6 +515,11 @@ def register(observed: Sequence[Tuple[float, float]], reference: Sequence[Tuple[
     on inlier count the result is ``ambiguous`` (the one closest to identity
     is returned, the others listed); fewer than ``min_inliers`` or a large
     residual is ``registration_failed``.
+
+    ``ref_labels``/``obs_labels`` (e.g. fiducial colour) restrict correspondences
+    to same-label points - this both speeds the search and breaks the symmetry of
+    an otherwise identical row (a red/green pattern that a plain shift would map
+    onto the wrong colour is rejected).
     """
     obs = np.asarray(observed, float).reshape(-1, 2)
     ref = np.asarray(reference, float).reshape(-1, 2)
@@ -436,6 +528,7 @@ def register(observed: Sequence[Tuple[float, float]], reference: Sequence[Tuple[
                         list(range(n_r)), list(range(n_o)))
     if n_o < 2 or n_r < 2:
         return fail
+    labelled = ref_labels is not None and obs_labels is not None
     max_rot = math.radians(max_rotation_deg)
     best: List[Tuple[int, float, Similarity, List[Tuple[int, int]]]] = []
     best_n = 0
@@ -448,6 +541,9 @@ def register(observed: Sequence[Tuple[float, float]], reference: Sequence[Tuple[
                 for j in range(n_o):
                     if i == j:
                         continue
+                    if labelled and (ref_labels[a] != obs_labels[i]
+                                     or ref_labels[b] != obs_labels[j]):
+                        continue
                     d_obs = float(np.hypot(*(obs[j] - obs[i])))
                     s = d_obs / d_ref
                     if not (scale_range[0] <= s <= scale_range[1]):
@@ -455,7 +551,7 @@ def register(observed: Sequence[Tuple[float, float]], reference: Sequence[Tuple[
                     t = Similarity.from_two_pairs(ref[a], ref[b], obs[i], obs[j])
                     if t is None or abs(math.remainder(t.theta, 2 * math.pi)) > max_rot:
                         continue
-                    pairs = _assign(t.apply(ref), obs, tol_px)
+                    pairs = _assign(t.apply(ref), obs, tol_px, ref_labels, obs_labels)
                     if len(pairs) < best_n or len(pairs) < 2:
                         continue
                     if len(pairs) > best_n:
@@ -469,7 +565,7 @@ def register(observed: Sequence[Tuple[float, float]], reference: Sequence[Tuple[
         r = np.array([p[0] for p in pairs])
         o = np.array([p[1] for p in pairs])
         t2 = Similarity.fit(ref[r], obs[o]) if len(pairs) >= 2 else t
-        pairs2 = _assign(t2.apply(ref), obs, tol_px)
+        pairs2 = _assign(t2.apply(ref), obs, tol_px, ref_labels, obs_labels)
         if len(pairs2) < len(pairs):
             t2, pairs2 = t, pairs
         refined.append((t2, pairs2, _rms(t2, ref, obs, pairs2)))
@@ -493,6 +589,73 @@ def register(observed: Sequence[Tuple[float, float]], reference: Sequence[Tuple[
                         [i for i in range(n_r) if i not in matched_r],
                         [i for i in range(n_o) if i not in matched_o],
                         [u for u, _, _ in distinct[1:]])
+
+
+# -------------------------------------------------------- hybrid + overlay
+
+def hybrid_blobs(expected: Sequence[Tuple[float, float]], detected: Sequence[Blob],
+                 tol_px: float) -> List[Tuple[Blob, Optional[int], bool]]:
+    """Combine detected blinking blobs with pose-transformed map positions.
+
+    ``expected`` are the stored LED positions transformed into this session's crop
+    coordinates (parallel to the map's LED order); ``detected`` are the blinking
+    blobs actually found. For each expected LED the nearest detected blob within
+    ``tol_px`` is used (``is_detected`` True); otherwise a synthetic blob is placed
+    at the expected position so it is still traced (the hybrid fallback, ADR-0153).
+    Detected blobs matching no expected LED are appended (``exp_index`` None) for
+    reporting. Returns ``(blob, exp_index, is_detected)`` with ids renumbered."""
+    det = list(detected)
+    used: set = set()
+    out: List[Tuple[Blob, Optional[int], bool]] = []
+    for ei, (ex, ey) in enumerate(expected):
+        best_j, best_d = None, tol_px * tol_px
+        for j, b in enumerate(det):
+            if j in used:
+                continue
+            dd = (b.x - ex) ** 2 + (b.y - ey) ** 2
+            if dd <= best_d:
+                best_d, best_j = dd, j
+        if best_j is not None:
+            used.add(best_j)
+            out.append((det[best_j], ei, True))
+        else:
+            out.append((Blob(0, float(ex), float(ey), 0, 0.0, BOTH), ei, False))
+    for j, b in enumerate(det):
+        if j not in used:
+            out.append((b, None, False))
+    for i, (b, _ei, _is) in enumerate(out):
+        b.id = i
+    return out
+
+
+def draw_overlay(canvas: np.ndarray, board_poly: Optional[Sequence[Tuple[float, float]]] = None,
+                 fiducials: Sequence[Fiducial] = (), blobs: Sequence[Blob] = (),
+                 labels: Optional[dict] = None) -> np.ndarray:
+    """Annotate a copy of ``canvas`` (BGR or grey uint8) for a manual QA check: the
+    ROI polygon (yellow), fiducials (red/green rings), blinking LEDs (white crosses
+    + optional label). All coordinates must be in the canvas's own pixel space, so
+    the caller subtracts the crop origin first. You eyeball whether the ROI lands
+    inside the physical retroreflective marker corners (ADR-0153)."""
+    if cv2 is None:
+        raise RuntimeError("cv2 is required to draw the overlay")
+    img = np.ascontiguousarray(canvas)
+    if img.dtype != np.uint8:
+        img = np.clip(img, 0, 255).astype(np.uint8)
+    img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR) if img.ndim == 2 else img.copy()
+    if board_poly:
+        pts = np.array([[int(round(x)), int(round(y))] for x, y in board_poly], np.int32)
+        cv2.polylines(img, [pts], True, (0, 255, 255), 1)
+    for f in fiducials:
+        colour = (0, 0, 255) if f.color == RED else (0, 255, 0)
+        cv2.circle(img, (int(round(f.x)), int(round(f.y))), 4, colour, 1)
+    for b in blobs:
+        px, py = int(round(b.x)), int(round(b.y))
+        cv2.drawMarker(img, (px, py), (255, 255, 255), cv2.MARKER_CROSS, 6, 1)
+        lab = labels.get(b.id) if labels else None
+        if lab:
+            cv2.putText(img, str(lab), (px + 4, py - 4),
+                        cv2.FONT_HERSHEY_PLAIN, 0.7, (255, 255, 255), 1)
+    return img
 
 
 # ------------------------------------------------------------- NumPy fallbacks
