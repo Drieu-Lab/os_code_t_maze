@@ -556,6 +556,54 @@ Open from this slice: the ENTRY/EXIT beams `S,0`/`S,1` still have no visible
 LED in the board crop (to be checked on the rig); the `--map` mode and the
 `sync/` artifacts are Slice 3.
 
+#### Slice 3 (2026-09-09) — `tmaze/tools/sync_fit.py` landed
+
+The offline runnable of §3.6, a thin shell over `led_detector` + `core/sync`:
+detect the board LEDs on a bundle, bind each to its serial channel, fit the two
+clocks, and **write `sync/led_events_<id>.csv` + `sync/clock_fit_<id>.json` into
+the bundle**. `--map` builds `host/led_map.json`; `--dry-run --out` prints the
+report and writes the artifacts to a scratch folder instead; `--selftest` checks
+the core end to end with no video. Tested in `tests/test_sync_fit.py` (pure
+builders on synthetic spans + an end-to-end run over the committed board clip).
+Decisions taken with the user (2026-09-09):
+
+- **Default writes into the bundle.** The fitted alignment belongs with the data
+  it describes (the bundle is the single contract, ADR-0142/0143), so the plain
+  `sync_fit <bundle>` writes the two `sync/` files there; `--dry-run` is the
+  safe rehearsal. The tool is idempotent — re-running overwrites its own two
+  files and nothing else.
+- **No map → bootstrap and warn.** Until a mapping session exists most bundles
+  have no `led_map.json`. Rather than refuse, the default run bootstraps the
+  bindings from the session itself (as the spike did) and prints a warning
+  suggesting `--map`; when a map *is* present it registers the constellation and
+  names/verifies each LED against it. Same code path, the map just adds names +
+  a registration verdict.
+- **`--map` is for a no-rat mapping session; `--board-rect` rescues a rat
+  session.** Building a map whole-frame is only clean with no rat: on a real
+  training session the rat's motion lights up the whole maze in max-minus-median
+  (564 blobs on the spike session, 77 of them binding — a blob where the rat
+  sits at a beam both brightens *and* coincides with that beam breaking, at a
+  plausible lag). So `--map` searches the whole frame by default (the mapping
+  session), and an optional `--board-rect X0 Y0 X1 Y1` confines the search to the
+  board — which both makes `--map` usable on a rat session and is the fast path
+  (the cropped decode) before any map exists. With the spike's board rectangle,
+  `--map` on the rat session recovered exactly the 11 board LEDs, all bound,
+  matching §3.7.
+- **Manifest/format left for Slice 4.** `sync_fit` drops the two files in `sync/`
+  but does not yet announce them in `session.json` / `format.json` or flip
+  `fiducial.method` to `led-fit`. That is a data-contract change (an offline tool
+  rewriting the manifest the rig wrote, plus a `format_version` bump) and lands
+  with its ADR in the integrate slice, so a reader that trusts only the manifest
+  won't act on the fit until then.
+- **`--min-matched` / `--min-pairs` are exposed.** The binding/fit thresholds are
+  tuned for a full session (thousands of crossings); a short window or a quick
+  look needs lower values, so both are flags (defaults 3 / 30). The clock-fit
+  `--tol-ms` defaults to the measured 200 ms (§3.7).
+
+The `led_events` residual per row is `(cam_ticks − fit.predict(firmware_ms)) /
+rate`, i.e. firmware-ms of misalignment for that edge — the per-edge view of the
+same residual the fit summarises.
+
 ---
 
 ## 4. Phase 2 — cue LEDs on spare optocoupler channels

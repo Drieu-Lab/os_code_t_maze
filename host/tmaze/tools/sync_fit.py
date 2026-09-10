@@ -1,0 +1,493 @@
+"""
+sync_fit.py - line up a session's video and Arduino clocks from the board LEDs.
+
+The production tool the Slice 0 spike (``led_sync_prototype``) grew into. It
+reads one recorded session bundle, reads the rig's indicator LEDs out of the
+video (``tmaze.vision.led_detector``), matches each LED's blinks against the
+serial log and fits ``cam_timestamp <-> firmware ms`` (``tmaze.core.sync``), and
+writes the two ``sync/`` artifacts the design doc specifies (section 3.6) plus a
+printed report. See ``docs/design/cross-stream-sync-design.md`` (Phase 1) and
+FW-0045.
+
+Three ways to run (env ``drieu_t_maze``, any directory):
+
+    # Fit a session and WRITE sync/led_events + sync/clock_fit INTO the bundle:
+    python -m tmaze.tools.sync_fit <bundle_dir>
+
+    # Same, but only print the report + write to a scratch folder (bundle untouched):
+    python -m tmaze.tools.sync_fit <bundle_dir> --dry-run --out <folder>
+
+    # Build host/led_map.json from a (mapping or ordinary) session:
+    python -m tmaze.tools.sync_fit <bundle_dir> --map
+
+    # No bundle, no video: check the core end to end on synthetic data:
+    python -m tmaze.tools.sync_fit --selftest
+
+Two clocks, one line: ``cam_timestamp`` is the Basler's 1 GHz hardware tick,
+``firmware ms`` the Arduino's ``millis()``; the LEDs are the shared events that
+tie them together, so the fit is what lets neural/behaviour/video land on one
+timeline. When ``host/led_map.json`` exists the LED pattern (the *constellation*)
+is registered against it and each LED is checked against its stored channel;
+without a map the tool **bootstraps** the bindings from the session itself (as
+the spike did) and warns. It never registers a MODE-less manifest change here -
+announcing the streams in ``session.json`` / ``format.json`` is Slice 4.
+
+Thin shell: all pixel work is in ``tmaze.vision.led_detector`` and all matching /
+fitting in ``tmaze.core.sync``; this file only does argument parsing, bundle I/O,
+and report formatting.
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import math
+import os
+import sys
+from dataclasses import asdict
+from datetime import datetime
+from typing import Dict, List, Optional, Sequence, Tuple
+
+from tmaze.core.sync import clockfit, led_map as LM, matching, pipeline
+from tmaze.core.sync import spans as S
+
+TOOL_VERSION = 1
+FIDUCIAL_METHOD = "led-fit"
+
+
+# ------------------------------------------------------------------ bundle I/O
+
+def bundle_id(bundle: str) -> str:
+    return os.path.basename(os.path.normpath(bundle))
+
+
+def _video_path(bundle: str, sid: str) -> str:
+    for ext in (".mp4", ".mkv"):
+        p = os.path.join(bundle, "video", sid + ext)
+        if os.path.isfile(p):
+            return p
+    raise FileNotFoundError(f"no video ({sid}.mp4/.mkv) under {os.path.join(bundle, 'video')}")
+
+
+def _read_frames(bundle: str, sid: str) -> Tuple[Dict[str, str], List[S.Frame]]:
+    path = os.path.join(bundle, "video", f"{sid}.csv")
+    with open(path, encoding="utf-8") as f:
+        return S.parse_sidecar_csv(f)
+
+
+def _read_events(bundle: str, sid: str) -> Dict[str, List[S.Span]]:
+    path = os.path.join(bundle, "serial", f"sensors_{sid}.csv")
+    with open(path, encoding="utf-8") as f:
+        return S.serial_spans(S.parse_serial_csv(f))
+
+
+# ------------------------------------------------------- detection + spans
+
+def _scan(video: str, crop: Optional[Tuple[int, int, int, int]], start: int,
+          n: Optional[int], params: LM.DetectorParams):
+    """Import the vision layer lazily so --selftest needs no OpenCV/NumPy."""
+    from tmaze.vision import led_detector as D
+    return D, D.scan_video(video, crop, start, n, params)
+
+
+def _window(frames: Sequence[S.Frame], start_min: float, minutes: Optional[float],
+            fps: float) -> Tuple[int, Optional[int]]:
+    """(start_frame, n_frames) for the requested window; n=None means to the end."""
+    start = int(round(start_min * 60 * fps))
+    start = max(0, min(start, len(frames)))
+    if minutes is None or minutes <= 0:
+        return start, None
+    return start, int(round(minutes * 60 * fps))
+
+
+# ---------------------------------------------------------------- the run
+
+class SyncRun:
+    """Everything one session produced: blobs, spans, bindings, fit, registration."""
+
+    def __init__(self, sid: str, header: Dict[str, str], blobs, floor: float,
+                 led_ids: Dict[int, str], result: pipeline.SyncResult,
+                 blob_spans: List[pipeline.BlobSpans], events: Dict[str, List[S.Span]],
+                 registration, used_map: Optional[LM.LedMap], window: Tuple[int, Optional[int]],
+                 tol_s: float, min_visible_s: float, crop: Optional[Tuple[int, int, int, int]]):
+        self.sid = sid
+        self.header = header
+        self.blobs = blobs
+        self.floor = floor
+        self.led_ids = led_ids                 # blob id -> led_id
+        self.result = result
+        self.blob_spans = {b.blob: b for b in blob_spans}
+        self.events = events
+        self.registration = registration
+        self.used_map = used_map
+        self.window = window
+        self.tol_s = tol_s
+        self.min_visible_s = min_visible_s
+        self.crop = crop
+
+    def led_id(self, blob: int) -> str:
+        return self.led_ids.get(blob, f"blob_{blob}")
+
+
+def analyze_bundle(bundle: str, *, start_min: float = 0.0, minutes: Optional[float] = None,
+                   tol_s: float = 0.20, min_visible_s: float = 0.06,
+                   map_path: Optional[str] = None, whole_frame: bool = False,
+                   board_rect: Optional[Tuple[int, int, int, int]] = None,
+                   min_matched: int = 3, min_pairs: int = 30) -> SyncRun:
+    """Detect the LEDs, bind them, fit the clock.
+
+    ``whole_frame`` ignores any stored ``board_rect`` (used by --map on a no-rat
+    mapping session, where the whole frame is clean). ``board_rect`` is an
+    explicit search window that overrides both the stored one and whole-frame -
+    the honest way to build a map from a session that still has a rat in it
+    (the rat's motion otherwise lights up the whole maze in max-minus-median and
+    floods the blob list), and the fast path before a map exists.
+    """
+    sid = bundle_id(bundle)
+    header, frames = _read_frames(bundle, sid)
+    if not frames:
+        raise RuntimeError(f"no frames in the sidecar for {sid}")
+    events = _read_events(bundle, sid)
+    fps = float(header.get("fps", "25") or "25")
+
+    used_map: Optional[LM.LedMap] = None
+    params = LM.DetectorParams()
+    crop: Optional[Tuple[int, int, int, int]] = board_rect
+    candidate_map = map_path or LM.led_map_path()
+    if not whole_frame and os.path.isfile(candidate_map):
+        used_map = LM.load(candidate_map)
+        params = used_map.detector
+        if crop is None:
+            crop = used_map.board_rect
+
+    start, n = _window(frames, start_min, minutes, fps)
+    win = frames[start:start + n] if n is not None else frames[start:]
+    D, (blobs, floor, grey, _rmg, got) = _scan(_video_path(bundle, sid), crop, start, n, params)
+    if got != len(win):
+        win = win[:got]
+
+    tick = S.cam_tick_s(win)
+    ox, oy = (crop[0], crop[1]) if crop else (0, 0)
+    blob_spans = [D.blob_spans(b.id, grey[:, b.id], win, tick) for b in blobs]
+
+    # Register the constellation (map only) and name the blobs.
+    registration = None
+    led_ids: Dict[int, str] = {}
+    if used_map is not None:
+        observed = [(b.x + ox, b.y + oy) for b in blobs]
+        registration = D.register(observed, used_map.constellation(),
+                                  tol_px=max(2.0, params.nms_radius))
+        entries = used_map.leds
+        for ref_i, obs_i in registration.pairs:
+            if 0 <= ref_i < len(entries):
+                led_ids[blobs[obs_i].id] = entries[ref_i].led_id
+
+    result = pipeline.analyze(blob_spans, events, tol_s=tol_s, min_visible_s=min_visible_s,
+                              min_matched=min_matched, min_pairs=min_pairs)
+    return SyncRun(sid, header, blobs, floor, led_ids, result, blob_spans, events,
+                   registration, used_map, (start, got), tol_s, min_visible_s, crop)
+
+
+# ------------------------------------------------------------ led_map builder
+
+def build_led_map(run: SyncRun) -> LM.LedMap:
+    """Turn a bootstrapped run into a ``led_map.json``: every blob's full-frame
+    position, its binding when it has one, and a board rectangle around them."""
+    ox, oy = (run.crop[0], run.crop[1]) if run.crop else (0, 0)
+    frame_size = None
+    codec_w = run.header.get("width") or run.header.get("frame_width")
+    codec_h = run.header.get("height") or run.header.get("frame_height")
+    if codec_w and codec_h:
+        try:
+            frame_size = (int(codec_w), int(codec_h))
+        except ValueError:
+            frame_size = None
+    entries: List[LM.LedEntry] = []
+    taken: List[str] = []
+    for b in sorted(run.blobs, key=lambda b: (round(b.y), b.x)):
+        binding = run.result.bindings.get(b.id)
+        channel = binding.channel if binding else None
+        polarity = binding.polarity if binding else None
+        lag = binding.lag_s if binding else None
+        led_id = LM.led_id_for(channel, polarity, taken, b.id)
+        taken.append(led_id)
+        entries.append(LM.LedEntry(led_id, (round(b.x + ox, 2), round(b.y + oy, 2)),
+                                   channel, polarity, lag))
+    det = run.used_map.detector if run.used_map else LM.DetectorParams()
+    # If the search was confined to a rectangle, that IS the board rect; otherwise
+    # (a clean no-rat mapping session searched whole-frame) fit one around the LEDs.
+    rect = tuple(run.crop) if run.crop else \
+        LM.board_rect_around([e.ref_px for e in entries], det.margin_px, frame_size)
+    return LM.LedMap(run.sid, rect, entries, det, frame_size,
+                     datetime.now().replace(microsecond=0).isoformat())
+
+
+# --------------------------------------------------------------- artifacts
+
+LED_EVENT_COLUMNS = ["led_id", "edge", "frame_idx", "cam_timestamp", "host_unix_s",
+                     "matched_event", "firmware_ms", "residual_ms"]
+
+
+def _residual_ms(fit: Optional[clockfit.ClockFit], y_ticks: Optional[float],
+                 x_fw_ms: Optional[float], segment: int) -> Optional[float]:
+    if fit is None or y_ticks is None or x_fw_ms is None or fit.rate == 0:
+        return None
+    if segment not in fit.offsets:
+        return None
+    return (y_ticks - fit.predict(x_fw_ms, segment)) / fit.rate
+
+
+def led_event_rows(run: SyncRun) -> List[dict]:
+    """One row per matched LED edge (both ends of every matched span)."""
+    fit = run.result.fit
+    active = S.active_spans(run.events)
+    rows: List[dict] = []
+    for blob, binding in sorted(run.result.bindings.items()):
+        bs = run.blob_spans[blob]
+        led = bs.lit if binding.polarity == matching.LIT else bs.dark
+        vis = matching.visible(active[binding.channel], run.min_visible_s)
+        matches = matching.match_spans(led, vis, run.tol_s)
+        start_edge, end_edge = ((clockfit.ON, clockfit.OFF) if binding.polarity == matching.LIT
+                                else (clockfit.OFF, clockfit.ON))
+        for m in matches:
+            e, l = vis[m.event_idx], led[m.led_idx]
+            for edge, ref, y, host, x in (
+                    (start_edge, l.ref0, l.clk0, l.host_t0, e.clk0),
+                    (end_edge, l.ref1, l.clk1, l.host_t1, e.clk1)):
+                resid = _residual_ms(fit, y, x, e.segment)
+                rows.append({
+                    "led_id": run.led_id(blob),
+                    "edge": edge,
+                    "frame_idx": ref,
+                    "cam_timestamp": None if y is None else int(y),
+                    "host_unix_s": round(host, 3),
+                    "matched_event": binding.channel,
+                    "firmware_ms": None if x is None else int(x),
+                    "residual_ms": None if resid is None else round(resid, 2),
+                })
+    rows.sort(key=lambda r: (r["frame_idx"] if r["frame_idx"] is not None else 0, r["led_id"]))
+    return rows
+
+
+def write_led_events(path: str, rows: Sequence[dict], sid: str) -> None:
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        f.write(f"# sync/led_events for session {sid}: one row per matched LED edge, "
+                f"written by tmaze.tools.sync_fit v{TOOL_VERSION}.\n")
+        w = csv.DictWriter(f, fieldnames=LED_EVENT_COLUMNS)
+        w.writeheader()
+        for r in rows:
+            w.writerow({k: ("" if r[k] is None else r[k]) for k in LED_EVENT_COLUMNS})
+
+
+def clock_fit_dict(run: SyncRun) -> dict:
+    res = run.result
+    start, n = run.window
+    bindings = {run.led_id(b): {"blob": b, **{k: v for k, v in vars(bd).items() if k != "blob"},
+                                "recall": round(bd.recall, 3)}
+                for b, bd in sorted(res.bindings.items())}
+    verdicts = {run.led_id(b): v for b, v in sorted(res.blob_verdicts.items())}
+    return {
+        "session_id": run.sid,
+        "method": FIDUCIAL_METHOD,
+        "generated_by": "tmaze.tools.sync_fit",
+        "tool_version": TOOL_VERSION,
+        "led_map": {
+            "used": run.used_map is not None,
+            "source_session": run.used_map.session_id if run.used_map else None,
+            "schema_version": LM.SCHEMA_VERSION,
+        },
+        "window": {"start_frame": start, "frames": n, "fps": float(run.header.get("fps", "25") or "25")},
+        "detector": asdict(run.used_map.detector if run.used_map else LM.DetectorParams()),
+        "noise_floor": round(run.floor, 2),
+        "board_rect": list(run.crop) if run.crop else None,
+        "registration": run.registration.to_dict() if run.registration is not None else None,
+        "blob_verdicts": verdicts,
+        "bindings": bindings,
+        "fit": res.fit.to_dict() if res.fit else None,
+        "verdict": res.verdict,
+    }
+
+
+def write_clock_fit(path: str, run: SyncRun) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(clock_fit_dict(run), f, indent=2)
+        f.write("\n")
+
+
+# ---------------------------------------------------------------- reporting
+
+def print_report(run: SyncRun, out: str) -> None:
+    res = run.result
+    print(f"\nsession {run.sid}: codec={run.header.get('codec')} "
+          f"fps={run.header.get('fps')} frames(window)={run.window[1]} "
+          f"blobs={len(run.blobs)} noise_floor={run.floor:.1f}")
+    if run.used_map is None:
+        print("  no led_map.json - bootstrapped bindings from this session "
+              "(run with --map to save them; then later sessions verify against it)")
+    else:
+        r = run.registration
+        print(f"  led_map {run.used_map.session_id}: registration {r.verdict}, "
+              f"{r.n_inliers}/{r.n_reference} LEDs, rms {r.rms_px:.2f} px, "
+              f"shift ({r.transform.tx:+.1f},{r.transform.ty:+.1f}) px, "
+              f"rot {math.degrees(r.transform.theta):+.2f} deg")
+        if r.unmatched_reference:
+            print(f"    silent/displaced map LEDs: "
+                  f"{[run.used_map.leds[i].led_id for i in r.unmatched_reference]}")
+
+    print(f"\n  {'led':>10} {'channel':>8} {'pol':>4} {'match/vis':>10} {'led':>4} "
+          f"{'prec':>5} {'recall':>6} {'lag_ms':>7} {'mad':>5} {'endlag':>7}")
+    for blob, b in sorted(res.bindings.items()):
+        print(f"  {run.led_id(blob):>10} {b.channel:>8} {b.polarity[:4]:>4} "
+              f"{f'{b.n_matched}/{b.n_events}':>10} {b.n_led:>4} {b.score:>5.2f} "
+              f"{b.recall:>6.2f} {b.lag_s * 1000:>7.1f} {b.lag_mad_s * 1000:>5.1f} "
+              f"{b.end_lag_s * 1000:>7.1f}")
+    unbound = [run.led_id(b) for b, v in res.blob_verdicts.items() if v != pipeline.MATCHED]
+    if unbound:
+        print(f"  unbound/silent: {unbound}")
+        for blob, v in sorted(res.blob_verdicts.items()):
+            if v == pipeline.MATCHED:
+                continue
+            cands = res.candidates.get(blob, [])[:1]
+            for c in cands:
+                plausible = matching.lag_plausible(c)
+                print(f"    {run.led_id(blob):>10} nearest: {c.channel} {c.polarity} "
+                      f"prec {c.score:.2f} n {c.n_matched}/{c.n_events} "
+                      f"lag {c.lag_s * 1000:+.0f}/{c.end_lag_s * 1000:+.0f} ms"
+                      f"{'' if plausible else ' (rejected: precedes its wire)'}")
+
+    fit = res.fit
+    if fit is not None:
+        r = fit.residuals
+        print(f"\n  clock fit: cam_ticks = offset[seg] + {fit.rate:.4f} * fw_ms  "
+              f"({len(fit.offsets)} segment(s), {fit.n_pairs} pairs)")
+        print(f"    residual median={r.median_ms:.1f} ms  MAD={r.mad_ms:.1f} ms  "
+              f"p5..p95=[{r.p5_ms:.1f}, {r.p95_ms:.1f}] ms")
+        if fit.per_edge_offset_ms:
+            print("    per-edge offset: " + ", ".join(f"{k}={v:.1f} ms"
+                  for k, v in fit.per_edge_offset_ms.items()))
+        print(f"    host lag median={fit.host_lag_median_s * 1000:.1f} ms "
+              f"MAD={fit.host_lag_mad_s * 1000:.1f} ms; verdict {fit.verdict}")
+        if fit.host_steps:
+            print(f"    HOST CLOCK STEP(S): {[round(s.delta_s * 1000) for s in fit.host_steps]} ms "
+                  "- the host-time join is untrustworthy past the step")
+    else:
+        print(f"\n  no clock fit: {res.verdict}")
+    print(f"\n  wrote {out}")
+
+
+# ---------------------------------------------------------------- selftest
+
+def _selftest() -> int:
+    """Synthesise a handful of LED spans + their serial events at a known rate
+    and offset, run the pipeline, and confirm it recovers them. No video."""
+    rate = 1_000_000.0      # cam ticks (ns) per firmware ms == 1e6 (1 GHz vs kHz)
+    offset = 5_000_000_000.0
+    fw_ms = 1_000
+    events: Dict[str, List[S.Span]] = {"S2=0": [], "S2=1": [], "SOL2.1": []}
+    lit: List[S.Span] = []
+    dark: List[S.Span] = []
+    host = 1_700_000_000.0
+    prev_end_fw = fw_ms
+    for i in range(40):
+        # a beam crossing: S2=0 for 200 ms, resting S2=1 for 800 ms between
+        c0 = prev_end_fw + 800
+        c1 = c0 + 200
+        events["S2=1"].append(S.Span("S2=1", host, host + 0.8, prev_end_fw, c0, 0, 0, 0, S.FIRMWARE_MS))
+        events["S2=0"].append(S.Span("S2=0", host + 0.8, host + 1.0, c0, c1, 0, 0, 0, S.FIRMWARE_MS))
+        # the LED is DARK during the crossing, +40 ms after the wire at each edge
+        dark.append(S.Span("blob0", host + 0.84, host + 1.04,
+                           offset + rate * (c0 + 40), offset + rate * (c1 + 40), 0, 0, 0, 1e-9))
+        host += 1.0
+        prev_end_fw = c1
+    blob = pipeline.BlobSpans(0, lit, dark)
+    res = pipeline.analyze([blob], events, min_matched=3, min_pairs=10)
+    ok = (res.verdict == clockfit.VERDICT_OK and res.fit is not None
+          and 0 in res.bindings and res.bindings[0].channel == "S2=0"
+          and abs(res.fit.rate - rate) < 1.0
+          and res.fit.residuals.mad_ms < 5.0)
+    binding = res.bindings[0].channel if 0 in res.bindings else None
+    got_rate = f"{res.fit.rate:.1f}" if res.fit else "none"
+    got_mad = f"{res.fit.residuals.mad_ms:.2f}" if res.fit else "none"
+    print(f"selftest: verdict={res.verdict} binding={binding} "
+          f"rate={got_rate} (want {rate:.0f}) resid_mad={got_mad} ms")
+    print("PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
+# ------------------------------------------------------------------- main
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap.add_argument("bundle", nargs="?", help="session bundle folder "
+                    "(<recordings>/phase3_recordings/<id>)")
+    ap.add_argument("--map", action="store_true",
+                    help="build host/led_map.json from this session (whole-frame search) instead of fitting")
+    ap.add_argument("--map-out", help="where --map writes the map (default host/led_map.json)")
+    ap.add_argument("--board-rect", nargs=4, type=int, metavar=("X0", "Y0", "X1", "Y1"),
+                    help="confine the LED search to this full-frame rectangle (build a map from a "
+                         "session that still has a rat in it, or scan fast before a map exists)")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="do not touch the bundle; print the report and write artifacts to --out")
+    ap.add_argument("--out", help="scratch folder for --dry-run artifacts (default <bundle>/_sync_dryrun)")
+    ap.add_argument("--start-min", type=float, default=0.0, help="window start, minutes into video")
+    ap.add_argument("--minutes", type=float, default=0.0,
+                    help="window length in minutes (0 = whole session, the default)")
+    ap.add_argument("--tol-ms", type=float, default=200.0,
+                    help="both-ends LED-vs-serial match tolerance on the host clock")
+    ap.add_argument("--min-visible-ms", type=float, default=60.0,
+                    help="serial spans shorter than this are sub-frame and excluded from recall")
+    ap.add_argument("--min-matched", type=int, default=3,
+                    help="fewest matched spans for a binding (raise for a full session, lower for a short window)")
+    ap.add_argument("--min-pairs", type=int, default=30,
+                    help="fewest edge pairs before the clock is fitted at all")
+    ap.add_argument("--selftest", action="store_true", help="run the synthetic self-check and exit")
+    a = ap.parse_args(argv)
+
+    if a.selftest:
+        return _selftest()
+    if not a.bundle:
+        ap.error("a bundle folder is required (or use --selftest)")
+    if not os.path.isdir(a.bundle):
+        ap.error(f"not a folder: {a.bundle}")
+
+    minutes = None if a.minutes <= 0 else a.minutes
+    rect = tuple(a.board_rect) if a.board_rect else None
+    try:
+        run = analyze_bundle(a.bundle, start_min=a.start_min, minutes=minutes,
+                             tol_s=a.tol_ms / 1000.0, min_visible_s=a.min_visible_ms / 1000.0,
+                             whole_frame=a.map and rect is None, board_rect=rect,
+                             min_matched=a.min_matched, min_pairs=a.min_pairs)
+    except (FileNotFoundError, RuntimeError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+
+    if a.map:
+        m = build_led_map(run)
+        path = LM.save(m, a.map_out or LM.led_map_path())
+        bound = sum(1 for e in m.leds if e.bound)
+        print(f"\nsession {run.sid}: {len(m.leds)} LEDs, {bound} bound, "
+              f"board_rect={m.board_rect}")
+        for e in m.leds:
+            tag = f"{e.channel} {e.polarity}" if e.bound else "(unbound)"
+            print(f"  {e.led_id:>10} at ({e.ref_px[0]:.1f},{e.ref_px[1]:.1f})  {tag}")
+        print(f"\n  wrote {path}")
+        return 0
+
+    if a.dry_run:
+        out_dir = a.out or os.path.join(a.bundle, "_sync_dryrun")
+    else:
+        out_dir = os.path.join(a.bundle, "sync")
+    os.makedirs(out_dir, exist_ok=True)
+    events_path = os.path.join(out_dir, f"led_events_{run.sid}.csv")
+    fit_path = os.path.join(out_dir, f"clock_fit_{run.sid}.json")
+    write_led_events(events_path, led_event_rows(run), run.sid)
+    write_clock_fit(fit_path, run)
+    print_report(run, out_dir)
+    if a.dry_run:
+        print("  (dry run: the bundle itself was not modified)")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
