@@ -523,6 +523,12 @@ class TrialSequence:
         block runs, else ``NORMAL`` (also when probe is disabled)."""
         return self._probe.state() if self._probe is not None else "NORMAL"
 
+    def probe_upcoming(self) -> int:
+        """Forced probe-block trials still ahead of the trials committed so far, for
+        the ribbon's upcoming-trial marker (docs/decisions/0152). 0 when probe is
+        disabled, no block is running, or an operator end/disable is latched."""
+        return self._probe.upcoming_forced() if self._probe is not None else 0
+
     def force_alternation_block(self) -> None:
         """Operator: start a de-alternation block on the next committed trial.
 
@@ -566,6 +572,15 @@ class TrialSequence:
         if self._ctl is not None and hasattr(self._ctl, "window_samples"):
             return self._ctl.window_samples()
         return 0
+
+    def intervention_will_continue(self) -> bool:
+        """Predict whether the NEXT committed trial would still be in a corrective
+        block (an already-open block that won't exit on the evidence scored so far),
+        for the ribbon's upcoming-trial marker (docs/decisions/0152). False when
+        open-loop or no block is active. An operator force-START from NORMAL is not
+        pre-marked - it is reflected once the trial commits (matches the provisional
+        cue-side prediction in :meth:`_provisional_arm`)."""
+        return self._ctl.will_continue() if self._ctl is not None else False
 
     def active_kind(self) -> str:
         """Which intervention owns the active block ("side_bias"/"alternation"; ""

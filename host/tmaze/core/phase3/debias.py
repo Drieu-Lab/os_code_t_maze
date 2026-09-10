@@ -180,6 +180,18 @@ class DebiasBlockController:
         left_pull, right_pull = self._pull_counts()
         return left_pull + right_pull
 
+    def will_continue(self) -> bool:
+        """Predict whether the NEXT :meth:`decide` would still be in a block, WITHOUT
+        mutating state - so the ribbon can provisionally mark the upcoming trial as a
+        block trial (docs/decisions/0152). Mirrors ``decide()``'s exit checks: True
+        only while a block is open, no operator end is latched, and neither the
+        success (``exit_consecutive``) nor the safety-cap (``max_block_len``)
+        criterion is already met by the choices scored so far."""
+        return (self._state == INTERVENTION
+                and not self._manual_end
+                and self._consec < self.cfg.exit_consecutive
+                and self._block_len < self.cfg.max_block_len)
+
     # -------------------------------------------------------- operator overrides
     def force_block(self, side: Optional[int] = None) -> None:
         """Request a corrective block on the next decision (operator button).

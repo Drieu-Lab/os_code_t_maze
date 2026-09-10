@@ -151,6 +151,15 @@ class InterventionStackController:
         the count its auto-trigger gates on (``min_samples``)."""
         return self._alt_ctl.window_samples() if self._alt_ctl is not None else 0
 
+    def will_continue(self) -> bool:
+        """Predict whether the NEXT :meth:`decide` would still be in a block, WITHOUT
+        mutating state, by delegating to the active child (False when none is active)
+        - so the ribbon can provisionally mark the upcoming trial (docs/decisions/
+        0152)."""
+        if self._active is None:
+            return False
+        return self._children[self._active][1].will_continue()
+
     @property
     def debias_vetoed(self) -> bool:
         """True while the switch-dominant veto is holding the side-bias AUTO-trigger

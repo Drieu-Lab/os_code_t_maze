@@ -13,6 +13,7 @@ Run from host/:  python -m unittest test_phase3_ribbon
 
 from __future__ import annotations
 
+import dataclasses
 import unittest
 
 from tmaze.core.phase3.debias import DebiasBlockConfig
@@ -236,6 +237,106 @@ class TestCorrectiveFlag(unittest.TestCase):
             if ribbon is None:
                 continue
             self.assertEqual(ribbon.corrective, row.sched_state == "INTERVENTION")
+
+
+class TestUpcomingBlockMarkers(unittest.TestCase):
+    """Provisional block/probe markers on UPCOMING (un-committed) trials, driven by
+    the snapshot's block prediction (docs/decisions/0152). The persisted row columns
+    stay blank for those trials (ADR-0096), so these come from ``probe_upcoming`` /
+    ``intervention_next``, tested here in isolation via ``dataclasses.replace``."""
+
+    def _snap(self, current=5, **fields):
+        # A freshly armed 20-trial plan (every row un-scored) with the prediction
+        # fields overridden - decouples the ribbon mapping from the scheduler.
+        base = _log(n=20).snapshot(current, armed=True)
+        return dataclasses.replace(base, **fields)
+
+    def test_probe_upcoming_marks_the_whole_remaining_block(self):
+        # current+1 .. current+probe_upcoming are marked probe; the trial after is not.
+        snap = self._snap(current=5, probe_upcoming=3)
+        by_trial = {r.trial: r for r in all_ribbon_rows(snap)}
+        # trial numbers are 1-based (index+1): current index 5 == trial 6.
+        self.assertFalse(by_trial[6].probe)                 # current (own column)
+        self.assertTrue(by_trial[7].probe)                  # +1
+        self.assertTrue(by_trial[8].probe)                  # +2
+        self.assertTrue(by_trial[9].probe)                  # +3 (last of block)
+        self.assertFalse(by_trial[10].probe)                # +4: past the block
+
+    def test_intervention_next_marks_only_the_single_next_trial(self):
+        snap = self._snap(current=5, intervention_next=True)
+        by_trial = {r.trial: r for r in all_ribbon_rows(snap)}
+        self.assertFalse(by_trial[6].corrective)            # current (own column)
+        self.assertTrue(by_trial[7].corrective)             # +1 only
+        self.assertFalse(by_trial[8].corrective)            # +2 stays normal
+
+    def test_zero_prediction_marks_nothing(self):
+        # No running block: neither an upcoming probe nor a corrective marker.
+        snap = self._snap(current=5, probe_upcoming=0, intervention_next=False)
+        rows = all_ribbon_rows(snap)
+        self.assertFalse(any(r.probe for r in rows))
+        self.assertFalse(any(r.corrective for r in rows))
+
+    def test_prediction_never_marks_a_resolved_trial(self):
+        # Score trials 6 and 7 (indices 6/7), then predict a probe over them: a
+        # resolved row keeps its own (blank) status and is not retro-flagged.
+        log = _log(n=20)
+        _score(log, 6, "left", "CORRECT")
+        _score(log, 7, "right", "INCORRECT")
+        snap = dataclasses.replace(log.snapshot(5, armed=True), probe_upcoming=4)
+        by_trial = {r.trial: r for r in all_ribbon_rows(snap)}
+        self.assertTrue(by_trial[7].resolved)
+        self.assertFalse(by_trial[7].probe)                 # resolved -> untouched
+        self.assertFalse(by_trial[8].probe)
+        self.assertTrue(by_trial[9].probe)                  # a later un-scored one
+
+    def test_probe_takes_precedence_over_intervention_on_the_next_cell(self):
+        # A probe suspends interventions, so an upcoming probe cell wins the styling.
+        snap = self._snap(current=5, probe_upcoming=2, intervention_next=True)
+        by_trial = {r.trial: r for r in all_ribbon_rows(snap)}
+        self.assertTrue(by_trial[7].probe)
+        self.assertFalse(by_trial[7].corrective)
+
+    def test_windowed_ribbon_also_marks_upcoming(self):
+        # The fixed 7-cell window (Phase 3 tab) uses the same helper as the strip.
+        snap = self._snap(current=5, probe_upcoming=2)
+        by_trial = {r.trial: r for r in ribbon_rows(snap)}
+        self.assertTrue(by_trial[7].probe)
+        self.assertTrue(by_trial[8].probe)
+
+
+class TestProbeUpcomingIntegration(unittest.TestCase):
+    """End-to-end: firing a real probe block makes the snapshot advertise the
+    upcoming forced trials, and cancelling it clears them (docs/decisions/0152)."""
+
+    def _probe_seq(self):
+        from tmaze.core.phase3.probe_blocks import ProbeBlockConfig
+        cfg = TrialConfig(max_trials=40, block_size=20, max_same_run=4,
+                          probe=ProbeBlockConfig(enabled=True, block_len=4,
+                                                 windows=((1, 40),)))
+        return TrialSequence(cfg, seed=7)
+
+    def test_firing_a_probe_advertises_the_upcoming_block(self):
+        seq = self._probe_seq()
+        log = Phase3Log(seq, animal="R", session_start_iso="t")
+        seq.commit(0)
+        # A correct choice inside the window fires the probe on the FOLLOWING trials.
+        correct = seq.correct_arm(0)
+        seq.probe_trigger_on_score(0, correct=True, intervention_active=False)
+        snap = log.snapshot(0, armed=True)
+        self.assertEqual(snap.probe_upcoming, 4)            # block_len forced trials
+        by_trial = {r.trial: r for r in all_ribbon_rows(snap)}
+        self.assertTrue(all(by_trial[t].probe for t in (2, 3, 4, 5)))
+        self.assertFalse(by_trial[6].probe)
+
+    def test_cancelling_the_probe_clears_the_upcoming_markers(self):
+        seq = self._probe_seq()
+        log = Phase3Log(seq, animal="R", session_start_iso="t")
+        seq.commit(0)
+        seq.probe_trigger_on_score(0, correct=True, intervention_active=False)
+        seq.end_probe_block()                               # operator abort
+        snap = log.snapshot(0, armed=True)
+        self.assertEqual(snap.probe_upcoming, 0)
+        self.assertFalse(any(r.probe for r in all_ribbon_rows(snap)))
 
 
 if __name__ == "__main__":

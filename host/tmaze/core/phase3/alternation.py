@@ -206,6 +206,20 @@ class AlternationBlockController:
         samples, _switched = self._sample_counts()
         return samples
 
+    def will_continue(self) -> bool:
+        """Predict whether the NEXT :meth:`decide` would still be in a block, WITHOUT
+        mutating state - the de-alternation twin of
+        :meth:`DebiasBlockController.will_continue`, for the ribbon's upcoming-trial
+        marker (docs/decisions/0152). Mirrors ``decide()``'s exit checks: True only
+        while a block is open, no operator end is latched, and neither the two-sided
+        success exit (``exit_repeats_per_side`` rewarded repeats on EACH arm) nor the
+        safety cap (``max_block_len``) is already met."""
+        k = self.cfg.exit_repeats_per_side
+        return (self._state == INTERVENTION
+                and not self._manual_end
+                and not (self._rep[LEFT] >= k and self._rep[RIGHT] >= k)
+                and self._block_len < self.cfg.max_block_len)
+
     def _block_rate(self) -> float:
         """In-block ``alt_rate`` (switched / samples since the block started); 0.0
         until the first in-block sample. This is what the success exit reads."""

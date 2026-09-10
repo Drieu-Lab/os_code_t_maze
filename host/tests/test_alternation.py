@@ -205,6 +205,63 @@ class TestManualOverride(unittest.TestCase):
         self.assertEqual(c.decide().state, NORMAL)
 
 
+class TestWillContinue(unittest.TestCase):
+    """The non-mutating prediction the ribbon uses to mark the upcoming trial
+    (docs/decisions/0152): True only while an open block will not exit next."""
+
+    def _ctl(self, **kw):
+        base = dict(window=10, min_samples=4, trigger_rate=0.8,
+                    exit_repeats_per_side=2, max_block_len=4)
+        base.update(kw)
+        return AlternationBlockController(AlternationBlockConfig(**base))
+
+    def test_false_when_normal(self):
+        self.assertFalse(self._ctl().will_continue())
+
+    def test_true_while_block_open_and_not_exiting(self):
+        c = self._ctl()
+        _prime_alternator(c, 4)
+        self.assertEqual(c.decide().state, INTERVENTION)
+        self.assertTrue(c.will_continue())
+
+    def test_false_once_two_sided_exit_is_met(self):
+        # Drive the two-sided repeats exit, then predict: no continue after success.
+        c = self._ctl(max_block_len=50)
+        _prime_alternator(c, 4)
+        exited = False
+        for _ in range(20):
+            d = c.decide()
+            if d.state == NORMAL:
+                exited = True
+                break
+            c.record(d.side, d.side)               # comply (repeat/bridge)
+            if not c.will_continue():
+                # The success criterion is now met; the next decide would exit.
+                break
+        # Either it already exited, or will_continue correctly predicts the exit.
+        self.assertTrue(exited or not c.will_continue())
+
+    def test_false_when_manual_end_latched(self):
+        c = self._ctl()
+        _prime_alternator(c, 4)
+        c.decide()
+        self.assertTrue(c.will_continue())
+        c.end_block()                              # latched, not yet applied
+        self.assertFalse(c.will_continue())
+
+    def test_false_at_the_welfare_cap(self):
+        c = self._ctl(max_block_len=4)
+        _prime_alternator(c, 4)
+        # Ride to the cap without complying (stubborn alternator).
+        for _ in range(4):
+            d = c.decide()
+            if d.state != INTERVENTION:
+                break
+            other = RIGHT if d.side == LEFT else LEFT
+            c.record(d.side, other)
+        self.assertFalse(c.will_continue())        # block_len hit the cap
+
+
 # --------------------------------------------------------------------------- #
 # TrialSequence in intervention_blocks mode with ONLY the alternation child.   #
 # --------------------------------------------------------------------------- #

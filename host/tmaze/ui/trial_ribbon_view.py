@@ -88,7 +88,12 @@ def progress_signature(state: Optional[Phase3StateSnapshot]):
             sum(1 for r in state.rows if r.sched_state == "INTERVENTION"),
             # so a probe appearing / the probe state changing redraws too
             getattr(state, "probe_state", "NORMAL"),
-            sum(1 for r in state.rows if r.probe == "1"))
+            sum(1 for r in state.rows if r.probe == "1"),
+            # so the provisional upcoming-block markers (docs/decisions/0152) redraw
+            # when only the prediction changes - e.g. a block about to exit while
+            # its sched_state is still INTERVENTION, or a probe running down
+            getattr(state, "intervention_next", False),
+            getattr(state, "probe_upcoming", 0))
 
 
 class TrialRibbonView:

@@ -76,8 +76,26 @@ def cue_side(cue: str, high_tone_is_left: bool) -> str:
 def _make_row(state: Phase3StateSnapshot, i: int, current: int) -> RibbonRow:
     """Build one ``RibbonRow`` for planned trial index ``i`` (``current`` is the
     clamped current-trial index, used only to set ``is_current``). Shared by the
-    windowed ``ribbon_rows`` and the full-plan ``all_ribbon_rows``."""
+    windowed ``ribbon_rows`` and the full-plan ``all_ribbon_rows``.
+
+    A committed row's block/probe status comes from its persisted columns
+    (``sched_state`` / ``probe``). An UPCOMING, not-yet-resolved trial has those
+    columns blank on purpose (the CSV records committed decisions only, ADR-0096),
+    so it is marked provisionally from the snapshot's block prediction
+    (docs/decisions/0152): the full remaining forced probe block, and the single
+    next trial of an open corrective block. These clear reactively when the block
+    exits or is cancelled."""
     row = state.rows[i]
+    corrective = (row.sched_state == "INTERVENTION")
+    probe = (row.probe == "1")
+    # Provisional markers for upcoming, not-yet-scored trials only (never override a
+    # committed/scored row's own columns).
+    if i > current and row.outcome is None:
+        probe_upcoming = getattr(state, "probe_upcoming", 0)
+        if probe_upcoming and current < i <= current + probe_upcoming:
+            probe = True
+        elif getattr(state, "intervention_next", False) and i == current + 1:
+            corrective = True
     return RibbonRow(
         trial=row.trial,
         is_current=(i == current),
@@ -88,8 +106,8 @@ def _make_row(state: Phase3StateSnapshot, i: int, current: int) -> RibbonRow:
         resolved=row.outcome is not None,
         chosen_arm=row.chosen_arm,
         outcome=row.outcome,
-        corrective=(row.sched_state == "INTERVENTION"),
-        probe=(row.probe == "1"),
+        corrective=corrective,
+        probe=probe,
         return_enabled=state.return_enabled,
     )
 

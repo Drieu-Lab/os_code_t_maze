@@ -163,6 +163,16 @@ class ProbeBlockController:
         block runs, else ``NORMAL``."""
         return "ACTIVE" if self._active else "NORMAL"
 
+    def upcoming_forced(self) -> int:
+        """How many forced probe-block trials still lie AHEAD of the trials issued so
+        far, for the ribbon's upcoming-trial marker (docs/decisions/0152). This is the
+        deterministic remainder of the block plan (``block_len - issued``); 0 when no
+        block is running or an operator end/disable is latched (``_manual_end``), so
+        the moment a probe is cancelled the ribbon's upcoming probe cells clear."""
+        if not self._active or self._manual_end:
+            return 0
+        return max(0, len(self._plan) - self._pos)
+
     # -------------------------------------------------------- operator overrides
     def end_block(self) -> None:
         """End a running probe early (operator "End" button). No manual START - the

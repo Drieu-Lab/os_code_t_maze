@@ -135,6 +135,56 @@ class TestManualOverride(unittest.TestCase):
         self.assertEqual(c.decide().side, RIGHT)
 
 
+class TestWillContinue(unittest.TestCase):
+    """The non-mutating prediction the ribbon uses to mark the upcoming trial
+    (docs/decisions/0152): True only while an open block will not exit next."""
+
+    def _ctl(self):
+        return DebiasBlockController(DebiasBlockConfig(
+            window=10, min_errors=4, trigger_bias=0.3,
+            exit_consecutive=3, max_block_len=4))
+
+    def test_false_when_normal(self):
+        self.assertFalse(self._ctl().will_continue())
+
+    def test_true_while_block_open_and_not_exiting(self):
+        c = self._ctl()
+        for _ in range(4):
+            c.record(RIGHT, LEFT)
+        self.assertEqual(c.decide().state, INTERVENTION)
+        self.assertTrue(c.will_continue())
+
+    def test_false_once_success_exit_is_met(self):
+        c = self._ctl()
+        for _ in range(4):
+            c.record(RIGHT, LEFT)
+        c.decide()                                 # open the block
+        # Comply the exit_consecutive times WITHOUT calling decide() (as the ribbon
+        # sees it right after the success is scored): it should predict no continue.
+        for _ in range(3):
+            c.record(RIGHT, RIGHT)
+        self.assertFalse(c.will_continue())
+
+    def test_false_when_manual_end_latched(self):
+        c = self._ctl()
+        for _ in range(4):
+            c.record(RIGHT, LEFT)
+        c.decide()
+        self.assertTrue(c.will_continue())
+        c.end_block()                              # latched, not yet applied
+        self.assertFalse(c.will_continue())
+
+    def test_does_not_mutate_state(self):
+        c = self._ctl()
+        for _ in range(4):
+            c.record(RIGHT, LEFT)
+        c.decide()
+        block_len_before = c._block_len
+        for _ in range(5):
+            c.will_continue()
+        self.assertEqual(c._block_len, block_len_before)   # pure read
+
+
 # --------------------------------------------------------------------------- #
 # TrialSequence in debias_blocks mode, driven like Phase3Task would.           #
 # --------------------------------------------------------------------------- #

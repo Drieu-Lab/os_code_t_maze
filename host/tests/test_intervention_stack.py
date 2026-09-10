@@ -45,6 +45,33 @@ def _arm_both(s):
         s.record(RIGHT, ch)
 
 
+class TestWillContinue(unittest.TestCase):
+    """The stack delegates the ribbon's upcoming-trial prediction to the active
+    child (docs/decisions/0152)."""
+
+    def test_false_when_no_block_active(self):
+        self.assertFalse(_both().will_continue())
+
+    def test_true_while_a_child_block_is_open(self):
+        s = _both()
+        _arm_both(s)
+        self.assertEqual(s.decide().state, INTERVENTION)     # side-bias block opens
+        self.assertTrue(s.will_continue())
+
+    def test_tracks_the_active_child_exit(self):
+        # Comply to the side-bias success exit; once met, will_continue predicts no
+        # continue even before the exiting decide() runs.
+        s = _both()
+        _arm_both(s)
+        s.decide()                                           # open side-bias block
+        for _ in range(3):                                   # exit_consecutive = 3
+            s.record(RIGHT, RIGHT)
+        self.assertFalse(s.will_continue())
+
+    def test_inert_stack_never_continues(self):
+        self.assertFalse(InterventionStackController(None, None).will_continue())
+
+
 class TestArbitration(unittest.TestCase):
     def test_side_bias_wins_when_both_arm(self):
         s = _both()

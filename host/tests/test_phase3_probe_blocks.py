@@ -109,6 +109,34 @@ class TestProbeBlockController(unittest.TestCase):
         self.assertFalse(c.active)
         self.assertEqual(c.state(), "NORMAL")
 
+    def test_upcoming_forced_counts_down_and_clears(self):
+        # The ribbon's upcoming-block count (docs/decisions/0152): block_len when a
+        # probe fires, decremented as trials are handed out, 0 when idle.
+        c = self._ctrl(block_len=4)
+        self.assertEqual(c.upcoming_forced(), 0)             # idle
+        c.on_scored(trial_no=40, correct=True, intervention_active=False)
+        self.assertEqual(c.upcoming_forced(), 4)             # full block ahead
+        c.advance()
+        self.assertEqual(c.upcoming_forced(), 3)             # one issued
+        _drain_block(c)
+        self.assertEqual(c.upcoming_forced(), 0)             # block finished
+
+    def test_upcoming_forced_zero_after_operator_end(self):
+        # Aborting a running probe clears the upcoming count immediately, before the
+        # next advance() actually tears the block down.
+        c = self._ctrl(block_len=6)
+        c.on_scored(trial_no=40, correct=True, intervention_active=False)
+        self.assertEqual(c.upcoming_forced(), 6)
+        c.end_block()                                        # latch _manual_end
+        self.assertEqual(c.upcoming_forced(), 0)
+
+    def test_upcoming_forced_zero_after_disarm(self):
+        c = self._ctrl(block_len=6)
+        c.on_scored(trial_no=40, correct=True, intervention_active=False)
+        self.assertEqual(c.upcoming_forced(), 6)
+        c.set_armed(False)                                   # operator disable
+        self.assertEqual(c.upcoming_forced(), 0)
+
     def test_block_honors_max_same_run(self):
         # The forced block re-rolls so no single-side run exceeds the session cap
         # (docs/decisions/0138). Check across several seeds, still 5/5 balanced.

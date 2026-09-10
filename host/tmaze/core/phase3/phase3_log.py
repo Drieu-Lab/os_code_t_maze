@@ -260,6 +260,14 @@ class Phase3StateSnapshot:
     # to suppress the return-cue readout when it is off (nothing is actually cued).
     # See docs/decisions/0141.
     return_enabled: bool = True
+    # Ribbon upcoming-block prediction (docs/decisions/0152), a DISPLAY hint only -
+    # never a persisted trial column (the CSV records committed decisions only,
+    # ADR-0096). ``intervention_next`` is whether the immediate next (un-committed)
+    # trial is predicted to continue an open corrective block; ``probe_upcoming`` is
+    # how many forced probe-block trials still lie ahead of the current index. Both
+    # clear reactively when a block exits or is cancelled.
+    intervention_next: bool = False
+    probe_upcoming: int = 0
 
 
 @dataclass(frozen=True)
@@ -626,7 +634,9 @@ class Phase3Log:
             alt_window_samples=seq.alt_samples(),
             probe_enabled=seq.probe_enabled, probe_state=seq.probe_state(),
             probe_armed=seq.probe_armed,
-            return_enabled=self.return_enabled)
+            return_enabled=self.return_enabled,
+            intervention_next=seq.intervention_will_continue(),
+            probe_upcoming=seq.probe_upcoming())
 
     # ------------------------------------------------------------- render
     def _header_comment(self) -> List[str]:
