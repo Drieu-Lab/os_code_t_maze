@@ -208,12 +208,16 @@ indicator LED:
 The mapping *could* be typed in by hand from the wiring, but the wiring labels
 have already been wrong once (see the beam-name aliases in `rig_config.h`). So:
 
-1. **Mapping session.** With no rat, run `tmaze_test` and the camera: fire each
-   solenoid a few times, break each beam by hand a few times, play each cue.
-   The serial log then contains a clean, sparse event train per event type.
-   (The spike in §3.7 showed a normal training session binds every visible LED
-   on its own, so the dedicated session is mainly for LEDs that a rat's session
-   never fires — left/right reward, rinse/drain, the Phase 2 cue LEDs.)
+1. **Mapping session.** With no rat, fire each solenoid a few times, break each
+   beam by hand a few times, touch each lick port, while the camera and the full
+   `rig_logger` record. The serial log then contains a clean, sparse event train
+   per event type. (The spike in §3.7 showed a normal training session binds
+   every visible LED on its own, so the dedicated session is mainly for LEDs that
+   a rat's session never fires — left/right reward, rinse/drain, the Phase 2 cue
+   LEDs.) Step-by-step operator instructions — including why the *full* log is
+   needed (the bundle's serial capture drops the non-central valve acks) — are in
+   [`docs/mapping-session-runbook.md`](../mapping-session-runbook.md); build the
+   map with `sync_fit --map --serial <full-log.csv>`.
 2. **Cross-correlate.** For every blinking blob found in the video (§3.4) and
    every event type in the serial log, cross-correlate the blob's on/off trace
    with the event train over a coarse window (the host-clock join gives the
@@ -259,6 +263,14 @@ the room is dark. Markers remain a fallback if a future board has too few LEDs
 to register. A secondary cue — template/phase correlation of the reference board
 crop against the current frame — can estimate translation before any LED fires,
 but under the rig's lighting it is a check, not the primary method.
+
+**Update (ADR-0153).** The registration and the ROI are now anchored on the
+board's **persistent red/green fiducial LEDs** rather than the blinking
+constellation: their convex hull (grown by a margin) is the search region, and a
+colour-constrained fit of that constellation recovers the board pose every
+session (colour breaks the identical-row ambiguity of step 4). See "Slice 3.5"
+below and the [glossary](../glossary.md) (*fiducial*, *convex hull*, *persistence
+image*, *retroreflective marker*).
 
 ### 3.5 The clock fit
 
@@ -603,6 +615,43 @@ Decisions taken with the user (2026-09-09):
 The `led_events` residual per row is `(cam_ticks − fit.predict(firmware_ms)) /
 rate`, i.e. firmware-ms of misalignment for that edge — the per-edge view of the
 same residual the fit summarises.
+
+#### Slice 3.5 (2026-09-10) — fiducial auto-ROI, board pose, hybrid (ADR-0153)
+
+Two gaps from Slice 3 are closed by anchoring on the board's **persistent
+red/green LEDs** (present in every past recording, soldered, colour-coded), which
+also makes markers a QA-only reference:
+
+- **The ROI is self-calibrating.** `led_detector.persistence_images` scores each
+  pixel's red-ness (`R−max(G,B)`) / green-ness (`G−max(R,B)`) at a low percentile
+  over sampled frames; `detect_fiducials` finds the always-on LEDs as its maxima
+  and **excludes any that also blink** (a beam/lick LED rests lit ~95 % of the
+  time — persistent-looking but a channel LED). Their convex hull grown by
+  `hull_margin_px` (30 px) is the board region the blinking LEDs are searched
+  inside, so a hand while firing, or a rat left in the maze, never floods the
+  blob list. All the geometry (`convex_hull`, `point_in_poly`, `board_poly_around`)
+  is pure stdlib in `core/sync/led_map.py`. **Consequence:** a map can be built
+  from *any* session — no rat-free requirement, no `--board-rect` by hand.
+- **Board pose + hybrid location.** `register` takes optional colour labels
+  (same-colour-only correspondences), so the fiducial fit recovers the board's
+  rotation/shift/scale and breaks the identical-row ambiguity (§3.4 step 4). With
+  a pose, each mapped LED is placed by `hybrid_blobs`: a detected blinking blob
+  when present, else its pose-transformed stored position, so an LED that never
+  fired this session is still traced.
+- **Schema v1→v2.** `led_map.json` gains `fiducials` + `reference.board_poly`; v1
+  maps still load (they fall back to registering the blinking constellation).
+- **Markers = physical QA reference.** The pipeline keys on colour, so neutral
+  markers are ignored; `--map` (and `--overlay` on a normal run) writes a debug
+  PNG (ROI polygon + fiducials + LEDs on a still) to eyeball that the ROI lands
+  inside the physical marker corners. A repeatable marker-placement scheme is
+  deferred to FW-0059.
+- **Fixture.** The board clip was re-cut wider (full-frame x 815–1025, y 560–744)
+  to include the persistent LEDs; the blink detector still finds exactly the 11
+  blinking LEDs (a steady LED has no difference-image signal), and the fiducials'
+  hull contains all 11.
+
+Still open from this slice: the ENTRY/EXIT beam LEDs remain invisible on the
+board (§3.7); manifest/format registration of the `sync/` stream is Slice 4.
 
 ---
 

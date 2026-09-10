@@ -60,8 +60,19 @@ Finding where a known, fixed pattern of points (the "constellation" — here the
 indicator LEDs on the rig's flat electronics board) has landed in an image, by
 fitting one rotation + shift (+ scale) to all of them at once rather than trusting
 stored pixel positions. Lets the LED detector survive the board or camera being
-nudged between sessions, and refuse loudly when it can't find the pattern. See
-[`docs/design/cross-stream-sync-design.md`](design/cross-stream-sync-design.md) §3.4.
+nudged between sessions, and refuse loudly when it can't find the pattern. The
+board is now registered on its persistent red/green [fiducial](#fiducial) LEDs,
+with the LEDs' **colour** as a matching constraint (same-colour points only) so a
+row of otherwise-identical LEDs can't line up shifted by one. See
+[`docs/design/cross-stream-sync-design.md`](design/cross-stream-sync-design.md) §3.4,
+ADR-0153.
+
+### Convex hull
+The smallest convex outline that encloses a set of points — imagine a rubber band
+snapped around them. The board region-of-interest (ROI) is the convex hull of the
+persistent red/green [fiducial](#fiducial) LEDs, grown outward by a margin; the
+blinking channel LEDs are searched only inside it, so a hand or the rat moving
+elsewhere on the maze can't flood the detector. See ADR-0153.
 
 ### Core (pure core) / shell (thin shell)
 The project's main code-organization pattern. A **pure core** is logic written in
@@ -133,8 +144,12 @@ A landmark that shows up in more than one data stream at the same instant, used
 to line the streams up — like a clapperboard in film. On this rig: an LED flash
 that is both in the video and the same electrical edge the Arduino timestamps;
 later, a [sync barcode](#sync-barcode) seen by the Arduino, the camera and the
-neural recorder. The session manifest's `fiducial.method` names which kind a
-session used (`host-t0` today). See ADR-0048, ADR-0124.
+neural recorder. A second, *spatial* sense is now also in use: the board's
+**persistent red/green LEDs** are visual fiducials — always-on landmarks whose
+[convex hull](#convex-hull) defines the board ROI and whose pattern gives the
+board's pose (position/orientation) each session. The session manifest's
+`fiducial.method` names which alignment a session used (`host-t0` today; `led-fit`
+once the sync fit is registered). See ADR-0048, ADR-0124, ADR-0153.
 
 ### Firmware
 The program running *on the microcontroller* (the Arduino/Due in the rig), as
@@ -234,6 +249,17 @@ stand clearly above it (the LEDs reach 80–190), so the LED detector reports th
 floor with every run: if a future recording setting lifts it toward the blob
 threshold, that number is the warning. See `tmaze/vision/led_detector.py`.
 
+### Persistence image (video)
+The mirror of the [noise-floor](#noise-floor-video) idea used to find the *steady*
+LEDs. For each pixel, take a **low percentile** (e.g. the 10th) over sampled
+frames of its colour-ness — how red (`R−max(G,B)`) or green (`G−max(R,B)`) it is.
+A [fiducial](#fiducial) LED that is on in nearly every frame scores high even at
+that low percentile; a dot lit only briefly (a hand, the rat) is dark most of the
+time and scores low; a neutral/white [retroreflective marker](#retroreflective-marker)
+has `R≈G≈B` and scores ≈0. This is how the persistent red/green fiducials are
+detected — invisible to the blink detector, which sees only *changes*. See
+ADR-0153.
+
 ### Poll / poll loop
 Repeatedly checking or doing something on a timer, rather than reacting to an
 event. The GUI runs a "Tk poll" roughly every 100 ms to refresh status and hand
@@ -306,6 +332,15 @@ last time? did accuracy settle lower after a config change?). The old session's
 recorded CSV is read back into the same [snapshot](#snapshot) shape and run
 through the *same* trace computation as the live line, so the two are directly
 comparable; a caption flags any run-config differences between them. See ADR-0117.
+
+### Retroreflective marker
+A small patch of material that bounces light straight back at its source, so it
+shows up bright under the rig's lighting. A ring of them has been stuck around the
+electronics board's border. They are **not** used by the sync detector (it keys on
+the LEDs' colour, and markers are colour-neutral); they are a **physical QA
+reference** — the operator eyeballs the debug overlay to confirm the LED-derived
+board ROI lands inside the marker corners. A repeatable placement scheme is
+deferred (FW-0059). See ADR-0153.
 
 ### Robust fit (Theil–Sen)
 A way of fitting a straight line that a few wildly wrong points cannot pull off

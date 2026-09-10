@@ -110,6 +110,7 @@ criteria).
 | [FW-0056](#fw-0056-camera-visible-cue-leds-on-spare-optocoupler-channels) | Camera-visible cue LEDs on spare optocoupler channels (hardware + firmware + `LEDTEST` roll-call) | Rig electronics board + `firmware/cue-guided-task` (`handleCueOn/Off`, `rig_config.h`, `PROTOCOL.md`) | Proposed |
 | [FW-0057](#fw-0057-live-alt-veto-readout-for-the-suppressed-debias-trigger) | Live `[ALT-VETO]` readout for the suppressed debias trigger | Phase 3 live readout (`intervention_stack.py` -> snapshot -> `phase3_stats.py` -> `behavior_view.py`) | Proposed |
 | [FW-0058](#fw-0058-reconcile-the-beam--and-lick-state-polarity-si1--li1-are-the-resting-states-not-broken--active) | Reconcile the beam- and lick-state polarity (`S,<i>,1` and `L,<i>,1` are the resting states in recorded logs; `PROTOCOL.md` rows corrected 2026-09-08, firmware comment + consumer audit open) | `firmware/PROTOCOL.md`, `cue-guided-task.ino` sensor reads, host consumers of the `S`/`L` `active` flag | Proposed |
+| [FW-0059](#fw-0059-repeatable-retroreflective-marker-scheme-for-the-board) | Design a REPEATABLE retroreflective-marker placement scheme for the electronics board (a physical QA reference for the LED auto-ROI, and a future geometry fallback) | Rig electronics board (physical), `docs/mapping-session-runbook.md`, optional `led_detector` marker check | Proposed |
 
 ## Entries
 
@@ -3038,6 +3039,49 @@ before touching firmware.
 
 **ADR needed?** Yes if the firmware/protocol meaning changes; otherwise a doc
 fix referencing this entry.
+
+### FW-0059: Repeatable retroreflective-marker scheme for the board
+
+- **Status:** Proposed
+- **Date added:** 2026-09-10
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** Rig electronics board (physical placement),
+  `docs/mapping-session-runbook.md`, optionally a marker check in
+  `tmaze/vision/led_detector.py`
+- **Related ADRs:** ADR-0153 (LED fiducial auto-ROI; markers are QA-only there),
+  FW-0045 (the board-LED sync feature)
+
+**Motivation / context.** ADR-0153 anchors the sync ROI and board pose on the
+persistent red/green LEDs, and treats the retroreflective border markers as a
+**manual QA reference only** (the operator eyeballs the `--overlay` PNG to check
+the LED-derived ROI lands inside the marker corners). The markers as they exist
+today were added ad-hoc, in non-repeatable positions (only the corner ones are
+repeatable). That is fine for eyeballing but not for anything quantitative, and
+if a marker peels off it cannot be replaced in the same place.
+
+**Sketch of approach.** Decide a small, documented set of marker positions that
+can be reproduced if a marker is replaced — e.g. the four board corners plus
+mid-edges at measured offsets from a fixed datum, with a photo + a short spec in
+the mapping runbook (and the rig manual in the resources repo). Optionally, once
+placement is repeatable, add a neutral-blob marker detector to `led_detector`
+(markers are bright but colour-neutral, `R≈G≈B`, so they are distinguishable from
+the colour LEDs) to (a) auto-check the LED ROI against the marker quadrilateral,
+and (b) serve as a geometry fallback for a future board with too few LEDs to
+register.
+
+**Evaluation / acceptance.** A replaced marker lands within a few mm of its spec;
+the overlay check becomes a documented pass/fail rather than a subjective look; if
+the detector is added, it agrees with the LED-derived ROI on the fixture.
+
+**Effort / risk.** Small (a placement spec + photo) to medium (if the detector is
+added). Risk: over-engineering a QA aid — keep it a reference unless a board with
+too few LEDs actually forces markers into the geometry path.
+
+**Open questions.** How many markers and where; whether a detector is worth it at
+all given the LEDs already register; the fixed datum on the board to measure from.
+
+**ADR needed?** Only if markers become a detected geometry input (that would
+refine ADR-0153); a pure placement spec is a runbook/manual doc change.
 
 ## Completed
 
