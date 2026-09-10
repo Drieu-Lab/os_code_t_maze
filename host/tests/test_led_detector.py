@@ -304,6 +304,30 @@ class TestFiducials(unittest.TestCase):
         for f in fids:
             self.assertGreater((f.x - BLINK_XY[0]) ** 2 + (f.y - BLINK_XY[1]) ** 2, 25.0)
 
+    def test_detect_fiducials_excludes_rest_lit_channel_leds(self):
+        # a red LED lit AT REST but dark during two brief events (a beam LED) looks
+        # persistent (on >90%), yet it must be excluded from the fiducials because
+        # it also blinks - only the truly always-on LED is a fiducial.
+        rng = np.random.default_rng(2)
+        dark_ev = [(43, 47), (93, 97)]        # off the 10-frame sample grid: seen lit in samples
+        fr = []
+        for k in range(150):
+            f = np.full((H, W, 3), BG, np.float32)
+            f += rng.normal(0, 2.0, f.shape).astype(np.float32)
+            _dot(f, 90.0, 80.0, 150.0, (0.2, 1.0, 0.3))        # green, always on (a fiducial)
+            if not any(a <= k < b for a, b in dark_ev):
+                _dot(f, 60.0, 50.0, 150.0, (0.2, 0.3, 1.0))    # red, rest-lit beam LED
+            fr.append(np.clip(f, 0, 255).astype(np.uint8))
+        ext = D.Extremes(self.p.sample_every)
+        for f in fr:
+            ext.add(f)
+        without = D.detect_fiducials(ext, self.p)
+        self.assertTrue(any(f.color == LM.RED for f in without))    # rest-lit red looks persistent
+        blinking, _ = D.detect_blobs(ext, self.p)
+        kept = D.detect_fiducials(ext, self.p, exclude=blinking)
+        self.assertEqual([f.color for f in kept], [LM.GREEN])       # the beam LED is excluded
+        self.assertLess((kept[0].x - 90.0) ** 2 + (kept[0].y - 80.0) ** 2, 4.0)
+
     def test_blinking_led_is_still_found_by_the_blink_detector(self):
         blobs, _ = D.detect_blobs(self.ext, self.p)
         self.assertTrue(any((b.x - BLINK_XY[0]) ** 2 + (b.y - BLINK_XY[1]) ** 2 < 4.0

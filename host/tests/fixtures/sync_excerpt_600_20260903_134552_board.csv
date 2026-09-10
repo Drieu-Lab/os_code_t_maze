@@ -1,10 +1,13 @@
 # Sidecar excerpt for sync_excerpt_600_20260903_134552_board.mp4: session frames 12305..13804 (60 s inside the
-# sync_excerpt_600_20260903_134552.json window), cropped to full-frame x 836-994, y 578-730 and
+# sync_excerpt_600_20260903_134552.json window), cropped to full-frame x 815-1025, y 560-744 (a WIDER
+# board crop than before so it also contains the persistent red/green fiducial LEDs) and
 # re-encoded with libx264 crf 22 (the session itself is crf 18). Clip frame k <-> row k.
 # source_codec: h264
 # source_fps: 24.959
 # source_undistorted: True
-# crop: 836,578,994,730
+# crop: 815,560,1025,744
+# width: 210
+# height: 184
 frame_idx,host_unix_s,cam_timestamp
 12305,1788458045.869,8648591742617640
 12306,1788458045.911,8648591782684200

@@ -227,15 +227,23 @@ def _merge_fiducials(fids: Sequence[Fiducial], radius: float) -> List[Fiducial]:
     return out
 
 
-def detect_fiducials(ext: Extremes, p: DetectorParams) -> List[Fiducial]:
+def detect_fiducials(ext: Extremes, p: DetectorParams,
+                     exclude: Sequence[Blob] = ()) -> List[Fiducial]:
     """The persistently-lit red/green LEDs, as local maxima of the persistence
-    images. Ids are renumbered top-to-bottom (round(y), x) so they are stable
-    run to run."""
+    images. A true fiducial never changes, so any persistence peak that coincides
+    (within ``nms_radius``) with a blinking blob in ``exclude`` is dropped - that
+    is a *channel* LED that merely rests lit (a beam/lick LED is on ~95% of the
+    time), not a fiducial. Ids are renumbered top-to-bottom (round(y), x) so they
+    are stable run to run."""
     red, green = persistence_images(ext, p.fid_min_frac)
     found: List[Fiducial] = []
     for color, img in ((RED, red), (GREEN, green)):
         for b in find_blobs(img, p.fid_thresh, p.min_area, p.nms_radius, ON):
             found.append(Fiducial(0, b.x, b.y, color, b.peak))
+    r2 = float(p.nms_radius) ** 2
+    if exclude:
+        found = [f for f in found
+                 if not any((f.x - e.x) ** 2 + (f.y - e.y) ** 2 <= r2 for e in exclude)]
     merged = _merge_fiducials(found, float(p.radius))
     merged.sort(key=lambda f: (round(f.y), f.x))
     for i, f in enumerate(merged):

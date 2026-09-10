@@ -2,7 +2,8 @@
 
 Fixture: ``tests/fixtures/sync_excerpt_600_20260903_134552_board.mp4`` (+ its
 ``_board.csv`` sidecar rows) - session frames 12305..13804, cropped to the
-board's LEDs (full-frame x 836-994, y 578-730) and re-encoded with libx264 at
+board (full-frame x 815-1025, y 560-744 - WIDER than the LED cluster so it also
+contains the persistent red/green fiducial LEDs) and re-encoded with libx264 at
 CRF 22, a little HARSHER than the rig's CRF 18, so the detector is tested under
 slightly worse compression than it will see. The window sits inside the
 five-minute ``sync_excerpt_600_20260903_134552.json`` excerpt whose LED spans
@@ -12,7 +13,9 @@ vision layer reproduces the pixels-to-spans step the core fixture was built on:
 - the 11 blinking LEDs are found where the JSON fixture has them (after the
   crop offset), and registration against those positions is an identity;
 - the spans the traces produce match the JSON fixture's spans frame for frame;
-- feeding them to the core binds every LED to the expected channel.
+- feeding them to the core binds every LED to the expected channel;
+- the persistent red/green fiducials are found and their hull ROI contains all
+  11 blinking LEDs (the steady LEDs stay invisible to the blink detector).
 
 Skipped when OpenCV cannot decode the clip.
 """
@@ -77,7 +80,10 @@ class TestBoardClip(unittest.TestCase):
         self.assertEqual(len(self.blobs), 11)
         for b in self.blobs:
             d = np.linalg.norm(self.expected - [b.x, b.y], axis=1).min()
-            self.assertLess(d, 0.6, b)
+            # ~1 px: this clip is a fresh CRF-22 re-encode of a WIDER crop than the
+            # full-res video the JSON positions came from, so luma centroids drift
+            # sub-pixel; still far tighter than the ~12 px LED spacing.
+            self.assertLess(d, 1.3, b)
         # the reward LED lights up, the beam/lick LEDs go dark
         dirs = {b.id: b.direction for b in self.blobs}
         self.assertEqual(dirs[0], D.ON)
@@ -95,9 +101,10 @@ class TestBoardClip(unittest.TestCase):
         r = self.reg
         self.assertEqual(r.verdict, D.REG_OK)
         self.assertEqual(r.n_inliers, 11)
-        self.assertLess(r.rms_px, 0.3)
-        self.assertAlmostEqual(r.transform.scale, 1.0, delta=0.002)
-        self.assertLess(abs(r.transform.tx) + abs(r.transform.ty), 0.5)
+        # ~1 px sub-pixel drift from the fresh re-encode (see the LED-position test)
+        self.assertLess(r.rms_px, 0.8)
+        self.assertAlmostEqual(r.transform.scale, 1.0, delta=0.01)
+        self.assertLess(abs(r.transform.tx) + abs(r.transform.ty), 1.6)
         self.assertEqual(r.pairs, [(i, i) for i in range(11)])     # same numbering both sides
 
     def test_spans_reproduce_the_fixture_frame_for_frame(self):
@@ -114,6 +121,23 @@ class TestBoardClip(unittest.TestCase):
                 want_n += len(want)
         self.assertGreater(want_n, 200)                  # the lick pair alone gives ~200
         self.assertGreaterEqual(hit / want_n, 0.98)     # measured 242/243
+
+    def test_persistent_fiducials_found_and_their_hull_contains_the_leds(self):
+        ext = D.accumulate_extremes(CLIP, None, 0, None, self.params)
+        blinking, _ = D.detect_blobs(ext, self.params)
+        fids = D.detect_fiducials(ext, self.params, exclude=blinking)
+        # several persistent LEDs, of both colours, and none coinciding with a
+        # blinking LED (a rest-lit channel LED must not be mistaken for a fiducial)
+        self.assertGreaterEqual(len(fids), 8)
+        colours = {f.color for f in fids}
+        self.assertEqual(colours, {LM.RED, LM.GREEN})
+        for f in fids:
+            self.assertGreater(min(np.hypot(f.x - b.x, f.y - b.y) for b in blinking), 2.0)
+        # the fiducials' hull (grown by the margin) is a board ROI that contains
+        # every blinking LED - so the auto-ROI never drops a channel LED
+        poly = LM.board_poly_around([(f.x, f.y) for f in fids], self.params.hull_margin_px)
+        for b in blinking:
+            self.assertTrue(LM.point_in_poly((b.x, b.y), poly), (b.x, b.y))
 
     def test_every_led_binds_to_its_channel_from_one_minute(self):
         events = S.serial_spans(S.parse_serial_csv(self.fx["serial_rows"]))

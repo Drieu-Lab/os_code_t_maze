@@ -91,7 +91,7 @@ class DetectorParams:
     margin_px: int = 24
     fid_thresh: float = 25.0
     fid_min_frac: float = 0.9
-    hull_margin_px: int = 16
+    hull_margin_px: int = 30
 
 
 @dataclass(frozen=True)

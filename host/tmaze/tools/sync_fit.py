@@ -17,8 +17,10 @@ Three ways to run (env ``drieu_t_maze``, any directory):
     # Same, but only print the report + write to a scratch folder (bundle untouched):
     python -m tmaze.tools.sync_fit <bundle_dir> --dry-run --out <folder>
 
-    # Build host/led_map.json from a (mapping or ordinary) session:
-    python -m tmaze.tools.sync_fit <bundle_dir> --map
+    # Build host/led_map.json from a NO-RAT mapping session (fire every valve,
+    # break every beam by hand); use the FULL rig_logger CSV so the left/right
+    # reward + rinse/drain valve acks are present - see docs/mapping-session-runbook.md:
+    python -m tmaze.tools.sync_fit <bundle_dir> --map --serial <rig_logger.csv>
 
     # No bundle, no video: check the core end to end on synthetic data:
     python -m tmaze.tools.sync_fit --selftest
@@ -26,11 +28,16 @@ Three ways to run (env ``drieu_t_maze``, any directory):
 Two clocks, one line: ``cam_timestamp`` is the Basler's 1 GHz hardware tick,
 ``firmware ms`` the Arduino's ``millis()``; the LEDs are the shared events that
 tie them together, so the fit is what lets neural/behaviour/video land on one
-timeline. When ``host/led_map.json`` exists the LED pattern (the *constellation*)
-is registered against it and each LED is checked against its stored channel;
-without a map the tool **bootstraps** the bindings from the session itself (as
-the spike did) and warns. It never registers a MODE-less manifest change here -
-announcing the streams in ``session.json`` / ``format.json`` is Slice 4.
+timeline. The ROI is self-calibrating: the persistently-lit red/green fiducials
+are found and their convex hull is the board region the blinking LEDs are searched
+inside (so a hand/rat elsewhere never floods the blob list). When a v2
+``host/led_map.json`` exists the fiducials are registered against it to recover
+the board pose, and each mapped LED is located by the HYBRID rule (a detected
+blinking blob when present, else its pose-transformed stored position); a v1 map
+falls back to registering the blinking-LED constellation; without any map the tool
+**bootstraps** the bindings from the session itself and warns. It never registers
+a MODE-less manifest change here - announcing the streams in ``session.json`` /
+``format.json`` is Slice 4.
 
 Thin shell: all pixel work is in ``tmaze.vision.led_detector`` and all matching /
 fitting in ``tmaze.core.sync``; this file only does argument parsing, bundle I/O,
@@ -76,20 +83,19 @@ def _read_frames(bundle: str, sid: str) -> Tuple[Dict[str, str], List[S.Frame]]:
         return S.parse_sidecar_csv(f)
 
 
-def _read_events(bundle: str, sid: str) -> Dict[str, List[S.Span]]:
-    path = os.path.join(bundle, "serial", f"sensors_{sid}.csv")
+def _read_events(bundle: str, sid: str, serial_path: Optional[str] = None) -> Dict[str, List[S.Span]]:
+    """Serial spans for the session. Defaults to the bundle's per-session capture
+    (``serial/sensors_<id>.csv``), which by design holds only body beams + the
+    CENTRAL well's lick/reward/solenoid (session_serial.py). ``serial_path``
+    overrides it with any ``<iso>,<ms>,TYPE,...`` log - use the FULL rig_logger
+    CSV for a mapping session, whose left/right-reward and rinse/drain valve acks
+    the filtered capture drops."""
+    path = serial_path or os.path.join(bundle, "serial", f"sensors_{sid}.csv")
     with open(path, encoding="utf-8") as f:
         return S.serial_spans(S.parse_serial_csv(f))
 
 
 # ------------------------------------------------------- detection + spans
-
-def _scan(video: str, crop: Optional[Tuple[int, int, int, int]], start: int,
-          n: Optional[int], params: LM.DetectorParams):
-    """Import the vision layer lazily so --selftest needs no OpenCV/NumPy."""
-    from tmaze.vision import led_detector as D
-    return D, D.scan_video(video, crop, start, n, params)
-
 
 def _window(frames: Sequence[S.Frame], start_min: float, minutes: Optional[float],
             fps: float) -> Tuple[int, Optional[int]]:
@@ -101,6 +107,24 @@ def _window(frames: Sequence[S.Frame], start_min: float, minutes: Optional[float
     return start, int(round(minutes * 60 * fps))
 
 
+def _frame_size(header: Dict[str, str]) -> Optional[Tuple[int, int]]:
+    w = header.get("width") or header.get("frame_width")
+    h = header.get("height") or header.get("frame_height")
+    try:
+        return (int(w), int(h)) if w and h else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _apply_point(t, xy: Tuple[float, float]) -> Tuple[float, float]:
+    """Apply a vision Similarity to one point without importing numpy (so the
+    stdlib self-test stays dep-free); mirrors led_detector.Similarity.apply."""
+    c = math.cos(t.theta) * t.scale
+    s = math.sin(t.theta) * t.scale
+    x, y = xy
+    return (c * x - s * y + t.tx, s * x + c * y + t.ty)
+
+
 # ---------------------------------------------------------------- the run
 
 class SyncRun:
@@ -110,7 +134,10 @@ class SyncRun:
                  led_ids: Dict[int, str], result: pipeline.SyncResult,
                  blob_spans: List[pipeline.BlobSpans], events: Dict[str, List[S.Span]],
                  registration, used_map: Optional[LM.LedMap], window: Tuple[int, Optional[int]],
-                 tol_s: float, min_visible_s: float, crop: Optional[Tuple[int, int, int, int]]):
+                 tol_s: float, min_visible_s: float, crop: Optional[Tuple[int, int, int, int]],
+                 fiducials=(), fid_registration=None,
+                 board_poly: Optional[List[Tuple[float, float]]] = None,
+                 frame_size: Optional[Tuple[int, int]] = None, median=None):
         self.sid = sid
         self.header = header
         self.blobs = blobs
@@ -119,12 +146,17 @@ class SyncRun:
         self.result = result
         self.blob_spans = {b.blob: b for b in blob_spans}
         self.events = events
-        self.registration = registration
+        self.registration = registration       # blinking-LED registration (v1 maps)
         self.used_map = used_map
         self.window = window
         self.tol_s = tol_s
         self.min_visible_s = min_visible_s
         self.crop = crop
+        self.fiducials = fiducials             # detected persistent LEDs (crop coords)
+        self.fid_registration = fid_registration   # pose from the fiducials (v2 maps / --map)
+        self.board_poly = board_poly           # ROI outline in FULL-frame pixels
+        self.frame_size = frame_size
+        self.median = median                   # the crop's median image, for the overlay
 
     def led_id(self, blob: int) -> str:
         return self.led_ids.get(blob, f"blob_{blob}")
@@ -134,22 +166,27 @@ def analyze_bundle(bundle: str, *, start_min: float = 0.0, minutes: Optional[flo
                    tol_s: float = 0.20, min_visible_s: float = 0.06,
                    map_path: Optional[str] = None, whole_frame: bool = False,
                    board_rect: Optional[Tuple[int, int, int, int]] = None,
-                   min_matched: int = 3, min_pairs: int = 30) -> SyncRun:
+                   min_matched: int = 3, min_pairs: int = 30,
+                   serial_path: Optional[str] = None) -> SyncRun:
     """Detect the LEDs, bind them, fit the clock.
 
-    ``whole_frame`` ignores any stored ``board_rect`` (used by --map on a no-rat
-    mapping session, where the whole frame is clean). ``board_rect`` is an
-    explicit search window that overrides both the stored one and whole-frame -
-    the honest way to build a map from a session that still has a rat in it
-    (the rat's motion otherwise lights up the whole maze in max-minus-median and
-    floods the blob list), and the fast path before a map exists.
+    The ROI is self-calibrating: the persistently-lit red/green fiducials are
+    detected, and their convex hull (grown by a margin) is the board region the
+    blinking channel LEDs are searched inside - so a hand/rat elsewhere on the
+    maze never floods the blob list (ADR-0153). With a v2 map the fiducials are
+    registered against the stored constellation to recover the board pose; each
+    mapped LED is then located by the HYBRID rule (a detected blinking blob when
+    present, else its pose-transformed stored position). ``whole_frame`` (--map)
+    searches the whole frame for fiducials; ``board_rect`` is an explicit search
+    window that overrides both (a v1-style fast path / fallback).
     """
     sid = bundle_id(bundle)
     header, frames = _read_frames(bundle, sid)
     if not frames:
         raise RuntimeError(f"no frames in the sidecar for {sid}")
-    events = _read_events(bundle, sid)
+    events = _read_events(bundle, sid, serial_path)
     fps = float(header.get("fps", "25") or "25")
+    frame_size = _frame_size(header)
 
     used_map: Optional[LM.LedMap] = None
     params = LM.DetectorParams()
@@ -163,46 +200,88 @@ def analyze_bundle(bundle: str, *, start_min: float = 0.0, minutes: Optional[flo
 
     start, n = _window(frames, start_min, minutes, fps)
     win = frames[start:start + n] if n is not None else frames[start:]
-    D, (blobs, floor, grey, _rmg, got) = _scan(_video_path(bundle, sid), crop, start, n, params)
+
+    from tmaze.vision import led_detector as D
+    video = _video_path(bundle, sid)
+    ext = D.accumulate_extremes(video, crop, start, n, params)
+    got = ext.n
     if got != len(win):
         win = win[:got]
-
     tick = S.cam_tick_s(win)
     ox, oy = (crop[0], crop[1]) if crop else (0, 0)
-    blob_spans = [D.blob_spans(b.id, grey[:, b.id], win, tick) for b in blobs]
+    shape = ext.max.shape[:2]
 
-    # Register the constellation (map only) and name the blobs.
-    registration = None
+    blinking, floor = D.detect_blobs(ext, params)        # crop coords
+    # A channel LED that rests lit (beam/lick) is on ~95% of the time and would
+    # pass the persistence test; exclude anything that also blinks so only the
+    # true always-on status LEDs remain as fiducials.
+    fiducials = D.detect_fiducials(ext, params, exclude=blinking)   # crop coords
+
+    registration = None                                  # blinking-LED registration (v1)
+    fid_registration = None
+    board_poly: Optional[List[Tuple[float, float]]] = None
     led_ids: Dict[int, str] = {}
-    if used_map is not None:
-        observed = [(b.x + ox, b.y + oy) for b in blobs]
-        registration = D.register(observed, used_map.constellation(),
-                                  tol_px=max(2.0, params.nms_radius))
-        entries = used_map.leds
-        for ref_i, obs_i in registration.pairs:
-            if 0 <= ref_i < len(entries):
-                led_ids[blobs[obs_i].id] = entries[ref_i].led_id
+
+    if used_map is not None and used_map.fiducials:
+        # v2: register the fiducials -> board pose, then locate LEDs by the hybrid rule.
+        obs = [(f.x + ox, f.y + oy) for f in fiducials]
+        fid_registration = D.register(obs, used_map.fiducial_constellation(),
+                                      tol_px=max(2.0, params.nms_radius),
+                                      obs_labels=[f.color for f in fiducials],
+                                      ref_labels=used_map.fiducial_colors())
+        t = fid_registration.transform
+        if used_map.board_poly:
+            board_poly = [_apply_point(t, p) for p in used_map.board_poly]
+        expected_crop = [(lambda q: (q[0] - ox, q[1] - oy))(_apply_point(t, e.ref_px))
+                         for e in used_map.leds]
+        combined = D.hybrid_blobs(expected_crop, blinking, tol_px=max(3.0, params.nms_radius + 1))
+        blobs = [b for b, _ei, _det in combined]
+        for b, ei, _det in combined:
+            if ei is not None:
+                led_ids[b.id] = used_map.leds[ei].led_id
+    else:
+        # No map (bootstrap / --map) or a v1 map: trace the detected blinking blobs.
+        # When fiducials are present, confine the blinking blobs to the board hull
+        # so a rat/hand elsewhere is excluded even on a whole-frame --map.
+        if fiducials:
+            board_poly = LM.board_poly_around([(f.x + ox, f.y + oy) for f in fiducials],
+                                              params.hull_margin_px, frame_size)
+            blinking = [b for b in blinking if LM.point_in_poly((b.x + ox, b.y + oy), board_poly)]
+        blobs = blinking
+        if used_map is not None:                         # v1 map: register the LED constellation
+            observed = [(b.x + ox, b.y + oy) for b in blobs]
+            registration = D.register(observed, used_map.constellation(),
+                                      tol_px=max(2.0, params.nms_radius))
+            for ref_i, obs_i in registration.pairs:
+                if 0 <= ref_i < len(used_map.leds):
+                    led_ids[blobs[obs_i].id] = used_map.leds[ref_i].led_id
+
+    grey, _rmg = D.sample_traces(video, crop, start, got, blobs, shape, params)
+    blob_spans = [D.blob_spans(b.id, grey[:, i], win, tick) for i, b in enumerate(blobs)]
 
     result = pipeline.analyze(blob_spans, events, tol_s=tol_s, min_visible_s=min_visible_s,
                               min_matched=min_matched, min_pairs=min_pairs)
     return SyncRun(sid, header, blobs, floor, led_ids, result, blob_spans, events,
-                   registration, used_map, (start, got), tol_s, min_visible_s, crop)
+                   registration, used_map, (start, got), tol_s, min_visible_s, crop,
+                   fiducials=fiducials, fid_registration=fid_registration,
+                   board_poly=board_poly, frame_size=frame_size, median=ext.median())
 
 
 # ------------------------------------------------------------ led_map builder
 
 def build_led_map(run: SyncRun) -> LM.LedMap:
-    """Turn a bootstrapped run into a ``led_map.json``: every blob's full-frame
-    position, its binding when it has one, and a board rectangle around them."""
+    """Turn a mapping run into a ``led_map.json`` (schema v2): the persistent
+    red/green fiducials, the board ROI polygon (their hull), and every blinking
+    LED's full-frame position + binding."""
     ox, oy = (run.crop[0], run.crop[1]) if run.crop else (0, 0)
-    frame_size = None
-    codec_w = run.header.get("width") or run.header.get("frame_width")
-    codec_h = run.header.get("height") or run.header.get("frame_height")
-    if codec_w and codec_h:
-        try:
-            frame_size = (int(codec_w), int(codec_h))
-        except ValueError:
-            frame_size = None
+    frame_size = run.frame_size
+    fiducials: List[LM.Fiducial] = []
+    counts: Dict[str, int] = {}
+    for f in sorted(run.fiducials, key=lambda f: (round(f.y), f.x)):
+        idx = counts.get(f.color, 0)
+        counts[f.color] = idx + 1
+        fiducials.append(LM.Fiducial(f"{f.color}_{idx}",
+                                     (round(f.x + ox, 2), round(f.y + oy, 2)), f.color))
     entries: List[LM.LedEntry] = []
     taken: List[str] = []
     for b in sorted(run.blobs, key=lambda b: (round(b.y), b.x)):
@@ -215,12 +294,18 @@ def build_led_map(run: SyncRun) -> LM.LedMap:
         entries.append(LM.LedEntry(led_id, (round(b.x + ox, 2), round(b.y + oy, 2)),
                                    channel, polarity, lag))
     det = run.used_map.detector if run.used_map else LM.DetectorParams()
-    # If the search was confined to a rectangle, that IS the board rect; otherwise
-    # (a clean no-rat mapping session searched whole-frame) fit one around the LEDs.
-    rect = tuple(run.crop) if run.crop else \
-        LM.board_rect_around([e.ref_px for e in entries], det.margin_px, frame_size)
+    # The board ROI comes from the fiducials' hull; its bounding box is the search
+    # rectangle. Fall back to an explicit crop, then to a box around the LEDs.
+    board_poly = run.board_poly
+    if board_poly:
+        rect = LM.poly_bbox(board_poly)
+    elif run.crop:
+        rect = tuple(run.crop)
+    else:
+        rect = LM.board_rect_around([e.ref_px for e in entries], det.margin_px, frame_size)
     return LM.LedMap(run.sid, rect, entries, det, frame_size,
-                     datetime.now().replace(microsecond=0).isoformat())
+                     datetime.now().replace(microsecond=0).isoformat(),
+                     fiducials=fiducials, board_poly=board_poly)
 
 
 # --------------------------------------------------------------- artifacts
@@ -280,6 +365,27 @@ def write_led_events(path: str, rows: Sequence[dict], sid: str) -> None:
             w.writerow({k: ("" if r[k] is None else r[k]) for k in LED_EVENT_COLUMNS})
 
 
+def _fiducial_color_counts(fiducials) -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    for f in fiducials:
+        counts[f.color] = counts.get(f.color, 0) + 1
+    return counts
+
+
+def write_overlay(path: str, run: SyncRun) -> bool:
+    """Draw the ROI polygon + fiducials + located LEDs on the crop's median image
+    for a manual QA check against the physical marker corners (ADR-0153). Returns
+    False (no file) when OpenCV is unavailable or there is no frame to draw on."""
+    from tmaze.vision import led_detector as D
+    if D.cv2 is None or run.median is None:
+        return False
+    ox, oy = (run.crop[0], run.crop[1]) if run.crop else (0, 0)
+    poly = [(x - ox, y - oy) for x, y in run.board_poly] if run.board_poly else None
+    img = D.draw_overlay(run.median, poly, run.fiducials, run.blobs, labels=run.led_ids)
+    D.cv2.imwrite(path, img)
+    return True
+
+
 def clock_fit_dict(run: SyncRun) -> dict:
     res = run.result
     start, n = run.window
@@ -301,6 +407,13 @@ def clock_fit_dict(run: SyncRun) -> dict:
         "detector": asdict(run.used_map.detector if run.used_map else LM.DetectorParams()),
         "noise_floor": round(run.floor, 2),
         "board_rect": list(run.crop) if run.crop else None,
+        "board_poly": None if run.board_poly is None
+        else [[round(x, 2), round(y, 2)] for x, y in run.board_poly],
+        "fiducials": {
+            "n": len(run.fiducials),
+            "by_color": _fiducial_color_counts(run.fiducials),
+            "registration": run.fid_registration.to_dict() if run.fid_registration is not None else None,
+        },
         "registration": run.registration.to_dict() if run.registration is not None else None,
         "blob_verdicts": verdicts,
         "bindings": bindings,
@@ -322,18 +435,30 @@ def print_report(run: SyncRun, out: str) -> None:
     print(f"\nsession {run.sid}: codec={run.header.get('codec')} "
           f"fps={run.header.get('fps')} frames(window)={run.window[1]} "
           f"blobs={len(run.blobs)} noise_floor={run.floor:.1f}")
+    fc = _fiducial_color_counts(run.fiducials)
+    print(f"  fiducials: {len(run.fiducials)} persistent LEDs "
+          f"({fc.get('red', 0)} red, {fc.get('green', 0)} green)"
+          + ("" if run.board_poly else "  [no ROI - no fiducials found]"))
+    if run.fid_registration is not None:
+        r = run.fid_registration
+        print(f"  board pose (fiducials): {r.verdict}, {r.n_inliers}/{r.n_reference} matched, "
+              f"rms {r.rms_px:.2f} px, shift ({r.transform.tx:+.1f},{r.transform.ty:+.1f}) px, "
+              f"rot {math.degrees(r.transform.theta):+.2f} deg, scale {r.transform.scale:.3f}")
     if run.used_map is None:
         print("  no led_map.json - bootstrapped bindings from this session "
               "(run with --map to save them; then later sessions verify against it)")
-    else:
+    elif run.registration is not None:
         r = run.registration
-        print(f"  led_map {run.used_map.session_id}: registration {r.verdict}, "
+        print(f"  led_map {run.used_map.session_id} (v1): registration {r.verdict}, "
               f"{r.n_inliers}/{r.n_reference} LEDs, rms {r.rms_px:.2f} px, "
               f"shift ({r.transform.tx:+.1f},{r.transform.ty:+.1f}) px, "
               f"rot {math.degrees(r.transform.theta):+.2f} deg")
         if r.unmatched_reference:
             print(f"    silent/displaced map LEDs: "
                   f"{[run.used_map.leds[i].led_id for i in r.unmatched_reference]}")
+    else:
+        print(f"  led_map {run.used_map.session_id} (v2): "
+              f"{len(run.led_ids)} LEDs located (detected + pose-transformed fallback)")
 
     print(f"\n  {'led':>10} {'channel':>8} {'pol':>4} {'match/vis':>10} {'led':>4} "
           f"{'prec':>5} {'recall':>6} {'lag_ms':>7} {'mad':>5} {'endlag':>7}")
@@ -427,6 +552,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--board-rect", nargs=4, type=int, metavar=("X0", "Y0", "X1", "Y1"),
                     help="confine the LED search to this full-frame rectangle (build a map from a "
                          "session that still has a rat in it, or scan fast before a map exists)")
+    ap.add_argument("--serial", help="read serial events from this log instead of the bundle's "
+                    "central-only capture; use the FULL rig_logger CSV for a mapping session "
+                    "(it keeps the left/right-reward and rinse/drain valve acks the capture drops)")
     ap.add_argument("--dry-run", action="store_true",
                     help="do not touch the bundle; print the report and write artifacts to --out")
     ap.add_argument("--out", help="scratch folder for --dry-run artifacts (default <bundle>/_sync_dryrun)")
@@ -441,6 +569,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     help="fewest matched spans for a binding (raise for a full session, lower for a short window)")
     ap.add_argument("--min-pairs", type=int, default=30,
                     help="fewest edge pairs before the clock is fitted at all")
+    ap.add_argument("--overlay", action="store_true",
+                    help="also write a debug PNG (ROI + fiducials + LEDs on a still) to eyeball "
+                         "against the physical marker corners; --map writes one automatically")
     ap.add_argument("--selftest", action="store_true", help="run the synthetic self-check and exit")
     a = ap.parse_args(argv)
 
@@ -457,7 +588,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         run = analyze_bundle(a.bundle, start_min=a.start_min, minutes=minutes,
                              tol_s=a.tol_ms / 1000.0, min_visible_s=a.min_visible_ms / 1000.0,
                              whole_frame=a.map and rect is None, board_rect=rect,
-                             min_matched=a.min_matched, min_pairs=a.min_pairs)
+                             min_matched=a.min_matched, min_pairs=a.min_pairs,
+                             serial_path=a.serial)
     except (FileNotFoundError, RuntimeError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
@@ -466,12 +598,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         m = build_led_map(run)
         path = LM.save(m, a.map_out or LM.led_map_path())
         bound = sum(1 for e in m.leds if e.bound)
-        print(f"\nsession {run.sid}: {len(m.leds)} LEDs, {bound} bound, "
-              f"board_rect={m.board_rect}")
+        fc = _fiducial_color_counts(run.fiducials)
+        print(f"\nsession {run.sid}: {len(m.fiducials)} fiducials "
+              f"({fc.get('red', 0)} red, {fc.get('green', 0)} green), "
+              f"{len(m.leds)} LEDs, {bound} bound, board_rect={m.board_rect}")
         for e in m.leds:
             tag = f"{e.channel} {e.polarity}" if e.bound else "(unbound)"
             print(f"  {e.led_id:>10} at ({e.ref_px[0]:.1f},{e.ref_px[1]:.1f})  {tag}")
         print(f"\n  wrote {path}")
+        overlay_path = os.path.splitext(path)[0] + f"_overlay_{run.sid}.png"
+        if write_overlay(overlay_path, run):
+            print(f"  wrote {overlay_path}  (check the ROI lands inside the marker corners)")
         return 0
 
     if a.dry_run:
@@ -484,6 +621,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     write_led_events(events_path, led_event_rows(run), run.sid)
     write_clock_fit(fit_path, run)
     print_report(run, out_dir)
+    if a.overlay:
+        overlay_path = os.path.join(out_dir, f"led_overlay_{run.sid}.png")
+        if write_overlay(overlay_path, run):
+            print(f"  wrote {overlay_path}")
     if a.dry_run:
         print("  (dry run: the bundle itself was not modified)")
     return 0

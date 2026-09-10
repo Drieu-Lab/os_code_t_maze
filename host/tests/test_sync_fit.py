@@ -24,8 +24,9 @@ from tmaze.tools import sync_fit
 try:
     import cv2
     import numpy  # noqa: F401
+    from tmaze.vision import led_detector as D
 except Exception:  # pragma: no cover
-    cv2 = None
+    cv2 = D = None
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SID = "600_20260903_134552"
@@ -119,6 +120,19 @@ class TestPureBuilders(unittest.TestCase):
         self.assertEqual(back["session_id"], SID)
         self.assertEqual(lines[0].strip().split(","), sync_fit.LED_EVENT_COLUMNS)
 
+    def test_serial_override_keeps_noncentral_valves(self):
+        # a mapping session must read the FULL logger, whose left/right-reward and
+        # rinse/drain acks (non-central SOL ports) the bundle capture drops.
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "full.csv")
+            with open(p, "w", encoding="utf-8") as f:
+                f.write("# wall_clock_iso,firmware_line (ms,TYPE,payload...)\n")
+                f.write("2026-09-03T13:53:50.100,1000,SOL,3,1,300\n")
+                f.write("2026-09-03T13:53:51.100,2000,SOL,3,1,300\n")
+            ev = sync_fit._read_events(d, "x", serial_path=p)
+        self.assertIn("SOL3.1", ev)
+        self.assertEqual(len(ev["SOL3.1"]), 2)
+
     def test_build_led_map_from_bootstrap(self):
         m = sync_fit.build_led_map(self.run)
         self.assertEqual(m.session_id, SID)
@@ -165,7 +179,7 @@ class TestEndToEndOnClip(unittest.TestCase):
             out = os.path.join(root, "dryrun")
             # no host/led_map.json in play: point --board-rect at the clip's own
             # frame so the whole (already-cropped) board is searched, and bootstrap.
-            rc = sync_fit.main([bundle, "--dry-run", "--out", out, "--board-rect", "0", "0", "158", "152",
+            rc = sync_fit.main([bundle, "--dry-run", "--out", out, "--board-rect", "0", "0", "210", "184",
                                 "--min-matched", "2", "--min-pairs", "10"])
             self.assertEqual(rc, 0)
             ep = os.path.join(out, f"led_events_{SID}.csv")
@@ -186,7 +200,7 @@ class TestEndToEndOnClip(unittest.TestCase):
     def test_write_mode_creates_sync_folder(self):
         with tempfile.TemporaryDirectory() as root:
             bundle = _make_bundle(root)
-            rc = sync_fit.main([bundle, "--board-rect", "0", "0", "158", "152"])
+            rc = sync_fit.main([bundle, "--board-rect", "0", "0", "210", "184"])
             self.assertEqual(rc, 0)
             self.assertTrue(os.path.isfile(os.path.join(bundle, "sync", f"clock_fit_{SID}.json")))
             self.assertTrue(os.path.isfile(os.path.join(bundle, "sync", f"led_events_{SID}.csv")))
@@ -195,14 +209,68 @@ class TestEndToEndOnClip(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             bundle = _make_bundle(root)
             mp = os.path.join(root, "led_map.json")
-            rc = sync_fit.main([bundle, "--map", "--map-out", mp, "--board-rect", "0", "0", "158", "152",
+            rc = sync_fit.main([bundle, "--map", "--map-out", mp, "--board-rect", "0", "0", "210", "184",
                                 "--min-matched", "2", "--min-pairs", "10"])
             self.assertEqual(rc, 0)
             m = LM.load(mp)
+            overlay = os.path.splitext(mp)[0] + f"_overlay_{SID}.png"
+            self.assertTrue(os.path.isfile(overlay))       # --map writes the QA overlay
         self.assertEqual(m.session_id, SID)
         self.assertEqual(len(m.leds), 11)
         self.assertEqual(sum(1 for e in m.leds if e.bound), 11)
-        self.assertEqual(m.board_rect, (0, 0, 158, 152))
+        # v2 map: persistent fiducials of both colours + a board ROI polygon whose
+        # bounding box is the (fiducial-derived) search rect, inside the crop
+        self.assertGreaterEqual(len(m.fiducials), 8)
+        self.assertEqual({f.color for f in m.fiducials}, {LM.RED, LM.GREEN})
+        self.assertIsNotNone(m.board_poly)
+        x0, y0, x1, y1 = m.board_rect       # clipped to the 210x184 frame (+1 half-open)
+        self.assertTrue(0 <= x0 < x1 <= 211 and 0 <= y0 < y1 <= 185)
+        # every mapped LED lies inside the ROI polygon
+        for e in m.leds:
+            self.assertTrue(LM.point_in_poly(e.ref_px, m.board_poly), e.led_id)
+
+    def _build_map(self, root: str) -> tuple:
+        bundle = _make_bundle(root)
+        mp = os.path.join(root, "led_map.json")
+        sync_fit.main([bundle, "--map", "--map-out", mp, "--board-rect", "0", "0", "210", "184",
+                       "--min-matched", "2", "--min-pairs", "10"])
+        return bundle, mp
+
+    def test_v2_map_run_registers_pose_and_locates_every_led(self):
+        with tempfile.TemporaryDirectory() as root:
+            bundle, mp = self._build_map(root)
+            # run against the v2 map; the stored (fiducial-derived) rect drives the search
+            run = sync_fit.analyze_bundle(bundle, map_path=mp, min_matched=2, min_pairs=10)
+        self.assertIsNotNone(run.fid_registration)
+        self.assertEqual(run.fid_registration.verdict, D.REG_OK)
+        self.assertAlmostEqual(run.fid_registration.transform.scale, 1.0, delta=0.02)
+        self.assertLess(abs(run.fid_registration.transform.tx)
+                        + abs(run.fid_registration.transform.ty), 2.0)
+        self.assertIsNotNone(run.board_poly)
+        self.assertEqual(len(run.led_ids), 11)             # all 11 located (hybrid)
+        self.assertIsNotNone(run.result.fit)
+        self.assertEqual(run.result.verdict, clockfit.VERDICT_OK)
+        d = sync_fit.clock_fit_dict(run)
+        self.assertEqual(d["fiducials"]["registration"]["verdict"], D.REG_OK)
+        self.assertTrue(d["led_map"]["used"])
+
+    def test_v1_map_without_fiducials_still_registers_the_constellation(self):
+        with tempfile.TemporaryDirectory() as root:
+            bundle, mp = self._build_map(root)
+            with open(mp, encoding="utf-8") as f:
+                d = json.load(f)
+            d["schema_version"] = 1                          # downgrade to a v1 map
+            d.pop("fiducials", None)
+            d["reference"].pop("board_poly", None)
+            v1 = os.path.join(root, "led_map_v1.json")
+            with open(v1, "w", encoding="utf-8") as f:
+                json.dump(d, f)
+            run = sync_fit.analyze_bundle(bundle, map_path=v1, board_rect=(0, 0, 210, 184),
+                                          min_matched=2, min_pairs=10)
+        self.assertIsNone(run.fid_registration)            # no fiducials in a v1 map
+        self.assertIsNotNone(run.registration)             # falls back to the LED constellation
+        self.assertEqual(run.registration.verdict, D.REG_OK)
+        self.assertEqual(len(run.led_ids), 11)
 
 
 if __name__ == "__main__":
