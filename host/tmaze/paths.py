@@ -19,9 +19,11 @@ Pure stdlib; no Tk/OpenCV/serial, so cores may import this freely.
 """
 from __future__ import annotations
 
+import json
 import os
 from importlib import resources
 from pathlib import Path
+from typing import Optional
 
 _LANDMARKS = (".git", "pyproject.toml")
 
@@ -72,11 +74,17 @@ def package_data(*parts: str) -> Path:
 
 def camera_output_dir() -> Path:
     """Root folder the rig writes recordings under (camera video + the
-    per-session bundle tree). The ``TMAZE_RECORDINGS_DIR`` env var overrides the
-    machine default, so this is the single source of truth for *where recordings
-    live* - shared by the camera/session UI and the session-registry tool so they
-    can't drift (see docs/decisions/0088)."""
-    return Path(os.environ.get(_RECORDINGS_ENV) or _DEFAULT_CAMERA_OUTPUT_DIR)
+    per-session bundle tree). This is the single source of truth for *where
+    recordings live* - shared by the camera/session UI and the session-registry
+    tool so they can't drift (see docs/decisions/0088).
+
+    Precedence: the operator-picked GUI pref (persisted in ``rig_prefs.json`` via
+    the Session panel), then the ``TMAZE_RECORDINGS_DIR`` env var, then the
+    machine default. The GUI pref wins over the env var the same way the Records
+    Manager scan root does (docs/decisions/0151, extends 0088); the env var stays
+    useful for tests/other machines that have no pref file."""
+    pref = recordings_base_pref()
+    return Path(pref or os.environ.get(_RECORDINGS_ENV) or _DEFAULT_CAMERA_OUTPUT_DIR)
 
 
 def phase3_recordings_root() -> Path:
@@ -110,3 +118,77 @@ def phase3_recordings_roots() -> list[Path]:
             seen.add(key)
             out.append(p)
     return out
+
+
+# --------------------------------------------------------------------------- #
+# Machine-local GUI preferences (rig_prefs.json)
+#
+# A small git-ignored file next to the other host/*.json config that remembers
+# operator choices which must survive a restart. Kept HERE in pure ``paths`` (not
+# in a UI module) so the single-source path resolver (``camera_output_dir``) and
+# the Session panel share one file with one merge-writer, and so headless tools
+# can read the same choice. Currently two keys: ``recordings_base`` (the rig
+# recordings base folder; highest precedence in ``camera_output_dir``, extends
+# ADR-0088) and ``low_disk_warn_gb`` (the operator-configurable free-space
+# warning threshold shown on the Session panel). See docs/decisions/0151.
+_PREFS_FILENAME = "rig_prefs.json"
+
+# Default free-space warning threshold (GB) when the operator hasn't set one; the
+# deliberate value lives in the ADR, callers pass it in so there's no magic number
+# baked in here (docs/decisions/0151).
+DEFAULT_LOW_DISK_WARN_GB = 40.0
+
+
+def prefs_path() -> Path:
+    """Absolute path to the machine-local GUI-pref file (``host/rig_prefs.json``)."""
+    return host_dir() / _PREFS_FILENAME
+
+
+def read_prefs() -> dict:
+    """The machine-local GUI-pref dict (best-effort; ``{}`` if absent/unreadable)."""
+    try:
+        with open(prefs_path(), "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def write_prefs(**updates) -> None:
+    """Merge ``updates`` into the pref file, preserving the other keys
+    (best-effort; a failed write is swallowed like the other GUI-pref writers)."""
+    prefs = read_prefs()
+    prefs.update(updates)
+    try:
+        with open(prefs_path(), "w", encoding="utf-8") as fh:
+            json.dump(prefs, fh, indent=2)
+    except OSError:
+        pass
+
+
+def recordings_base_pref() -> Optional[str]:
+    """The operator-picked recordings base folder, or ``None`` if unset. Highest
+    precedence in :func:`camera_output_dir` (docs/decisions/0151, extends 0088)."""
+    val = read_prefs().get("recordings_base")
+    return val if isinstance(val, str) and val.strip() else None
+
+
+def set_recordings_base(path: str) -> None:
+    """Persist the recordings base folder the operator picked (docs/decisions/0151)."""
+    write_prefs(recordings_base=str(path))
+
+
+def low_disk_warn_gb(default: float = DEFAULT_LOW_DISK_WARN_GB) -> float:
+    """The low-disk warning threshold in GB (operator-configurable, persisted);
+    ``default`` when unset or invalid (docs/decisions/0151)."""
+    val = read_prefs().get("low_disk_warn_gb")
+    try:
+        gb = float(val)
+    except (TypeError, ValueError):
+        return float(default)
+    return gb if gb > 0 else float(default)
+
+
+def set_low_disk_warn_gb(gb: float) -> None:
+    """Persist the low-disk warning threshold in GB (docs/decisions/0151)."""
+    write_prefs(low_disk_warn_gb=float(gb))

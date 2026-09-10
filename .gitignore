@@ -22,6 +22,11 @@ host/recordings/
 # path, so per-machine not versioned - see docs/decisions/0088).
 host/records_manager.json
 
+# Rig GUI prefs (operator-picked recordings base folder + low-disk warning
+# threshold; a machine path, so per-machine not versioned - see
+# docs/decisions/0159).
+host/rig_prefs.json
+
 # Learned appearance models (per-animal .npz; binary, kept in external backup).
 # The per-rig GEOMETRY files (roi_polygon/landmarks/zones/rig_scale) are now
 # VERSIONED as fixed rig parameters - see docs/decisions/0072 (supersedes the

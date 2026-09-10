@@ -84,12 +84,14 @@ from __future__ import annotations
 
 import os
 import queue
+import shutil
 import time
 import tkinter as tk
 from datetime import datetime
-from tkinter import messagebox, simpledialog, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 from typing import Any, Callable, Optional
 
+from tmaze.core import disk_space
 from tmaze.core.records import animal_state
 from tmaze.core.records import animals
 from tmaze.core.records import daily_log
@@ -106,6 +108,7 @@ from tmaze.core.rig_config import load_rig_config
 from tmaze.core.session.session_log import SessionManifest, clock_snapshot, path_within_session
 from tmaze.core.session.session_serial import is_sensor_or_central
 from tmaze.core.session.session_timer import SessionTimer
+from tmaze import paths
 from tmaze.paths import host_dir, phase3_recordings_root
 
 # Fallback recordings root if experiment_control doesn't pass one; normally the
@@ -156,6 +159,18 @@ STAGE_OVERRIDE_CHOICES = ("", "Habituation", "Shaping", "Reversal", "Probe")
 # session is active. The camera path resolves immediately; the Phase 3 file only
 # once its gate opens (Free Roam + tracking + a zone map), so we poll for it.
 RESOLVE_INTERVAL_MS = 500
+
+# How often (ms) to re-measure free space on the recordings drive for the Session
+# panel's disk readout. Slow on purpose - disk space drifts over minutes, not
+# frames - and it runs even when no session is active so the operator sees a
+# low-space warning before pressing Start (docs/decisions/0151). The warning
+# threshold itself is operator-configurable and persisted (paths.low_disk_warn_gb).
+DISK_POLL_INTERVAL_MS = 30000
+
+# Foreground colors for the disk readout: red when at/below the warning threshold,
+# muted grey otherwise - matching the Records Manager welfare-flag palette.
+_DISK_FG_LOW = "#9C0006"
+_DISK_FG_OK = "#555"
 
 # Map a recorded video extension to the codec label recorded in the manifest.
 _CODEC_BY_EXT = {".mkv": "ffv1", ".mp4": "h264"}
@@ -233,6 +248,12 @@ class SessionControlView:
         self._manifest: Optional[SessionManifest] = None
         self._manifest_path: Optional[str] = None
         self._resolve_after: Optional[str] = None
+        # Disk-space readout (docs/decisions/0151): a StringVar for the label text,
+        # the label widget (so the poll can repaint its color), and the pending
+        # after() id so close() can cancel the standalone poll loop.
+        self._disk_var = tk.StringVar(value="Disk: ...")
+        self._disk_label: Optional[ttk.Label] = None
+        self._disk_after: Optional[str] = None
         self._learned_animal = ""         # last animal id seen on the serial stream
         # Canonical animal-id list (resources repo), loaded best-effort once so
         # Session Start can normalize/validate the entered id (docs/decisions/0075).
@@ -291,6 +312,9 @@ class SessionControlView:
         self._apply_active_liquid()
 
         self._build_ui()
+        # Standalone slow poll of the recordings drive's free space; runs whether
+        # or not a session is active (docs/decisions/0151).
+        self._schedule_disk_poll()
 
     # ------------------------------------------------------------ module API
     def widget(self) -> tk.Widget:
@@ -367,9 +391,160 @@ class SessionControlView:
             except tk.TclError:
                 pass
             self._resolve_after = None
+        if self._disk_after is not None:
+            try:
+                self.frame.after_cancel(self._disk_after)
+            except tk.TclError:
+                pass
+            self._disk_after = None
         if self._active:
             self._stop_session()
         self._close_serial()
+
+    # -------------------------------------------------------- disk-space UI
+    def _recordings_drive_path(self) -> str:
+        """The nearest EXISTING folder at/above the recordings root, so
+        ``shutil.disk_usage`` can measure the drive even before the session tree
+        is created. Walks up parents; falls back to the drive root."""
+        path = self._recordings_root
+        while path and not os.path.isdir(path):
+            parent = os.path.dirname(path)
+            if not parent or parent == path:
+                break
+            path = parent
+        return path or os.path.abspath(os.sep)
+
+    def _update_disk_free(self) -> None:
+        """Measure free space on the recordings drive and paint the readout red
+        below the operator's threshold (docs/decisions/0151). Best-effort: any
+        measurement error shows as "unknown" rather than crashing the panel."""
+        try:
+            free_bytes: Optional[int] = shutil.disk_usage(
+                self._recordings_drive_path()).free
+        except OSError:
+            free_bytes = None
+        status = disk_space.disk_status(free_bytes, paths.low_disk_warn_gb())
+        self._disk_var.set(status.text)
+        if self._disk_label is not None:
+            try:
+                self._disk_label.config(
+                    foreground=_DISK_FG_LOW if status.is_low else _DISK_FG_OK)
+            except tk.TclError:
+                pass
+
+    def _schedule_disk_poll(self) -> None:
+        """Self-rescheduling slow poll of the recordings drive's free space; runs
+        regardless of session state until the panel is closed."""
+        if self._closed:
+            return
+        try:
+            self._update_disk_free()
+        finally:
+            try:
+                self._disk_after = self.frame.after(
+                    DISK_POLL_INTERVAL_MS, self._schedule_disk_poll)
+            except tk.TclError:
+                self._disk_after = None
+
+    def _open_storage_dialog(self) -> None:
+        """Popup to view/change the recordings base folder AND the low-disk
+        warning threshold, both persisted in rig_prefs.json (docs/decisions/0151).
+        A folder change is refused mid-session (bundles are being written); a
+        threshold change is always allowed."""
+        dlg = tk.Toplevel(self.frame)
+        dlg.title("Storage")
+        dlg.transient(self.frame.winfo_toplevel())
+
+        # Current base folder is the single source of truth (paths.camera_output_dir);
+        # session bundles live under <base>/phase3_recordings (ADR-0088/0049).
+        base_var = tk.StringVar(value=str(paths.camera_output_dir()))
+        warn_var = tk.StringVar(value=f"{paths.low_disk_warn_gb():g}")
+
+        pad = {"padx": 8, "pady": 4}
+        frm = ttk.Frame(dlg)
+        frm.pack(fill="both", expand=True)
+
+        ttk.Label(frm, text="Recordings folder (base):").grid(
+            row=0, column=0, columnspan=3, sticky="w", **pad)
+        ttk.Entry(frm, textvariable=base_var, width=48).grid(
+            row=1, column=0, columnspan=2, sticky="we", padx=8)
+
+        def _browse() -> None:
+            chosen = filedialog.askdirectory(
+                parent=dlg, initialdir=base_var.get() or None,
+                title="Choose recordings base folder")
+            if chosen:
+                base_var.set(chosen)
+
+        ttk.Button(frm, text="Browse...", command=_browse).grid(
+            row=1, column=2, padx=(4, 8))
+        ttk.Label(frm, text="Session bundles are written under "
+                            "<folder>\\phase3_recordings.",
+                  font=("TkDefaultFont", 8), foreground="#777").grid(
+            row=2, column=0, columnspan=3, sticky="w", **pad)
+
+        ttk.Separator(frm, orient="horizontal").grid(
+            row=3, column=0, columnspan=3, sticky="we", padx=8, pady=(2, 2))
+
+        ttk.Label(frm, text="Warn when free space below (GB):").grid(
+            row=4, column=0, sticky="w", **pad)
+        ttk.Entry(frm, textvariable=warn_var, width=8).grid(
+            row=4, column=1, sticky="w", padx=(0, 8))
+
+        note = ("A folder change applies to the NEXT session (this session keeps "
+                "writing where it started) and fully to camera/tools on the next "
+                "launch.")
+        ttk.Label(frm, text=note, font=("TkDefaultFont", 8), foreground="#777",
+                  wraplength=380, justify="left").grid(
+            row=5, column=0, columnspan=3, sticky="w", **pad)
+
+        btns = ttk.Frame(frm)
+        btns.grid(row=6, column=0, columnspan=3, sticky="e", **pad)
+
+        def _save() -> None:
+            # Threshold first (always allowed, even mid-session).
+            raw = warn_var.get().strip()
+            try:
+                warn_gb = float(raw)
+                if warn_gb <= 0:
+                    raise ValueError
+            except ValueError:
+                messagebox.showwarning(
+                    "Storage", "Enter a positive number of GB for the warning "
+                    "threshold.", parent=dlg)
+                return
+            paths.set_low_disk_warn_gb(warn_gb)
+
+            # Folder change: only if it actually changed, and never mid-session.
+            new_base = base_var.get().strip()
+            old_base = str(paths.camera_output_dir())
+            if new_base and os.path.normcase(os.path.normpath(new_base)) != \
+                    os.path.normcase(os.path.normpath(old_base)):
+                if self._active:
+                    messagebox.showwarning(
+                        "Storage", "Can't change the recordings folder while a "
+                        "session is running. The warning threshold was saved.",
+                        parent=dlg)
+                    self._update_disk_free()
+                    dlg.destroy()
+                    return
+                paths.set_recordings_base(new_base)
+                # Point the live panel at the new base so the NEXT session and the
+                # disk readout use it immediately, without a restart.
+                self._recordings_root = os.path.join(new_base, "phase3_recordings")
+            self._update_disk_free()
+            dlg.destroy()
+
+        ttk.Button(btns, text="Cancel", command=dlg.destroy).pack(
+            side="right", padx=(4, 0))
+        ttk.Button(btns, text="Save", command=_save).pack(side="right")
+
+        frm.columnconfigure(0, weight=1)
+        dlg.bind("<Escape>", lambda _e: dlg.destroy())
+        try:
+            dlg.grab_set()
+        except tk.TclError:
+            pass
 
     # ------------------------------------------------------------------- UI
     def _build_ui(self) -> None:
@@ -425,6 +600,20 @@ class SessionControlView:
         ttk.Combobox(meta, textvariable=self._stage_override_var,
                      values=STAGE_OVERRIDE_CHOICES, width=11).pack(
             side="left", padx=(2, 0))
+
+        # Free-space readout for the recordings drive + a Storage... popup to
+        # change where bundles are saved and the low-space warning threshold. Kept
+        # to one grid row so the full-height Rig view gains minimal height
+        # (docs/decisions/0073/0079/0151). The label color flips to red below the
+        # threshold; the poll (started in __init__) keeps both current.
+        storage = ttk.Frame(root)
+        storage.grid(row=3, column=0, columnspan=3, sticky="w", padx=6, pady=(0, 4))
+        self._disk_label = ttk.Label(storage, textvariable=self._disk_var,
+                                     font=("TkDefaultFont", 8))
+        self._disk_label.pack(side="left")
+        ttk.Button(storage, text="Storage...", width=10,
+                   command=self._open_storage_dialog).pack(side="left", padx=(8, 0))
+        self._update_disk_free()
 
         # Quick-stamp hotkey: mark the moment on the shared timeline without
         # opening the dialog (text can be filled in later). Bound on the toplevel
