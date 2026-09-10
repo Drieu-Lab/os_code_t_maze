@@ -25,7 +25,9 @@ import time
 import tkinter as tk
 import unittest
 
-from tmaze.core.maze_state import CENTRAL_STEM, HUB, RatState
+from tmaze.core.maze_state import (
+    CENTRAL_STEM, HUB, IN_WELL, LEFT_CHOICE, RIGHT_CHOICE, UP_STEM, RatState)
+from tmaze.core.phase3.trial_sequence import TrialConfig
 from tmaze.ui.phase3_controller import DATA_DIR, Phase3ControlView
 from tmaze.ui.session_controller import SessionControlView
 
@@ -298,6 +300,66 @@ class SessionPhase3WiringTest(unittest.TestCase):
         self.assertNotIn("task", self.phase3._write_errors)
         self.phase3._publish_status(self.phase3._act_snapshot)
         self.assertNotIn("DISK WRITE FAILED", self.phase3._status_text)
+
+    # ---------------------------------------------- auto-extend (ADR-0150)
+    def _feed(self, state):
+        """Publish the gate snapshot then fold one synthetic frame, exactly as the
+        Tk poll + actuation loop do."""
+        self.phase3._publish_snapshot()
+        self.phase3._process_act_item(("frame", _Bundle(state)),
+                                      self.phase3._act_snapshot)
+
+    def _run_full_trial(self, side):
+        """Drive one COMPLETE trial through the real vision->task path: hub departure
+        up the stem (trial start + choice cue), a choice-arm entry (scored on the
+        shared choice-commit edge), and the return lap closing at the hub (advances
+        the trial). ``side`` is "left"/"right"."""
+        choice_zone = LEFT_CHOICE if side == "left" else RIGHT_CHOICE
+        frames = (
+            # Home at the well: re-arms the per-trip latches (excursion + stem).
+            RatState(zone=HUB, substate=IN_WELL, valid=True, confidence=1.0),
+            # Depart the hub UP the stem: trial-start edge + the CHOICE cue window.
+            RatState(zone=CENTRAL_STEM, direction=UP_STEM, entered=CENTRAL_STEM,
+                     exited=HUB, valid=True, confidence=1.0),
+            # Enter the choice arm: the once-per-trip choice-commit edge -> scored.
+            RatState(zone=choice_zone, entered=choice_zone, valid=True,
+                     confidence=1.0),
+            # Close the lap back at the hub: advances the trial index.
+            RatState(zone=HUB, substate=IN_WELL, entered=HUB, exited=choice_zone,
+                     loop_completed=True, loop_side=side, valid=True,
+                     confidence=1.0),
+        )
+        for state in frames:
+            self._feed(state)
+
+    def test_plan_auto_extends_when_rat_outpaces_it(self):
+        """ADR-0150: a rat that runs past the planned trial count keeps going - the
+        plan auto-extends one balanced block ahead, trials past the original count
+        are still scored, and NO identity-less (full-blast) cue is ever sent."""
+        # A deliberately tiny plan so a handful of trials overruns it.
+        self.phase3._current_trial_config = lambda: TrialConfig(
+            max_trials=2, block_size=2, max_same_run=0)
+        sends = []
+        self.phase3._send = sends.append
+
+        self._open_gate()
+        for _ in range(4):                     # 4 > the 2 planned trials
+            self._run_full_trial("left")
+
+        # The plan grew past the initial max_trials (append-only extension).
+        self.assertGreater(len(self.phase3._seq), 2)
+        self.assertGreater(len(self.phase3.published_state().rows), 2)
+        # Every one of the four trials was scored - none stranded in a "complete"
+        # dead state past the original boundary.
+        self.assertEqual(self.phase3._correct + self.phase3._incorrect, 4)
+
+        # Cues fired with a real identity (hz + gain) throughout, and never as a
+        # bare "CUE_ON,CHOICE"/"CUE_ON,RETURN" (the firmware full-volume low-tone
+        # fallback the guard prevents).
+        self.assertTrue(any(s.startswith("CUE_ON,CHOICE,") for s in sends),
+                        "expected at least one identity-carrying choice cue")
+        self.assertNotIn("CUE_ON,CHOICE", sends)
+        self.assertNotIn("CUE_ON,RETURN", sends)
 
     def test_manifest_never_records_a_file_outside_the_session(self):
         """The backstop, independent of the rebind: a reported path from outside

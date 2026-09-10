@@ -979,30 +979,41 @@ class Phase3ControlView(VisionActuator):
                             outbound, on_leg)
         if d.started == CHOICE:
             freq = self._task.current_choice_freq()
-            # Command the frequency-corrected tone so the speaker EMITS the target,
-            # but key the volume balance to the TARGET freq (ADR-0148 extends 0125).
-            cf = cue_calibration.commanded_hz_for(freq)
-            self._send_cmd(f"CUE_ON,CHOICE,{cf},{cue_calibration.gain_pct_for(freq)}"
-                           if freq is not None else "CUE_ON,CHOICE")
-            self._active_cue = CHOICE
-            # Remember this trip's cue-on stamp so a scored excursion can carry the
-            # relative cue-zone dwell (ADR-0108/0109).
-            self._choice_cue_on_iso = iso
-            self._log_call(lambda: self._log.choice_cue_started(idx, iso))
-            changed = True
+            # No valid trial identity (plan exhausted / index out of range) => start
+            # NO cue. Auto-extend normally keeps identity valid, but this is the
+            # belt-and-suspenders guard: a bare "CUE_ON,CHOICE" makes the firmware
+            # play its full-volume LOW-tone fallback (cueFor(-1)) with no calibrated
+            # gain, so a completed session would blast a wrong cue on every
+            # excursion (docs/decisions/0150).
+            if freq is not None:
+                # Command the frequency-corrected tone so the speaker EMITS the
+                # target, but key the volume balance to the TARGET freq (ADR-0148
+                # extends 0125).
+                cf = cue_calibration.commanded_hz_for(freq)
+                self._send_cmd(
+                    f"CUE_ON,CHOICE,{cf},{cue_calibration.gain_pct_for(freq)}")
+                self._active_cue = CHOICE
+                # Remember this trip's cue-on stamp so a scored excursion can carry
+                # the relative cue-zone dwell (ADR-0108/0109).
+                self._choice_cue_on_iso = iso
+                self._log_call(lambda: self._log.choice_cue_started(idx, iso))
+                changed = True
         elif d.started == RETURN:
             # Identity now comes from this arm's planned return schedule, looked up
             # by the PHYSICAL return arm the rat entered (ADR-0047).
             side = _SIDE_OF_ARM.get(d.return_arm)
             freq = self._seq.return_freq(side, idx) if side is not None else None
             cue = self._seq.return_cue(side, idx) if side is not None else None
-            cf = cue_calibration.commanded_hz_for(freq)
-            self._send_cmd(f"CUE_ON,RETURN,{cf},{cue_calibration.gain_pct_for(freq)}"
-                           if freq is not None else "CUE_ON,RETURN")
-            self._active_cue = RETURN
-            self._log_call(lambda: self._log.return_cue_started(
-                idx, d.return_arm or "", cue, iso))
-            changed = True
+            # Same guard as CHOICE: no valid return identity => start no cue rather
+            # than a full-volume bare "CUE_ON,RETURN" (docs/decisions/0150).
+            if freq is not None:
+                cf = cue_calibration.commanded_hz_for(freq)
+                self._send_cmd(
+                    f"CUE_ON,RETURN,{cf},{cue_calibration.gain_pct_for(freq)}")
+                self._active_cue = RETURN
+                self._log_call(lambda: self._log.return_cue_started(
+                    idx, d.return_arm or "", cue, iso))
+                changed = True
         elif d.stopped:
             self._send_cmd("CUE_OFF")
             if self._active_cue == CHOICE:
@@ -1076,6 +1087,18 @@ class Phase3ControlView(VisionActuator):
             # score fold so a scored stem trip's choice_time (this frame's iso) is
             # available for the relative cue-zone dwell.
             self._append_excursion(task_frame, idx, iso)
+
+        # Auto-extend the plan one balanced block AHEAD so a rat that outpaces the
+        # planned trial count keeps running with correct cue identity / calibrated
+        # volume / scoring / reward, instead of hitting a degenerate "complete"
+        # state (the plan runs out; docs/decisions/0150, extends 0059). One extend
+        # per boundary: appending a block grows len(seq) by block_size, so this is
+        # immediately false again and won't re-fire until the animal advances a
+        # whole block later. Keeping the plan exactly one step ahead also caps the
+        # trailing empty planned rows in the CSV at block_size - 1 (same footprint
+        # as today's fixed plan).
+        if self._seq is not None and self._task.index >= len(self._seq) - 1:
+            self._extend_trials(snap)
 
         if changed:
             # Re-align the display cues of the current + upcoming (not-yet-run)
