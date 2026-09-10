@@ -265,7 +265,7 @@ class TestLedMap(unittest.TestCase):
             with open(p, encoding="utf-8") as f:
                 raw = json.load(f)
             self.assertEqual(LM.load(p).to_dict(), m.to_dict())
-        self.assertEqual(raw["schema_version"], 1)
+        self.assertEqual(raw["schema_version"], 2)
         self.assertEqual(back.session_id, m.session_id)
         self.assertEqual(back.board_rect, m.board_rect)
         self.assertEqual(back.frame_size, (1280, 1024))
@@ -295,6 +295,79 @@ class TestLedMap(unittest.TestCase):
         self.assertEqual(LM.led_id_for("S3=0", "dark", taken, 8), "S3_b")
         self.assertEqual(LM.led_id_for("SOL2.1", "lit", [], 0), "SOL2.1_a")
         self.assertEqual(LM.led_id_for(None, None, [], 11), "blob_11")
+
+    # --------------------------------------------------- fiducials + ROI (v2)
+
+    def _fid_map(self) -> LM.LedMap:
+        return LM.LedMap("600_20260903_134552", (826, 570, 1004, 740), [
+            LM.LedEntry("SOL2.1_a", (900.0, 640.0), "SOL2.1", "lit", 0.031),
+        ], LM.DetectorParams(), (1280, 1024), "2026-09-10", fiducials=[
+            LM.Fiducial("red_0", (840.0, 590.0), LM.RED),
+            LM.Fiducial("green_0", (980.0, 600.0), LM.GREEN),
+            LM.Fiducial("red_1", (860.0, 720.0), LM.RED),
+            LM.Fiducial("green_1", (975.0, 715.0), LM.GREEN),
+        ], board_poly=[(830.0, 585.0), (985.0, 595.0), (980.0, 725.0), (855.0, 730.0)])
+
+    def test_fiducials_round_trip(self):
+        m = self._fid_map()
+        with tempfile.TemporaryDirectory() as d:
+            p = LM.save(m, os.path.join(d, "led_map.json"))
+            back = LM.load(p)
+            with open(p, encoding="utf-8") as f:
+                raw = json.load(f)
+            self.assertEqual(LM.load(p).to_dict(), m.to_dict())
+        self.assertEqual(raw["schema_version"], 2)
+        self.assertEqual([f.fid_id for f in back.fiducials], ["red_0", "green_0", "red_1", "green_1"])
+        self.assertEqual(back.fiducial_colors(), [LM.RED, LM.GREEN, LM.RED, LM.GREEN])
+        self.assertEqual(back.fiducial_constellation()[0], (840.0, 590.0))
+        self.assertEqual(back.board_poly[0], (830.0, 585.0))
+
+    def test_v1_map_still_loads_without_fiducials(self):
+        v1 = self._map().to_dict()
+        v1["schema_version"] = 1
+        v1.pop("fiducials", None)
+        v1["reference"].pop("board_poly", None)
+        back = LM.from_dict(v1)
+        self.assertEqual(back.fiducials, [])
+        self.assertIsNone(back.board_poly)
+        self.assertEqual(len(back.leds), 3)          # blinking-LED registration still available
+
+    def test_fiducial_validation_catches_typos(self):
+        good = self._fid_map().to_dict()
+        bad_color = json.loads(json.dumps(good)); bad_color["fiducials"][0]["color"] = "blue"
+        dup = json.loads(json.dumps(good)); dup["fiducials"][1]["fid_id"] = "red_0"
+        short_poly = json.loads(json.dumps(good)); short_poly["reference"]["board_poly"] = [[1, 2], [3, 4]]
+        for d in (bad_color, dup, short_poly):
+            with self.assertRaises(ValueError):
+                LM.from_dict(d)
+
+    def test_convex_hull_ignores_interior_points(self):
+        square = [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0), (5.0, 5.0)]
+        hull = LM.convex_hull(square)
+        self.assertEqual(set(hull), {(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)})
+        self.assertEqual(LM.poly_bbox(hull), (0, 0, 11, 11))
+
+    def test_point_in_poly(self):
+        poly = [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)]
+        self.assertTrue(LM.point_in_poly((5.0, 5.0), poly))
+        self.assertFalse(LM.point_in_poly((15.0, 5.0), poly))
+        self.assertFalse(LM.point_in_poly((-1.0, 5.0), poly))
+
+    def test_board_poly_around_grows_outward_and_contains_the_points(self):
+        pts = [(20.0, 20.0), (40.0, 22.0), (38.0, 42.0), (18.0, 40.0), (30.0, 30.0)]
+        poly = LM.board_poly_around(pts, margin_px=6, frame_size=(100, 100))
+        for p in pts:                                # every fiducial stays inside the ROI
+            self.assertTrue(LM.point_in_poly(p, poly), p)
+        # the ROI is strictly larger than the bare hull's bounding box
+        hb = LM.poly_bbox(LM.convex_hull(pts))
+        pb = LM.poly_bbox(poly)
+        self.assertLess(pb[0], hb[0])
+        self.assertGreater(pb[2], hb[2])
+
+    def test_board_poly_around_falls_back_to_rect_when_degenerate(self):
+        poly = LM.board_poly_around([(5.0, 5.0), (9.0, 9.0)], margin_px=3, frame_size=(50, 50))
+        self.assertEqual(len(poly), 4)               # a rectangle when the hull is a line
+        self.assertTrue(LM.point_in_poly((7.0, 7.0), poly))
 
 
 if __name__ == "__main__":

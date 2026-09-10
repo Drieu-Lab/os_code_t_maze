@@ -27,20 +27,29 @@ themselves are only ever touched in ``tmaze.vision.led_detector``.
 from __future__ import annotations
 
 import json
+import math
 import os
 from dataclasses import asdict, dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from tmaze.paths import host_dir
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+SUPPORTED_SCHEMA_VERSIONS = (1, 2)
 LED_MAP_FILENAME = "led_map.json"
-_SCHEMA_NOTE = ("tmaze led_map v1 - which board indicator LED mirrors which serial channel, "
-                "and where it sits (full-frame px) in the reference session. Written by "
+_SCHEMA_NOTE = ("tmaze led_map v2 - which board indicator LED mirrors which serial channel, "
+                "and where it sits (full-frame px) in the reference session, plus the "
+                "persistently-lit red/green fiducial LEDs whose hull is the board ROI and "
+                "whose pattern gives the board pose. Written by "
                 "`python -m tmaze.tools.sync_fit --map`; see docs/design/cross-stream-sync-design.md "
                 "sections 3.1/3.4 and tmaze/core/sync/led_map.py.")
 
 LIT, DARK = "lit", "dark"
+# The persistent fiducial colours (see docs/glossary.md 'fiducial'). Neutral/white
+# retroreflective markers are NOT detected - they stay a physical QA reference the
+# operator eyeballs against the debug overlay (ADR-0153).
+RED, GREEN = "red", "green"
+FIDUCIAL_COLORS = (RED, GREEN)
 
 
 def led_map_path() -> str:
@@ -63,6 +72,14 @@ class DetectorParams:
     ring_in/out  - background ring radii (px) subtracted from the disk mean.
     sample_every - frame stride for the median image (every 10th frame).
     margin_px    - how far beyond the LEDs the board_rect is widened.
+    fid_thresh   - min persistent colour contrast (red-minus-green or the reverse,
+                   grey levels) for a pixel to count as a steady red/green fiducial.
+    fid_min_frac - a fiducial must be lit in at least this FRACTION of the sampled
+                   frames; the persistence test that rejects a hand/rat that is
+                   only briefly bright (ADR-0153). The detector reads the
+                   100*(1-frac)-th percentile of each pixel's colour contrast.
+    hull_margin_px - how far the fiducial convex hull is grown outward to form the
+                   board ROI polygon (must clear the ring radius for edge LEDs).
     """
     blob_thresh: float = 30.0
     min_area: int = 2
@@ -72,6 +89,9 @@ class DetectorParams:
     ring_out: int = 9
     sample_every: int = 10
     margin_px: int = 24
+    fid_thresh: float = 25.0
+    fid_min_frac: float = 0.9
+    hull_margin_px: int = 16
 
 
 @dataclass(frozen=True)
@@ -88,6 +108,17 @@ class LedEntry:
         return self.channel is not None
 
 
+@dataclass(frozen=True)
+class Fiducial:
+    """One persistently-lit red/green board LED (schema v2). Its ``ref_px`` in the
+    reference session; ``color`` is 'red' or 'green'. Together the fiducials form
+    the point set whose convex hull is the board ROI and whose pattern registration
+    matches to recover the board pose (ADR-0153)."""
+    fid_id: str
+    ref_px: Tuple[float, float]
+    color: str
+
+
 @dataclass
 class LedMap:
     session_id: str
@@ -96,11 +127,23 @@ class LedMap:
     detector: DetectorParams = field(default_factory=DetectorParams)
     frame_size: Optional[Tuple[int, int]] = None      # (width, height) of the reference frame
     created: str = ""
+    fiducials: List[Fiducial] = field(default_factory=list)     # persistent red/green LEDs (v2)
+    board_poly: Optional[List[Tuple[float, float]]] = None      # ROI outline = fiducial hull + margin (v2)
 
     def constellation(self) -> List[Tuple[float, float]]:
         """Every LED's reference pixel position, bound or not - the point set
         registration matches each session's blobs against."""
         return [e.ref_px for e in self.leds]
+
+    def fiducial_constellation(self) -> List[Tuple[float, float]]:
+        """Every fiducial's reference pixel position - the persistent-LED point set
+        that registration matches to recover the board pose (v2)."""
+        return [f.ref_px for f in self.fiducials]
+
+    def fiducial_colors(self) -> List[str]:
+        """The colour label of each fiducial, parallel to :meth:`fiducial_constellation`
+        (a same-colour matching constraint for registration)."""
+        return [f.color for f in self.fiducials]
 
     def by_id(self) -> Dict[str, LedEntry]:
         return {e.led_id: e for e in self.leds}
@@ -112,10 +155,17 @@ class LedMap:
             "reference": {
                 "session_id": self.session_id,
                 "board_rect": list(self.board_rect),
+                "board_poly": None if self.board_poly is None
+                else [[round(x, 2), round(y, 2)] for x, y in self.board_poly],
                 "frame_size": list(self.frame_size) if self.frame_size else None,
                 "created": self.created,
             },
             "detector": asdict(self.detector),
+            "fiducials": [{
+                "fid_id": f.fid_id,
+                "ref_px": [round(f.ref_px[0], 2), round(f.ref_px[1], 2)],
+                "color": f.color,
+            } for f in self.fiducials],
             "leds": [{
                 "led_id": e.led_id,
                 "ref_px": [round(e.ref_px[0], 2), round(e.ref_px[1], 2)],
@@ -136,14 +186,46 @@ def _rect(v: Sequence) -> Tuple[int, int, int, int]:
     return x0, y0, x1, y1
 
 
+def _poly(v: Optional[Sequence]) -> Optional[List[Tuple[float, float]]]:
+    """Validate an optional board_poly: absent/None, or >=3 [x, y] points."""
+    if v is None:
+        return None
+    if not isinstance(v, (list, tuple)) or len(v) < 3:
+        raise ValueError(f"board_poly must be null or >=3 [x, y] points, got {v!r}")
+    out: List[Tuple[float, float]] = []
+    for i, p in enumerate(v):
+        if not isinstance(p, (list, tuple)) or len(p) != 2:
+            raise ValueError(f"board_poly[{i}] must be [x, y], got {p!r}")
+        out.append((float(p[0]), float(p[1])))
+    return out
+
+
 def from_dict(d: dict) -> LedMap:
-    """Build a LedMap from parsed JSON, checking the parts a typo would break."""
+    """Build a LedMap from parsed JSON, checking the parts a typo would break.
+
+    Both schema v1 (no fiducials/board_poly) and v2 load, so a map written before
+    the fiducial upgrade still registers via the blinking-LED constellation."""
     ver = d.get("schema_version")
-    if ver != SCHEMA_VERSION:
-        raise ValueError(f"led_map schema_version {ver!r} is not {SCHEMA_VERSION}")
+    if ver not in SUPPORTED_SCHEMA_VERSIONS:
+        raise ValueError(f"led_map schema_version {ver!r} is not one of {SUPPORTED_SCHEMA_VERSIONS}")
     ref = d.get("reference") or {}
     det = DetectorParams(**{k: v for k, v in (d.get("detector") or {}).items()
                             if k in DetectorParams.__dataclass_fields__})
+    fiducials: List[Fiducial] = []
+    seen_fid: set = set()
+    for i, e in enumerate(d.get("fiducials") or []):
+        fid_id = str(e.get("fid_id") or "")
+        if not fid_id or fid_id in seen_fid:
+            raise ValueError(f"fiducials[{i}]: fid_id missing or duplicated ({fid_id!r})")
+        seen_fid.add(fid_id)
+        px = e.get("ref_px")
+        if not isinstance(px, (list, tuple)) or len(px) != 2:
+            raise ValueError(f"fiducials[{i}] ({fid_id}): ref_px must be [x, y]")
+        color = e.get("color")
+        if color not in FIDUCIAL_COLORS:
+            raise ValueError(f"fiducials[{i}] ({fid_id}): color must be one of "
+                             f"{FIDUCIAL_COLORS}, got {color!r}")
+        fiducials.append(Fiducial(fid_id, (float(px[0]), float(px[1])), color))
     leds: List[LedEntry] = []
     seen: set = set()
     for i, e in enumerate(d.get("leds") or []):
@@ -165,7 +247,8 @@ def from_dict(d: dict) -> LedMap:
                              str(e.get("note") or "")))
     fs = ref.get("frame_size")
     return LedMap(str(ref.get("session_id") or ""), _rect(ref.get("board_rect") or []), leds, det,
-                  None if not fs else (int(fs[0]), int(fs[1])), str(ref.get("created") or ""))
+                  None if not fs else (int(fs[0]), int(fs[1])), str(ref.get("created") or ""),
+                  fiducials, _poly(ref.get("board_poly")))
 
 
 def load(path: Optional[str] = None) -> LedMap:
@@ -197,6 +280,88 @@ def board_rect_around(points: Sequence[Tuple[float, float]], margin_px: int,
         x0, y0 = max(0, x0), max(0, y0)
         x1, y1 = min(frame_size[0], x1), min(frame_size[1], y1)
     return x0, y0, x1, y1
+
+
+# ------------------------------------------------------------ ROI geometry (v2)
+# Pure Python (no numpy) so the core stays shell-free (ADR-0083 / test_architecture);
+# the vision layer calls these to build/apply the board ROI from the fiducials.
+
+def convex_hull(points: Sequence[Tuple[float, float]]) -> List[Tuple[float, float]]:
+    """The convex hull of a point set (Andrew's monotone chain), as its vertices.
+    Returns the input (de-duplicated, sorted) when there are fewer than 3 points."""
+    pts = sorted(set((float(x), float(y)) for x, y in points))
+    if len(pts) < 3:
+        return pts
+
+    def cross(o, a, b) -> float:
+        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+
+    lower: List[Tuple[float, float]] = []
+    for p in pts:
+        while len(lower) >= 2 and cross(lower[-2], lower[-1], p) <= 0:
+            lower.pop()
+        lower.append(p)
+    upper: List[Tuple[float, float]] = []
+    for p in reversed(pts):
+        while len(upper) >= 2 and cross(upper[-2], upper[-1], p) <= 0:
+            upper.pop()
+        upper.append(p)
+    return lower[:-1] + upper[:-1]
+
+
+def poly_bbox(poly: Sequence[Tuple[float, float]]) -> Tuple[int, int, int, int]:
+    """The integer bounding box ``(x0, y0, x1, y1)`` (half-open) of a polygon -
+    the fast crop the vision layer searches before masking to the polygon."""
+    if not poly:
+        raise ValueError("empty polygon")
+    xs = [p[0] for p in poly]
+    ys = [p[1] for p in poly]
+    return int(min(xs)), int(min(ys)), int(max(xs)) + 1, int(max(ys)) + 1
+
+
+def point_in_poly(pt: Tuple[float, float], poly: Sequence[Tuple[float, float]]) -> bool:
+    """Ray-casting point-in-polygon test (True when ``pt`` is inside ``poly``)."""
+    x, y = pt
+    n = len(poly)
+    inside = False
+    j = n - 1
+    for i in range(n):
+        xi, yi = poly[i]
+        xj, yj = poly[j]
+        if (yi > y) != (yj > y):
+            x_cross = (xj - xi) * (y - yi) / (yj - yi) + xi
+            if x < x_cross:
+                inside = not inside
+        j = i
+    return inside
+
+
+def board_poly_around(points: Sequence[Tuple[float, float]], margin_px: int,
+                      frame_size: Optional[Tuple[int, int]] = None
+                      ) -> List[Tuple[float, float]]:
+    """The board ROI outline for a set of fiducials: their convex hull, grown
+    outward by ``margin_px`` (each vertex pushed away from the hull centroid),
+    clipped to the frame. Falls back to the rectangle when the hull is degenerate
+    (fewer than 3 non-collinear points)."""
+    if not points:
+        raise ValueError("no points to build a board_poly from")
+    hull = convex_hull(points)
+    if len(hull) < 3:
+        x0, y0, x1, y1 = board_rect_around(points, margin_px, frame_size)
+        return [(float(x0), float(y0)), (float(x1), float(y0)),
+                (float(x1), float(y1)), (float(x0), float(y1))]
+    cx = sum(p[0] for p in hull) / len(hull)
+    cy = sum(p[1] for p in hull) / len(hull)
+    out: List[Tuple[float, float]] = []
+    for x, y in hull:
+        dx, dy = x - cx, y - cy
+        d = math.hypot(dx, dy) or 1.0
+        nx, ny = x + dx / d * margin_px, y + dy / d * margin_px
+        if frame_size:
+            nx = min(max(0.0, nx), float(frame_size[0]))
+            ny = min(max(0.0, ny), float(frame_size[1]))
+        out.append((round(nx, 2), round(ny, 2)))
+    return out
 
 
 def led_id_for(channel: Optional[str], polarity: Optional[str], taken: Sequence[str],
