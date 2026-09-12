@@ -112,6 +112,11 @@ _BUILDER_TIMEOUT_S = 180
 # imperceptible to the operator but keeps the poll loop cheap (docs/decisions/0163).
 _ASYNC_POLL_MS = 100
 
+# How often to check whether the records files changed on disk under us (ms). A
+# few seconds is responsive enough to catch an Excel build / hand edit without
+# stat-ing the files busily.
+_FILE_WATCH_MS = 4000
+
 # A small starter vocabulary of common per-session procedures for the Sessions
 # annotation checklist (Phase B). Ticking one adds it as a line in the free-text
 # "Common procedures" box; the operator can still type anything else. This is a
@@ -171,6 +176,20 @@ _DAILY_TREE_COLUMNS = (
 # for a single selected rat. Bounded so old history doesn't fill with placeholders.
 _DAILY_MISSING_LOOKBACK_DAYS = 14
 
+# Hover text for the Daily table's non-obvious / derived column headings (QoL).
+_DAILY_HEADING_TIPS = {
+    "day": "Weekday of the date (derived).",
+    "wt_delta": "Day-over-day weight change in grams (derived).",
+    "pct_baseline": "Weight / baseline as a percentage (derived; <90% is red).",
+    "supp_water_ml": "Supplemental water hand-given, in mL (numeric; v4).",
+    "supp_access_min": "Minutes of free bottle access (numeric; v4).",
+    "supp_water": "Legacy free-text supplemental cell - read-only, "
+                  "not counted; split it into the two numeric cells.",
+    "water_regime": "restriction (default) vs ad_lib (off-restriction).",
+    "water_method": "How restricted water was delivered "
+                    "(timed_access / measured_bottle / task_earned).",
+}
+
 # Sentinel in the "Mark span" dialog's regime/method dropdowns meaning "don't
 # touch this field over the span" (so a bulk regime mark doesn't clear methods).
 # Defined in the core so span_edits and the dialog agree on it.
@@ -217,7 +236,11 @@ class RecordsManager:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title("T-maze Records Manager")
-        self.root.geometry("1000x680")
+        # Restore the last window size/position; fall back to a sensible default
+        # (QoL - remembered geometry). A stored value like "1000x680+40+40" is
+        # width x height + x + y.
+        geom = str(self._load_prefs().get("geometry", "")).strip()
+        self.root.geometry(geom or "1000x680")
 
         # Resolved on-disk locations (all best-effort; the cores tolerate absence).
         self.daily_path = daily_log.default_daily_log_path()
@@ -272,11 +295,22 @@ class RecordsManager:
         self._daily_dirty = False
         self._suspend_dirty = False
         self._suspend_session_select = False
+        # Toolbar buttons that must be greyed out while a build runs (QoL -
+        # busy-state toolbar); filled in by _build_ui.
+        self._toolbar_buttons: List[ttk.Button] = []
         self._load_data()
         self._build_ui()
         self._refresh_all()
         # Guard the window-close button too (unsaved edits / a running build).
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        # Keyboard shortcuts (QoL): Ctrl+S saves the daily row, F5 reloads.
+        self.root.bind("<Control-s>", lambda _e: self._on_ctrl_s())
+        self.root.bind("<Control-S>", lambda _e: self._on_ctrl_s())
+        self.root.bind("<F5>", lambda _e: self._on_reload())
+        # Poll for the records files being changed by another surface (the Excel
+        # builders, a hand edit) and offer to reload (QoL - file-changed
+        # detection; uses the load-time mtimes from _load_data).
+        self.root.after(_FILE_WATCH_MS, self._poll_files_changed)
 
     # ---------------------------------------------------------------- data
     def _load_data(self) -> None:
@@ -333,14 +367,19 @@ class RecordsManager:
     def _build_ui(self) -> None:
         bar = ttk.Frame(self.root, padding=(8, 6))
         bar.pack(side="top", fill="x")
-        ttk.Button(bar, text="Generate files",
-                   command=self._on_generate).pack(side="left")
-        ttk.Button(bar, text="Import from Excel",
-                   command=self._on_import).pack(side="left", padx=(6, 0))
+        b_generate = ttk.Button(bar, text="Generate files",
+                                command=self._on_generate)
+        b_generate.pack(side="left")
+        b_import = ttk.Button(bar, text="Import from Excel",
+                              command=self._on_import)
+        b_import.pack(side="left", padx=(6, 0))
         ttk.Button(bar, text="Reload",
                    command=self._on_reload).pack(side="left", padx=(6, 0))
-        ttk.Button(bar, text="Integrity check",
-                   command=self._integrity_check).pack(side="left", padx=(6, 0))
+        b_integrity = ttk.Button(bar, text="Integrity check",
+                                 command=self._integrity_check)
+        b_integrity.pack(side="left", padx=(6, 0))
+        # These are the buttons locked while a build runs (Reload stays live).
+        self._toolbar_buttons = [b_generate, b_import, b_integrity]
         # Operator: WHO is editing. Required before any save/import; every
         # change is logged under this name (ADR-0155). Fed by the tracked
         # host/operators.json; the last choice is remembered per machine.
@@ -361,9 +400,10 @@ class RecordsManager:
         # Commit records: put the four records files into the resources repo's
         # git history (only those files; never pushes; ADR-0155). The label
         # beside it says how many logged edits are not yet committed.
-        ttk.Button(bar, text="Commit records",
-                   command=self._on_commit_records).pack(side="left",
-                                                          padx=(14, 0))
+        b_commit = ttk.Button(bar, text="Commit records",
+                              command=self._on_commit_records)
+        b_commit.pack(side="left", padx=(14, 0))
+        self._toolbar_buttons.append(b_commit)
         self.git_var = tk.StringVar(value="")
         self.git_label = ttk.Label(bar, textvariable=self.git_var,
                                    foreground="#555")
@@ -387,6 +427,12 @@ class RecordsManager:
         # docs/decisions/0113).
         ttk.Button(recbar, text="Archives...",
                    command=self._on_manage_archives).pack(side="left", padx=(6, 0))
+        # Quick access to the files on disk (QoL): the records folder and the
+        # generated daily workbook, opened with the OS default handler.
+        ttk.Button(recbar, text="Open records folder",
+                   command=self._open_records_folder).pack(side="right")
+        ttk.Button(recbar, text="Open workbook",
+                   command=self._open_workbook).pack(side="right", padx=(0, 6))
 
         # Staleness banner: how many sessions are indexed + when the registry was
         # last built, and whether the daily Excel workbook has edits not yet
@@ -450,8 +496,20 @@ class RecordsManager:
 
         ttk.Label(form, text="Date").grid(row=0, column=2, sticky="e", padx=4)
         self.d_vars["date"].set(_today_iso())
-        ttk.Entry(form, textvariable=self.d_vars["date"], width=12).grid(
-            row=0, column=3, sticky="w")
+        datewrap = ttk.Frame(form)
+        datewrap.grid(row=0, column=3, columnspan=3, sticky="w")
+        ttk.Entry(datewrap, textvariable=self.d_vars["date"], width=12).pack(
+            side="left")
+        # Quick date nudges (QoL): jump to today or step a day back/forward.
+        ttk.Button(datewrap, text="Today", width=6,
+                   command=lambda: self._bump_date(None)).pack(
+                       side="left", padx=(4, 0))
+        ttk.Button(datewrap, text="-1", width=3,
+                   command=lambda: self._bump_date(-1)).pack(
+                       side="left", padx=(4, 0))
+        ttk.Button(datewrap, text="+1", width=3,
+                   command=lambda: self._bump_date(1)).pack(
+                       side="left", padx=(2, 0))
 
         # Weight / baseline / % baseline (auto).
         for col, field in enumerate(("weight_g", "baseline_g")):
@@ -570,11 +628,9 @@ class RecordsManager:
         self.d_tree.tag_configure("below", foreground="#9C0006")
         self.d_tree.tag_configure("missing", background="#fde0e0",
                                   foreground="#9a6700")
-        vsb = ttk.Scrollbar(table, orient="vertical", command=self.d_tree.yview)
-        self.d_tree.configure(yscrollcommand=vsb.set)
-        self.d_tree.pack(side="left", fill="both", expand=True)
-        vsb.pack(side="right", fill="y")
+        self._grid_tree_with_scrollbars(table, self.d_tree)
         self.d_tree.bind("<Double-1>", self._load_selected_daily)
+        self._attach_heading_tooltips(self.d_tree, _DAILY_HEADING_TIPS)
 
     def _on_form_animal(self, _event=None) -> None:
         """Picking a DIFFERENT animal starts a fresh entry for it: the per-day
@@ -710,10 +766,15 @@ class RecordsManager:
         return "\n".join(parts)
 
     def _confirm_discard(self, what: str) -> bool:
-        """Ask before an action that would throw away unsaved edits."""
+        """Ask before an action that would throw away unsaved edits, naming what
+        is actually unsaved (routes through _unsaved_summary; QoL)."""
+        summary = self._unsaved_summary()
+        body = "You have unsaved changes:"
+        if summary:
+            body += "\n\n" + summary
         return messagebox.askyesno(
             "Discard unsaved changes?",
-            f"You have unsaved changes: {what}\n\nContinue and discard them?",
+            f"{body}\n\n{what}.\n\nContinue and discard them?",
             default="no")
 
     # ---- operator + change log (ADR-0155) --------------------------------
@@ -844,6 +905,7 @@ class RecordsManager:
         self._daily_dirty = False
         self._load_data()
         self._refresh_daily_table()
+        self._reveal_daily_row(aid, date)
         self._refresh_dashboard()
         self._refresh_git_label()
 
@@ -857,6 +919,33 @@ class RecordsManager:
             self._update_pct()
         self._last_form_animal = ""
         self._daily_dirty = False
+        # Clearing the form also widens the table back to all rats (QoL - the
+        # filter follows the form, so an empty form means no rat is in focus).
+        if hasattr(self, "d_filter") and self.d_filter.get() != "All":
+            self.d_filter.set("All")
+            self._refresh_daily_table()
+
+    def _bump_date(self, delta: Optional[int]) -> None:
+        """Set the Daily date field to today (delta=None) or step it by ``delta``
+        days from its current value (falling back to today if unparseable)."""
+        if delta is None:
+            self.d_vars["date"].set(_today_iso())
+            return
+        try:
+            base = dt.date.fromisoformat(self.d_vars["date"].get().strip())
+        except ValueError:
+            base = dt.date.today()
+        self.d_vars["date"].set((base + dt.timedelta(days=delta)).isoformat())
+
+    def _reveal_daily_row(self, animal_id: str, date: str) -> None:
+        """Select and scroll to the (animal, date) row just saved (QoL)."""
+        want = (str(animal_id).strip(), str(date).strip())
+        for iid, row in self._daily_row_by_iid.items():
+            if (str(row.get("animal_id", "")).strip(),
+                    str(row.get("date", "")).strip()) == want:
+                self.d_tree.selection_set(iid)
+                self.d_tree.see(iid)
+                return
 
     def _load_selected_daily(self, _event=None) -> None:
         sel = self.d_tree.selection()
@@ -1130,11 +1219,7 @@ class RecordsManager:
             self.s_tree.heading(c, text=heads.get(c, c))
             self.s_tree.column(c, width=widths.get(c, 80),
                                anchor="w" if c == "stage" else "center")
-        vsb = ttk.Scrollbar(listwrap, orient="vertical",
-                            command=self.s_tree.yview)
-        self.s_tree.configure(yscrollcommand=vsb.set)
-        self.s_tree.pack(side="left", fill="x", expand=True)
-        vsb.pack(side="right", fill="y")
+        self._grid_tree_with_scrollbars(listwrap, self.s_tree)
         self.s_tree.bind("<<TreeviewSelect>>", self._on_session_select)
 
         # Bottom: left = read-only session log, right = the annotation editor.
@@ -1738,7 +1823,9 @@ class RecordsManager:
         left.pack(side="left", fill="both", expand=True)
         ttk.Label(left, text="Rats (id  |  aliases  |  date of birth)").pack(
             side="top", anchor="w")
-        self.r_tree = ttk.Treeview(left, columns=("id", "aliases", "dob", "age"),
+        rwrap = ttk.Frame(left)
+        rwrap.pack(side="top", fill="both", expand=True)
+        self.r_tree = ttk.Treeview(rwrap, columns=("id", "aliases", "dob", "age"),
                                    show="headings", height=14)
         self.r_tree.heading("id", text="id")
         self.r_tree.heading("aliases", text="aliases (comma-separated)")
@@ -1748,7 +1835,7 @@ class RecordsManager:
         self.r_tree.column("aliases", width=200, anchor="w")
         self.r_tree.column("dob", width=100, anchor="center")
         self.r_tree.column("age", width=90, anchor="center")
-        self.r_tree.pack(side="top", fill="both", expand=True)
+        self._grid_tree_with_scrollbars(rwrap, self.r_tree)
         self.r_tree.bind("<<TreeviewSelect>>", self._load_selected_roster)
 
         right = ttk.LabelFrame(tab, text="Add / edit rat", padding=8)
@@ -2564,6 +2651,146 @@ class RecordsManager:
         self._refresh_all()
         self._set_status("Reloaded from disk.")
 
+    def _on_ctrl_s(self) -> None:
+        """Ctrl+S: save whichever tab is in front (Daily form, else nothing)."""
+        try:
+            current = self.nb.tab(self.nb.select(), "text")
+        except tk.TclError:
+            current = ""
+        if current == "Daily entry":
+            self._save_daily()
+        elif current == "Sessions":
+            # The Sessions tab saves annotations through its own button; nudge.
+            self._set_status("Use 'Save annotation' on the Sessions tab.")
+
+    def _poll_files_changed(self) -> None:
+        """Notice when another surface (an Excel build, a hand edit) rewrote a
+        records file since we loaded it, and offer to reload (QoL).
+
+        Skipped while a build is running (it rewrites these files itself) or when
+        a prompt is already up. Reschedules itself either way.
+        """
+        try:
+            if self._busy or getattr(self, "_reload_prompt_open", False):
+                return
+            changed = [name for name, path in (("daily", self.daily_path),
+                                               ("annot", self.annot_path),
+                                               ("animals", self.animals_path))
+                       if file_mtime(path) != self._mtimes.get(name)]
+            if changed:
+                self._reload_prompt_open = True
+                try:
+                    keep = self._has_unsaved()
+                    msg = ("The records files were changed on disk"
+                           " (by an Excel build or a hand edit).")
+                    if keep:
+                        msg += ("\n\nYou have unsaved changes:\n\n"
+                                + self._unsaved_summary())
+                    msg += "\n\nReload from disk now?"
+                    if messagebox.askyesno("Records changed on disk", msg,
+                                           default="no" if keep else "yes"):
+                        self._on_reload()
+                    else:
+                        # Adopt the new mtimes so we don't nag every tick until
+                        # the next real change.
+                        self._mtimes = {
+                            "daily": file_mtime(self.daily_path),
+                            "annot": file_mtime(self.annot_path),
+                            "animals": file_mtime(self.animals_path),
+                        }
+                finally:
+                    self._reload_prompt_open = False
+        finally:
+            self.root.after(_FILE_WATCH_MS, self._poll_files_changed)
+
+    def _set_toolbar_enabled(self, enabled: bool) -> None:
+        """Grey out (or restore) the toolbar's action buttons - used to lock the
+        toolbar while a build runs (QoL - busy-state toolbar)."""
+        state = "normal" if enabled else "disabled"
+        for btn in getattr(self, "_toolbar_buttons", []):
+            try:
+                btn.configure(state=state)
+            except tk.TclError:
+                pass
+
+    def _open_path(self, path: str, what: str) -> None:
+        """Open a file/folder with the OS default handler (QoL)."""
+        if not os.path.exists(path):
+            messagebox.showinfo("Not found",
+                                f"{what} does not exist yet:\n{path}")
+            return
+        try:
+            if sys.platform.startswith("win"):
+                os.startfile(path)  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", path])
+            else:
+                subprocess.Popen(["xdg-open", path])
+        except OSError as e:
+            messagebox.showwarning("Could not open", f"{what}:\n{e}")
+
+    def _open_records_folder(self) -> None:
+        self._open_path(self.records_dir, "The records folder")
+
+    def _open_workbook(self) -> None:
+        self._open_path(self.daily_xlsx_path, "The daily workbook")
+
+    @staticmethod
+    def _grid_tree_with_scrollbars(container, tree) -> None:
+        """Lay a Treeview out with BOTH a vertical and a horizontal scrollbar
+        (QoL - the daily/roster tables are wider than the pane)."""
+        vsb = ttk.Scrollbar(container, orient="vertical", command=tree.yview)
+        hsb = ttk.Scrollbar(container, orient="horizontal", command=tree.xview)
+        tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
+        container.rowconfigure(0, weight=1)
+        container.columnconfigure(0, weight=1)
+
+    def _attach_heading_tooltips(self, tree, tips: Dict[str, str]) -> None:
+        """Show a small hover tip over a Treeview HEADING (QoL). Headings aren't
+        separate widgets, so we watch pointer motion and map the region+column to
+        the tip text; the popup follows the pointer and hides off the headings."""
+        state = {"tip": None, "col": None}
+
+        def hide() -> None:
+            if state["tip"] is not None:
+                state["tip"].destroy()
+                state["tip"] = None
+            state["col"] = None
+
+        def on_motion(event) -> None:
+            if tree.identify_region(event.x, event.y) != "heading":
+                hide()
+                return
+            col = tree.identify_column(event.x)  # like "#3"
+            try:
+                cid = tree["columns"][int(col[1:]) - 1]
+            except (ValueError, IndexError):
+                hide()
+                return
+            text = tips.get(cid)
+            if not text:
+                hide()
+                return
+            if col == state["col"] and state["tip"] is not None:
+                state["tip"].wm_geometry(
+                    f"+{event.x_root + 12}+{event.y_root + 16}")
+                return
+            hide()
+            state["col"] = col
+            tw = tk.Toplevel(tree)
+            tw.wm_overrideredirect(True)
+            tw.wm_geometry(f"+{event.x_root + 12}+{event.y_root + 16}")
+            tk.Label(tw, text=text, background="#ffffe0", relief="solid",
+                     borderwidth=1, justify="left", padx=6, pady=3,
+                     wraplength=320).pack()
+            state["tip"] = tw
+
+        tree.bind("<Motion>", on_motion, add="+")
+        tree.bind("<Leave>", lambda _e: hide(), add="+")
+
     def _on_generate(self) -> None:
         if self._has_unsaved() and not self._confirm_discard(
                 "Generate refreshes every view from disk"):
@@ -2602,6 +2829,11 @@ class RecordsManager:
                 "You have unsaved changes:\n\n" + self._unsaved_summary()
                 + "\n\nQuit anyway?", default="no"):
             return
+        # Remember the window size/position for next launch (QoL).
+        try:
+            self._save_prefs(geometry=self.root.winfo_geometry())
+        except tk.TclError:
+            pass
         self.root.destroy()
 
     def _do_generate(self, allow_shrink: bool = False) -> _ChainOutcome:
@@ -2689,6 +2921,7 @@ class RecordsManager:
         if self._busy:
             return
         self._busy = True
+        self._set_toolbar_enabled(False)
         self._set_status(busy_msg)
 
         def worker():
@@ -2714,6 +2947,7 @@ class RecordsManager:
 
     def _async_done(self, result: _ChainOutcome) -> None:
         self._busy = False
+        self._set_toolbar_enabled(True)
         if result.shrink_refused:
             # Nothing was written. Show what would vanish and let the operator
             # decide on the main thread (ADR-0158).
@@ -2733,8 +2967,34 @@ class RecordsManager:
             self._record_xlsx_sync()
         self._refresh_all()
         self._set_status("Done." if result.ok else "Finished with errors.")
-        (messagebox.showinfo if result.ok else messagebox.showwarning)(
-            "Result", result.text())
+        self._show_result_dialog(result.text(), result.ok)
+
+    def _show_result_dialog(self, text: str, ok: bool) -> None:
+        """A scrollable result window (QoL) - a chain's per-step output can be
+        long, so a fixed messagebox truncated it. Warning-tinted on failure."""
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Result" if ok else "Result - finished with errors")
+        dlg.transient(self.root)
+        header = ttk.Label(
+            dlg, padding=(10, 8),
+            text=("All steps succeeded." if ok
+                  else "Some steps failed - see below."),
+            foreground=("#227722" if ok else "#9C0006"))
+        header.pack(side="top", fill="x")
+        wrap = ttk.Frame(dlg, padding=(10, 0))
+        wrap.pack(side="top", fill="both", expand=True)
+        txt = tk.Text(wrap, width=90, height=18, wrap="word")
+        ysb = ttk.Scrollbar(wrap, orient="vertical", command=txt.yview)
+        txt.configure(yscrollcommand=ysb.set)
+        txt.grid(row=0, column=0, sticky="nsew")
+        ysb.grid(row=0, column=1, sticky="ns")
+        wrap.rowconfigure(0, weight=1)
+        wrap.columnconfigure(0, weight=1)
+        txt.insert("1.0", text or "(no output)")
+        txt.configure(state="disabled")
+        ttk.Button(dlg, text="Close", command=dlg.destroy).pack(
+            side="bottom", pady=(6, 10))
+        dlg.geometry("720x420")
 
     def _confirm_shrink(self, report: Optional[session_registry.ShrinkReport]
                         ) -> bool:
