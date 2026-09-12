@@ -76,9 +76,16 @@ def read_commented_csv(path: str) -> CommentedCsv:
     do); callers decide whether that means "empty" (best-effort read) or
     "refuse" (write path).
     """
-    out = CommentedCsv()
     with open(path, "r", encoding="utf-8", newline="") as fh:
-        lines = fh.readlines()
+        return parse_commented_csv(fh.read())
+
+
+def parse_commented_csv(text: str) -> CommentedCsv:
+    """:func:`read_commented_csv` for text already in memory (e.g. a file's
+    committed content from ``git show``). Same rules; raises ``ValueError`` as
+    :mod:`csv` does."""
+    out = CommentedCsv()
+    lines = text.splitlines(keepends=True)
     i = 0
     while i < len(lines) and lines[i].lstrip().startswith("#"):
         comment = lines[i].rstrip("\r\n")

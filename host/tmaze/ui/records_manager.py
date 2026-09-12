@@ -71,6 +71,7 @@ from tmaze.core.records import (
     records_audit,
     records_audit_ack,
     records_changelog,
+    records_git,
     session_annotations,
     session_ignore,
 )
@@ -287,6 +288,16 @@ class RecordsManager:
         if not self.operators:
             ttk.Label(bar, text="(none in host/operators.json)",
                       foreground="#9C0006").pack(side="left", padx=(4, 0))
+        # Commit records: put the four records files into the resources repo's
+        # git history (only those files; never pushes; ADR-0155). The label
+        # beside it says how many logged edits are not yet committed.
+        ttk.Button(bar, text="Commit records",
+                   command=self._on_commit_records).pack(side="left",
+                                                          padx=(14, 0))
+        self.git_var = tk.StringVar(value="")
+        self.git_label = ttk.Label(bar, textvariable=self.git_var,
+                                   foreground="#555")
+        self.git_label.pack(side="left", padx=(6, 0))
         self.status_var = tk.StringVar(value="Ready.")
         ttk.Label(bar, textvariable=self.status_var,
                   foreground="#555").pack(side="right")
@@ -729,6 +740,7 @@ class RecordsManager:
         self._load_data()
         self._refresh_daily_table()
         self._refresh_dashboard()
+        self._refresh_git_label()
 
     def _clear_daily(self) -> None:
         with self._suspend_dirty_tracking():
@@ -1612,6 +1624,7 @@ class RecordsManager:
         self._reset_annotation_modified()
         self._load_data()
         self._refresh_sessions()
+        self._refresh_git_label()
 
     # ---- Roster tab -------------------------------------------------------
     def _build_roster_tab(self) -> None:
@@ -1735,6 +1748,7 @@ class RecordsManager:
         # that would clear an in-progress Daily form.)
         self._refresh_sessions()
         self._refresh_dashboard()
+        self._refresh_git_label()
 
     # ---- Dashboard tab ----------------------------------------------------
     def _build_dashboard_tab(self) -> None:
@@ -2070,6 +2084,100 @@ class RecordsManager:
         else:
             self.banner_var.set(reg + "   |   Daily Excel in sync")
             self.banner.configure(foreground="#555")
+        self._refresh_git_label()
+
+    # ---- Commit records (ADR-0155) ---------------------------------------
+    def _git_run(self) -> records_git.GitRun:
+        """A git runner bound to the resources repo (the folder the records
+        files live in)."""
+        return records_git.git_runner(str(animals.resources_root()))
+
+    def _records_git_status(self) -> records_git.RecordsStatus:
+        return records_git.records_status(
+            self._git_run(), records_changelog.load_entries(self.changelog_path))
+
+    def _refresh_git_label(self) -> None:
+        """The toolbar's 'N records edits not yet committed' label."""
+        st = self._records_git_status()
+        if not st.ok:
+            self.git_var.set("(git unavailable)")
+            self.git_label.configure(foreground="#9a6700")
+            return
+        n = len(st.pending)
+        if n:
+            self.git_var.set(f"{n} records edit{'' if n == 1 else 's'} "
+                             "not yet committed")
+            self.git_label.configure(foreground="#9a6700")
+        elif st.records_changed:
+            self.git_var.set("records files changed, not yet committed")
+            self.git_label.configure(foreground="#9a6700")
+        else:
+            self.git_var.set("records committed")
+            self.git_label.configure(foreground="#555")
+
+    def _on_commit_records(self) -> None:
+        """Stage only the records files and commit them to the resources repo,
+        after the operator has seen (and may edit) the generated message."""
+        if self._busy:
+            messagebox.showinfo("Busy", "Wait for the running build to finish.")
+            return
+        if self._has_unsaved() and not messagebox.askyesno(
+                "Unsaved edits",
+                "You have unsaved edits - they are not on disk, so they will "
+                "NOT be in this commit:\n\n" + self._unsaved_summary()
+                + "\n\nCommit what is already saved anyway?", default="no"):
+            return
+        st = self._records_git_status()
+        why = records_git.refusal(st)
+        if why:
+            (messagebox.showinfo if why.startswith("Nothing")
+             else messagebox.showwarning)("Commit records", why)
+            self._refresh_git_label()
+            return
+        message = records_git.build_message(st.pending, st.records_changed)
+        self._commit_dialog(st, message)
+
+    def _commit_dialog(self, st: records_git.RecordsStatus,
+                       message: str) -> None:
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Commit records")
+        dlg.transient(self.root)
+        frm = ttk.Frame(dlg, padding=10)
+        frm.pack(fill="both", expand=True)
+        files = ", ".join(os.path.basename(p) for p in st.records_changed)
+        ttk.Label(frm, text=f"Files to commit: {files}\n"
+                            "Only these are staged; nothing is pushed. "
+                            "Edit the message if you like, then Commit.",
+                  justify="left").pack(anchor="w")
+        txt = tk.Text(frm, width=76, height=14, wrap="word")
+        txt.pack(fill="both", expand=True, pady=(6, 6))
+        txt.insert("1.0", message)
+        btns = ttk.Frame(frm)
+        btns.pack(fill="x")
+
+        def _do_commit() -> None:
+            msg = txt.get("1.0", "end").strip() + "\n"
+            if not msg.strip():
+                messagebox.showwarning("Commit records",
+                                       "The commit message is empty.")
+                return
+            # Re-query right before committing so a file staged in between
+            # (another window, a terminal) is caught by the same refusal.
+            fresh = self._records_git_status()
+            result = records_git.commit_records(self._git_run(), fresh, msg)
+            dlg.destroy()
+            if result.ok:
+                messagebox.showinfo("Commit records", result.summary)
+                self._set_status(result.summary)
+            else:
+                messagebox.showerror("Commit records", result.summary)
+            self._refresh_git_label()
+
+        ttk.Button(btns, text="Commit", command=_do_commit).pack(side="right")
+        ttk.Button(btns, text="Cancel",
+                   command=dlg.destroy).pack(side="right", padx=(0, 6))
+        dlg.grab_set()
+        txt.focus_set()
 
     def _refresh_all(self) -> None:
         self._refresh_daily_table()

@@ -39,7 +39,7 @@ import os
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
-from tmaze.core.records import animals, read_commented_csv
+from tmaze.core.records import animals, parse_commented_csv, read_commented_csv
 
 FIELDS = ["ts", "operator", "source", "file", "key", "field", "old", "new"]
 
@@ -203,8 +203,21 @@ def load_entries(path: Optional[str] = None) -> List[ChangeEntry]:
         parsed = read_commented_csv(p)
     except (OSError, ValueError):
         return []
+    return _entries_from_rows(parsed.rows)
+
+
+def parse_entries(text: str) -> List[ChangeEntry]:
+    """:func:`load_entries` for log text already in memory (e.g. the committed
+    copy from ``git show``); malformed text yields []."""
+    try:
+        return _entries_from_rows(parse_commented_csv(text).rows)
+    except ValueError:
+        return []
+
+
+def _entries_from_rows(rows: Iterable[Dict[str, str]]) -> List[ChangeEntry]:
     out: List[ChangeEntry] = []
-    for row in parsed.rows:
+    for row in rows:
         if not (row.get("ts") and row.get("key") and row.get("field")):
             continue
         out.append(ChangeEntry(*[str(row.get(f, "") or "") for f in FIELDS]))

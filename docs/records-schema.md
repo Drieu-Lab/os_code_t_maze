@@ -94,6 +94,16 @@ line per non-blank field. Never rewritten or sorted; readers drop a partial
 trailing line. It describes the records, it is not one: if it disagrees with a
 records file, the file wins. Core: `tmaze.core.records.records_changelog`.
 
+**Git history.** The four records files (`daily_log.csv`,
+`session_annotations.csv`, `animals.json`, `records_changes.csv`) are tracked in
+the resources repo. The Records Manager's **Commit records** button
+(`tmaze.core.records.records_git`) stages exactly those four, refuses if anything
+else is already staged, builds the message from the change-log entries not yet
+in `HEAD` (the log is append-only, so "not yet committed" is just the tail past
+the committed copy - no clock comparison), and commits with the machine's git
+identity. It never pushes (FW-0064). The toolbar shows "N records edits not yet
+committed".
+
 ## `animal_state.json` (v2)
 
 Pre-session physiological/motivational state frozen into the bundle at Start
