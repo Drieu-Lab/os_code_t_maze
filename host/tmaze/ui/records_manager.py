@@ -61,6 +61,7 @@ from tmaze.core.records import (
     animals,
     dashboard,
     daily_log,
+    file_mtime,
     read_commented_csv,
     records_audit,
     records_audit_ack,
@@ -205,9 +206,11 @@ class RecordsManager:
         # per-Treeview-item registry rows behind it).
         self.current_session_id = ""
         self._session_row_by_item: Dict[str, Dict[str, str]] = {}
-        # Daily table: maps each Treeview item to its source row (real rows only;
-        # missing-entry placeholders are absent) so a double-click loads it.
+        # Daily table: maps each Treeview item to its source row (real rows) or
+        # to its missing-entry placeholder, so a double-click loads the row or
+        # opens a new entry for the gap.
         self._daily_row_by_iid: Dict[str, Dict[str, str]] = {}
+        self._daily_missing_by_iid: Dict[str, Dict[str, str]] = {}
         # Unsaved-edit tracking (#3): the Daily form marks itself dirty on any
         # user edit (suspended during programmatic fills); the annotation editor
         # uses the Text widgets' own modified flag. Reload/Generate/Import/close
@@ -223,7 +226,17 @@ class RecordsManager:
 
     # ---------------------------------------------------------------- data
     def _load_data(self) -> None:
-        """(Re)read every source of truth from disk into memory."""
+        """(Re)read every source of truth from disk into memory.
+
+        Also remembers each file's modification time as loaded. Every save
+        passes it to the core writer, which refuses to write if the file has
+        changed on disk since (another surface saved in between); the GUI then
+        offers to reload and re-apply the edit (ADR-0155)."""
+        self._mtimes: Dict[str, Optional[int]] = {
+            "daily": file_mtime(self.daily_path),
+            "annot": file_mtime(self.annot_path),
+            "animals": file_mtime(self.animals_path),
+        }
         self.roster = animals.load_records(self.animals_path)  # [{id, aliases}]
         self.animal_ids = [r["id"] for r in self.roster] or ["600", "601", "602"]
         self.daily_rows = daily_log.load_rows(self.daily_path)
@@ -314,8 +327,12 @@ class RecordsManager:
 
         # Animal (dropdown) + Date.
         ttk.Label(form, text="Animal").grid(row=0, column=0, sticky="e", padx=4, pady=3)
+        # Read-only: the roster (animals.json) is the source of truth for ids,
+        # so a typo can't mint an off-roster husbandry row here - add the animal
+        # on the Roster tab first (ADR-0075/0155).
         self.d_animal = ttk.Combobox(form, textvariable=self.d_vars["animal_id"],
-                                     values=self.animal_ids, width=10)
+                                     values=self.animal_ids, width=10,
+                                     state="readonly")
         self.d_animal.grid(row=0, column=1, sticky="w")
         self.d_animal.bind("<<ComboboxSelected>>", self._on_form_animal)
         # The animal the form's baseline was last prefilled for, so re-selecting
@@ -427,17 +444,52 @@ class RecordsManager:
         self.d_tree.bind("<Double-1>", self._load_selected_daily)
 
     def _on_form_animal(self, _event=None) -> None:
-        """Picking an animal in the form re-prefills its baseline (replacing the
-        previous animal's) and narrows the recent-rows table to that rat
-        (single-rat focus during data entry). Re-selecting the SAME animal
-        doesn't touch a baseline the operator just typed."""
+        """Picking a DIFFERENT animal starts a fresh entry for it: the per-day
+        data fields (weight, water, notes) are cleared - before this, the
+        previous rat's weight silently carried over and could be saved under
+        the new rat - and its baseline / water method are prefilled (ADR-0155).
+        If the form holds unsaved edits the switch asks first and, if declined,
+        snaps the dropdown back. The table narrows to the picked rat.
+        Re-selecting the SAME animal changes nothing."""
         aid = self.d_vars["animal_id"].get().strip()
         if aid != self._last_form_animal:
-            self._prefill_baseline(force=True)
-            self._last_form_animal = aid
+            if self._daily_dirty and not messagebox.askyesno(
+                    "Discard unsaved changes?",
+                    "You have unsaved changes:\n\n" + self._unsaved_summary()
+                    + f"\n\nSwitch to rat {aid} and discard them?",
+                    default="no"):
+                with self._suspend_dirty_tracking():
+                    self.d_vars["animal_id"].set(self._last_form_animal)
+                return
+            self._start_new_daily(aid, self.d_vars["date"].get().strip())
         if aid:
             self.d_filter.set(aid)
             self._refresh_daily_table()
+
+    # Per-day data fields: everything except the key (animal, date), the
+    # prefilled baseline, and the derived pct.
+    _DAY_FIELDS = ("weight_g", "water_on", "water_off", "water_ml",
+                   "supp_water", "notes")
+
+    def _start_new_daily(self, aid: str, date: str) -> None:
+        """Put the form into "new entry for (aid, date)" state: day fields blank,
+        baseline + water method prefilled from the animal's history, regime at
+        the restriction default (a weekend's ad-lib must not leak into Monday).
+        Not a user edit, so the form is clean afterwards."""
+        with self._suspend_dirty_tracking():
+            for f in self._DAY_FIELDS:
+                self.d_vars[f].set("")
+            self.d_vars["animal_id"].set(aid)
+            self.d_vars["date"].set(date or _today_iso())
+            self.d_vars["water_regime"].set("restriction")
+            latest_m = self.daily.latest_for(aid, date or None,
+                                             having="water_method") if aid else None
+            self.d_vars["water_method"].set(
+                daily_log.normalize_method((latest_m or {}).get("water_method")))
+            self._update_pct()
+        self._last_form_animal = aid
+        self._prefill_baseline(force=True)
+        self._daily_dirty = False
 
     def _prefill_baseline(self, force: bool = False) -> None:
         """Prefill baseline from the animal's most recent row (on/before the
@@ -518,6 +570,42 @@ class RecordsManager:
             f"You have unsaved changes: {what}\n\nContinue and discard them?",
             default="no")
 
+    # ---- guarded writes (ADR-0155) ---------------------------------------
+    def _guarded_write(self, which: str, path: str, write_fn) -> bool:
+        """Run ``write_fn(expect_mtime)`` - a read-merge-write against ``path`` -
+        with the modification time captured at load. If the core refuses
+        because the file changed on disk meanwhile, offer to reload and re-apply
+        the same edit on top of the current contents (``write_fn`` re-reads the
+        file, so the edit lands on fresh rows). Returns True if written; every
+        refusal/failure is reported to the operator here."""
+        try:
+            write_fn(self._mtimes.get(which))
+            return True
+        except RecordsFileError as e:
+            if file_mtime(path) == self._mtimes.get(which):
+                messagebox.showerror("Save refused", str(e))  # not staleness
+                return False
+            if not messagebox.askyesno(
+                    "File changed on disk",
+                    f"{e}\n\nReload the current contents now and re-apply "
+                    "this edit on top of them? (Your edit wins for the rows it "
+                    "touches; everything else comes from the file.)",
+                    default="yes"):
+                return False
+            self._load_data()
+            try:
+                write_fn(self._mtimes.get(which))
+                return True
+            except RecordsFileError as e2:
+                messagebox.showerror("Save refused", str(e2))
+                return False
+            except (OSError, ValueError) as e2:
+                messagebox.showerror("Save failed", str(e2))
+                return False
+        except (OSError, ValueError) as e:
+            messagebox.showerror("Save failed", str(e))
+            return False
+
     def _save_daily(self) -> None:
         edit = {f: self.d_vars[f].get().strip() for f in daily_log.FIELDS}
         # Hard validation (blocks the save): required key + ISO date + numeric
@@ -546,17 +634,16 @@ class RecordsManager:
         # water method ("" when unspecified/unknown; ADR-0104).
         edit["water_regime"] = daily_log.normalize_regime(edit["water_regime"])
         edit["water_method"] = daily_log.normalize_method(edit["water_method"])
-        try:
-            # Read-for-write so a present-but-unreadable CSV aborts the save
-            # rather than being overwritten with just this row (#12).
+
+        def _write(expect_mtime) -> None:
+            # Read-for-write so a present-but-unreadable/mis-headed CSV aborts
+            # the save rather than being overwritten with just this row (#12).
             existing = daily_log.load_rows_for_write(self.daily_path)
             merged = daily_log.upsert_rows(existing, [edit])
-            daily_log.write_rows(merged, self.daily_path)
-        except RecordsFileError as e:
-            messagebox.showerror("Save refused", str(e))
-            return
-        except (OSError, ValueError) as e:
-            messagebox.showerror("Save failed", str(e))
+            daily_log.write_rows(merged, self.daily_path,
+                                 expect_mtime=expect_mtime)
+
+        if not self._guarded_write("daily", self.daily_path, _write):
             return
         self._set_status(f"Saved {aid} {date} to daily_log.csv.")
         self._daily_dirty = False
@@ -579,10 +666,18 @@ class RecordsManager:
         sel = self.d_tree.selection()
         if not sel:
             return
-        # A missing-entry placeholder has no source row; loading it would clear
-        # the form, so ignore it (nothing to edit yet).
+        if self._daily_dirty and not messagebox.askyesno(
+                "Discard unsaved changes?",
+                "You have unsaved changes:\n\n" + self._unsaved_summary()
+                + "\n\nLoad the selected row and discard them?", default="no"):
+            return
         row = self._daily_row_by_iid.get(sel[0])
         if row is None:
+            # A missing-entry placeholder: open a NEW entry for that rat + day
+            # (the gap is exactly what the operator wants to fill).
+            gap = self._daily_missing_by_iid.get(sel[0])
+            if gap is not None:
+                self._start_new_daily(gap["animal_id"], gap["date"])
             return
         # Loading a row into the form is not itself an edit; it becomes dirty
         # only if the operator then changes a field (#3).
@@ -697,31 +792,35 @@ class RecordsManager:
             return
         regime_val = daily_log.normalize_regime(spec.get("regime", ""))
         method_val = daily_log.normalize_method(spec.get("method", ""))
-        edits: List[Dict[str, str]] = []
         n = (d1 - d0).days + 1
-        for i in range(n):
-            day = (d0 + dt.timedelta(days=i)).isoformat()
-            row = dict(self.daily.for_date(aid, day) or
-                       {"animal_id": aid, "date": day})
-            row["animal_id"], row["date"] = aid, day
-            if set_regime:
-                row["water_regime"] = regime_val
-            if set_method:
-                row["water_method"] = method_val
-            if i == 0 and spec.get("start_t"):
-                row["water_on"] = spec["start_t"]
-            if i == n - 1 and spec.get("end_t"):
-                row["water_off"] = spec["end_t"]
-            edits.append(row)
-        try:
+
+        def _write(expect_mtime) -> None:
+            # Build the per-day edits from the rows AS READ NOW, not from the
+            # in-memory table: a span only touches regime/method/boundary times,
+            # so every other cell (weight, notes...) must come from the file's
+            # current row or a concurrent edit would be reverted (ADR-0155).
             existing = daily_log.load_rows_for_write(self.daily_path)
+            fresh = daily_log.DailyLog(existing)
+            edits: List[Dict[str, str]] = []
+            for i in range(n):
+                day = (d0 + dt.timedelta(days=i)).isoformat()
+                row = dict(fresh.for_date(aid, day) or
+                           {"animal_id": aid, "date": day})
+                row["animal_id"], row["date"] = aid, day
+                if set_regime:
+                    row["water_regime"] = regime_val
+                if set_method:
+                    row["water_method"] = method_val
+                if i == 0 and spec.get("start_t"):
+                    row["water_on"] = spec["start_t"]
+                if i == n - 1 and spec.get("end_t"):
+                    row["water_off"] = spec["end_t"]
+                edits.append(row)
             merged = daily_log.upsert_rows(existing, edits)
-            daily_log.write_rows(merged, self.daily_path)
-        except RecordsFileError as e:
-            messagebox.showerror("Save refused", str(e))
-            return
-        except (OSError, ValueError) as e:
-            messagebox.showerror("Save failed", str(e))
+            daily_log.write_rows(merged, self.daily_path,
+                                 expect_mtime=expect_mtime)
+
+        if not self._guarded_write("daily", self.daily_path, _write):
             return
         what = []
         if set_regime:
@@ -747,6 +846,7 @@ class RecordsManager:
         # Map each Treeview item back to its source row so editing loads the real
         # record (the table now shows derived columns, so positional zip is out).
         self._daily_row_by_iid: Dict[str, Dict[str, str]] = {}
+        self._daily_missing_by_iid: Dict[str, Dict[str, str]] = {}
         sel = self.d_filter.get().strip()
         rows = [dict(r) for r in self.daily_rows
                 if sel in ("", "All") or r.get("animal_id", "") == sel]
@@ -768,7 +868,9 @@ class RecordsManager:
             values = [self._daily_cell(r, cid) for cid, *_ in _DAILY_TREE_COLUMNS]
             iid = self.d_tree.insert("", "end", values=values,
                                      tags=self._daily_row_tags(r))
-            if not r.get("_missing"):
+            if r.get("_missing"):
+                self._daily_missing_by_iid[iid] = r
+            else:
                 self._daily_row_by_iid[iid] = r
 
     def _daily_cell(self, row: Dict[str, str], col_id: str) -> str:
@@ -1398,17 +1500,15 @@ class RecordsManager:
             "procedures": self.a_proc.get("1.0", "end").strip(),
             "notes": self.a_notes.get("1.0", "end").strip(),
         }
-        try:
-            # Read-for-write so a present-but-unreadable CSV aborts the save
-            # rather than being overwritten with just this row (#12).
+        def _write(expect_mtime) -> None:
+            # Read-for-write so a present-but-unreadable/mis-headed CSV aborts
+            # the save rather than being overwritten with just this row (#12).
             existing = session_annotations.load_rows_for_write(self.annot_path)
             merged = session_annotations.upsert_rows(existing, [edit])
-            session_annotations.write_rows(merged, self.annot_path)
-        except RecordsFileError as e:
-            messagebox.showerror("Save refused", str(e))
-            return
-        except (OSError, ValueError) as e:
-            messagebox.showerror("Save failed", str(e))
+            session_annotations.write_rows(merged, self.annot_path,
+                                           expect_mtime=expect_mtime)
+
+        if not self._guarded_write("annot", self.annot_path, _write):
             return
         self._set_status(f"Saved annotation for {sid}.")
         self._reset_annotation_modified()
@@ -1500,7 +1600,17 @@ class RecordsManager:
             messagebox.showerror("Save refused", str(e))
             return
         try:
-            cleaned = animals.write_records(self.roster, self.animals_path)
+            cleaned = animals.write_records(
+                self.roster, self.animals_path,
+                expect_mtime=self._mtimes.get("animals"))
+        except RecordsFileError as e:
+            # The roster is a whole-file replace of the staged in-memory list,
+            # so a file changed on disk can't be merged automatically: reload
+            # (toolbar) and redo the roster edits (ADR-0155).
+            messagebox.showerror(
+                "Save refused",
+                f"{e}\n\nUse Reload, then redo your roster edits.")
+            return
         except ValueError as e:
             messagebox.showerror("Invalid roster", str(e))
             return
