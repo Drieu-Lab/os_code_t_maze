@@ -32,11 +32,29 @@ class TestSignal1(unittest.TestCase):
     def setUp(self):
         self.log = DailyLog(_ROWS)
 
-    def test_uses_stored_pct_when_present(self):
+    def test_recomputes_from_weight_baseline(self):
         s = dashboard.weight_status(self.log, "600", "2026-07-01")
-        self.assertAlmostEqual(s["pct_baseline"], 0.977)
+        self.assertAlmostEqual(s["pct_baseline"], round(340 / 348, 4))
         self.assertFalse(s["below_threshold"])
         self.assertEqual(s["grams_to_threshold"], 0.0)
+
+    def test_recompute_overrides_a_stale_stored_pct(self):
+        # weight/baseline are the source of truth: a stored mirror that disagrees
+        # is ignored, not trusted (docs/decisions/0163).
+        log = DailyLog([{"animal_id": "600", "date": "2026-07-10",
+                         "weight_g": "300", "baseline_g": "348",
+                         "pct_baseline": "0.999"}])
+        s = dashboard.weight_status(log, "600", "2026-07-10")
+        self.assertAlmostEqual(s["pct_baseline"], round(300 / 348, 4))
+        self.assertTrue(s["below_threshold"])
+
+    def test_falls_back_to_stored_when_not_computable(self):
+        # Baseline missing -> can't recompute, so the stored mirror is used.
+        log = DailyLog([{"animal_id": "600", "date": "2026-07-11",
+                         "weight_g": "", "baseline_g": "",
+                         "pct_baseline": "0.9123"}])
+        s = dashboard.weight_status(log, "600", "2026-07-11")
+        self.assertAlmostEqual(s["pct_baseline"], 0.9123)
 
     def test_computes_pct_and_flags_below_90(self):
         s = dashboard.weight_status(self.log, "600", "2026-07-02")

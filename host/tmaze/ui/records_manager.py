@@ -54,6 +54,7 @@ import datetime as dt
 import io
 import json
 import os
+import queue
 import subprocess
 import sys
 import threading
@@ -106,6 +107,10 @@ _ENTRY_LABELS = {
 }
 
 _BUILDER_TIMEOUT_S = 180
+
+# How often the UI thread checks the background-result queue (ms). 100 ms is
+# imperceptible to the operator but keeps the poll loop cheap (docs/decisions/0163).
+_ASYNC_POLL_MS = 100
 
 # A small starter vocabulary of common per-session procedures for the Sessions
 # annotation checklist (Phase B). Ticking one adds it as a line in the free-text
@@ -272,6 +277,13 @@ class RecordsManager:
             build_session_registry.REGISTRY_FILENAME)
 
         self._busy = False
+        # Background builds hand their result back to the UI thread through this
+        # queue, which the main thread drains with root.after. Tk is single-
+        # threaded, so a worker must never touch widgets directly; posting to a
+        # thread-safe queue and polling it on the UI thread is the documented-safe
+        # pattern (docs/decisions/0163) - safer than calling root.after from the
+        # worker, which Tk does not officially guarantee across threads.
+        self._async_queue: "queue.Queue" = queue.Queue()
         # Sessions tab selection state (session_id of the selected row + the
         # per-Treeview-item registry rows behind it).
         self.current_session_id = ""
@@ -2723,7 +2735,12 @@ class RecordsManager:
         return _StepResult(name, proc.returncode == 0, detail)
 
     def _run_async(self, busy_msg: str, work) -> None:
-        """Run ``work`` (returns a _ChainOutcome) off the UI thread, then report."""
+        """Run ``work`` (returns a _ChainOutcome) off the UI thread, then report.
+
+        The worker posts its result to ``self._async_queue`` and the UI thread
+        picks it up in :meth:`_drain_async_queue` (scheduled with ``after``). The
+        worker itself never touches Tk (docs/decisions/0163).
+        """
         if self._busy:
             return
         self._busy = True
@@ -2736,9 +2753,19 @@ class RecordsManager:
                 result = _ChainOutcome(
                     steps=[_StepResult("build", False, f"{type(e).__name__}: {e}")],
                     halted=True)
-            self.root.after(0, lambda: self._async_done(result))
+            self._async_queue.put(result)
 
         threading.Thread(target=worker, daemon=True).start()
+        self.root.after(_ASYNC_POLL_MS, self._drain_async_queue)
+
+    def _drain_async_queue(self) -> None:
+        """Poll the background-result queue on the UI thread; report when ready."""
+        try:
+            result = self._async_queue.get_nowait()
+        except queue.Empty:
+            self.root.after(_ASYNC_POLL_MS, self._drain_async_queue)
+            return
+        self._async_done(result)
 
     def _async_done(self, result: _ChainOutcome) -> None:
         self._busy = False

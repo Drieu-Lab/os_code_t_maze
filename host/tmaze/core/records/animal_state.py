@@ -108,11 +108,13 @@ class AnimalState:
 
 def _pct(weight: Optional[float], baseline: Optional[float],
          stored: Optional[float]) -> Optional[float]:
-    if stored is not None:
-        return stored
+    # Recompute from weight/baseline first (the source of truth); fall back to
+    # the stored mirror only when the row can't be computed. Same precedence as
+    # dashboard.pct_baseline_of, so a frozen animal_state and the dashboard
+    # agree on the number (docs/decisions/0163).
     if weight is not None and baseline:
         return round(weight / baseline, 4)
-    return None
+    return stored
 
 
 # Clock-time formats seen in the real daily log ("6pm", "5:30PM", "17:00",

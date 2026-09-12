@@ -479,6 +479,24 @@ class TestWriteRows(unittest.TestCase):
                                 ("601", "2026-07-02")])
         self.assertEqual(written[0]["weight_g"], "332")
 
+    def test_write_rewrites_pct_baseline_mirror(self):
+        # write_rows always rewrites pct_baseline from weight/baseline: a stale
+        # stored value is corrected, and a row that can't be computed is blanked
+        # (docs/decisions/0163).
+        rows = [
+            {"animal_id": "600", "date": "2026-07-02", "weight_g": "332",
+             "baseline_g": "348", "pct_baseline": "0.111"},   # wrong -> fixed
+            {"animal_id": "601", "date": "2026-07-02", "weight_g": "",
+             "baseline_g": "350", "pct_baseline": "0.9"},      # can't compute
+        ]
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "daily_log.csv")
+            written = write_rows(rows, path)
+        by_id = {r["animal_id"]: r for r in written}
+        self.assertEqual(by_id["600"]["pct_baseline"],
+                         f"{round(332 / 348, 4):.4f}")
+        self.assertEqual(by_id["601"]["pct_baseline"], "")
+
     def test_creates_missing_parent_dir(self):
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "nested", "sub", "daily_log.csv")

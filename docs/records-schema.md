@@ -68,6 +68,13 @@ version loads with the missing columns as `""`.
 `water_on`/`water_off` are free text today ("6pm"); see FW-0029 for hardening
 them into real timestamps.
 
+`pct_baseline` is a **derived mirror** of `weight_g / baseline_g` (a fraction,
+0..1), not an independent field. Every writer rewrites it from the row's
+weight/baseline, and every reader (`dashboard.pct_baseline_of`,
+`animal_state`) recomputes it first and only falls back to the stored cell when
+weight or baseline is missing (ADR-0163) — so the two surfaces can't drift, and
+the Excel Entry sheet can keep it as a live formula.
+
 `water_method` (schema v3, ADR-0104) records HOW the day's restricted water was
 delivered: blank (unspecified), `timed_access`, `measured_bottle` or
 `task_earned`. Orthogonal to `water_regime`. On a `task_earned` day the entered

@@ -63,15 +63,23 @@ def _iso(value: Any) -> Optional[dt.date]:
 # Signal 1: % baseline + <90% flag + grams-to-threshold deficit
 # --------------------------------------------------------------------------- #
 def pct_baseline_of(row: Optional[Dict[str, str]]) -> Optional[float]:
-    """A row's % baseline as a fraction: the stored value if numeric, else
-    computed from weight/baseline, else None."""
+    """A row's % baseline as a fraction, computed from weight/baseline.
+
+    Weight and baseline are the source of truth; ``pct_baseline`` is a derived
+    mirror that can drift (e.g. a weight edited on one surface without the mirror
+    being recomputed). So we recompute from weight/baseline FIRST and only fall
+    back to the stored cell when the row can't be computed (weight or baseline
+    missing). :func:`daily_log.write_rows` keeps the stored mirror in step, so in
+    practice the two agree - this precedence just makes the reader authoritative
+    if they ever don't. Returns None when neither path yields a value.
+    """
     if not row:
         return None
-    stored = _num(row.get("pct_baseline"))
-    if stored is not None:
-        return stored
-    return daily_log.compute_pct_baseline(row.get("weight_g"),
-                                          row.get("baseline_g"))
+    computed = daily_log.compute_pct_baseline(row.get("weight_g"),
+                                              row.get("baseline_g"))
+    if computed is not None:
+        return computed
+    return _num(row.get("pct_baseline"))
 
 
 def below_threshold(pct: Optional[float],

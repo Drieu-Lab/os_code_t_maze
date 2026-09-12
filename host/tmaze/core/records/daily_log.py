@@ -313,6 +313,22 @@ def _normalise(row: Dict[str, str]) -> Dict[str, str]:
     return {f: str(row.get(f, "") or "").strip() for f in FIELDS}
 
 
+def _with_recomputed_pct(row: Dict[str, str]) -> Dict[str, str]:
+    """A normalised row whose ``pct_baseline`` mirror is recomputed from its
+    weight/baseline (blank when not computable).
+
+    Weight/baseline are the source of truth and ``pct_baseline`` is a derived
+    mirror, so every persisted row rewrites it here rather than trusting whatever
+    the caller passed. That keeps the stored column in step with the reader
+    (:func:`dashboard.pct_baseline_of`, which also recomputes first), so the two
+    surfaces can't drift. See docs/decisions/0163.
+    """
+    out = _normalise(row)
+    pct = compute_pct_baseline(out.get("weight_g"), out.get("baseline_g"))
+    out["pct_baseline"] = "" if pct is None else f"{pct:.4f}"
+    return out
+
+
 def row_has_weight(row: Optional[Dict[str, str]]) -> bool:
     """True if a daily row carries a usable (numeric) weight.
 
@@ -448,7 +464,7 @@ def write_rows(rows: List[Dict[str, str]],
     check_unchanged(p, expect_mtime)
     deduped: Dict[tuple, Dict[str, str]] = {}
     for row in rows:
-        deduped[_key(row)] = _normalise(row)
+        deduped[_key(row)] = _with_recomputed_pct(row)
     ordered = sorted(deduped.values(), key=_key)
 
     parent = os.path.dirname(os.path.abspath(p))
