@@ -2392,19 +2392,8 @@ class RecordsManager:
         operator = self._require_operator()
         if operator is None:
             return
-        # Snapshot the CSVs BEFORE the builders run so the import's effect can
-        # be logged per field under this operator (ADR-0155). Done here on the
-        # UI thread; the worker reads the after-state once the builders finish.
-        try:
-            before_daily = daily_log.load_rows_for_write(self.daily_path)
-            before_annot = session_annotations.load_rows_for_write(
-                self.annot_path)
-        except RecordsFileError as e:
-            messagebox.showerror("Import refused", str(e))
-            return
         self._run_async("Importing from Excel...",
-                        lambda: self._do_import(operator, before_daily,
-                                                before_annot))
+                        lambda: self._do_import(operator))
 
     def _on_close(self) -> None:
         """Window-close guard: warn on a running build or unsaved edits (#3)."""
@@ -2426,32 +2415,15 @@ class RecordsManager:
                self._run_script("build_session_training_log.py", [])]
         return "\n".join(log)
 
-    def _do_import(self, operator: str,
-                   before_daily: List[Dict[str, str]],
-                   before_annot: List[Dict[str, str]]) -> str:
-        """Worker: run the two importing builders, then log what they changed
-        (before/after diff of each CSV) to the change log under ``operator``.
-        Runs off the UI thread - file IO only, no Tk calls."""
-        log = [self._run_script("build_daily_log.py", ["--export"]),
+    def _do_import(self, operator: str) -> str:
+        """Worker: run the two importing builders under ``operator``. They log
+        what they changed to records_changes.csv themselves (ADR-0155), so the
+        GUI does not diff here - one writer, one log entry per change."""
+        log = [self._run_script("build_daily_log.py",
+                                ["--export", "--operator", operator]),
                self._run_script("build_session_training_log.py",
-                                ["--import-annotations"])]
-        try:
-            n_daily = records_changelog.record(
-                before_daily, daily_log.load_rows(self.daily_path),
-                daily_log.KEY_FIELDS, operator,
-                "records_manager import (build_daily_log --export)",
-                "daily_log.csv", fields=daily_log.FIELDS,
-                path=self.changelog_path)
-            n_annot = records_changelog.record(
-                before_annot, session_annotations.load_rows(self.annot_path),
-                (session_annotations.KEY_FIELD,), operator,
-                "records_manager import (build_session_training_log "
-                "--import-annotations)", "session_annotations.csv",
-                fields=session_annotations.FIELDS, path=self.changelog_path)
-            log.append(f"[change log] {n_daily + n_annot} change(s) logged "
-                       f"for {operator}")
-        except OSError as e:
-            log.append(f"[change log] FAILED to write {self.changelog_path}: {e}")
+                                ["--import-annotations", "--operator",
+                                 operator])]
         return "\n".join(log)
 
     def _build_registry_inprocess(self) -> str:
