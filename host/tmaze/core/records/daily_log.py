@@ -324,8 +324,7 @@ def _with_recomputed_pct(row: Dict[str, str]) -> Dict[str, str]:
     surfaces can't drift. See docs/decisions/0163.
     """
     out = _normalise(row)
-    pct = compute_pct_baseline(out.get("weight_g"), out.get("baseline_g"))
-    out["pct_baseline"] = "" if pct is None else f"{pct:.4f}"
+    out["pct_baseline"] = pct_str(out.get("weight_g"), out.get("baseline_g"))
     return out
 
 
@@ -423,6 +422,16 @@ def compute_pct_baseline(weight, baseline) -> Optional[float]:
     if b == 0:
         return None
     return round(w / b, 4)
+
+
+def pct_str(weight, baseline) -> str:
+    """The stored ``pct_baseline`` mirror string for a weight/baseline pair.
+
+    The single formatter every writer uses so the on-disk mirror is byte-for-byte
+    consistent: a 4-dp fraction, or "" when not computable (docs/decisions/0163).
+    """
+    pct = compute_pct_baseline(weight, baseline)
+    return "" if pct is None else f"{pct:.4f}"
 
 
 def upsert_rows(existing: List[Dict[str, str]],

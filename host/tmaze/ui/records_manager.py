@@ -60,7 +60,6 @@ import sys
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
-from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from tmaze.core.records import (
@@ -74,6 +73,7 @@ from tmaze.core.records import (
     records_audit,
     records_audit_ack,
     records_changelog,
+    records_edits,
     records_git,
     session_annotations,
     session_ignore,
@@ -173,7 +173,8 @@ _DAILY_MISSING_LOOKBACK_DAYS = 14
 
 # Sentinel in the "Mark span" dialog's regime/method dropdowns meaning "don't
 # touch this field over the span" (so a bulk regime mark doesn't clear methods).
-_SPAN_LEAVE = "(leave unchanged)"
+# Defined in the core so span_edits and the dialog agree on it.
+_SPAN_LEAVE = records_edits.SPAN_LEAVE
 
 
 def _today_iso() -> str:
@@ -203,40 +204,11 @@ def _read_csv_skip_comments(path: str) -> List[Dict[str, str]]:
         return []
 
 
-@dataclass
-class _StepResult:
-    """One step of a Generate / Import chain, as data (not a text line to
-    sniff; docs/decisions/0158)."""
-    name: str
-    ok: bool
-    detail: str = ""
-
-    def line(self) -> str:
-        tag = "OK" if self.ok else "FAILED"
-        return f"[{self.name} {tag}] {self.detail}".rstrip()
-
-
-@dataclass
-class _ChainOutcome:
-    """The result of a Generate / Import chain: its steps in order, whether it
-    stopped early (a failed step halts the chain so later builders never run
-    on a half-written input), and - for Generate - the registry's shrink
-    report when the build REFUSED because sessions would vanish."""
-    steps: List[_StepResult] = field(default_factory=list)
-    halted: bool = False
-    shrink: Optional[session_registry.ShrinkReport] = None
-    shrink_refused: bool = False
-
-    @property
-    def ok(self) -> bool:
-        return bool(self.steps) and all(s.ok for s in self.steps) \
-            and not self.halted
-
-    def text(self) -> str:
-        lines = [s.line() for s in self.steps]
-        if self.halted:
-            lines.append("Stopped here - the remaining steps were not run.")
-        return "\n".join(lines)
+# The Generate / Import chain model lives in the tested core now
+# (tmaze.core.records.records_edits); these aliases keep the shell's call sites
+# unchanged.
+_StepResult = records_edits.StepResult
+_ChainOutcome = records_edits.GenerateResult
 
 
 class RecordsManager:
@@ -332,14 +304,11 @@ class RecordsManager:
         self.ignored_sessions = session_ignore.load_ignored()
         # Bundle folders under the configured roots, scanned once per load (not
         # per banner refresh - the archive root may be a network drive). Feeds
-        # the "N bundles not yet indexed" hint (ADR-0158) and the integrity
-        # check's ghost-annotation section (ADR-0159). None = nothing found
-        # anywhere, i.e. the roots are unreachable rather than empty.
+        # the "N bundles not yet indexed" hint (records_edits.registry_staleness,
+        # ADR-0158) and the integrity check's ghost-annotation section (ADR-0159).
+        # None = nothing found anywhere, i.e. the roots are unreachable rather
+        # than empty.
         self.on_disk_sessions: Optional[Set[str]] = self._scan_on_disk()
-        self.unindexed_sessions = session_registry.unindexed_sessions(
-            self.on_disk_sessions or [],
-            [r.get("session_id", "") for r in self.registry_rows],
-            self.ignored_sessions)
 
     def _read_registry_meta(self) -> session_registry.BuildMeta:
         """The registry's provenance header (v2, ADR-0157); blank for a v1 file
@@ -830,17 +799,17 @@ class RecordsManager:
         operator = self._require_operator()
         if operator is None:
             return
-        edit = {f: self.d_vars[f].get().strip() for f in daily_log.FIELDS}
+        raw = {f: self.d_vars[f].get().strip() for f in daily_log.FIELDS}
         # Hard validation (blocks the save): required key + ISO date + numeric
         # weight/baseline/water mL. Shared with the Excel --export path so both
         # surfaces reject the same garbage (Phase B; #14).
-        errors = daily_log.validate_entry(edit)
+        errors = daily_log.validate_entry(raw)
         if errors:
             messagebox.showwarning(
                 "Can't save this row",
                 "Please fix:\n  - " + "\n  - ".join(errors))
             return
-        aid, date = edit["animal_id"], edit["date"]
+        aid, date = raw["animal_id"], raw["date"]
         # Soft, warn-but-allow identity check (keeps ADR-0075's policy): an id not
         # on the roster is allowed but confirmed, so a typo doesn't silently mint
         # an off-roster husbandry row. Only when the roster actually loaded.
@@ -850,13 +819,9 @@ class RecordsManager:
                 f"'{aid}' isn't in the roster (animals.json).\n"
                 "Save this row anyway?", default="no"):
             return
-        pct = daily_log.compute_pct_baseline(edit["weight_g"], edit["baseline_g"])
-        edit["pct_baseline"] = "" if pct is None else str(pct)
-        # Store the canonical regime ("ad_lib" or "" for restriction) so the
-        # column stays blank except on ad-lib days (ADR-0100), and the canonical
-        # water method ("" when unspecified/unknown; ADR-0104).
-        edit["water_regime"] = daily_log.normalize_regime(edit["water_regime"])
-        edit["water_method"] = daily_log.normalize_method(edit["water_method"])
+        # Normalise the raw form into a writeable row: recompute the pct mirror,
+        # canonicalise regime/method (core: records_edits.daily_row_from_form).
+        edit = records_edits.daily_row_from_form(raw)
 
         changes: List[records_changelog.Change] = []
 
@@ -999,57 +964,28 @@ class RecordsManager:
         operator = self._require_operator()
         if operator is None:
             return
-        aid = spec["animal"]
+        # Hard validation of the request (core: records_edits.validate_span).
+        errors = records_edits.validate_span(spec)
+        if errors:
+            messagebox.showwarning("Can't mark this span",
+                                   "Please fix:\n  - " + "\n  - ".join(errors))
+            return
+        aid = spec["animal"].strip()
         start, end = spec["start"], spec["end"]
-        if not aid:
-            messagebox.showwarning("Missing animal", "Pick an animal.")
-            return
-        if not _is_iso_date(start) or not _is_iso_date(end):
-            messagebox.showwarning(
-                "Bad date", "Start and End must both be YYYY-MM-DD.")
-            return
-        d0 = dt.date.fromisoformat(start)
-        d1 = dt.date.fromisoformat(end)
-        if d1 < d0:
-            messagebox.showwarning("Bad range", "End date is before Start date.")
-            return
-        if (d1 - d0).days > 31:
-            messagebox.showwarning("Range too long",
-                                   "Span is over 31 days - mark a shorter range.")
-            return
         set_regime = spec.get("regime", _SPAN_LEAVE) != _SPAN_LEAVE
         set_method = spec.get("method", _SPAN_LEAVE) != _SPAN_LEAVE
-        if not set_regime and not set_method:
-            messagebox.showwarning(
-                "Nothing to set",
-                "Choose a regime and/or a method to apply over the span.")
-            return
         regime_val = daily_log.normalize_regime(spec.get("regime", ""))
         method_val = daily_log.normalize_method(spec.get("method", ""))
-        n = (d1 - d0).days + 1
 
         def _write(expect_mtime) -> None:
             # Build the per-day edits from the rows AS READ NOW, not from the
             # in-memory table: a span only touches regime/method/boundary times,
             # so every other cell (weight, notes...) must come from the file's
             # current row or a concurrent edit would be reverted (ADR-0155).
+            # The expansion itself is pure (core: records_edits.span_edits).
             existing = daily_log.load_rows_for_write(self.daily_path)
             fresh = daily_log.DailyLog(existing)
-            edits: List[Dict[str, str]] = []
-            for i in range(n):
-                day = (d0 + dt.timedelta(days=i)).isoformat()
-                row = dict(fresh.for_date(aid, day) or
-                           {"animal_id": aid, "date": day})
-                row["animal_id"], row["date"] = aid, day
-                if set_regime:
-                    row["water_regime"] = regime_val
-                if set_method:
-                    row["water_method"] = method_val
-                if i == 0 and spec.get("start_t"):
-                    row["water_on"] = spec["start_t"]
-                if i == n - 1 and spec.get("end_t"):
-                    row["water_off"] = spec["end_t"]
-                edits.append(row)
+            edits = records_edits.span_edits(fresh, spec)
             merged = daily_log.upsert_rows(existing, edits)
             daily_log.write_rows(merged, self.daily_path,
                                  expect_mtime=expect_mtime)
@@ -1061,6 +997,7 @@ class RecordsManager:
             return
         self._log_changes(changes, operator, "records_manager span",
                           "daily_log.csv")
+        n = (dt.date.fromisoformat(end) - dt.date.fromisoformat(start)).days + 1
         what = []
         if set_regime:
             what.append(f"regime={regime_val or 'restriction'}")
@@ -2277,22 +2214,30 @@ class RecordsManager:
         """Update the top staleness strip (session count + build time + bundles
         not yet indexed + whether the daily Excel workbook holds edits not yet
         imported)."""
-        n = len(self.registry_rows)
-        reg = (f"Registry: {n} session{'' if n == 1 else 's'} "
+        # Fold the staleness signals into one tested struct (core:
+        # records_edits.registry_staleness) and just render it here.
+        st = records_edits.registry_staleness(
+            getattr(self, "on_disk_sessions", None),
+            [r.get("session_id", "") for r in self.registry_rows],
+            getattr(self, "ignored_sessions", set()),
+            len(self.registry_rows),
+            self._excel_has_unsynced_edits())
+        reg = (f"Registry: {st.n_indexed} session"
+               f"{'' if st.n_indexed == 1 else 's'} "
                f"\u00b7 built {self._registry_built_str()}")
-        stale = len(getattr(self, "unindexed_sessions", []) or [])
-        if stale:
-            reg += (f" \u00b7 {stale} bundle{'' if stale == 1 else 's'} on disk "
+        if st.stale:
+            k = len(st.unindexed)
+            reg += (f" \u00b7 {k} bundle{'' if k == 1 else 's'} on disk "
                     "not yet indexed \u2014 run Generate")
-        if stale:
+        if st.stale:
             # Stale registry outranks the Excel note for colour: the session
             # list is missing real sessions until Generate runs.
             excel = ("Daily Excel edited since last sync \u2014 run Import "
-                     "before Generate" if self._excel_has_unsynced_edits()
+                     "before Generate" if st.excel_unsynced
                      else "Daily Excel in sync")
             self.banner_var.set(reg + "   |   " + excel)
             self.banner.configure(foreground="#9a6700")
-        elif self._excel_has_unsynced_edits():
+        elif st.excel_unsynced:
             self.banner_var.set(
                 reg + "   |   Daily Excel edited since last sync \u2014 run "
                 "Import before Generate, or those edits are overwritten.")
