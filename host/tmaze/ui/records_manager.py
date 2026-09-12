@@ -300,9 +300,15 @@ class RecordsManager:
 
         self.d_vars: Dict[str, tk.StringVar] = {
             f: tk.StringVar() for f in daily_log.FIELDS}
-        # Any user edit to a field marks the form dirty (#3); programmatic fills
-        # wrap themselves in _suspend_dirty_tracking so they don't trip this.
+        # A user edit to a DATA field marks the form dirty (#3); programmatic
+        # fills wrap themselves in _suspend_dirty_tracking so they don't trip
+        # this. The key/navigation fields (animal_id, date) and the derived
+        # pct_baseline are deliberately NOT tracked: picking an animal or a date
+        # is browsing (the Animal dropdown also filters the table below), not
+        # editing, so it must not raise a spurious "unsaved changes" warning.
         for _f in daily_log.FIELDS:
+            if _f in ("animal_id", "date", "pct_baseline"):
+                continue
             self.d_vars[_f].trace_add("write", self._mark_daily_dirty)
 
         # Animal (dropdown) + Date.
@@ -447,7 +453,10 @@ class RecordsManager:
             aid, self.d_vars["date"].get().strip() or None)
         baseline = str((latest or {}).get("baseline_g", "")) if latest else ""
         if force or baseline:
-            self.d_vars["baseline_g"].set(baseline)
+            # Auto-prefilling the baseline on an animal change is not a user
+            # edit, so don't let it mark the form dirty (#3).
+            with self._suspend_dirty_tracking():
+                self.d_vars["baseline_g"].set(baseline)
 
     def _update_pct(self) -> None:
         pct = daily_log.compute_pct_baseline(self.d_vars["weight_g"].get(),
@@ -484,6 +493,19 @@ class RecordsManager:
 
     def _has_unsaved(self) -> bool:
         return self._daily_dirty or self._annotation_dirty()
+
+    def _unsaved_summary(self) -> str:
+        """A human list of what's actually unsaved, so a discard/quit prompt can
+        name it instead of a vague "you have unsaved changes" (#3)."""
+        parts: List[str] = []
+        if self._daily_dirty:
+            aid = self.d_vars["animal_id"].get().strip() or "?"
+            date = self.d_vars["date"].get().strip() or "?"
+            parts.append(f"- Daily entry form (rat {aid}, {date})")
+        if self._annotation_dirty():
+            sid = self.current_session_id or "?"
+            parts.append(f"- Annotation for session {sid}")
+        return "\n".join(parts)
 
     def _confirm_discard(self, what: str) -> bool:
         """Ask before an action that would throw away unsaved edits."""
@@ -2049,8 +2071,9 @@ class RecordsManager:
                     default="no"):
                 return
         elif self._has_unsaved() and not messagebox.askyesno(
-                "Quit?", "You have unsaved changes. Quit anyway?",
-                default="no"):
+                "Quit?",
+                "You have unsaved changes:\n\n" + self._unsaved_summary()
+                + "\n\nQuit anyway?", default="no"):
             return
         self.root.destroy()
 
