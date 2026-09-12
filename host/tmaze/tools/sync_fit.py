@@ -35,9 +35,11 @@ inside (so a hand/rat elsewhere never floods the blob list). When a v2
 the board pose, and each mapped LED is located by the HYBRID rule (a detected
 blinking blob when present, else its pose-transformed stored position); a v1 map
 falls back to registering the blinking-LED constellation; without any map the tool
-**bootstraps** the bindings from the session itself and warns. It never registers
-a MODE-less manifest change here - announcing the streams in ``session.json`` /
-``format.json`` is Slice 4.
+**bootstraps** the bindings from the session itself and warns. On a normal (non
+``--dry-run``) run it then registers the two ``sync/`` files in the bundle's
+``session_<id>.json`` manifest and flips the time-anchor ``fiducial.method`` to
+``led-fit`` (the streams + format are announced in ``config/format.json`` too;
+ADR-0154). ``--dry-run`` leaves the bundle and its manifest untouched.
 
 Thin shell: all pixel work is in ``tmaze.vision.led_detector`` and all matching /
 fitting in ``tmaze.core.sync``; this file only does argument parsing, bundle I/O,
@@ -56,6 +58,7 @@ from dataclasses import asdict
 from datetime import datetime
 from typing import Dict, List, Optional, Sequence, Tuple
 
+from tmaze.core.session.session_log import SessionManifest
 from tmaze.core.sync import clockfit, led_map as LM, matching, pipeline
 from tmaze.core.sync import spans as S
 
@@ -428,6 +431,82 @@ def write_clock_fit(path: str, run: SyncRun) -> None:
         f.write("\n")
 
 
+def _atomic_write(path: str, text: str) -> None:
+    """Write ``text`` to ``path`` via temp file + os.replace (never a torn file).
+
+    Mirrors ``session_config._atomic_json`` - used to re-write the rig-authored
+    ``session_<id>.json`` in place without risking a half-written manifest."""
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8", newline="") as fh:
+        fh.write(text)
+    os.replace(tmp, path)
+
+
+def register_sync_in_manifest(bundle: str, run: SyncRun) -> Optional[str]:
+    """Announce the two ``sync/`` files in the bundle's session manifest.
+
+    Reads ``session_<id>.json``, registers the ``sync_led_events`` /
+    ``sync_clock_fit`` streams (bundle-relative paths), and flips the time-anchor
+    ``fiducial.method`` to ``led-fit`` while KEEPING the ``pending`` note (led-fit
+    is a ~9.5 ms software fit, not the sub-ms hardware sync FW-0018 still points
+    at). The fit numbers themselves stay in ``sync/clock_fit_<id>.json`` - the
+    manifest only points at them (ADR-0154). Atomic read-modify-write so the file
+    the rig wrote is never clobbered mid-write; idempotent. Returns the manifest
+    path on success, or None if there is no manifest to update."""
+    path = os.path.join(bundle, f"session_{run.sid}.json")
+    if not os.path.isfile(path):
+        return None
+    with open(path, encoding="utf-8") as fh:
+        m = SessionManifest.from_dict(json.load(fh))
+    m.set_stream("sync_led_events", f"sync/led_events_{run.sid}.csv")
+    m.set_stream("sync_clock_fit", f"sync/clock_fit_{run.sid}.json")
+    m.fiducial["method"] = FIDUCIAL_METHOD  # host-t0 -> led-fit; pending note kept
+    _atomic_write(path, m.render())
+    return path
+
+
+def write_fit_plot(path: str, run: SyncRun) -> bool:
+    """Save a QA plot of the clock fit: per-edge residuals (ms) vs firmware_ms.
+
+    A quick visual companion to the residual scalars in clock_fit_<id>.json - the
+    dashed median +/- MAD band shows the fit's spread and any drift over the
+    session. ``matplotlib`` is an OPTIONAL rig dep: if it is not installed (or
+    there is no fit / no matched pairs) the plot is skipped and this returns
+    False, so the tool still runs on a bare machine."""
+    fit = run.result.fit
+    if fit is None:
+        return False
+    pts = [(r["firmware_ms"], r["residual_ms"]) for r in led_event_rows(run)
+           if r["firmware_ms"] is not None and r["residual_ms"] is not None]
+    if not pts:
+        return False
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print("  (matplotlib not installed - skipped the clock-fit plot)")
+        return False
+    xs = [p[0] / 1000.0 for p in pts]          # firmware seconds, for readability
+    ys = [p[1] for p in pts]
+    r = fit.residuals
+    fig, ax = plt.subplots(figsize=(8, 4))
+    ax.axhspan(r.median_ms - r.mad_ms, r.median_ms + r.mad_ms,
+               color="0.85", label=f"median +/- MAD ({r.mad_ms:.1f} ms)")
+    ax.axhline(r.median_ms, color="0.4", lw=1, ls="--")
+    ax.scatter(xs, ys, s=8, alpha=0.5, color="tab:blue")
+    ax.set_xlabel("firmware clock (s)")
+    ax.set_ylabel("residual (ms)  [cam - fit]")
+    ax.set_title(f"{run.sid}: clock fit  rate={fit.rate:.4f}  "
+                 f"{len(fit.offsets)} seg  {fit.n_pairs} pairs  "
+                 f"MAD={r.mad_ms:.1f} ms  verdict={run.result.verdict}")
+    ax.legend(loc="upper right", fontsize=8)
+    fig.tight_layout()
+    fig.savefig(path, dpi=110)
+    plt.close(fig)
+    return True
+
+
 # ---------------------------------------------------------------- reporting
 
 def print_report(run: SyncRun, out: str) -> None:
@@ -625,8 +704,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         overlay_path = os.path.join(out_dir, f"led_overlay_{run.sid}.png")
         if write_overlay(overlay_path, run):
             print(f"  wrote {overlay_path}")
+        plot_path = os.path.join(out_dir, f"clock_fit_{run.sid}.png")
+        if write_fit_plot(plot_path, run):
+            print(f"  wrote {plot_path}")
     if a.dry_run:
-        print("  (dry run: the bundle itself was not modified)")
+        print("  (dry run: the bundle + its manifest were not modified)")
+    else:
+        manifest_path = register_sync_in_manifest(a.bundle, run)
+        if manifest_path:
+            print(f"  registered sync streams + fiducial.method=led-fit in {manifest_path}")
+        else:
+            print("  (no session manifest found - sync/ written but not registered)")
     return 0
 
 

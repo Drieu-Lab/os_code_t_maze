@@ -168,6 +168,16 @@ def _make_bundle(root: str) -> str:
         f.write("# wall_clock_iso,firmware_line\n")
         for r in rows:
             f.write(r + "\n")
+    # the rig-written session manifest sync_fit reads back to register the sync/
+    # streams + flip fiducial.method (defaults: 3 streams, host-t0 fiducial)
+    manifest = sync_fit.SessionManifest(
+        session_id=SID, animal="600",
+        t0={"wall": 1.0, "mono": 2.0, "iso": "2026-09-03T13:53:00.000"},
+        streams={"phase3_task": f"task/phase3_{SID}.csv",
+                 "camera_video": f"video/{SID}.mp4",
+                 "camera_sidecar": f"video/{SID}.csv"})
+    with open(os.path.join(bundle, f"session_{SID}.json"), "w", encoding="utf-8") as f:
+        f.write(manifest.render())
     return bundle
 
 
@@ -204,6 +214,50 @@ class TestEndToEndOnClip(unittest.TestCase):
             self.assertEqual(rc, 0)
             self.assertTrue(os.path.isfile(os.path.join(bundle, "sync", f"clock_fit_{SID}.json")))
             self.assertTrue(os.path.isfile(os.path.join(bundle, "sync", f"led_events_{SID}.csv")))
+
+    def test_write_mode_registers_streams_and_flips_fiducial(self):
+        with tempfile.TemporaryDirectory() as root:
+            bundle = _make_bundle(root)
+            rc = sync_fit.main([bundle, "--board-rect", "0", "0", "210", "184"])
+            self.assertEqual(rc, 0)
+            with open(os.path.join(bundle, f"session_{SID}.json"), encoding="utf-8") as f:
+                man = json.load(f)
+        # the two sync files are announced with bundle-relative paths
+        self.assertEqual(man["streams"]["sync_led_events"], f"sync/led_events_{SID}.csv")
+        self.assertEqual(man["streams"]["sync_clock_fit"], f"sync/clock_fit_{SID}.json")
+        # the time anchor flips to led-fit, but the FW-0018 pending note stays
+        self.assertEqual(man["fiducial"]["method"], "led-fit")
+        self.assertIn("FW-0018", man["fiducial"]["pending"])
+        # what the rig wrote is otherwise preserved
+        self.assertEqual(man["streams"]["camera_video"], f"video/{SID}.mp4")
+
+    def test_dry_run_leaves_manifest_byte_identical(self):
+        with tempfile.TemporaryDirectory() as root:
+            bundle = _make_bundle(root)
+            mpath = os.path.join(bundle, f"session_{SID}.json")
+            with open(mpath, "rb") as f:
+                before = f.read()
+            out = os.path.join(root, "dryrun")
+            rc = sync_fit.main([bundle, "--dry-run", "--out", out, "--board-rect", "0", "0", "210", "184",
+                                "--min-matched", "2", "--min-pairs", "10"])
+            self.assertEqual(rc, 0)
+            with open(mpath, "rb") as f:
+                after = f.read()
+        self.assertEqual(before, after)   # a dry run never edits the manifest
+
+    def test_overlay_writes_clock_fit_plot(self):
+        try:
+            import matplotlib  # noqa: F401
+        except ImportError:
+            self.skipTest("matplotlib not installed (optional plot dep)")
+        with tempfile.TemporaryDirectory() as root:
+            bundle = _make_bundle(root)
+            # lower thresholds so this short clip yields a fit (needed for the plot)
+            rc = sync_fit.main([bundle, "--overlay", "--board-rect", "0", "0", "210", "184",
+                                "--min-matched", "2", "--min-pairs", "10"])
+            self.assertEqual(rc, 0)
+            self.assertTrue(os.path.isfile(
+                os.path.join(bundle, "sync", f"clock_fit_{SID}.png")))
 
     def test_map_mode_writes_led_map(self):
         with tempfile.TemporaryDirectory() as root:
