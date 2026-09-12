@@ -66,3 +66,48 @@ def load_operators(path: Optional[str] = None) -> List[str]:
 def is_operator(name: str, operators: List[str]) -> bool:
     """Whether ``name`` (trimmed) is one of the configured operators."""
     return str(name or "").strip() in operators
+
+
+def _read_if_present(path: str) -> Optional[List[str]]:
+    """The operators list if ``path`` is a readable operators.json, else None.
+
+    Distinguishes "file missing / unreadable" (None — the caller should not
+    enforce membership) from "file present with an empty list" ([]).
+    """
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            raw = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(raw, dict) or not isinstance(raw.get("operators"), list):
+        return None
+    return load_operators(path)
+
+
+def require_operator(name: str, what: str,
+                     path: Optional[str] = None) -> str:
+    """The trimmed operator name, or raise ``ValueError`` explaining that
+    ``what`` (e.g. ``--export``) must be attributed.
+
+    When ``operators.json`` is readable the name must be on the list; when
+    the file is absent or unreadable any non-blank name is accepted, so a
+    builder run on a machine that can import ``tmaze`` but whose ``host/``
+    folder is not the live one still writes. The resources builders catch
+    the ``ValueError`` and exit (ADR-0162).
+    """
+    name = str(name or "").strip()
+    if not name:
+        raise ValueError(
+            f"{what} rewrites a records file, so it must be attributed: pass "
+            f"--operator <your initials> (the names in host/operators.json). "
+            f"Nothing was written.")
+    p = path or default_operators_path()
+    known = _read_if_present(p)
+    if known is not None and name not in known:
+        raise ValueError(
+            f"--operator {name!r} is not in {p} "
+            f"(known: {', '.join(known) or 'none'}). Add it there (and "
+            f"commit) or pick a listed name. Nothing was written.")
+    return name
