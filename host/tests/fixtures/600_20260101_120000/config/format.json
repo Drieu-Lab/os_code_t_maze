@@ -1,5 +1,5 @@
 {
-  "format_version": 1,
+  "format_version": 2,
   "proto": 10,
   "zones_version": 1,
   "outcome_labels": [
@@ -59,5 +59,31 @@
     "attempt": "1-based attempt number for this trial (append-only edits)",
     "superseded": "1 on a preserved attempt a later Repeat/Back replaced",
     "edit": "operator action that created a >1 attempt (repeat/back)"
+  },
+  "sync": {
+    "stream": "sync",
+    "method": "led-fit",
+    "led_events": "sync/led_events_<session_id>.csv",
+    "led_events_columns": {
+      "led_id": "detected board LED id (blob_N, or a mapped channel name)",
+      "edge": "'on' or 'off' - which LED transition this row marks",
+      "frame_idx": "0-based video frame index of the edge",
+      "cam_timestamp": "camera hardware-clock tick at that frame (ns), blank if unknown",
+      "host_unix_s": "host wall-clock epoch seconds at that frame (from the sidecar)",
+      "matched_event": "serial channel the LED is bound to (e.g. SOL2.1, S2=0)",
+      "firmware_ms": "Arduino millis() of the matched serial edge, blank if unmatched",
+      "residual_ms": "edge misalignment vs the fit in firmware-ms, blank if unmatched"
+    },
+    "clock_fit": "sync/clock_fit_<session_id>.json",
+    "clock_fit_fields": {
+      "method": "alignment method that produced the fit (led-fit)",
+      "fit": "per-segment offset + rate (cam_ticks = offset[seg] + rate*fw_ms) + residual stats",
+      "bindings": "per-LED serial channel + polarity + precision/recall/lag",
+      "board_rect": "board search rectangle [x0,y0,x1,y1] in full-frame px",
+      "board_poly": "board ROI outline (fiducial hull + margin) in full-frame px",
+      "fiducials": "persistent red/green fiducial count + colour split + registration pose",
+      "registration": "v1 blinking-constellation registration pose (when no fiducials)",
+      "verdict": "overall fit verdict"
+    }
   }
 }

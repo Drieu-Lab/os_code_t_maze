@@ -34,7 +34,9 @@ from tmaze.core.phase3.trial_sequence import HIGH, LEFT, LOW, RIGHT
 # Bump when the format.json layout / semantics change. Kept in lockstep with the
 # analysis mirror (drieu_lab_analysis: tmaze_analysis.phase3_format.FORMAT_VERSION),
 # which the reader checks to fail loudly on a newer format.
-FORMAT_VERSION = 1
+# v2 (ADR-0154): adds the ``sync`` block below (the offline LED clock-fit stream
+# written by tmaze.tools.sync_fit into sync/).
+FORMAT_VERSION = 2
 
 # One-line meaning per trial-CSV column, keyed by the phase3_log.COLUMNS names.
 # Columns without an entry still appear in the manifest (with an empty string), so
@@ -82,6 +84,46 @@ def _columns() -> Dict[str, str]:
     return {name: _COLUMN_DOC.get(name, "") for name in phase3_log.COLUMNS}
 
 
+# The offline cross-stream sync stream (ADR-0153/0154; docs/design/cross-stream-
+# sync-design.md sec 3.6). tmaze.tools.sync_fit WRITES these files into sync/; this
+# manifest only DOCUMENTS their shape so an offline reader learns the columns from
+# the bundle. The tool is the source of truth for the actual columns/keys - keep
+# these two in step (the golden-bundle round trip + the design doc are the guard).
+_SYNC_EVENT_COLUMN_DOC: Dict[str, str] = {
+    "led_id": "detected board LED id (blob_N, or a mapped channel name)",
+    "edge": "'on' or 'off' - which LED transition this row marks",
+    "frame_idx": "0-based video frame index of the edge",
+    "cam_timestamp": "camera hardware-clock tick at that frame (ns), blank if unknown",
+    "host_unix_s": "host wall-clock epoch seconds at that frame (from the sidecar)",
+    "matched_event": "serial channel the LED is bound to (e.g. SOL2.1, S2=0)",
+    "firmware_ms": "Arduino millis() of the matched serial edge, blank if unmatched",
+    "residual_ms": "edge misalignment vs the fit in firmware-ms, blank if unmatched",
+}
+
+_SYNC_CLOCK_FIT_FIELDS: Dict[str, str] = {
+    "method": "alignment method that produced the fit (led-fit)",
+    "fit": "per-segment offset + rate (cam_ticks = offset[seg] + rate*fw_ms) + residual stats",
+    "bindings": "per-LED serial channel + polarity + precision/recall/lag",
+    "board_rect": "board search rectangle [x0,y0,x1,y1] in full-frame px",
+    "board_poly": "board ROI outline (fiducial hull + margin) in full-frame px",
+    "fiducials": "persistent red/green fiducial count + colour split + registration pose",
+    "registration": "v1 blinking-constellation registration pose (when no fiducials)",
+    "verdict": "overall fit verdict",
+}
+
+
+def _sync() -> Dict[str, Any]:
+    """The ``sync`` block: the LED clock-fit stream's on-disk shape (see above)."""
+    return {
+        "stream": "sync",
+        "method": "led-fit",
+        "led_events": "sync/led_events_<session_id>.csv",
+        "led_events_columns": dict(_SYNC_EVENT_COLUMN_DOC),
+        "clock_fit": "sync/clock_fit_<session_id>.json",
+        "clock_fit_fields": dict(_SYNC_CLOCK_FIT_FIELDS),
+    }
+
+
 def format_manifest() -> Dict[str, Any]:
     """The ``config/format.json`` payload: the bundle's machine-readable contract.
 
@@ -98,4 +140,5 @@ def format_manifest() -> Dict[str, Any]:
         "arm_labels": [phase3_log._ARM_LABEL[LEFT], phase3_log._ARM_LABEL[RIGHT]],
         "zone_names": list(maze_state.EDITABLE_ZONES),
         "columns": _columns(),
+        "sync": _sync(),
     }
