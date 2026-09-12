@@ -74,6 +74,34 @@ class TestLoadForWrite(unittest.TestCase):
             rows = load_rows_for_write(_write(d))
         self.assertEqual(len(rows), 2)
 
+    # --------------------------------------------- header/schema guard (ADR-0155)
+    def test_renamed_header_column_is_refused(self):
+        bad = _CSV.replace("procedures", "Procedures")
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(RecordsFileError):
+                load_rows_for_write(_write(d, bad))
+
+    def test_newer_schema_version_is_refused(self):
+        bad = _CSV.replace("# schema_version=1", "# schema_version=7")
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(RecordsFileError):
+                load_rows_for_write(_write(d, bad))
+
+    def test_hash_line_inside_quoted_notes_is_kept(self):
+        text = (
+            "# schema_version=1\n"
+            "session_id,animal,date,procedures,notes\n"
+            "600_a,600,2026-08-05,,\"first\n# second\"\n"
+            "601_b,601,2026-08-05,,quiet\n"
+        )
+        with tempfile.TemporaryDirectory() as d:
+            path = _write(d, text)
+            strict = load_rows_for_write(path)
+            lenient = load_rows(path)
+        for rows in (strict, lenient):
+            self.assertEqual([r["session_id"] for r in rows], ["600_a", "601_b"])
+            self.assertEqual(rows[0]["notes"], "first\n# second")
+
     def test_present_but_unreadable_raises(self):
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "session_annotations.csv")

@@ -45,7 +45,6 @@ Run (conda env drieu_t_maze):
 from __future__ import annotations
 
 import contextlib
-import csv
 import datetime as dt
 import io
 import json
@@ -62,6 +61,7 @@ from tmaze.core.records import (
     animals,
     dashboard,
     daily_log,
+    read_commented_csv,
     records_audit,
     records_audit_ack,
     session_annotations,
@@ -161,13 +161,14 @@ def _is_iso_date(value: str) -> bool:
 
 
 def _read_csv_skip_comments(path: str) -> List[Dict[str, str]]:
-    """Rows of a `# schema_version`-prefixed CSV as dicts; [] if absent/unreadable."""
+    """Rows of a `# schema_version`-prefixed CSV as dicts; [] if absent/unreadable.
+
+    Uses the shared records reader so only the LEADING ``#`` lines count as
+    comments (a ``#`` inside a quoted cell is data; ADR-0155)."""
     try:
-        with open(path, "r", encoding="utf-8", newline="") as fh:
-            lines = [ln for ln in fh if not ln.lstrip().startswith("#")]
-    except OSError:
+        return read_commented_csv(path).rows
+    except (OSError, ValueError):
         return []
-    return list(csv.DictReader(lines))
 
 
 class RecordsManager:

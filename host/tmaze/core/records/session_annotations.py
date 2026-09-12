@@ -31,7 +31,12 @@ import csv
 import os
 from typing import Dict, List, Optional
 
-from tmaze.core.records import RecordsFileError, animals
+from tmaze.core.records import (
+    RecordsFileError,
+    animals,
+    check_header,
+    read_commented_csv,
+)
 
 # One row per session. ``session_id`` is the identity; ``animal`` and ``date`` are
 # denormalised copies (handy when reading the CSV alone); ``procedures`` and
@@ -54,20 +59,16 @@ def default_annotations_path() -> str:
 def load_rows(path: Optional[str] = None) -> List[Dict[str, str]]:
     """Read the annotations table best-effort; [] if it's missing/malformed.
 
-    Skips the leading `# schema_version` comment line (and any `#` line), then
-    parses the header + rows with ``csv``.
+    Skips the leading ``# schema_version`` comment line(s), then parses the
+    header + rows with ``csv`` (``read_commented_csv``; a ``#`` inside a quoted
+    notes cell is data, not a comment).
     """
     p = path or default_annotations_path()
     try:
-        with open(p, "r", encoding="utf-8", newline="") as fh:
-            lines = [ln for ln in fh if not ln.lstrip().startswith("#")]
+        parsed = read_commented_csv(p)
     except (OSError, ValueError):
         return []
-    reader = csv.DictReader(lines)
-    rows = []
-    for row in reader:
-        rows.append({k: (row.get(k) or "").strip() for k in FIELDS})
-    return rows
+    return [{k: row.get(k, "") for k in FIELDS} for row in parsed.rows]
 
 
 class SessionAnnotations:
@@ -116,19 +117,26 @@ def load_rows_for_write(path: Optional[str] = None) -> List[Dict[str, str]]:
 
     - File absent -> ``[]`` (a fresh file is safe to create).
     - File present but unopenable/undecodable -> raise :class:`RecordsFileError`.
+    - File present but its header isn't FIELDS (or an older prefix of it), or
+      its ``schema_version`` is newer than this code -> raise
+      :class:`RecordsFileError` (``check_header``; ADR-0155).
     """
     p = path or default_annotations_path()
     if not os.path.exists(p):
         return []
     try:
-        with open(p, "r", encoding="utf-8", newline="") as fh:
-            lines = [ln for ln in fh if not ln.lstrip().startswith("#")]
+        parsed = read_commented_csv(p)
     except (OSError, ValueError) as exc:
         raise RecordsFileError(
             f"{p} exists but could not be read ({exc}); refusing to overwrite "
             "it, which would drop the rows already in the file.") from exc
-    reader = csv.DictReader(lines)
-    return [{k: (row.get(k) or "").strip() for k in FIELDS} for row in reader]
+    problems = check_header(parsed.header, FIELDS, parsed.schema_version,
+                            SCHEMA_VERSION)
+    if problems:
+        raise RecordsFileError(
+            f"{p} is not safe to save into: " + " ".join(problems)
+            + " Fix the file by hand (or update the software) first.")
+    return [{k: row.get(k, "") for k in FIELDS} for row in parsed.rows]
 
 
 # --------------------------------------------------------------------------- #

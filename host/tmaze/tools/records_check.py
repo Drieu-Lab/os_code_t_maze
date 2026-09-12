@@ -26,13 +26,13 @@ Run (conda env drieu_t_maze; from anywhere):
 from __future__ import annotations
 
 import argparse
-import csv
 import os
 from typing import Dict, List
 
 from tmaze.core.records import (
     animals,
     daily_log,
+    read_commented_csv,
     records_audit,
     records_audit_ack,
     session_annotations,
@@ -42,13 +42,13 @@ from tmaze.tools import build_session_registry
 
 
 def _read_csv_skip_comments(path: str) -> List[Dict[str, str]]:
-    """Rows of a ``# schema_version``-prefixed CSV as dicts; [] if absent."""
+    """Rows of a ``# schema_version``-prefixed CSV as dicts; [] if absent.
+
+    Shared records reader: only the LEADING ``#`` lines are comments (ADR-0155)."""
     try:
-        with open(path, "r", encoding="utf-8", newline="") as fh:
-            lines = [ln for ln in fh if not ln.lstrip().startswith("#")]
-    except OSError:
+        return read_commented_csv(path).rows
+    except (OSError, ValueError):
         return []
-    return list(csv.DictReader(lines))
 
 
 def _print_section(section: records_audit.AuditSection,

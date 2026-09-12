@@ -40,7 +40,12 @@ import datetime as _dt
 import os
 from typing import Dict, List, Optional
 
-from tmaze.core.records import RecordsFileError, animals
+from tmaze.core.records import (
+    RecordsFileError,
+    animals,
+    check_header,
+    read_commented_csv,
+)
 
 # Column order mirrors the resources builder (records/animal/build_daily_log.py).
 # ``water_regime`` (schema v2, ADR-0100) and ``water_method`` (schema v3,
@@ -135,20 +140,17 @@ def default_daily_log_path() -> str:
 def load_rows(path: Optional[str] = None) -> List[Dict[str, str]]:
     """Read the daily table best-effort; [] if it's missing/malformed.
 
-    Skips the leading `# schema_version` comment line (and any `#` line), then
-    parses the header + rows with ``csv``.
+    Skips the leading ``# schema_version`` comment line(s), then parses the
+    header + rows with ``csv`` (``read_commented_csv``; a ``#`` inside a quoted
+    notes cell is data, not a comment). Rows are projected onto FIELDS by
+    column NAME, so an older file lacking the appended columns reads them as "".
     """
     p = path or default_daily_log_path()
     try:
-        with open(p, "r", encoding="utf-8", newline="") as fh:
-            lines = [ln for ln in fh if not ln.lstrip().startswith("#")]
+        parsed = read_commented_csv(p)
     except (OSError, ValueError):
         return []
-    reader = csv.DictReader(lines)
-    rows = []
-    for row in reader:
-        rows.append({k: (row.get(k) or "").strip() for k in FIELDS})
-    return rows
+    return [{k: row.get(k, "") for k in FIELDS} for row in parsed.rows]
 
 
 class DailyLog:
@@ -223,19 +225,27 @@ def load_rows_for_write(path: Optional[str] = None) -> List[Dict[str, str]]:
     - File absent -> ``[]`` (creating a fresh file is safe).
     - File present but it can't be opened/decoded -> raise
       :class:`RecordsFileError` so the caller can abort before clobbering it.
+    - File present but its header isn't FIELDS (or an older prefix of it), or
+      its ``schema_version`` is newer than this code -> raise
+      :class:`RecordsFileError` (``check_header``; ADR-0155). Without this a
+      renamed column read as blank and ONE save blanked it for every row.
     """
     p = path or default_daily_log_path()
     if not os.path.exists(p):
         return []
     try:
-        with open(p, "r", encoding="utf-8", newline="") as fh:
-            lines = [ln for ln in fh if not ln.lstrip().startswith("#")]
+        parsed = read_commented_csv(p)
     except (OSError, ValueError) as exc:
         raise RecordsFileError(
             f"{p} exists but could not be read ({exc}); refusing to overwrite "
             "it, which would drop the rows already in the file.") from exc
-    reader = csv.DictReader(lines)
-    return [{k: (row.get(k) or "").strip() for k in FIELDS} for row in reader]
+    problems = check_header(parsed.header, FIELDS, parsed.schema_version,
+                            SCHEMA_VERSION)
+    if problems:
+        raise RecordsFileError(
+            f"{p} is not safe to save into: " + " ".join(problems)
+            + " Fix the file by hand (or update the software) first.")
+    return [{k: row.get(k, "") for k in FIELDS} for row in parsed.rows]
 
 
 # --------------------------------------------------------------------------- #

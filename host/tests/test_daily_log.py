@@ -88,6 +88,67 @@ class TestLoadForWrite(unittest.TestCase):
             with self.assertRaises(RecordsFileError):
                 load_rows_for_write(path)
 
+    # --------------------------------------------- header/schema guard (ADR-0155)
+    def test_renamed_header_column_is_refused(self):
+        # Before the guard, a renamed column read as blank for every row and ONE
+        # save then wrote that blank back for the whole column.
+        bad = _CSV.replace("weight_g", "Weight_g")
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(RecordsFileError) as cm:
+                load_rows_for_write(_write(d, bad))
+        self.assertIn("Weight_g", str(cm.exception))
+
+    def test_reordered_header_is_refused(self):
+        bad = _CSV.replace("animal_id,date,", "date,animal_id,")
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(RecordsFileError):
+                load_rows_for_write(_write(d, bad))
+
+    def test_unknown_extra_column_is_refused(self):
+        # A column this code doesn't know would be dropped on rewrite.
+        bad = _CSV.replace(",notes\n", ",notes,extra\n")
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(RecordsFileError):
+                load_rows_for_write(_write(d, bad))
+
+    def test_newer_schema_version_is_refused(self):
+        bad = _CSV.replace("# schema_version=1", "# schema_version=99")
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(RecordsFileError) as cm:
+                load_rows_for_write(_write(d, bad))
+        self.assertIn("schema_version=99", str(cm.exception))
+
+    def test_older_prefix_header_is_accepted(self):
+        # The v1 fixture lacks water_regime/water_method: that's the documented
+        # upgrade path (appended columns read as "" and are written back).
+        with tempfile.TemporaryDirectory() as d:
+            rows = load_rows_for_write(_write(d))
+        self.assertEqual(rows[0]["water_method"], "")
+
+    def test_missing_schema_line_is_tolerated(self):
+        text = _CSV.split("\n", 1)[1]  # drop the comment line
+        with tempfile.TemporaryDirectory() as d:
+            rows = load_rows_for_write(_write(d, text))
+        self.assertEqual(len(rows), 3)
+
+    def test_hash_line_inside_quoted_notes_is_kept(self):
+        # A multi-line notes cell whose second line starts with '#': the old
+        # reader dropped that line as a "comment" and desynchronised the row.
+        text = (
+            "# schema_version=1\n"
+            "animal_id,date,weight_g,baseline_g,pct_baseline,water_on,water_off,water_ml,supp_water,notes\n"
+            "600,2026-07-02,332,348,0.954,6pm,7pm,,,\"line one\n#2 cage moved\"\n"
+            "601,2026-07-02,338,350,0.9657,6pm,7pm,,,\n"
+        )
+        with tempfile.TemporaryDirectory() as d:
+            path = _write(d, text)
+            strict = load_rows_for_write(path)
+            lenient = load_rows(path)
+        for rows in (strict, lenient):
+            self.assertEqual(len(rows), 2)
+            self.assertEqual(rows[0]["notes"], "line one\n#2 cage moved")
+            self.assertEqual(rows[1]["animal_id"], "601")
+
 
 class TestLookups(unittest.TestCase):
     def setUp(self):
