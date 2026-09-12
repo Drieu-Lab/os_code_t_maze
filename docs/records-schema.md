@@ -19,6 +19,7 @@ provenance-labelled channels**, never summed (see the registry below).
 | `animals.json` | resources · `records/animal/` | Records Manager GUI (Roster) or hand-edited | 1 | 0075 |
 | `daily_log.csv` | resources · `records/animal/` | Records Manager GUI (Daily) or `build_daily_log.py` (from the Entry sheet) | 2 (comment line) | 0076, 0100 |
 | `session_annotations.csv` | resources · `records/animal/` | Records Manager GUI (Sessions) or `build_session_training_log.py --import-annotations` | 1 (comment line) | 0082 / 0085 |
+| `records_changes.csv` | resources · `records/animal/` | appended by every records write path (Records Manager saves; builders' `--export` / `--import-annotations`) | 1 (comment line) | 0155 |
 | `animal_state.json` | code · per-bundle `config/` | `session_controller` at Start (core `animal_state.py`) | 2 | 0077, 0101 |
 | `session_meta.json` | code · per-bundle `config/` | `session_controller` at Start (core `session_meta.py`) | 1 | 0079 |
 | `session_registry.csv` | code · recordings root (git-ignored) | `build_session_registry.py` (core `session_registry.py`) | 1 (comment line) | 0081 |
@@ -73,6 +74,25 @@ line precedes the header. One row per `session_id`:
 Manager's Sessions tab. A save merges by `session_id`
 ([upsert](glossary.md#upsert-keyed-merge)) and, for a session not in the
 registry, preserves the row's existing `animal`/`date` rather than blanking them.
+
+## `records_changes.csv` (v1)
+
+The append-only [change log](glossary.md#change-log-records) for the three
+records files above (ADR-0155). A leading `# schema_version=1` comment line,
+then one line per changed **field**:
+
+`ts, operator, source, file, key, field, old, new`.
+
+`ts` is local wall-clock time to the second (ISO 8601, one stamp per save);
+`operator` is the person chosen in the Records Manager's Operator dropdown (or
+a builder's `--operator`); `source` is the tool (`records_manager`,
+`build_daily_log --export`, ...); `file` the records file's basename; `key` the
+row identity as one string (`600|2026-09-10` for the daily log, the
+`session_id` for annotations, the animal id for the roster). A row that appears
+or vanishes gets a `(row)` marker line (`new=added` / `old=removed`) plus one
+line per non-blank field. Never rewritten or sorted; readers drop a partial
+trailing line. It describes the records, it is not one: if it disagrees with a
+records file, the file wins. Core: `tmaze.core.records.records_changelog`.
 
 ## `animal_state.json` (v2)
 
