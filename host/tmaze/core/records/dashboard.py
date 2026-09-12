@@ -167,8 +167,10 @@ def collect_water(daily_row: Optional[Dict[str, str]],
 
     ``task``/``manual`` are summed from the day's already-filtered
     ``registry_rows`` (see :func:`registry_rows_for`); ``supplemental`` and
-    ``cage`` come from the daily row's ``supp_water`` / ``water_ml`` cells, read
-    as mL when numeric and 0 otherwise (those cells may hold a time or be blank).
+    ``cage`` come from the daily row's ``supp_water_ml`` / ``water_ml`` cells,
+    read as mL when numeric and 0 otherwise. The LEGACY free-text ``supp_water``
+    cell is never parsed ("2 min" is not 2 mL; ADR-0160) - an unsplit legacy
+    cell simply contributes nothing until a human splits it.
 
     On a ``task_earned`` day (``water_method``; ADR-0104) the entered ``water_ml``
     records the SAME water the rig already measures as task/manual reward, so
@@ -180,7 +182,7 @@ def collect_water(daily_row: Optional[Dict[str, str]],
     """
     task = sum(_num(r.get("task_reward_ml")) or 0.0 for r in registry_rows)
     manual = sum(_num(r.get("manual_reward_ml")) or 0.0 for r in registry_rows)
-    supp = _num((daily_row or {}).get("supp_water")) or 0.0
+    supp = daily_log.supp_water_ml(daily_row) or 0.0
     cage = _num((daily_row or {}).get("water_ml")) or 0.0
     method = daily_log.normalize_method((daily_row or {}).get("water_method", ""))
     if method == daily_log.METHOD_TASK_EARNED and cage > 0.0:

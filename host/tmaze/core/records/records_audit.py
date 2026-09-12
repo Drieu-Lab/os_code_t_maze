@@ -117,6 +117,26 @@ def suspect_water_methods(
     return out
 
 
+def unsplit_supp_water(
+        daily_rows: Sequence[dict]) -> List[Tuple[str, str, str]]:
+    """``(animal_id, date, legacy_text)`` for each row whose legacy free-text
+    ``supp_water`` cell is filled while BOTH v4 split cells (``supp_water_ml``,
+    ``supp_access_min``) are blank (``daily_log.supp_unsplit``; ADR-0160).
+
+    The legacy cell mixed volumes ("2.5 ml") and access durations ("2 min"),
+    so no reader parses it; until a human moves each value into the right
+    numeric cell that day's supplemental water counts as zero everywhere. This
+    is the to-do list for that one-time split - the list shrinks as cells are
+    split and the legacy column can be dropped once it is empty."""
+    out: List[Tuple[str, str, str]] = []
+    for row in daily_rows or []:
+        if daily_log.supp_unsplit(row):
+            out.append((str(row.get("animal_id", "") or "").strip(),
+                        str(row.get("date", "") or "").strip(),
+                        str(row.get(daily_log.SUPP_LEGACY_FIELD, "")).strip()))
+    return out
+
+
 def sessions_missing_daily(
         session_triples: Sequence[Tuple[str, str, str]],
         daily: Optional[Any]) -> List[Tuple[str, str, str]]:
@@ -447,6 +467,16 @@ def build_report(triples: Sequence[Tuple[str, str, str]],
             findings,
             "use one of: " + ", ".join(daily_log.WATER_METHODS)
             + " (or clear the cell).", acked))
+        sid = "unsplit_supp_water"
+        findings = [Finding(f"{sid}:{a}:{d}", f"{a} {d}  supp_water={val!r}")
+                    for a, d, val in unsplit_supp_water(daily_rows)]
+        sections.append(_section(
+            sid, "Legacy supp_water cells not yet split into mL / minutes",
+            findings,
+            "in the Daily tab load the row, type the volume into "
+            "'Supp. water (mL)' and/or the access time into 'Supp. access "
+            "(min)', then clear the legacy cell and save. Until then that "
+            "day's supplemental water counts as 0 mL.", acked))
     else:
         sections.append(AuditSection(
             sid, "Sessions with no daily_log.csv (animal, date) row", [],

@@ -17,13 +17,13 @@ provenance-labelled channels**, never summed (see the registry below).
 | Artifact | Repo / location | Written by | schema_version | ADR |
 | --- | --- | --- | --- | --- |
 | `animals.json` | resources · `records/animal/` | Records Manager GUI (Roster) or hand-edited | 1 | 0075 |
-| `daily_log.csv` | resources · `records/animal/` | Records Manager GUI (Daily) or `build_daily_log.py` (from the Entry sheet) | 2 (comment line) | 0076, 0100 |
+| `daily_log.csv` | resources · `records/animal/` | Records Manager GUI (Daily) or `build_daily_log.py` (from the Entry sheet) | 4 (comment line) | 0076, 0100, 0104, 0160 |
 | `session_annotations.csv` | resources · `records/animal/` | Records Manager GUI (Sessions) or `build_session_training_log.py --import-annotations` | 1 (comment line) | 0082 / 0085 |
 | `records_changes.csv` | resources · `records/animal/` | appended by every records write path (Records Manager saves; builders' `--export` / `--import-annotations`) | 1 (comment line) | 0155 |
 | `animal_state.json` | code · per-bundle `config/` | `session_controller` at Start (core `animal_state.py`) | 2 | 0077, 0101 |
 | `session_meta.json` | code · per-bundle `config/` | `session_controller` at Start (core `session_meta.py`) | 1 | 0079 |
-| `session_registry.csv` | code · `host/data/phase3_recordings/` (git-ignored) | `build_session_registry.py` (core `session_registry.py`) | 2 (comment line + provenance header) | 0081, 0157 |
-| `session_registry_tags.csv` | code · `host/data/phase3_recordings/` (git-ignored) | `build_session_registry.py` | 2 (comment line) | 0081, 0157 |
+| `session_registry.csv` | code · `host/data/phase3_recordings/` (git-ignored) | `build_session_registry.py` (core `session_registry.py`) | 3 (comment line + provenance header) | 0081, 0157, 0160 |
+| `session_registry_tags.csv` | code · `host/data/phase3_recordings/` (git-ignored) | `build_session_registry.py` | 3 (comment line; tracks the registry's number) | 0081, 0157 |
 
 Related per-bundle streams these join (not re-defined here): the session manifest
 `session_<id>.json` (ADR-0048), the behavioural summary `summary/session_summary_<id>.json`
@@ -48,16 +48,36 @@ Canonical animal identity — the join key between recordings and husbandry.
 - `animals[]` — `{id, aliases[]}`: the canonical id plus any loose spellings that
   normalize to it (ADR-0075).
 
-## `daily_log.csv` (v2)
+## `daily_log.csv` (v4)
 
 Machine-readable daily husbandry table (source of truth); a leading
-`# schema_version=2` comment line precedes the header. One row per `(animal, date)`:
+`# schema_version=4` comment line precedes the header. One row per `(animal, date)`:
 
 `animal_id, date (YYYY-MM-DD), weight_g, baseline_g, pct_baseline, water_on,
-water_off, water_ml, supp_water, notes, water_regime`.
+water_off, water_ml, supp_water, notes, water_regime, water_method,
+supp_water_ml, supp_access_min`.
 
-`water_on`/`water_off`/`supp_water` are free text today ("6pm", "2 min"); see
-FW-0029 for hardening them into real timestamps.
+Each schema bump appends its column(s) LAST so older readers ignore them and
+the Excel Entry sheet's column letters never shift; a file from an older
+version loads with the missing columns as `""`.
+
+`water_on`/`water_off` are free text today ("6pm"); see FW-0029 for hardening
+them into real timestamps.
+
+`water_method` (schema v3, ADR-0104) records HOW the day's restricted water was
+delivered: blank (unspecified), `timed_access`, `measured_bottle` or
+`task_earned`. Orthogonal to `water_regime`. On a `task_earned` day the entered
+`water_ml` is the same water the rig measured as reward, so the dashboard counts
+it once (ADR-0106).
+
+**Supplemental water** (schema v4, ADR-0160): `supp_water_ml` (millilitres
+hand-given) and `supp_access_min` (minutes of free bottle access) are the two
+NUMERIC cells; non-blank values must be numbers ≥ 0 on both write surfaces.
+`supp_water` is the **legacy free-text** cell they replace — it mixed volumes
+("2.5 ml") and durations ("2 min"), so no reader parses it and the dashboard
+counts only `supp_water_ml`. The legacy column is kept verbatim until a human
+has moved each value into the right numeric cell (the records audit's
+`unsplit_supp_water` section lists the ones left); a later v5 drops it.
 
 `water_regime` (schema v2, ADR-0100) marks the day's regime: blank or
 `restriction` (the default, on water restriction) vs `ad_lib` (off-restriction,
@@ -144,11 +164,11 @@ Sticky human bookkeeping frozen into the bundle at Start (one per bundle):
 typed a sub-stage), so a reader can tell a derived stage from a typed one
 (ADR-0079).
 
-## `session_registry.csv` (v2)
+## `session_registry.csv` (v3)
 
 The cross-session index — one row per bundle, a full [idempotent
 rebuild](glossary.md#idempotent-rebuild) of everything under the recordings roots
-(ADR-0081, 0113). The file opens with a `# schema_version=2` comment line followed
+(ADR-0081, 0113). The file opens with a `# schema_version=3` comment line followed
 by the build's **provenance header** (ADR-0157) — `# built_at=<local ISO time>`,
 `# code_commit=<short sha, "+dirty" if uncommitted changes, or unknown>`,
 `# roots=<JSON list of the folders scanned, in scan order>`, and one
@@ -163,12 +183,14 @@ back). Then these columns:
   `(animal, date)` join against `daily_log.csv`): `husbandry_source`
   (`daily_table`/`start_dialog`/`manual`/`daily_table_join`/`none`), `weight_g`,
   `baseline_g`, `pct_baseline`, `hours_since_water`.
-- **Water — four channels:** `task_reward_ml` (auto rewards, from the summary's
+- **Water channels:** `task_reward_ml` (auto rewards, from the summary's
   `estimated_water`), `manual_reward_ml` (operator GUI-button reward dispenses,
-  from the summary's `manual_water`; ADR-0084, supersedes 0078), `supp_water`
-  (post-session top-up, daily table), `water_on`/`water_off` (restriction span).
-  The task and operator reward channels are disjoint, so `task_reward_ml +
-  manual_reward_ml` is a correct reward total; the others are separate figures.
+  from the summary's `manual_water`; ADR-0084, supersedes 0078), the daily
+  table's supplemental top-up as three columns — `supp_water` (legacy free
+  text), `supp_water_ml` and `supp_access_min` (the v4 numeric split, v3 of this
+  file; ADR-0160) — and `water_on`/`water_off` (restriction span). The task and
+  operator reward channels are disjoint, so `task_reward_ml + manual_reward_ml`
+  is a correct reward total; the others are separate figures.
 - **Cued task** (verbatim from the summary's `cued_task`/`phase3_stats` block,
   ADR-0052): `trials_total, completed, correct, incorrect, accuracy_cum,
   high_accuracy, low_accuracy, side_bias_left, side_bias_right, reward_rate,
@@ -187,10 +209,10 @@ back). Then these columns:
   vocabulary (0 when the session has none) — a convenience projection of the tidy
   file below; the column set follows the vocabulary and so is not fixed.
 
-## `session_registry_tags.csv` (v2)
+## `session_registry_tags.csv` (v3)
 
 The [tidy](glossary.md#tidy-long-format), churn-proof form of the tag tallies —
-stable across vocabulary edits. Leading `# schema_version=2` comment line (the
+stable across vocabulary edits. Leading `# schema_version=3` comment line (the
 number tracks the registry's; the columns are unchanged since v1), then:
 
 `session_id, tag, count` — one row per `(session, tag)`, `count` summing that

@@ -80,7 +80,7 @@ class TestSignal3(unittest.TestCase):
         ]
         day = dashboard.registry_rows_for(reg, "600", "2026-07-02")
         self.assertEqual(len(day), 2)
-        daily_row = {"supp_water": "3", "water_ml": "10"}
+        daily_row = {"supp_water_ml": "3", "water_ml": "10"}
         water = dashboard.collect_water(daily_row, day)
         self.assertEqual(water["task"], 3.5)
         self.assertEqual(water["manual"], 0.5)
@@ -94,11 +94,19 @@ class TestSignal3(unittest.TestCase):
         self.assertEqual(out["total_ml"], 6.5)
 
     def test_non_numeric_supp_is_zero(self):
-        # supp_water may hold a *time* (from the paper log) - treated as 0 mL.
-        water = dashboard.collect_water({"supp_water": "6:30pm", "water_ml": ""},
+        # supp_water_ml may be blank/garbage - treated as 0 mL.
+        water = dashboard.collect_water({"supp_water_ml": "n/a", "water_ml": ""},
                                         [])
         self.assertEqual(water["supplemental"], 0.0)
         self.assertEqual(water["cage"], 0.0)
+
+    def test_legacy_supp_water_text_is_never_counted(self):
+        # ADR-0160: the legacy free-text cell ("2 min", or even a bare "3") is
+        # not a volume; only the v4 supp_water_ml cell contributes.
+        for legacy in ("2 min", "3", "6:30pm"):
+            water = dashboard.collect_water(
+                {"supp_water": legacy, "supp_water_ml": "", "water_ml": ""}, [])
+            self.assertEqual(water["supplemental"], 0.0, legacy)
 
     def test_task_earned_day_counts_entered_water_once(self):
         # ADR-0106: on a task_earned day the entered water_ml IS the rig reward,
@@ -107,7 +115,7 @@ class TestSignal3(unittest.TestCase):
                 "task_reward_ml": "4.4", "manual_reward_ml": "0.12"}]
         day = dashboard.registry_rows_for(reg, "602", "2026-08-10")
         water = dashboard.collect_water(
-            {"water_ml": "4.52", "supp_water": "1.0",
+            {"water_ml": "4.52", "supp_water_ml": "1.0",
              "water_method": "task_earned"}, day)
         self.assertEqual(water, {"task": 0.0, "manual": 0.0,
                                  "supplemental": 1.0, "cage": 4.52})
@@ -162,11 +170,11 @@ class TestWaterMlTrend(unittest.TestCase):
 
     _WATER_ROWS = [
         {"animal_id": "600", "date": "2026-07-01",
-         "water_ml": "10", "supp_water": "3"},          # 13 mL (cage + supp)
+         "water_ml": "10", "supp_water_ml": "3"},       # 13 mL (cage + supp)
         {"animal_id": "600", "date": "2026-07-02",
-         "water_ml": "", "supp_water": "6:30pm"},        # nothing numeric -> 0
+         "water_ml": "", "supp_water": "6:30pm"},        # legacy text only -> 0
         {"animal_id": "600", "date": "2026-07-03",
-         "water_ml": "8", "supp_water": ""},             # 8 mL, but registry adds task
+         "water_ml": "8", "supp_water_ml": ""},          # 8 mL, but registry adds task
     ]
 
     def setUp(self):

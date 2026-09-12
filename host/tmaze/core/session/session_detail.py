@@ -100,6 +100,20 @@ def _g(row: Dict[str, Any], key: str) -> str:
     return _s(row, key) or "-"
 
 
+def supp_text(row: Dict[str, Any]) -> str:
+    """The supplemental-water cell for the Water line: the v4 numeric split
+    (``<mL> mL`` / ``<min> min access``, ADR-0160) when present, else the legacy
+    free-text ``supp_water`` verbatim, else ``-``."""
+    parts = []
+    if _s(row, "supp_water_ml"):
+        parts.append(f"{_s(row, 'supp_water_ml')} mL")
+    if _s(row, "supp_access_min"):
+        parts.append(f"{_s(row, 'supp_access_min')} min access")
+    if parts:
+        return " + ".join(parts)
+    return _g(row, "supp_water")
+
+
 def tag_tally(row: Dict[str, Any]) -> str:
     """The session's note-tag counts as ``name x n, ...`` (intervention history),
     read from the registry row's wide ``tag_<name>`` columns (0/blank skipped);
@@ -145,7 +159,7 @@ _METRICS: List[Tuple[str, str, Any]] = [
                f"stem-compliance {_pct(_s(r, 'stem_compliance'))}"),
     ("water", "Water (task / manual / supp)",
      lambda r: f"Water:    task {_g(r, 'task_reward_ml')} mL   "
-               f"manual {_g(r, 'manual_reward_ml')} mL   supp {_g(r, 'supp_water')}"),
+               f"manual {_g(r, 'manual_reward_ml')} mL   supp {supp_text(r)}"),
     ("trainer", "Trainer / reward",
      lambda r: f"Trainer:  {_g(r, 'trainer')}   Reward: {_g(r, 'reward_type')}"),
     ("tags", "Note tags (tally)",

@@ -80,6 +80,17 @@ class TestMetricsLines(unittest.TestCase):
     def test_tag_tally_dash_when_no_tags(self):
         self.assertEqual(session_detail.tag_tally(_FULL_ROW), "-")
 
+    def test_supp_text_prefers_v4_split_then_legacy(self):
+        # ADR-0160: numeric split cells when present, else the legacy text.
+        self.assertEqual(session_detail.supp_text(_FULL_ROW), "-")
+        self.assertEqual(session_detail.supp_text(
+            dict(_FULL_ROW, supp_water="2 min")), "2 min")
+        self.assertEqual(session_detail.supp_text(
+            dict(_FULL_ROW, supp_water="2 min", supp_water_ml="2.5",
+                 supp_access_min="2")), "2.5 mL + 2 min access")
+        self.assertEqual(session_detail.supp_text(
+            dict(_FULL_ROW, supp_access_min="30")), "30 min access")
+
 
 class TestSelectableMetrics(unittest.TestCase):
     def test_available_and_default_align(self):

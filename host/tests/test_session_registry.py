@@ -141,12 +141,18 @@ class TestJoinPrefersBundleState(unittest.TestCase):
                 {"animal_id": "600", "date": "2026-08-06", "weight_g": "330",
                  "baseline_g": "348", "pct_baseline": "0.9483",
                  "water_on": "5:30pm", "water_off": "6pm", "water_ml": "",
-                 "supp_water": "2 min", "notes": ""}])
+                 "supp_water": "2 min", "notes": "",
+                 "supp_water_ml": "2.5", "supp_access_min": "2"}])
             rows, _ = session_registry.build(root, daily=daily)
             r = rows[0]
             self.assertEqual(r["task_reward_ml"], 1.5)      # 1500 uL
             self.assertEqual(r["manual_reward_ml"], 0.12)   # 120 uL
-            self.assertEqual(r["supp_water"], "2 min")
+            self.assertEqual(r["supp_water"], "2 min")      # legacy text kept
+            # The v4 split cells ride along as their own columns (ADR-0160).
+            self.assertEqual(r["supp_water_ml"], "2.5")
+            self.assertEqual(r["supp_access_min"], "2")
+            self.assertIn("supp_water_ml", session_registry.REGISTRY_COLUMNS)
+            self.assertEqual(session_registry.SCHEMA_VERSION, 3)
             self.assertEqual(r["water_on"], "5:30pm")
             self.assertEqual(r["water_off"], "6pm")
 
@@ -167,6 +173,7 @@ class TestDailyTableFallback(unittest.TestCase):
             self.assertEqual(r["weight_g"], "300")
             self.assertEqual(r["water_on"], "4pm")
             self.assertEqual(r["supp_water"], "1 min")
+            self.assertIsNone(r["supp_water_ml"])   # unsplit legacy: blank
 
 
 class TestGracefulDegradation(unittest.TestCase):

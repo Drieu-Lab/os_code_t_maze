@@ -58,6 +58,35 @@ class TestSuspectWaterMethods(unittest.TestCase):
         self.assertEqual(got, [("601", "2026-08-09", "hose")])
 
 
+class TestUnsplitSuppWater(unittest.TestCase):
+    """ADR-0160: legacy supp_water text still awaiting its mL/min split."""
+
+    def test_flags_only_legacy_text_with_both_v4_cells_blank(self):
+        rows = [
+            {"animal_id": "600", "date": "2026-08-07", "supp_water": "2 min"},
+            {"animal_id": "600", "date": "2026-08-08", "supp_water": "2.5ml",
+             "supp_water_ml": "2.5"},                         # split: ok
+            {"animal_id": "600", "date": "2026-08-09", "supp_water": "",
+             "supp_access_min": "30"},                         # v4 only: ok
+            {"animal_id": "601", "date": "2026-08-09", "supp_water": " "},  # blank
+            {"animal_id": "601", "date": "2026-08-10", "supp_water": "1 min",
+             "supp_water_ml": "", "supp_access_min": ""},
+        ]
+        got = records_audit.unsplit_supp_water(rows)
+        self.assertEqual(got, [("600", "2026-08-07", "2 min"),
+                               ("601", "2026-08-10", "1 min")])
+
+    def test_wired_into_report_with_stable_key(self):
+        daily_rows = [{"animal_id": "600", "date": "2026-08-07",
+                       "supp_water": "2 min"}]
+        sections = records_audit.build_report(
+            [], daily_rows, [], DailyLog(daily_rows), None)
+        by = {s.id: s for s in sections}
+        self.assertEqual([f.key for f in by["unsplit_supp_water"].findings],
+                         ["unsplit_supp_water:600:2026-08-07"])
+        self.assertIn("'2 min'", by["unsplit_supp_water"].findings[0].text)
+
+
 class TestSessionsMissingDaily(unittest.TestCase):
     def setUp(self):
         self.daily = DailyLog([

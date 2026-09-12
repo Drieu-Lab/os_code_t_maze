@@ -89,15 +89,19 @@ from tmaze.paths import (
 )
 from tmaze.tools import build_session_registry
 
-# The four daily-entry water/measurement fields the form binds to (the rest of
-# daily_log.FIELDS are animal_id/date/pct_baseline/water_on/off/notes).
+# The daily-entry water/measurement fields the form binds to (the rest of
+# daily_log.FIELDS are animal_id/date/pct_baseline/notes/regime/method). The
+# legacy free-text supp_water is shown read-only (ADR-0160): the operator
+# types its value into the two numeric cells and clears it.
 _ENTRY_LABELS = {
     "weight_g": "Weight (g)",
     "baseline_g": "Baseline (g)",
     "water_on": "H2O ON",
     "water_off": "H2O OFF",
     "water_ml": "Water (mL)",
-    "supp_water": "Supp. water",
+    "supp_water_ml": "Supp. water (mL)",
+    "supp_access_min": "Supp. access (min)",
+    "supp_water": "Legacy supp.",
 }
 
 _BUILDER_TIMEOUT_S = 180
@@ -149,7 +153,9 @@ _DAILY_TREE_COLUMNS = (
     ("water_on", "Water on", 76, "center"),
     ("water_off", "Water off", 76, "center"),
     ("water_ml", "Water mL", 70, "center"),
-    ("supp_water", "Supp", 60, "center"),
+    ("supp_water_ml", "Supp mL", 62, "center"),
+    ("supp_access_min", "Supp min", 62, "center"),
+    ("supp_water", "Supp (legacy)", 82, "center"),
     ("water_regime", "Regime", 78, "center"),
     ("water_method", "Method", 100, "center"),
     ("notes", "Notes", 200, "w"),
@@ -484,11 +490,36 @@ class RecordsManager:
         ttk.Label(form, text=_ENTRY_LABELS["water_ml"]).grid(row=2, column=4, sticky="e", padx=4)
         ttk.Entry(form, textvariable=self.d_vars["water_ml"], width=12).grid(row=2, column=5, sticky="w")
 
-        ttk.Label(form, text=_ENTRY_LABELS["supp_water"]).grid(row=3, column=0, sticky="e", padx=4, pady=3)
-        ttk.Entry(form, textvariable=self.d_vars["supp_water"], width=12).grid(row=3, column=1, sticky="w")
-        ttk.Label(form, text="Notes").grid(row=3, column=2, sticky="e", padx=4)
+        # Supplemental water (ADR-0160): two NUMERIC cells - millilitres
+        # hand-given and minutes of free bottle access. The legacy free-text
+        # cell is shown read-only beside them with a Clear button: the
+        # operator copies its value into the right numeric cell, clears it,
+        # saves. Nothing parses the legacy text.
+        ttk.Label(form, text=_ENTRY_LABELS["supp_water_ml"]).grid(
+            row=3, column=0, sticky="e", padx=4, pady=3)
+        ttk.Entry(form, textvariable=self.d_vars["supp_water_ml"],
+                  width=12).grid(row=3, column=1, sticky="w")
+        ttk.Label(form, text=_ENTRY_LABELS["supp_access_min"]).grid(
+            row=3, column=2, sticky="e", padx=4)
+        ttk.Entry(form, textvariable=self.d_vars["supp_access_min"],
+                  width=12).grid(row=3, column=3, sticky="w")
+        legacy = ttk.Frame(form)
+        legacy.grid(row=3, column=4, columnspan=2, sticky="w", padx=4)
+        ttk.Label(legacy, text=_ENTRY_LABELS["supp_water"]).pack(side="left")
+        self.d_legacy_supp = ttk.Label(legacy, text="-", width=12,
+                                       foreground="#9a6700")
+        self.d_legacy_supp.pack(side="left", padx=(4, 0))
+        self.d_clear_legacy = ttk.Button(legacy, text="Clear", width=6,
+                                         command=self._clear_legacy_supp)
+        self.d_clear_legacy.pack(side="left", padx=(4, 0))
+        self.d_vars["supp_water"].trace_add(
+            "write", lambda *_a: self._refresh_legacy_supp())
+        self._refresh_legacy_supp()
+
+        ttk.Label(form, text="Notes").grid(row=6, column=0, sticky="e", padx=4,
+                                           pady=3)
         ttk.Entry(form, textvariable=self.d_vars["notes"], width=48).grid(
-            row=3, column=3, columnspan=3, sticky="we")
+            row=6, column=1, columnspan=5, sticky="we")
 
         # Water regime (ADR-0100): restriction default vs ad-lib (off-restriction,
         # e.g. weekends). Water method (ADR-0104) is orthogonal: HOW the day's
@@ -511,7 +542,7 @@ class RecordsManager:
             row=4, column=4, columnspan=2, sticky="w", padx=4)
 
         btns = ttk.Frame(form)
-        btns.grid(row=5, column=0, columnspan=6, sticky="w", pady=(8, 0))
+        btns.grid(row=7, column=0, columnspan=6, sticky="w", pady=(8, 0))
         ttk.Button(btns, text="Save row", command=self._save_daily).pack(side="left")
         ttk.Button(btns, text="Clear form", command=self._clear_daily).pack(
             side="left", padx=(6, 0))
@@ -589,7 +620,20 @@ class RecordsManager:
     # Per-day data fields: everything except the key (animal, date), the
     # prefilled baseline, and the derived pct.
     _DAY_FIELDS = ("weight_g", "water_on", "water_off", "water_ml",
-                   "supp_water", "notes")
+                   "supp_water", "supp_water_ml", "supp_access_min", "notes")
+
+    def _refresh_legacy_supp(self) -> None:
+        """Show the loaded row's legacy ``supp_water`` text (read-only) and
+        enable Clear only when there is something to clear (ADR-0160)."""
+        text = self.d_vars["supp_water"].get().strip()
+        self.d_legacy_supp.configure(text=text or "-")
+        self.d_clear_legacy.configure(state="normal" if text else "disabled")
+
+    def _clear_legacy_supp(self) -> None:
+        """Blank the legacy cell once its value has been re-typed into the
+        numeric mL / minutes cells. A user edit (marks the form dirty); the
+        row is written on Save like any other change."""
+        self.d_vars["supp_water"].set("")
 
     def _start_new_daily(self, aid: str, date: str) -> None:
         """Put the form into "new entry for (aid, date)" state: day fields blank,

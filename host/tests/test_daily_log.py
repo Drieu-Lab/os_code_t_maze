@@ -18,7 +18,9 @@ import unittest
 
 from tmaze.core.records import RecordsFileError, file_mtime
 from tmaze.core.records.daily_log import (
+    FIELDS,
     REGIME_AD_LIB,
+    SCHEMA_VERSION,
     WATER_METHODS,
     DailyLog,
     compute_pct_baseline,
@@ -29,6 +31,9 @@ from tmaze.core.records.daily_log import (
     normalize_method,
     normalize_regime,
     row_has_weight,
+    supp_access_min,
+    supp_unsplit,
+    supp_water_ml,
     upsert_rows,
     validate_entry,
     write_rows,
@@ -253,8 +258,17 @@ class TestValidateEntry(unittest.TestCase):
         self.assertTrue(any("Water" in e for e in errors))
 
     def test_supp_water_stays_free_text(self):
-        # supp_water is not a hard-numeric field (free text like "2 min").
+        # The LEGACY supp_water is not a hard-numeric field (free text like
+        # "2 min"); the v4 split cells are (ADR-0160).
         self.assertEqual(validate_entry(self._row(supp_water="2 min")), [])
+        self.assertEqual(validate_entry(self._row(
+            supp_water_ml="2.5", supp_access_min="30")), [])
+        errors = validate_entry(self._row(supp_water_ml="2 min"))
+        self.assertTrue(any("Supp. water (mL)" in e and "number" in e
+                            for e in errors))
+        errors = validate_entry(self._row(supp_access_min="-1"))
+        self.assertTrue(any("Supp. access (min)" in e and "negative" in e
+                            for e in errors))
 
     def test_blank_and_known_regimes_are_allowed(self):
         for regime in ("", "restriction", "ad_lib", "Ad-Lib", "adlib"):
@@ -344,7 +358,7 @@ class TestWaterMethod(unittest.TestCase):
             with open(path, "r", encoding="utf-8", newline="") as fh:
                 first = fh.readline()
             back = load_rows(path)
-        self.assertEqual(first, "# schema_version=3\n")
+        self.assertEqual(first, f"# schema_version={SCHEMA_VERSION}\n")
         self.assertEqual(back[0].get("water_method"), "task_earned")
 
     def test_v2_csv_without_method_column_reads_blank(self):
@@ -362,6 +376,57 @@ class TestWaterMethod(unittest.TestCase):
             back = load_rows(path)
         self.assertEqual(back[0].get("water_method"), "")
         self.assertTrue(is_ad_lib(back[0]))
+
+
+class TestSuppWaterV4(unittest.TestCase):
+    """Schema v4 (ADR-0160): the supplemental cell split into mL + minutes."""
+
+    def test_fields_end_with_the_v4_pair_and_version_is_4(self):
+        self.assertEqual(FIELDS[-2:], ["supp_water_ml", "supp_access_min"])
+        self.assertEqual(SCHEMA_VERSION, 4)
+
+    def test_numeric_accessors_ignore_legacy_text(self):
+        row = {"supp_water": "2 min", "supp_water_ml": "", "supp_access_min": ""}
+        self.assertIsNone(supp_water_ml(row))
+        self.assertIsNone(supp_access_min(row))
+        row = {"supp_water": "", "supp_water_ml": "2.5", "supp_access_min": "30"}
+        self.assertEqual(supp_water_ml(row), 2.5)
+        self.assertEqual(supp_access_min(row), 30.0)
+        self.assertIsNone(supp_water_ml(None))
+        self.assertIsNone(supp_water_ml({"supp_water_ml": "abc"}))
+
+    def test_supp_unsplit(self):
+        self.assertTrue(supp_unsplit({"supp_water": "2 min"}))
+        self.assertFalse(supp_unsplit({"supp_water": "2 min",
+                                       "supp_access_min": "2"}))
+        self.assertFalse(supp_unsplit({"supp_water": "2.5ml",
+                                       "supp_water_ml": "2.5"}))
+        self.assertFalse(supp_unsplit({"supp_water": ""}))
+        self.assertFalse(supp_unsplit(None))
+
+    def test_v3_csv_reads_blank_v4_cells_and_rewrites_as_v4(self):
+        csv_v3 = (
+            "# schema_version=3\n"
+            "animal_id,date,weight_g,baseline_g,pct_baseline,water_on,"
+            "water_off,water_ml,supp_water,notes,water_regime,water_method\n"
+            "600,2026-08-08,,,,,,,2 min,,,timed_access\n"
+        )
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "daily_log.csv")
+            with open(path, "w", encoding="utf-8", newline="") as fh:
+                fh.write(csv_v3)
+            back = load_rows(path)
+            self.assertEqual(back[0]["supp_water"], "2 min")   # legacy kept
+            self.assertEqual(back[0].get("supp_water_ml"), "")
+            self.assertTrue(supp_unsplit(back[0]))
+            # A rewrite upgrades the header, keeps the legacy cell verbatim.
+            write_rows(back, path)
+            with open(path, "r", encoding="utf-8", newline="") as fh:
+                text = fh.read()
+            self.assertTrue(text.startswith("# schema_version=4\n"))
+            self.assertIn("supp_water_ml,supp_access_min", text.splitlines()[1])
+            again = load_rows(path)
+            self.assertEqual(again[0]["supp_water"], "2 min")
 
 
 class TestComputePctBaseline(unittest.TestCase):
@@ -393,7 +458,7 @@ class TestWriteRows(unittest.TestCase):
             write_rows(rows, path)
             with open(path, "r", encoding="utf-8", newline="") as fh:
                 first = fh.readline()
-            self.assertEqual(first, "# schema_version=3\n")
+            self.assertEqual(first, f"# schema_version={SCHEMA_VERSION}\n")
             back = load_rows(path)
         self.assertEqual(len(back), 2)
         self.assertEqual(back[0]["animal_id"], "600")

@@ -50,21 +50,61 @@ from tmaze.core.records import (
 )
 
 # Column order mirrors the resources builder (records/animal/build_daily_log.py).
-# ``water_regime`` (schema v2, ADR-0100) and ``water_method`` (schema v3,
-# ADR-0104) are appended LAST, in that order, so older readers that project onto
-# their own FIELDS just ignore them and the column letters of the existing fields
-# don't shift in the Excel Entry sheet.
+# ``water_regime`` (schema v2, ADR-0100), ``water_method`` (schema v3,
+# ADR-0104) and the two supplemental-water cells (schema v4, ADR-0160) are
+# appended LAST, in that order, so older readers that project onto their own
+# FIELDS just ignore them and the column letters of the existing fields don't
+# shift in the Excel Entry sheet.
 FIELDS = [
     "animal_id", "date", "weight_g", "baseline_g", "pct_baseline",
     "water_on", "water_off", "water_ml", "supp_water", "notes",
     "water_regime", "water_method",
+    "supp_water_ml", "supp_access_min",
 ]
 
 # Bumped in lockstep with the resources builder's schema. v2 adds water_regime
-# (docs/decisions/0076 + 0100); v3 adds water_method (docs/decisions/0104).
-# Readers stay backward-compatible: a v1/v2 row with no water_method column reads
-# as "" (unspecified method).
-SCHEMA_VERSION = 3
+# (docs/decisions/0076 + 0100); v3 adds water_method (docs/decisions/0104); v4
+# adds supp_water_ml + supp_access_min (docs/decisions/0160). Readers stay
+# backward-compatible: a row from an older file reads the missing columns as "".
+SCHEMA_VERSION = 4
+
+# Supplemental water (schema v4, ADR-0160). The legacy free-text ``supp_water``
+# cell mixed two different facts - a VOLUME ("2.5 ml") and an ACCESS DURATION
+# ("2 min", "30 min bottle") - so nothing downstream could add it up. v4 splits
+# it into two NUMERIC cells: ``supp_water_ml`` (millilitres hand-given) and
+# ``supp_access_min`` (minutes of free bottle access). The legacy column stays
+# in the file, read-only in every writer, until a human has split each old
+# cell (the records audit lists the ones still to do); readers never guess a
+# split. A later v5 drops the legacy column.
+SUPP_LEGACY_FIELD = "supp_water"
+SUPP_FIELDS = ("supp_water_ml", "supp_access_min")
+
+
+def supp_water_ml(row: Optional[Dict[str, str]]) -> Optional[float]:
+    """The hand-given supplemental volume in mL from the v4 cell, or None when
+    blank/non-numeric. The legacy ``supp_water`` text is deliberately NOT
+    parsed: "2 min" is not 2 mL."""
+    try:
+        return float(str((row or {}).get("supp_water_ml", "") or "").strip())
+    except ValueError:
+        return None
+
+
+def supp_access_min(row: Optional[Dict[str, str]]) -> Optional[float]:
+    """Minutes of free bottle access from the v4 cell, or None."""
+    try:
+        return float(str((row or {}).get("supp_access_min", "") or "").strip())
+    except ValueError:
+        return None
+
+
+def supp_unsplit(row: Optional[Dict[str, str]]) -> bool:
+    """True when a row still carries a legacy ``supp_water`` text and NEITHER
+    v4 cell is filled - i.e. the human split hasn't happened yet."""
+    r = row or {}
+    legacy = str(r.get(SUPP_LEGACY_FIELD, "") or "").strip()
+    return bool(legacy) and not any(
+        str(r.get(f, "") or "").strip() for f in SUPP_FIELDS)
 
 # Water regime for a (animal, date): blank/"restriction" is the default
 # (on water restriction), "ad_lib" marks an off-restriction day (typically a
@@ -301,9 +341,11 @@ def _is_iso_date(value: str) -> bool:
 
 
 # The numeric daily-entry cells a save/import must not accept as garbage. These
-# are the fields analysis joins/aggregates on (weight, baseline, cage water mL);
-# supp_water/water_on/off stay free text for now (hardening -> FW-0029).
-NUMERIC_ENTRY_FIELDS = ("weight_g", "baseline_g", "water_ml")
+# are the fields analysis joins/aggregates on (weight, baseline, cage water mL,
+# the v4 supplemental mL/minutes); the legacy supp_water and water_on/off stay
+# free text (hardening -> FW-0029).
+NUMERIC_ENTRY_FIELDS = ("weight_g", "baseline_g", "water_ml",
+                        "supp_water_ml", "supp_access_min")
 
 
 def validate_entry(row: Dict[str, str]) -> List[str]:
@@ -326,7 +368,8 @@ def validate_entry(row: Dict[str, str]) -> List[str]:
     elif not _is_iso_date(date):
         errors.append(f"Date '{date}' must be in YYYY-MM-DD form.")
     labels = {"weight_g": "Weight (g)", "baseline_g": "Baseline (g)",
-              "water_ml": "Water (mL)"}
+              "water_ml": "Water (mL)", "supp_water_ml": "Supp. water (mL)",
+              "supp_access_min": "Supp. access (min)"}
     for field in NUMERIC_ENTRY_FIELDS:
         raw = str(row.get(field, "")).strip()
         if not raw:

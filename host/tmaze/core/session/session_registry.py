@@ -26,8 +26,10 @@ Design (docs/decisions/0081):
 - **Four water channels, not one.** Surface ``task_reward_ml`` (auto rewards, from
   the summary's ``estimated_water``), ``manual_reward_ml`` (operator GUI-button
   reward dispenses, from the summary's ``manual_water``; ADR-0084, supersedes
-  0078), ``supp_water`` (post-session top-up, daily table) and the restriction
-  span ``water_on``/``water_off`` as SEPARATE, provenance-labelled columns so the
+  0078), the supplemental top-up from the daily table (legacy free-text
+  ``supp_water`` plus its v3/v4 numeric split ``supp_water_ml`` /
+  ``supp_access_min``; docs/decisions/0160) and the restriction span
+  ``water_on``/``water_off`` as SEPARATE, provenance-labelled columns so the
   "accounted several ways" water reconciles in one row. Task and operator reward
   are disjoint, so those two add up; the rest are distinct figures.
 
@@ -87,7 +89,9 @@ from tmaze.core.session import session_notes
 # same convention as daily_log.csv; docs/decisions/0076/0081).
 # v2 (docs/decisions/0157): provenance header lines; `bundle` is root-relative
 # and a `root` column is appended.
-SCHEMA_VERSION = 2
+# v3 (docs/decisions/0160): `supp_water_ml` + `supp_access_min` inserted after
+# the legacy free-text `supp_water` (the daily table's v4 split cells).
+SCHEMA_VERSION = 3
 
 # The fixed (non-tag) columns of session_registry.csv, in output order. The
 # per-tag wide columns (tag_<name>) are appended from the current vocabulary at
@@ -98,8 +102,11 @@ REGISTRY_COLUMNS: Tuple[str, ...] = (
     # husbandry (preferred from the bundle's animal_state, else a daily join)
     "husbandry_source", "weight_g", "baseline_g", "pct_baseline",
     "hours_since_water",
-    # four provenance-labelled water channels (never summed)
-    "task_reward_ml", "manual_reward_ml", "supp_water", "water_on", "water_off",
+    # provenance-labelled water channels (never summed). `supp_water` is the
+    # legacy free-text cell; `supp_water_ml` / `supp_access_min` are its v4
+    # numeric split (docs/decisions/0160).
+    "task_reward_ml", "manual_reward_ml", "supp_water", "supp_water_ml",
+    "supp_access_min", "water_on", "water_off",
     # cued-task behaviour (from the summary's phase3_stats block)
     "trials_total", "completed", "correct", "incorrect",
     "accuracy_cum", "high_accuracy", "low_accuracy",
@@ -396,6 +403,8 @@ def bundle_row(bundle_dir: str, daily: Optional[Any] = None,
     row["task_reward_ml"] = _ml_from_ul(est.get("ul"))
     row["manual_reward_ml"] = _ml_from_ul(man.get("ul"))
     row["supp_water"] = (row_daily or {}).get("supp_water") or None
+    row["supp_water_ml"] = (row_daily or {}).get("supp_water_ml") or None
+    row["supp_access_min"] = (row_daily or {}).get("supp_access_min") or None
 
     _fill_cued(row, summary)
     _fill_locomotion(row, summary.get("locomotion") or {})
