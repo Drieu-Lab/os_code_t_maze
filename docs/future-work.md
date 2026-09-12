@@ -111,6 +111,11 @@ criteria).
 | [FW-0057](#fw-0057-live-alt-veto-readout-for-the-suppressed-debias-trigger) | Live `[ALT-VETO]` readout for the suppressed debias trigger | Phase 3 live readout (`intervention_stack.py` -> snapshot -> `phase3_stats.py` -> `behavior_view.py`) | Proposed |
 | [FW-0058](#fw-0058-reconcile-the-beam--and-lick-state-polarity-si1--li1-are-the-resting-states-not-broken--active) | Reconcile the beam- and lick-state polarity (`S,<i>,1` and `L,<i>,1` are the resting states in recorded logs; `PROTOCOL.md` rows corrected 2026-09-08, firmware comment + consumer audit open) | `firmware/PROTOCOL.md`, `cue-guided-task.ino` sensor reads, host consumers of the `S`/`L` `active` flag | Proposed |
 | [FW-0059](#fw-0059-repeatable-retroreflective-marker-scheme-for-the-board) | Design a REPEATABLE retroreflective-marker placement scheme for the electronics board (a physical QA reference for the LED auto-ROI, and a future geometry fallback) | Rig electronics board (physical), `docs/mapping-session-runbook.md`, optional `led_detector` marker check | Proposed |
+| [FW-0060](#fw-0060-age-matched-baseline-weight-for-the-water-restriction-rule) | Age-matched baseline weight for the water-restriction rule (the fixed July baseline makes the 90% flag inert at 115-129%) | `core/records/{dashboard,daily_log,animals}.py`, resources `build_daily_log.py` | Deferred |
+| [FW-0061](#fw-0061-reconcile-the-onedrive-parallel-excel-logs-at-cutover) | Reconcile the OneDrive parallel Excel logs against the CSVs at cutover (one-off diff/import tool) | resources `records/animal/`, a new `tmaze.tools` reconciler | Deferred |
+| [FW-0062](#fw-0062-controlled-vocabulary-for-session-procedures) | Controlled vocabulary for session `procedures` (annotations) instead of free text | `core/records/session_annotations.py`, Records Manager Sessions tab, `build_session_training_log.py` | Proposed |
+| [FW-0063](#fw-0063-hours_since_water-semantics-under-task_earned-water) | Define `hours_since_water` when the day's water is `task_earned` (no `water_off` clock time exists) | `core/records/{animal_state,daily_log}.py`, `session_controller._write_animal_state` | Proposed |
+| [FW-0064](#fw-0064-push-policy-for-the-records-commits) | Push policy for the records commits made by the "Commit records" button (when, where, who) | Records Manager, resources repo remote | Deferred |
 
 ## Entries
 
@@ -3086,6 +3091,188 @@ all given the LEDs already register; the fixed datum on the board to measure fro
 
 **ADR needed?** Only if markers become a detected geometry input (that would
 refine ADR-0153); a pure placement spec is a runbook/manual doc change.
+
+### FW-0060: Age-matched baseline weight for the water-restriction rule
+
+- **Status:** Deferred
+- **Date added:** 2026-09-11
+- **Author / Agent:** Agent (Cursor) on behalf of Ravi
+- **Area / modules:** `host/tmaze/core/records/dashboard.py` (`BELOW_THRESHOLD`, `pct_baseline_of`), `daily_log.py` (`baseline_g`, `compute_pct_baseline`), `animals.py` (`date_of_birth`, added by the hardening plan Phase 5), resources `build_daily_log.py` (Entry-sheet % baseline + red flag)
+- **Related ADRs:** [ADR-0155](decisions/0155-records-history-tracked-csvs-and-change-log.md) (review that surfaced it), ADR-0076 (daily CSV), ADR-0100 (ad-lib days)
+
+**Motivation / context.** The welfare rule compares each weight against a fixed
+free-feeding `baseline_g` taken in July 2026 and flags < 90%. The rats are young
+and still growing: on 2026-09-01 they sat at 115-129% of that baseline, so the
+flag can no longer fire for any plausible restriction-related loss, and a
+genuine drop to, say, 100% of the July weight would pass silently. The lab's
+stated rule is a fixed free-feeding baseline *age-matched* to the animal, which
+means the reference weight should move with age (a growth curve) rather than
+stay pinned to one date. The user chose to keep the fixed 90% rule for now and
+revisit; `date_of_birth` in `animals.json` is the groundwork.
+
+**Sketch of approach.** Options to evaluate: (a) a per-animal growth-curve
+reference (Long-Evans male/female strain curves, or the lab's own free-feeding
+cohort) indexed by age from `date_of_birth`; (b) a rolling baseline (e.g. the
+animal's own max over the trailing N ad-lib days); (c) periodic re-baselining
+recorded as a dated `baseline_g` change in `daily_log.csv` with the change log
+explaining why. Whichever is chosen, `pct_baseline_of` should take the reference
+from one function (`reference_weight(animal, date)`) so the dashboard, the GUI's
+red flag, the registry `pct_baseline` column and the Excel Entry sheet agree.
+
+**Evaluation / acceptance.** Replaying the existing `daily_log.csv` under the new
+rule should flag no false alarms on the known-healthy history and should flag
+a synthetic 10% dip from the age-appropriate reference. A doc note states the
+rule in the terms the ACUC protocol (RA23A232) uses.
+
+**Effort / risk.** Medium. Risk is scientific, not technical: the reference must
+match what the protocol and the lab actually mean by "baseline"; get that in
+writing before coding.
+
+**Open questions.** Which reference the PI/veterinary staff accept; whether the
+Excel Entry sheet keeps a static formula or reads a computed column.
+
+**ADR needed?** Yes - the rule is a welfare threshold whose value is a deliberate
+choice.
+
+### FW-0061: Reconcile the OneDrive parallel Excel logs at cutover
+
+- **Status:** Deferred
+- **Date added:** 2026-09-11
+- **Author / Agent:** Agent (Cursor) on behalf of Ravi
+- **Area / modules:** resources `records/animal/` (`training_log_onedrive_copy.xlsx`, `water_restriction_log_onedrive_copy.xlsx`, `daily_log.csv`, `session_annotations.csv`); a new one-off `tmaze.tools` reconciler (or a `--reconcile` mode on `build_daily_log.py`)
+- **Related ADRs:** [ADR-0155](decisions/0155-records-history-tracked-csvs-and-change-log.md), ADR-0085 (`--import-legacy` precedent)
+
+**Motivation / context.** A parallel set of hand-kept Excel logs lives on
+OneDrive (outside both repos) and is being maintained until the Records Manager
+is judged stable and reliable. The two sets will have diverged (different
+people, different days, typos on either side). When the OneDrive copies are
+retired, the differences must be surfaced and resolved deliberately, not by
+picking one file.
+
+**Sketch of approach.** Follow the `--import-legacy` pattern (ADR-0085): read
+the OneDrive workbooks read-only, map their cells onto `daily_log` /
+`session_annotations` fields, and produce a three-way report per `(animal,
+date)`: agree / only-in-CSV / only-in-Excel / conflict (both present, different).
+Blanks are filled from the other side automatically; conflicts are listed for a
+human with both values and are never auto-resolved. Accepted resolutions are
+applied through the normal upsert and therefore land in `records_changes.csv`
+with the operator's name and `source=reconcile`.
+
+**Evaluation / acceptance.** Run on the current copies: the report's counts
+reconcile to the row totals; a re-run after applying the resolutions reports
+zero conflicts; the change log shows every applied fix.
+
+**Effort / risk.** Small-medium (the column mapping is the work; the paper-form
+layout differs from the flat CSV). Risk: silently trusting one side - keep it a
+report-first tool.
+
+**Open questions.** Cutover date; whether the OneDrive files are then archived
+into the resources repo (they are binary and ~MB scale) or just referenced.
+
+**ADR needed?** No, if it follows the ADR-0085 import pattern; a change-log entry
+in the resources `AGENTS.md` suffices.
+
+### FW-0062: Controlled vocabulary for session `procedures`
+
+- **Status:** Proposed
+- **Date added:** 2026-09-11
+- **Author / Agent:** Agent (Cursor) on behalf of Ravi
+- **Area / modules:** `host/tmaze/core/records/session_annotations.py`, Records Manager Sessions tab, resources `build_session_training_log.py` (Annotations sheet), `docs/records-schema.md`
+- **Related ADRs:** ADR-0082 (annotations), ADR-0085, [ADR-0155](decisions/0155-records-history-tracked-csvs-and-change-log.md)
+
+**Motivation / context.** `procedures` is a free-text cell meant for the
+per-session events the rig cannot know (handling, injection, surgery, probe
+advance, habituation, ...). All 43 current rows are blank, so the field has
+cost nothing yet - but once filled as free text it cannot be filtered or joined
+reliably by the analysis repo (`drieu_lab_analysis`, which plans to read these
+files). The same drift problem was solved for `water_regime` / `water_method`
+with a closed token set (ADR-0100/0104).
+
+**Sketch of approach.** A tracked `host/procedures.json` (or a block in
+`animals.json`) listing tokens with one-line meanings; `procedures` becomes a
+`;`-separated list of tokens, validated on save like `water_method`; the GUI
+offers checkboxes/multi-select plus the free `notes` field for anything else;
+`records_check` flags unknown tokens. Existing free text (if any by then) is
+migrated by hand with the audit listing offenders.
+
+**Evaluation / acceptance.** Unit tests on the normaliser/validator; the
+analysis repo can group sessions by procedure token from the CSV alone.
+
+**Effort / risk.** Small. Risk: an incomplete vocabulary pushes people back to
+`notes`; keep adding tokens cheap (edit the JSON).
+
+**Open questions.** The initial token list (ask the trainers); whether a
+procedure needs a time-of-day or before/after-session flag.
+
+**ADR needed?** Yes, small - the vocabulary is a data-contract choice shared with
+the analysis repo.
+
+### FW-0063: `hours_since_water` semantics under `task_earned` water
+
+- **Status:** Proposed
+- **Date added:** 2026-09-11
+- **Author / Agent:** Agent (Cursor) on behalf of Ravi
+- **Area / modules:** `host/tmaze/core/records/animal_state.py`, `daily_log.py` (`water_on`/`water_off`), `host/tmaze/ui/session_controller.py` (`_write_animal_state`), `session_registry.py` (`hours_since_water` column), `docs/records-schema.md`
+- **Related ADRs:** ADR-0077/0101 (`animal_state.json`), ADR-0104 (`water_method`), [ADR-0155](decisions/0155-records-history-tracked-csvs-and-change-log.md)
+
+**Motivation / context.** `hours_since_water` is derived from the previous day's
+`water_off` clock time. On `task_earned` days there is no bottle and no
+`water_off`, so the field is blank (7 of 48 registry rows carried a value in the
+review) even though the deprivation interval is exactly the quantity a
+motivation analysis wants. The `records_check` "water cells that aren't clock
+times" section shows trainers have been typing volumes and notes into
+`water_on`/`water_off` on such days because there was nowhere else to say it.
+
+**Sketch of approach.** Define the interval per method: `timed_access` /
+`measured_bottle` -> from the previous `water_off`; `task_earned` -> from the
+previous session's end time (available from the registry / bundle manifest);
+`ad_lib` -> blank by definition. Compute in one pure function
+(`hours_since_water(animal, date, daily, registry)`) used at Start and by the
+registry build, and record which rule produced the value (`water_source` /
+`hours_since_water_rule`) so analysis can filter.
+
+**Evaluation / acceptance.** Unit tests per method; the registry column fills
+for every `task_earned` day that has a preceding session; the audit section for
+non-clock water cells shrinks once the supp split (schema v4) and this land.
+
+**Effort / risk.** Small-medium. Risk: cross-source join (daily log + registry)
+at Start time - must degrade to blank, never block a session.
+
+**Open questions.** Whether "end of previous session" is the right anchor when
+the animal also got a measured top-up after the session.
+
+**ADR needed?** Yes - the derivation rule is a data-contract choice.
+
+### FW-0064: Push policy for the records commits
+
+- **Status:** Deferred
+- **Date added:** 2026-09-11
+- **Author / Agent:** Agent (Cursor) on behalf of Ravi
+- **Area / modules:** Records Manager "Commit records" button (ADR-0155), resources repo remote (`origin/main`), possibly a scheduled task on the rig PC
+- **Related ADRs:** [ADR-0155](decisions/0155-records-history-tracked-csvs-and-change-log.md)
+
+**Motivation / context.** ADR-0155 gives the records local git history via a
+GUI button but deliberately does not push. Until commits are pushed, the history
+exists on one disk (the rig PC), which is the same single point of failure the
+records had before. The rig PC is currently the only machine editing the
+records, so the decision could be postponed, but it must not be forgotten.
+
+**Sketch of approach.** Options: (a) the button also pushes when a remote is
+configured and reachable, with a clear failure message and no retry loop;
+(b) a separate "Push" button so a flaky network never blocks a commit;
+(c) a scheduled task (e.g. nightly) that pushes if ahead of the remote;
+(d) manual, documented in the operator runbook. Credentials on the rig PC and
+who owns the GitHub remote need settling first.
+
+**Evaluation / acceptance.** After a day of edits the remote has the commits
+without an operator remembering; a failed push is visible in the GUI banner.
+
+**Effort / risk.** Small. Risk: credential handling on a shared rig PC.
+
+**Open questions.** Remote ownership (the resources repo's `origin`), whether a
+second machine will edit records (then pull-before-commit is also needed).
+
+**ADR needed?** Yes, small - extends ADR-0155.
 
 ## Completed
 

@@ -46,6 +46,16 @@ A function you hand to another piece of code to be called *later*, when somethin
 happens — e.g. "call this function every time a new camera frame is ready." The
 [fast view](#fast-view-vs-debounced-view) delivers frames by calling a callback.
 
+### Change log (records)
+An **append-only** file that records each edit to a data file as its own line
+- who (operator), when, which file and row, which field, old value, new value -
+and is never rewritten. It complements git: git keeps whole-file snapshots at the
+moments someone commits, while the change log keeps per-cell attribution for
+every save in between. The coordinated records keep one as
+`records/animal/records_changes.csv` in the resources repo (ADR-0155). It is data
+*about* the records, not a source of truth: if the log and a records file
+disagree, the records file wins.
+
 ### Clock fit / drift
 No two clocks tick at exactly the same speed, so the camera's clock, the
 Arduino's `millis()`, the PC's wall clock and a neural recorder's sample counter
