@@ -16,7 +16,7 @@ import os
 import tempfile
 import unittest
 
-from tmaze.core.records import RecordsFileError
+from tmaze.core.records import RecordsFileError, file_mtime
 from tmaze.core.records.session_annotations import (
     SessionAnnotations,
     load,
@@ -138,7 +138,26 @@ class TestWriteAndUpsert(unittest.TestCase):
                 first = fh.readline()
             self.assertEqual(first, "# schema_version=1\n")
             back = load_rows(path)
+            with open(path, "rb") as fh:
+                self.assertNotIn(b"\r", fh.read())  # LF only (ADR-0155)
         self.assertEqual(len(back), 2)
+
+    def test_stale_write_is_refused(self):
+        # ADR-0155: the file changed since we loaded -> refuse, nothing written.
+        with tempfile.TemporaryDirectory() as d:
+            path = _write(d)
+            seen = file_mtime(path)
+            with open(path, "a", encoding="utf-8", newline="") as fh:
+                fh.write("602_x,602,2026-08-05,,late\n")
+            os.utime(path, ns=(seen + 1_000_000_000, seen + 1_000_000_000))
+            with self.assertRaises(RecordsFileError):
+                write_rows([{"session_id": "600_2026-08-05_1400", "notes": "n"}],
+                           path, expect_mtime=seen)
+            self.assertEqual(len(load_rows(path)), 3)
+            write_rows(upsert_rows(load_rows_for_write(path),
+                                   [{"session_id": "603_y"}]),
+                       path, expect_mtime=file_mtime(path))
+            self.assertEqual(len(load_rows(path)), 4)
 
     def test_sorted_by_session_id(self):
         rows = [

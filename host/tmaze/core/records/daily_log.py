@@ -41,9 +41,11 @@ import os
 from typing import Dict, List, Optional
 
 from tmaze.core.records import (
+    NO_MTIME_CHECK,
     RecordsFileError,
     animals,
     check_header,
+    check_unchanged,
     read_commented_csv,
 )
 
@@ -190,11 +192,16 @@ class DailyLog:
         return None
 
     def latest_for(self, animal_id: str,
-                   on_or_before: Optional[str] = None) -> Optional[Dict[str, str]]:
+                   on_or_before: Optional[str] = None,
+                   having: Optional[str] = None) -> Optional[Dict[str, str]]:
         """The most recent row for an animal (optionally on/before a date), or None.
 
         Dates are ISO ``YYYY-MM-DD`` so a lexicographic ``max`` is chronological.
-        Used to recover a baseline when today's row hasn't been entered yet.
+        ``having`` names a column that must be NON-BLANK for a row to count, so
+        "the latest baseline" (``having="baseline_g"``) skips a newer row whose
+        baseline cell was left empty instead of returning it and wiping the
+        prefill (ADR-0155). Used to recover a baseline when today's row hasn't
+        been entered yet.
         """
         aid = str(animal_id).strip()
         cutoff = str(on_or_before).strip() if on_or_before else None
@@ -204,6 +211,8 @@ class DailyLog:
                 continue
             d = row.get("date", "")
             if not d or (cutoff is not None and d > cutoff):
+                continue
+            if having and not str(row.get(having, "") or "").strip():
                 continue
             if best is None or d > best.get("date", ""):
                 best = row
@@ -376,15 +385,24 @@ def upsert_rows(existing: List[Dict[str, str]],
 
 
 def write_rows(rows: List[Dict[str, str]],
-               path: Optional[str] = None) -> List[Dict[str, str]]:
+               path: Optional[str] = None,
+               expect_mtime=NO_MTIME_CHECK) -> List[Dict[str, str]]:
     """Write the daily table atomically; returns the deduped, sorted rows written.
 
     On-disk shape matches the resources builder: a ``# schema_version=N`` comment
     line, the FIELDS header, then one row per `(animal_id, date)` (last-wins on
     duplicates) sorted by that key. ISO dates make the string sort chronological.
     Writes to a temp file then ``os.replace`` so a crash can't leave a half-file.
+    Lines end in ``\\n`` (the repo's stored form), not the csv default ``\\r\\n``.
+
+    ``expect_mtime``: the :func:`tmaze.core.records.file_mtime` of the file when
+    the caller read it (None if it was absent). If the file has changed since,
+    raise :class:`RecordsFileError` without writing, so a save can't overwrite
+    an edit made by another surface in the meantime (ADR-0155). The default
+    skips the check.
     """
     p = path or default_daily_log_path()
+    check_unchanged(p, expect_mtime)
     deduped: Dict[tuple, Dict[str, str]] = {}
     for row in rows:
         deduped[_key(row)] = _normalise(row)
@@ -395,7 +413,7 @@ def write_rows(rows: List[Dict[str, str]],
     tmp = p + ".tmp"
     with open(tmp, "w", encoding="utf-8", newline="") as fh:
         fh.write(f"# schema_version={SCHEMA_VERSION}\n")
-        writer = csv.DictWriter(fh, fieldnames=FIELDS)
+        writer = csv.DictWriter(fh, fieldnames=FIELDS, lineterminator="\n")
         writer.writeheader()
         for row in ordered:
             writer.writerow(row)

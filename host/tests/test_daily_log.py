@@ -16,7 +16,7 @@ import os
 import tempfile
 import unittest
 
-from tmaze.core.records import RecordsFileError
+from tmaze.core.records import RecordsFileError, file_mtime
 from tmaze.core.records.daily_log import (
     REGIME_AD_LIB,
     WATER_METHODS,
@@ -174,6 +174,17 @@ class TestLookups(unittest.TestCase):
 
     def test_latest_for_unknown_animal(self):
         self.assertIsNone(self.log.latest_for("999"))
+
+    def test_latest_for_having_skips_blank_cells(self):
+        # A newer row with a blank baseline must not hide the older good one
+        # (the Records Manager prefill / Session Start baseline; ADR-0155).
+        text = _CSV + "600,2026-07-04,329,,,6pm,7pm,,,\n"
+        log = DailyLog(load_rows_text(text))
+        self.assertEqual(log.latest_for("600")["date"], "2026-07-04")
+        got = log.latest_for("600", having="baseline_g")
+        self.assertEqual((got["date"], got["baseline_g"]), ("2026-07-03", "348"))
+        self.assertIsNone(log.latest_for("600", having="notes",
+                                         on_or_before="2026-07-02"))
 
 
 def load_rows_text(text):
@@ -407,6 +418,58 @@ class TestWriteRows(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "nested", "sub", "daily_log.csv")
             write_rows([{"animal_id": "600", "date": "2026-07-02"}], path)
+            self.assertTrue(os.path.exists(path))
+
+    def test_lines_end_in_lf_only(self):
+        # The repo stores LF; the csv default "\r\n" made every save show as a
+        # line-ending change in git (ADR-0155).
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "daily_log.csv")
+            write_rows([{"animal_id": "600", "date": "2026-07-02"}], path)
+            with open(path, "rb") as fh:
+                raw = fh.read()
+        self.assertNotIn(b"\r", raw)
+        self.assertEqual(raw.count(b"\n"), 3)  # comment + header + 1 row
+
+    # ------------------------------------------------ stale-write guard (ADR-0155)
+    def test_stale_write_is_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = _write(d)
+            seen = file_mtime(path)
+            # Another surface rewrites the file after we loaded it.
+            with open(path, "a", encoding="utf-8", newline="") as fh:
+                fh.write("602,2026-07-02,340,352,,6pm,7pm,,,\n")
+            os.utime(path, ns=(seen + 1_000_000_000, seen + 1_000_000_000))
+            with self.assertRaises(RecordsFileError) as cm:
+                write_rows([{"animal_id": "600", "date": "2026-07-02"}], path,
+                           expect_mtime=seen)
+            self.assertIn("changed on disk", str(cm.exception))
+            # Nothing written: the other surface's row is still there.
+            self.assertEqual(len(load_rows(path)), 4)
+
+    def test_matching_mtime_writes(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = _write(d)
+            seen = file_mtime(path)
+            write_rows(upsert_rows(load_rows_for_write(path),
+                                   [{"animal_id": "600", "date": "2026-07-09"}]),
+                       path, expect_mtime=seen)
+            self.assertEqual(len(load_rows(path)), 4)
+
+    def test_expected_absent_file_that_appeared_is_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "daily_log.csv")
+            self.assertIsNone(file_mtime(path))
+            _write(d)  # created by something else in the meantime
+            with self.assertRaises(RecordsFileError):
+                write_rows([{"animal_id": "600", "date": "2026-07-02"}], path,
+                           expect_mtime=None)
+
+    def test_expected_absent_file_still_absent_writes(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "daily_log.csv")
+            write_rows([{"animal_id": "600", "date": "2026-07-02"}], path,
+                       expect_mtime=None)
             self.assertTrue(os.path.exists(path))
 
 

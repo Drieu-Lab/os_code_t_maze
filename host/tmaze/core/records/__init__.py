@@ -13,6 +13,7 @@ docs/decisions/0155 (records history) for why the guards exist.
 from __future__ import annotations
 
 import csv
+import os
 import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence
@@ -128,3 +129,52 @@ def check_header(header: Sequence[str], fields: Sequence[str],
             f"understands (v{max_schema}); saving would drop columns it "
             "does not know.")
     return problems
+
+
+# --------------------------------------------------------------------------- #
+# Stale-write guard (ADR-0155). A Save is "read the file, merge my edits, write
+# the whole file back". If the file changed on disk between the read and the
+# write (the Excel --export ran, another Records Manager window saved, a hand
+# edit), the write silently discards that other change. The writers therefore
+# take the modification time the caller saw when it READ the file and refuse to
+# write if it has moved.
+# --------------------------------------------------------------------------- #
+
+# Pass as ``expect_mtime`` to skip the check (the default, so callers that have
+# no read to compare against - a one-off migration, a test - keep working).
+NO_MTIME_CHECK = object()
+
+
+def file_mtime(path: str) -> Optional[int]:
+    """The file's modification time in integer nanoseconds, or None if absent.
+
+    Nanoseconds (``st_mtime_ns``) so two writes within the same second still
+    compare unequal on filesystems that record sub-second times.
+    """
+    try:
+        return os.stat(path).st_mtime_ns
+    except OSError:
+        return None
+
+
+def check_unchanged(path: str, expect_mtime) -> None:
+    """Raise :class:`RecordsFileError` if ``path`` no longer matches ``expect_mtime``.
+
+    ``expect_mtime`` is what :func:`file_mtime` returned when the caller read
+    the file: an int, or None meaning "the file did not exist then". The
+    sentinel :data:`NO_MTIME_CHECK` disables the check.
+    """
+    if expect_mtime is NO_MTIME_CHECK:
+        return
+    now = file_mtime(path)
+    if now == expect_mtime:
+        return
+    if expect_mtime is None:
+        what = "was created by something else since you loaded"
+    elif now is None:
+        what = "was deleted since you loaded"
+    else:
+        what = "was changed on disk since you loaded"
+    raise RecordsFileError(
+        f"{path} {what}; not saving, because that would overwrite the other "
+        "change. Reload, then re-apply your edit.")

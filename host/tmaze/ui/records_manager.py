@@ -450,8 +450,11 @@ class RecordsManager:
             return
         if not force and self.d_vars["baseline_g"].get().strip():
             return
+        # The latest row that actually HAS a baseline (a newer row with the cell
+        # left blank must not wipe the prefill; ADR-0155).
         latest = self.daily.latest_for(
-            aid, self.d_vars["date"].get().strip() or None)
+            aid, self.d_vars["date"].get().strip() or None,
+            having="baseline_g")
         baseline = str((latest or {}).get("baseline_g", "")) if latest else ""
         if force or baseline:
             # Auto-prefilling the baseline on an animal change is not a user

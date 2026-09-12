@@ -31,7 +31,7 @@ import json
 import os
 from typing import Dict, List, Optional
 
-from tmaze.core.records import RecordsFileError
+from tmaze.core.records import NO_MTIME_CHECK, RecordsFileError, check_unchanged
 from tmaze.paths import repo_root
 
 # Environment override for the sibling resources repo location; when unset we use
@@ -314,13 +314,18 @@ def _read_meta(path: str) -> Dict[str, object]:
 
 
 def write_records(records: List[Dict[str, object]],
-                  path: Optional[str] = None) -> List[Dict[str, object]]:
+                  path: Optional[str] = None,
+                  expect_mtime=NO_MTIME_CHECK) -> List[Dict[str, object]]:
     """Validate + write the roster to animals.json atomically; return it cleaned.
 
     Raises ``ValueError`` (without touching disk) if :func:`validate_records`
     finds a problem, so a bad edit can't corrupt the identity source of truth.
     Preserves the ``_schema`` note and ``schema_version`` of any existing file.
     Writes to a temp file then ``os.replace``.
+
+    ``expect_mtime``: the file's :func:`tmaze.core.records.file_mtime` when the
+    caller read it; a changed file raises :class:`RecordsFileError` before
+    anything is written (ADR-0155). The default skips the check.
     """
     cleaned = normalize_records(records)
     errors = validate_records(cleaned)
@@ -328,6 +333,7 @@ def write_records(records: List[Dict[str, object]],
         raise ValueError("Invalid animal roster:\n  " + "\n  ".join(errors))
 
     p = path or animals_json_path()
+    check_unchanged(p, expect_mtime)
     meta = _read_meta(p)
     doc = {
         "_schema": meta["_schema"],

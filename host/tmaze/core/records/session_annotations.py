@@ -32,9 +32,11 @@ import os
 from typing import Dict, List, Optional
 
 from tmaze.core.records import (
+    NO_MTIME_CHECK,
     RecordsFileError,
     animals,
     check_header,
+    check_unchanged,
     read_commented_csv,
 )
 
@@ -175,15 +177,23 @@ def upsert_rows(existing: List[Dict[str, str]],
 
 
 def write_rows(rows: List[Dict[str, str]],
-               path: Optional[str] = None) -> List[Dict[str, str]]:
+               path: Optional[str] = None,
+               expect_mtime=NO_MTIME_CHECK) -> List[Dict[str, str]]:
     """Write the annotations table atomically; returns the deduped, sorted rows.
 
     On-disk shape mirrors the daily log: a ``# schema_version=N`` comment line,
     the FIELDS header, then one row per ``session_id`` (last-wins on duplicates)
     sorted by ``session_id``. Rows without a ``session_id`` are skipped. Writes to
-    a temp file then ``os.replace`` so a crash can't leave a half-file.
+    a temp file then ``os.replace`` so a crash can't leave a half-file. Lines
+    end in ``\\n``.
+
+    ``expect_mtime``: the file's :func:`tmaze.core.records.file_mtime` when the
+    caller read it (None if absent); a changed file raises
+    :class:`RecordsFileError` before anything is written (ADR-0155). The
+    default skips the check.
     """
     p = path or default_annotations_path()
+    check_unchanged(p, expect_mtime)
     deduped: Dict[str, Dict[str, str]] = {}
     for row in rows:
         k = _key(row)
@@ -196,7 +206,7 @@ def write_rows(rows: List[Dict[str, str]],
     tmp = p + ".tmp"
     with open(tmp, "w", encoding="utf-8", newline="") as fh:
         fh.write(f"# schema_version={SCHEMA_VERSION}\n")
-        writer = csv.DictWriter(fh, fieldnames=FIELDS)
+        writer = csv.DictWriter(fh, fieldnames=FIELDS, lineterminator="\n")
         writer.writeheader()
         for row in ordered:
             writer.writerow(row)

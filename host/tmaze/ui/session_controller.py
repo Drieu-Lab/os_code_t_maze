@@ -1090,7 +1090,10 @@ class SessionControlView:
                 session_start=session_start, last_water_off=last_off)
             note = None
         else:
-            recent = table.latest_for(animal, on_or_before=date)
+            # The latest row that actually HAS a baseline - a newer row with a
+            # blank baseline cell must not hide an older good one (ADR-0155).
+            recent = table.latest_for(animal, on_or_before=date,
+                                      having="baseline_g")
             baseline = recent.get("baseline_g") if recent else None
             weight = self._ask_pre_session_weight(animal)
             if weight is not None:

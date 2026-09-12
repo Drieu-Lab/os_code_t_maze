@@ -17,7 +17,7 @@ import unittest
 
 import json
 
-from tmaze.core.records import RecordsFileError
+from tmaze.core.records import RecordsFileError, file_mtime
 from tmaze.core.records.animals import (
     AnimalRegistry, animals_json_path, load_records, load_records_for_write,
     load_registry, normalize_records, parse_registry, resources_root,
@@ -182,6 +182,22 @@ class TestRosterEditing(unittest.TestCase):
                 doc = json.load(fh)
         self.assertIn("_schema", doc)
         self.assertEqual(doc["schema_version"], 1)
+
+    def test_write_records_stale_mtime_is_refused(self):
+        # ADR-0155: a roster changed on disk since it was loaded is not
+        # overwritten; the caller must reload and re-apply.
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "animals.json")
+            write_records([{"id": "600"}], path)
+            seen = file_mtime(path)
+            write_records([{"id": "600"}, {"id": "601"}], path)
+            os.utime(path, ns=(seen + 1_000_000_000, seen + 1_000_000_000))
+            with self.assertRaises(RecordsFileError):
+                write_records([{"id": "602"}], path, expect_mtime=seen)
+            self.assertEqual([r["id"] for r in load_records(path)],
+                             ["600", "601"])
+            write_records([{"id": "602"}], path, expect_mtime=file_mtime(path))
+            self.assertEqual([r["id"] for r in load_records(path)], ["602"])
 
 
 class TestLoadRecordsForWrite(unittest.TestCase):
