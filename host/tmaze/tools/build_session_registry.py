@@ -11,12 +11,15 @@ does the file writes, and prints a one-line summary.
 Scan input vs. output are two DIFFERENT locations (see docs/decisions/0088):
 
 - ``--root`` (the scan INPUT) defaults to the full recordings search path from
-  ``tmaze.paths.phase3_recordings_roots`` - the rig's primary folder
-  ``<camera_output_dir>/phase3_recordings`` (env-overridable via
-  ``TMAZE_RECORDINGS_DIR``) plus any read-only ARCHIVE roots
-  (``TMAZE_RECORDINGS_ARCHIVES``) where older sessions were moved when the rig
-  disk filled (docs/decisions/0113). Pass ``--root`` one or more times to scan a
-  custom set; multiple roots are merged and de-duplicated by session_id.
+  ``tmaze.paths.phase3_recordings_roots`` - the tracked project config
+  ``host/recordings_roots.json`` (docs/decisions/0156): its ``primary`` (null =
+  the rig's write folder ``<camera_output_dir>/phase3_recordings``,
+  env-overridable via ``TMAZE_RECORDINGS_DIR``) plus its read-only ARCHIVE roots
+  where older sessions were moved when the rig disk filled (docs/decisions/0113;
+  ``TMAZE_RECORDINGS_ARCHIVES`` overrides the list per process). The Records
+  Manager's Generate resolves the same config, so GUI and CLI scan identical
+  folders. Pass ``--root`` one or more times to scan a custom set instead;
+  multiple roots are merged and de-duplicated by session_id.
 - ``--out-dir`` (where the CSVs are WRITTEN) defaults to ``host/data/phase3_recordings``
   (git-ignored), which is where the Records Manager GUI and the resources
   ``build_session_training_log.py`` read ``session_registry.csv`` from.
@@ -75,15 +78,15 @@ def main(argv=None) -> int:
     ap.add_argument("--root", action="append", default=None, dest="roots",
                     metavar="PATH",
                     help="Phase 3 recordings root to scan; repeatable to scan "
-                         "several (default: the primary root plus any "
-                         "TMAZE_RECORDINGS_ARCHIVES roots)")
+                         "several (default: the roots in the tracked "
+                         "host/recordings_roots.json - primary + archives)")
     ap.add_argument("--out-dir", default=None,
                     help="where to write the CSVs "
                          f"(default: {REGISTRY_OUTPUT_DIR})")
     args = ap.parse_args(argv)
 
     # Default (no --root): the full recordings search path (primary + archives),
-    # resolved fresh so a changed env var is honoured (ADR-0113).
+    # resolved fresh so an edited config / env var is honoured (ADR-0113, 0156).
     roots = args.roots or [str(p) for p in phase3_recordings_roots()]
 
     # Best-effort inputs: an absent daily table just skips the fallback join; the

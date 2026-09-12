@@ -39,8 +39,18 @@ _DEFAULT_CAMERA_OUTPUT_DIR = r"C:\Users\Celine\Documents\t-maze_recordings"
 # when its disk fills, e.g. Z:\Ravi\phase3_recordings). Discovery scans these in
 # ADDITION to the primary root; the rig still WRITES only to the primary. Each
 # entry is a full `phase3_recordings` folder (the one that directly holds session
-# bundles), os.pathsep-separated. See docs/decisions/0113 (extends 0088).
+# bundles). Since docs/decisions/0156 the list is PROJECT CONFIG in the tracked
+# host/recordings_roots.json (below); this env var (os.pathsep-separated) is a
+# per-process OVERRIDE kept for tests/other machines. See docs/decisions/0113.
 _RECORDINGS_ARCHIVES_ENV = "TMAZE_RECORDINGS_ARCHIVES"
+
+# Where sessions may live, as TRACKED project config (docs/decisions/0156). The
+# set of folders holding the experiment's history is a fact about the project,
+# not a per-machine taste, so it is versioned with the code instead of hidden in
+# a git-ignored pref: `{"primary": <folder or null>, "archives": [<folders>]}`.
+# `primary` null means "the folder the rig writes to" (phase3_recordings_root).
+_ROOTS_CONFIG_FILENAME = "recordings_roots.json"
+ROOTS_CONFIG_SCHEMA_VERSION = 1
 
 
 def repo_root() -> Path:
@@ -95,24 +105,108 @@ def phase3_recordings_root() -> Path:
     return camera_output_dir() / "phase3_recordings"
 
 
-def phase3_recordings_archives() -> list[Path]:
-    """The read-only ARCHIVE recordings roots from ``TMAZE_RECORDINGS_ARCHIVES``
-    (os.pathsep-separated full ``phase3_recordings`` folders), in order. Empty
-    when the env var is unset/blank. These are scanned in addition to the primary
-    root; the rig never writes to them (docs/decisions/0113)."""
-    raw = os.environ.get(_RECORDINGS_ARCHIVES_ENV) or ""
+# --------------------------------------------------------------------------- #
+# Recording roots as project config (host/recordings_roots.json)
+#
+# See docs/decisions/0156. Read best-effort (a missing/malformed file means "no
+# archives, primary = the rig's write folder"); written by the Records Manager's
+# Browse / Archives controls with an atomic replace, preserving the file's
+# `_schema` note.
+
+def recordings_roots_config_path() -> Path:
+    """Absolute path to the tracked roots config (``host/recordings_roots.json``)."""
+    return host_dir() / _ROOTS_CONFIG_FILENAME
+
+
+def read_recordings_roots_config() -> dict:
+    """``{"primary": Optional[str], "archives": list[str]}`` from the config
+    file. Best-effort: absent/malformed -> ``{"primary": None, "archives": []}``.
+    Blank strings are dropped; the archive list keeps the file's order."""
+    out: dict = {"primary": None, "archives": []}
+    try:
+        with open(recordings_roots_config_path(), "r", encoding="utf-8") as fh:
+            raw = json.load(fh)
+    except (OSError, ValueError):
+        return out
+    if not isinstance(raw, dict):
+        return out
+    prim = raw.get("primary")
+    if isinstance(prim, str) and prim.strip():
+        out["primary"] = prim.strip()
+    arch = raw.get("archives")
+    if isinstance(arch, list):
+        out["archives"] = [a.strip() for a in arch
+                           if isinstance(a, str) and a.strip()]
+    return out
+
+
+def write_recordings_roots_config(primary: Optional[str],
+                                  archives: list[str]) -> None:
+    """Persist the roots config, keeping any ``_schema`` note already in the
+    file. ``primary`` None/blank is stored as null (= the rig's write folder).
+    Atomic (write-then-replace) so a crash can't leave a half-written file."""
+    p = recordings_roots_config_path()
+    existing: dict = {}
+    try:
+        with open(p, "r", encoding="utf-8") as fh:
+            loaded = json.load(fh)
+        if isinstance(loaded, dict):
+            existing = loaded
+    except (OSError, ValueError):
+        pass
+    data: dict = {}
+    if "_schema" in existing:
+        data["_schema"] = existing["_schema"]
+    data["schema_version"] = ROOTS_CONFIG_SCHEMA_VERSION
+    data["primary"] = (str(primary).strip() or None) if primary else None
+    data["archives"] = [str(a).strip() for a in archives if str(a).strip()]
+    tmp = str(p) + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=2)
+        fh.write("\n")
+    os.replace(tmp, p)
+
+
+def scan_primary_root() -> Path:
+    """The PRIMARY folder the records tools scan for session bundles: the
+    config's ``primary`` when set, else the folder the rig writes to
+    (:func:`phase3_recordings_root`). Kept separate from the write location so
+    pointing the scan elsewhere never redirects recording (docs/decisions/0156)."""
+    prim = read_recordings_roots_config()["primary"]
+    return Path(prim) if prim else phase3_recordings_root()
+
+
+def archives_env_override() -> Optional[list[Path]]:
+    """The archive roots from ``TMAZE_RECORDINGS_ARCHIVES`` if that env var is
+    set (even to blank = "no archives"), else None. Exposed so a GUI can tell the
+    operator the config file is being overridden for this process."""
+    raw = os.environ.get(_RECORDINGS_ARCHIVES_ENV)
+    if raw is None:
+        return None
     return [Path(p) for p in raw.split(os.pathsep) if p.strip()]
 
 
+def phase3_recordings_archives() -> list[Path]:
+    """The read-only ARCHIVE recordings roots, in order: the
+    ``TMAZE_RECORDINGS_ARCHIVES`` env override when set, else the tracked
+    config's ``archives`` list. These are scanned in addition to the primary
+    root; the rig never writes to them (docs/decisions/0113, 0156)."""
+    env = archives_env_override()
+    if env is not None:
+        return env
+    return [Path(a) for a in read_recordings_roots_config()["archives"]]
+
+
 def phase3_recordings_roots() -> list[Path]:
-    """The full recordings search path: the primary root first, then any archive
+    """The full recordings search path: the scan primary first, then any archive
     roots, order-preserving de-duplicated. This is the single source of truth for
-    *everywhere sessions may live* - shared by the registry builder and the
-    offline analysis reader so a history split across drives is fully discovered
-    (docs/decisions/0113, extends 0088)."""
+    *everywhere sessions may live* - shared by the registry builder, the Records
+    Manager, the past-session reader and the offline analysis reader so a history
+    split across drives is fully discovered and every tool scans the SAME set
+    (docs/decisions/0113, 0156; extends 0088)."""
     seen: set[str] = set()
     out: list[Path] = []
-    for p in [phase3_recordings_root(), *phase3_recordings_archives()]:
+    for p in [scan_primary_root(), *phase3_recordings_archives()]:
         key = os.path.normcase(os.path.normpath(str(p)))
         if key not in seen:
             seen.add(key)

@@ -76,7 +76,16 @@ from tmaze.core.records import (
     session_ignore,
 )
 from tmaze.core.session import session_detail
-from tmaze.paths import host_dir, phase3_recordings_root
+from tmaze.paths import (
+    archives_env_override,
+    host_dir,
+    phase3_recordings_archives,
+    phase3_recordings_root,
+    read_recordings_roots_config,
+    recordings_roots_config_path,
+    scan_primary_root,
+    write_recordings_roots_config,
+)
 from tmaze.tools import build_session_registry
 
 # The four daily-entry water/measurement fields the form binds to (the rest of
@@ -107,11 +116,13 @@ _COMMON_PROCEDURES = (
     "Supplemental water",
 )
 
-# Small GUI-pref file (a machine path, so git-ignored): remembers the recordings
-# folder the operator picked so it survives restarts. Precedence for the scan
-# root is this pref, else tmaze.paths.phase3_recordings_root() (which itself
-# honours the TMAZE_RECORDINGS_DIR env var, else the machine default; ADR-0088).
+# Small GUI-pref file (machine-local, so git-ignored): the chosen operator, the
+# Sessions-tab column set, the dashboard span, the Excel sync mtime. The
+# recordings folders used to live here too; since docs/decisions/0156 they are
+# PROJECT config in the tracked host/recordings_roots.json (read through
+# tmaze.paths), and any old pref keys are migrated there once at startup.
 _PREFS_PATH = os.path.join(str(host_dir()), "records_manager.json")
+_LEGACY_ROOT_PREF_KEYS = ("recordings_root", "recordings_archives")
 
 # Stable per-rat colours for the combined dashboard trend (matplotlib tab10);
 # assigned by the rat's position in the roster so a given rat keeps its colour.
@@ -200,14 +211,18 @@ class RecordsManager:
         # vs the last sync we performed drives the Import-before-Generate warning
         # + the staleness banner (Phase B).
         self.daily_xlsx_path = os.path.join(self.records_dir, "daily_log.xlsx")
-        # Where the rig's session bundles are SCANNED from (operator-pickable,
-        # persisted). The registry CSV is READ from a fixed spot regardless of the
-        # scan root (host/data/phase3_recordings; see docs/decisions/0088).
-        self.recordings_root = self._load_recordings_root()
-        # Extra read-only ARCHIVE roots (older sessions moved off the rig disk;
-        # docs/decisions/0113). Scanned in addition to the primary root; the rig
-        # still writes only to the primary. Persisted in records_manager.json.
-        self.recordings_archives = self._load_recordings_archives()
+        # Where the rig's session bundles are SCANNED from: the primary folder
+        # plus any read-only ARCHIVE roots (older sessions moved off the rig
+        # disk; docs/decisions/0113). Both come from the tracked project config
+        # host/recordings_roots.json through tmaze.paths, so this GUI, the
+        # registry tool and the past-session reader scan the SAME folders
+        # (docs/decisions/0156). Browse/Archives edit that file. The registry CSV
+        # is READ from a fixed spot regardless (host/data/phase3_recordings;
+        # docs/decisions/0088).
+        self._migrate_roots_prefs()
+        self.recordings_root = ""
+        self.recordings_archives: List[str] = []
+        self._load_roots()
         self.registry_path = os.path.join(
             build_session_registry.REGISTRY_OUTPUT_DIR,
             build_session_registry.REGISTRY_FILENAME)
@@ -2214,49 +2229,73 @@ class RecordsManager:
         except OSError:
             return None
 
-    def _load_recordings_root(self) -> str:
-        """The recordings folder to scan: the persisted pref if present, else the
-        shared default (env-overridable) from tmaze.paths (ADR-0088)."""
-        return (self._load_prefs().get("recordings_root", "").strip()
-                or str(phase3_recordings_root()))
+    # ---- recording roots (tracked project config; ADR-0156) ---------------
+    def _load_roots(self) -> None:
+        """Refresh the scan roots from tmaze.paths (the tracked config, with the
+        env override for archives honoured the same way the CLI does)."""
+        self.recordings_root = str(scan_primary_root())
+        self.recordings_archives = [str(p) for p in phase3_recordings_archives()]
 
-    def _save_recordings_root(self, path: str) -> None:
-        """Persist the chosen recordings folder (best-effort)."""
-        self._save_prefs(recordings_root=path)
+    def _migrate_roots_prefs(self) -> None:
+        """One-time move of the recordings folders out of the machine-local pref
+        file into the tracked host/recordings_roots.json (ADR-0156).
 
-    def _load_recordings_archives(self) -> List[str]:
-        """The persisted list of read-only ARCHIVE recordings roots (folders
-        older sessions were moved to; docs/decisions/0113). [] when unset. Only
-        well-formed string entries are kept, order preserved."""
-        raw = self._load_prefs().get("recordings_archives", [])
-        if not isinstance(raw, list):
-            return []
-        return [os.path.normpath(p.strip()) for p in raw
-                if isinstance(p, str) and p.strip()]
+        A pref value is carried over only when the config has nothing for that
+        slot, so a config someone already committed is never overwritten by a
+        stale pref; either way the legacy keys are removed so the pref file
+        can't silently disagree with the config later."""
+        prefs = self._load_prefs()
+        if not any(k in prefs for k in _LEGACY_ROOT_PREF_KEYS):
+            return
+        cfg = read_recordings_roots_config()
+        primary = cfg["primary"]
+        archives = list(cfg["archives"])
+        old_root = str(prefs.get("recordings_root") or "").strip()
+        if old_root and not primary and os.path.normcase(os.path.normpath(
+                old_root)) != os.path.normcase(os.path.normpath(
+                str(scan_primary_root()))):
+            primary = os.path.normpath(old_root)
+        old_arch = prefs.get("recordings_archives")
+        if isinstance(old_arch, list) and not archives:
+            archives = [os.path.normpath(p.strip()) for p in old_arch
+                        if isinstance(p, str) and p.strip()]
+        if (primary, archives) != (cfg["primary"], cfg["archives"]):
+            try:
+                write_recordings_roots_config(primary, archives)
+            except OSError:
+                return  # keep the prefs; try again next start
+        for k in _LEGACY_ROOT_PREF_KEYS:
+            prefs.pop(k, None)
+        try:
+            with open(_PREFS_PATH, "w", encoding="utf-8") as fh:
+                json.dump(prefs, fh, indent=2)
+        except OSError:
+            pass
 
-    def _save_recordings_archives(self, paths: List[str]) -> None:
-        """Persist the archive-root list (best-effort)."""
-        self._save_prefs(recordings_archives=paths)
-
-    def _all_scan_roots(self) -> List[str]:
-        """Every root the registry build should scan: the primary first, then the
-        archives, order-preserving de-duplicated (docs/decisions/0113)."""
-        seen: set = set()
-        out: List[str] = []
-        for p in [self.recordings_root, *self.recordings_archives]:
-            key = os.path.normcase(os.path.normpath(p))
-            if key not in seen:
-                seen.add(key)
-                out.append(p)
-        return out
+    def _save_roots(self, primary: Optional[str], archives: List[str]) -> bool:
+        """Write the tracked roots config; False (after telling the user) if the
+        file could not be written."""
+        try:
+            write_recordings_roots_config(primary, archives)
+        except OSError as e:
+            messagebox.showerror(
+                "Could not save recordings folders",
+                f"{recordings_roots_config_path()}\n{e}")
+            return False
+        self._load_roots()
+        return True
 
     def _recordings_summary(self) -> str:
         """The recordings-bar label: the primary root, plus a "(+N archived)"
-        suffix when archive roots are configured."""
+        suffix when archive roots are configured (and a note when the env var
+        is overriding the tracked archive list for this process)."""
         n = len(self.recordings_archives)
-        if not n:
-            return self.recordings_root
-        return f"{self.recordings_root}   (+{n} archived)"
+        s = self.recordings_root
+        if n:
+            s += f"   (+{n} archived)"
+        if archives_env_override() is not None:
+            s += "   [archives from TMAZE_RECORDINGS_ARCHIVES]"
+        return s
 
     def _record_xlsx_sync(self) -> None:
         """Remember the daily workbook's mtime right after we (re)built it from
@@ -2287,11 +2326,19 @@ class RecordsManager:
             initialdir=start)
         if not chosen:
             return
-        self.recordings_root = os.path.normpath(chosen)
+        # Store null when the pick IS the rig's write folder, so the config
+        # keeps following that machine setting instead of freezing a copy.
+        picked = os.path.normpath(chosen)
+        primary: Optional[str] = picked
+        if os.path.normcase(picked) == os.path.normcase(
+                os.path.normpath(str(phase3_recordings_root()))):
+            primary = None
+        if not self._save_roots(primary, read_recordings_roots_config()["archives"]):
+            return
         self.rec_root_var.set(self._recordings_summary())
-        self._save_recordings_root(self.recordings_root)
-        self._set_status(f"Recordings folder set to {self.recordings_root}. "
-                         "Click Generate files to re-scan.")
+        self._set_status(f"Recordings folder set to {self.recordings_root} "
+                         f"(saved to {os.path.basename(str(recordings_roots_config_path()))}; "
+                         "commit it with the code). Click Generate files to re-scan.")
 
     def _on_manage_archives(self) -> None:
         """Add/remove read-only ARCHIVE recordings roots (older sessions moved off
@@ -2343,13 +2390,15 @@ class RecordsManager:
 
         def _save() -> None:
             paths = [lb.get(i) for i in range(lb.size())]
-            self.recordings_archives = paths
-            self._save_recordings_archives(paths)
+            if not self._save_roots(read_recordings_roots_config()["primary"],
+                                    paths):
+                return
             self.rec_root_var.set(self._recordings_summary())
             n = len(paths)
             self._set_status(
-                f"{n} archive folder{'' if n == 1 else 's'} set. "
-                "Click Generate files to re-scan.")
+                f"{n} archive folder{'' if n == 1 else 's'} saved to "
+                f"{os.path.basename(str(recordings_roots_config_path()))} "
+                "(commit it with the code). Click Generate files to re-scan.")
             dlg.destroy()
 
         foot = ttk.Frame(dlg)
@@ -2427,17 +2476,15 @@ class RecordsManager:
         return "\n".join(log)
 
     def _build_registry_inprocess(self) -> str:
-        """Rebuild session_registry.csv by calling the tool's main() directly,
-        scanning the operator-chosen recordings root plus any archive roots (the
-        CSV still lands in the tool's fixed output dir; see docs/decisions/0088,
-        0113)."""
+        """Rebuild session_registry.csv by calling the tool's main() directly.
+        No ``--root`` is passed: the tool resolves the same tracked roots config
+        this GUI shows (tmaze.paths.phase3_recordings_roots), so a GUI Generate
+        and a command-line run scan identical folders (docs/decisions/0156). The
+        CSV still lands in the tool's fixed output dir (docs/decisions/0088)."""
         buf = io.StringIO()
-        root_args: List[str] = []
-        for r in self._all_scan_roots():
-            root_args += ["--root", r]
         try:
             with contextlib.redirect_stdout(buf):
-                build_session_registry.main(root_args)
+                build_session_registry.main([])
             return "[session registry] " + (buf.getvalue().strip() or "rebuilt")
         except SystemExit as e:  # the tool raises SystemExit on a missing root
             return f"[session registry] {e}"

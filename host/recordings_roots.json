@@ -1,0 +1,10 @@
+{
+  "_schema": {
+    "note": "Where the experiment's Phase 3 session bundles live (docs/decisions/0156). Tracked project config read by tmaze.paths.phase3_recordings_roots(), so the Records Manager, build_session_registry and the past-session reader all scan the SAME folders. `primary` is the folder scanned first; null means 'the folder the rig writes to' (tmaze.paths.phase3_recordings_root, a per-machine setting) - set it only if the scan should start somewhere else. `archives` are read-only folders older sessions were moved to when the rig disk filled; each is a full phase3_recordings folder (the one directly holding session bundles). Edited by the Records Manager's Browse... / Archives... controls or by hand. FRAGILITY: drive-letter paths (Z:\\...) depend on that letter being mapped on the machine running the scan; a UNC path (\\\\server\\share\\...) is accepted and is sturdier. The TMAZE_RECORDINGS_ARCHIVES env var, when set, overrides `archives` for that process only (tests / other machines)."
+  },
+  "schema_version": 1,
+  "primary": null,
+  "archives": [
+    "Z:\\Ravi\\phase3_recordings"
+  ]
+}
