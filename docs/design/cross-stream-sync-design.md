@@ -305,6 +305,7 @@ ADR-0142/0143).
 Manifest: register `sync_led_events` / `sync_clock_fit` via
 `SessionManifest.set_stream`, and let `fiducial.method` take the value `led-fit`
 (today `host-t0`). `format.json` should list the new stream and its columns.
+**(Landed in Slice 4 — see below.)**
 
 Code map (respecting the pure-core / thin-shell rule in
 [`CONTRIBUTING.md`](../../CONTRIBUTING.md)):
@@ -606,7 +607,7 @@ Decisions taken with the user (2026-09-09):
   `fiducial.method` to `led-fit`. That is a data-contract change (an offline tool
   rewriting the manifest the rig wrote, plus a `format_version` bump) and lands
   with its ADR in the integrate slice, so a reader that trusts only the manifest
-  won't act on the fit until then.
+  won't act on the fit until then. **(Done in Slice 4, ADR-0154.)**
 - **`--min-matched` / `--min-pairs` are exposed.** The binding/fit thresholds are
   tuned for a full session (thousands of crossings); a short window or a quick
   look needs lower values, so both are flags (defaults 3 / 30). The clock-fit
@@ -652,6 +653,38 @@ also makes markers a QA-only reference:
 
 Still open from this slice: the ENTRY/EXIT beam LEDs remain invisible on the
 board (§3.7); manifest/format registration of the `sync/` stream is Slice 4.
+
+#### Slice 4 (2026-09-11) — register the sync stream in the bundle contract (ADR-0154)
+
+The `sync/` files are now announced in the bundle's self-describing contract, so
+a reader that trusts only the manifest acts on the fit:
+
+- **Manifest.** On a normal (non-`--dry-run`) run, `sync_fit` reads the bundle's
+  `session_<id>.json` (new pure `SessionManifest.from_dict`), registers the
+  `sync_led_events` / `sync_clock_fit` streams, and flips the time-anchor
+  `fiducial.method` from `host-t0` to `led-fit` — written back **atomically**
+  (temp + `os.replace`) so the rig-authored manifest is never torn; idempotent.
+  The `fiducial.pending` note (the sub-ms hardware upgrade, FW-0018) stays: the
+  LED fit is a ~9.5 ms software alignment, not that hardware-grade sync. Only the
+  small index file is edited — the raw recorded streams are never mutated — and
+  `--dry-run` leaves even the index untouched.
+- **Format.** `bundle_format.format_manifest()` gains a `sync` block documenting
+  the `led_events` columns + the `clock_fit` fields (incl. the `board_poly` +
+  fiducial registration), and `FORMAT_VERSION` bumps 1→2. This is a coordinated
+  data-contract change: the analysis mirror (`drieu_lab_analysis`
+  `phase3_format.FORMAT_VERSION`) + its golden fixture bump to 2 in lockstep, or
+  it would reject new bundles as newer-than-supported.
+- **Map snapshot.** `led_map.json` joins `HOST_CONFIG_FILES`, so it is copied
+  into `config/led_map.json` at Session Start (best-effort; absent until a
+  mapping session exists) like `zones.json`.
+- **QA plot.** `--overlay` also writes an optional `sync/clock_fit_<id>.png`
+  (residuals vs firmware-ms + a median/MAD band) via a lazily-imported
+  `matplotlib` (skipped if absent); an unregistered QA artifact like the overlay.
+
+This closes `#260720_DataVideoSync`: the measured host-stamp bias (+59 ms) and the
+LED fit that removes it now live in the bundle as a versioned stream. Still open:
+an analysis-side `clock_fit` reader that *applies* the correction (a follow-on now
+that the stream is first-class), and the ENTRY/EXIT beam LEDs (§3.7).
 
 ---
 

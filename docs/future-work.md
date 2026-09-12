@@ -96,7 +96,7 @@ criteria).
 | [FW-0042](#fw-0042-live-excursion-based-engagement-traces) | Live excursion-based engagement traces (trips/min, non-stem fraction) | Phase 3 host + live trace panel | Proposed |
 | [FW-0043](#fw-0043-automatic-probe-block-triggers) | Automatic probe-block triggers (position / elapsed time / reward volume) | Phase 3 host (`core/phase3/probe_blocks.py`) | Done (ADR-0134) |
 | [FW-0044](#fw-0044-closed-loop-scheduler-rollback-on-a-manual-scored-re-run) | Closed-loop scheduler rollback on a manual scored re-run | Phase 3 closed-loop schedulers (`core/phase3/`) | Deferred |
-| [FW-0045](#fw-0045-in-fov-event-led-visual-fiducial-for-videoserial-alignment) | In-FOV event-LED visual fiducial (sensor/solenoid) for video<->serial alignment | Camera vision + sidecar + rig LED wiring | Proposed |
+| [FW-0045](#fw-0045-in-fov-event-led-visual-fiducial-for-videoserial-alignment) | In-FOV event-LED visual fiducial (sensor/solenoid) for video<->serial alignment | Camera vision + sidecar + rig LED wiring | Done (Phase 1; ADR-0153/0154) |
 | [FW-0046](#fw-0046-live-core-metrics-tab-fixes-engagement-definition--others) | Live-core Metrics-tab fixes (engagement definition + others) | Phase 3 live metrics (`core/phase3/phase3_traces.py`, `phase3_stats.py`) | Deferred |
 | [FW-0047](#fw-0047-schedule-aware-side-bias-score-inside-intervention-blocks) | Schedule-aware side-bias score inside intervention blocks | Phase 3 closed-loop schedulers (`core/phase3/debias.py`, `intervention_stack.py`) | Proposed |
 | [FW-0048](#fw-0048-carve-the-analysis-layer-into-its-own-repo) | Carve the analysis layer into its own repo | Cross-session analysis (`tmaze.analysis`) + packaging | Done (ADR-0146) |
@@ -2263,7 +2263,11 @@ block be disallowed or warned-and-allowed (current behavior)?
 
 ### FW-0045: In-FOV event-LED visual fiducial (sensor/solenoid) for video<->serial alignment
 
-- **Status:** Proposed
+- **Status:** Done — Phase 1 landed across design-doc Slices 0–4 (offline
+  `tmaze.tools.sync_fit` + `tmaze.core.sync` + `tmaze.vision.led_detector`; ROI
+  auto-calibration ADR-0153; bundle-contract registration ADR-0154, which closed
+  `#260720_DataVideoSync`). Phase 2 (camera-visible cue LEDs) is tracked separately
+  as FW-0056. The sketch below is kept for the design rationale.
 - **Date added:** 2026-08-26
 - **Author / Agent:** Agent (Cursor) on behalf of Celine
 - **Area / modules:** `host/tmaze/vision/` (a detector), `host/tmaze/ui/camera_view.py`
