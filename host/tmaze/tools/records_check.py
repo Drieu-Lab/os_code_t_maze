@@ -10,7 +10,11 @@ ADR-0097). The fixes are the operator's - this just makes the drift visible:
 - sessions whose ``(animal, date)`` has no ``daily_log.csv`` husbandry row;
 - ``daily_log.csv`` water-on/off cells holding a volume or free-text note instead
   of a clock time (so the machine-readable ``water_ml`` never captured it);
-- near-zero-duration bundles that look like start/stop churn.
+- near-zero-duration bundles that look like start/stop churn;
+- same-animal sessions starting within a few minutes of each other (a restart),
+  sessions whose bundle has no behavioural summary, a bundle's frozen weight
+  disagreeing with the daily table, and annotations for sessions with no bundle
+  on any recordings root (docs/decisions/0159).
 
 Sessions listed in ``host/session_ignore.json`` are excluded throughout, the same
 as the registry build. Findings acknowledged in ``host/records_audit_ack.json``
@@ -27,7 +31,7 @@ from __future__ import annotations
 
 import argparse
 import os
-from typing import Dict, List
+from typing import Dict, List, Optional, Set
 
 from tmaze.core.records import (
     animals,
@@ -38,7 +42,20 @@ from tmaze.core.records import (
     session_annotations,
     session_ignore,
 )
+from tmaze.core.session import session_registry
+from tmaze.paths import phase3_recordings_roots
 from tmaze.tools import build_session_registry
+
+
+def on_disk_session_ids() -> "Optional[Set[str]]":
+    """Bundle folder names under the configured recordings roots (ADR-0156),
+    for the ghost-annotation check. None when NO bundle was found anywhere -
+    that means the roots are unreachable, not that every session vanished, so
+    the check is skipped rather than flagging every annotation."""
+    roots = [str(p) for p in phase3_recordings_roots()]
+    found = {os.path.basename(os.path.normpath(b))
+             for b in session_registry.scan_roots(roots)}
+    return found or None
 
 
 def _read_csv_skip_comments(path: str) -> List[Dict[str, str]]:
@@ -110,7 +127,9 @@ def main(argv=None) -> int:
               "duration/animal columns; annotation-only checks still run)")
 
     sections = records_audit.build_report(
-        triples, daily_rows, kept_registry, daily, registry, acknowledged)
+        triples, daily_rows, kept_registry, daily, registry, acknowledged,
+        annot_rows=annot_rows, on_disk_ids=on_disk_session_ids(),
+        ignore=ignore)
     problems = sum(_print_section(s, args.show_acknowledged) for s in sections)
     acked = records_audit.total_acknowledged(sections)
 

@@ -105,6 +105,95 @@ class TestShortSessions(unittest.TestCase):
         self.assertEqual(got, [("s_short", 12.0), ("s_zero", 0.0)])
 
 
+class TestGhostAnnotations(unittest.TestCase):
+    def test_flags_annotations_with_no_bundle_unless_ignored(self):
+        annots = [{"session_id": "600_a", "animal": "600", "date": "2026-08-01"},
+                  {"session_id": "600_gone", "animal": "600", "date": "2026-08-02"},
+                  {"session_id": "000_junk", "animal": "000", "date": ""},
+                  {"session_id": "", "animal": "600", "date": ""}]
+        out = records_audit.ghost_annotations(
+            annots, on_disk_ids=["600_a", "601_x"], ignore={"000_junk"})
+        self.assertEqual(out, [("600_gone", "600", "2026-08-02")])
+
+    def test_empty_inputs(self):
+        self.assertEqual(records_audit.ghost_annotations([], []), [])
+
+
+class TestSessionsWithoutSummary(unittest.TestCase):
+    def test_flags_rows_with_no_summary_columns(self):
+        rows = [{"session_id": "a", "start_iso": "", "duration_s": "",
+                 "trials_total": "", "task_reward_ml": ""},
+                {"session_id": "b", "start_iso": "", "duration_s": "12"},
+                {"session_id": "c", "trials_total": "0"},
+                {"session_id": "", "start_iso": ""}]
+        self.assertEqual(records_audit.sessions_without_summary(rows), ["a"])
+
+
+class TestChurnPairs(unittest.TestCase):
+    def test_flags_consecutive_same_animal_starts_inside_window(self):
+        rows = [
+            {"session_id": "600_20260801_100000", "animal": "600",
+             "start_iso": "2026-08-01T10:00:00"},
+            {"session_id": "600_20260801_100230", "animal": "600",
+             "start_iso": "2026-08-01T10:02:30"},     # 150 s later -> flagged
+            {"session_id": "600_20260801_130000", "animal": "600",
+             "start_iso": "2026-08-01T13:00:00"},     # hours later -> fine
+            {"session_id": "601_20260801_100100", "animal": "601",
+             "start_iso": "2026-08-01T10:01:00"},     # other animal -> fine
+        ]
+        out = records_audit.churn_pairs(rows)
+        self.assertEqual(out, [("600_20260801_100230",
+                                "600_20260801_100000", 150.0)])
+
+    def test_falls_back_to_session_id_stamp_and_ignores_unparseable(self):
+        rows = [
+            {"session_id": "600_20260801_100000", "animal": "600"},   # no iso
+            {"session_id": "600_20260801_100100", "animal": "600",
+             "start_iso": "not a time"},                              # id stamp
+            {"session_id": "weird", "animal": "600"},                # skipped
+            {"session_id": "600_20260801_100200", "animal": ""},     # no animal
+        ]
+        out = records_audit.churn_pairs(rows)
+        self.assertEqual(out, [("600_20260801_100100",
+                                "600_20260801_100000", 60.0)])
+
+    def test_window_boundary_and_order_independence(self):
+        rows = [
+            {"session_id": "600_20260801_100500", "animal": "600"},
+            {"session_id": "600_20260801_100000", "animal": "600"},  # exactly 300 s
+        ]
+        self.assertEqual(records_audit.churn_pairs(rows), [])
+        self.assertEqual(len(records_audit.churn_pairs(rows, window_s=301)), 1)
+
+
+class TestWeightMismatches(unittest.TestCase):
+    def test_flags_bundle_vs_daily_disagreement_beyond_tolerance(self):
+        daily = DailyLog([
+            {"animal_id": "600", "date": "2026-08-01", "weight_g": "330"},
+            {"animal_id": "600", "date": "2026-08-02", "weight_g": "331"},
+            {"animal_id": "600", "date": "2026-08-03", "weight_g": ""},
+        ])
+        rows = [
+            {"session_id": "s1", "animal": "600", "date": "2026-08-01",
+             "husbandry_source": "daily_table", "weight_g": "325"},   # 5 g off
+            {"session_id": "s2", "animal": "600", "date": "2026-08-02",
+             "husbandry_source": "start_dialog", "weight_g": "331.5"},  # within 1 g
+            {"session_id": "s3", "animal": "600", "date": "2026-08-03",
+             "husbandry_source": "manual", "weight_g": "320"},   # daily blank
+            {"session_id": "s4", "animal": "600", "date": "2026-08-01",
+             "husbandry_source": "daily_table_join", "weight_g": "300"},  # joined: same source
+            {"session_id": "s5", "animal": "600", "date": "2026-08-01",
+             "husbandry_source": "none", "weight_g": ""},
+        ]
+        out = records_audit.weight_mismatches(rows, daily)
+        self.assertEqual(out, [("s1", "600", "2026-08-01", 325.0, 330.0)])
+
+    def test_none_daily_flags_nothing(self):
+        rows = [{"session_id": "s1", "animal": "600", "date": "2026-08-01",
+                 "husbandry_source": "daily_table", "weight_g": "325"}]
+        self.assertEqual(records_audit.weight_mismatches(rows, None), [])
+
+
 class TestSessionTriples(unittest.TestCase):
     def test_registry_first_then_annot_only_skip_ignored_and_dups(self):
         registry = [{"session_id": "a", "animal": "600", "date": "2026-08-07"},
@@ -169,6 +258,54 @@ class TestBuildReport(unittest.TestCase):
         self.assertIn("suspect_water_methods", by)
         self.assertEqual([f.key for f in by["suspect_water_methods"].findings],
                          ["suspect_water_methods:600:2026-08-07"])
+
+    def test_new_sections_wired_with_stable_keys(self):
+        reg = AnimalRegistry([{"id": "600"}])
+        daily_rows = [{"animal_id": "600", "date": "2026-08-01",
+                       "weight_g": "330"}]
+        daily = DailyLog(daily_rows)
+        kept = [
+            {"session_id": "600_20260801_100000", "animal": "600",
+             "date": "2026-08-01", "husbandry_source": "daily_table",
+             "weight_g": "320", "duration_s": "900",
+             "start_iso": "2026-08-01T10:00:00"},
+            {"session_id": "600_20260801_100200", "animal": "600",
+             "date": "2026-08-01", "husbandry_source": "none",
+             "start_iso": "", "duration_s": "", "trials_total": "",
+             "task_reward_ml": ""},
+        ]
+        annots = [{"session_id": "600_20260801_100000", "animal": "600",
+                   "date": "2026-08-01"},
+                  {"session_id": "600_ghost", "animal": "600",
+                   "date": "2026-07-01"}]
+        sections = records_audit.build_report(
+            [], daily_rows, kept, daily, reg, annot_rows=annots,
+            on_disk_ids=["600_20260801_100000", "600_20260801_100200"],
+            ignore=set())
+        by = {s.id: s for s in sections}
+        self.assertEqual([f.key for f in by["churn_window"].findings],
+                         ["churn_window:600_20260801_100200"])
+        self.assertEqual([f.key for f in by["no_summary"].findings],
+                         ["no_summary:600_20260801_100200"])
+        self.assertEqual([f.key for f in by["weight_mismatch"].findings],
+                         ["weight_mismatch:600_20260801_100000"])
+        self.assertIn("320 g vs daily_log 330 g",
+                      by["weight_mismatch"].findings[0].text)
+        self.assertEqual([f.key for f in by["ghost_annotations"].findings],
+                         ["ghost_annotations:600_ghost"])
+        self.assertEqual(records_audit.total_flagged(sections), 4)
+
+    def test_ghost_section_skipped_without_disk_scan(self):
+        reg = AnimalRegistry([{"id": "600"}])
+        daily = DailyLog([{"animal_id": "600", "date": "2026-08-01"}])
+        sections = records_audit.build_report(
+            [], [], [], daily, reg,
+            annot_rows=[{"session_id": "600_ghost", "animal": "600"}])
+        by = {s.id: s for s in sections}
+        self.assertTrue(by["ghost_annotations"].skipped)
+        self.assertEqual(by["ghost_annotations"].count, 0)
+        self.assertTrue(by["weight_mismatch"].id)   # present (daily available)
+        self.assertFalse(by["weight_mismatch"].skipped)
 
     def test_acknowledged_findings_are_partitioned_out(self):
         reg = AnimalRegistry([{"id": "600"}])

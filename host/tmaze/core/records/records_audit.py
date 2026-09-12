@@ -20,16 +20,25 @@ set from ``records_audit_ack`` (ADR-0105). It also flags a ``water_method`` cell
 that isn't a known method, reusing ``daily_log.normalize_method`` so the
 vocabulary can't drift.
 
-Pure stdlib (``re``) plus the sibling ``daily_log`` core (method vocabulary);
-headlessly testable.
+The 2026-09-11 records review (docs/decisions/0159) added four more checks:
+annotations for sessions that no longer exist on any recordings root ("ghost"
+annotations), sessions whose bundle has no behavioural summary, same-animal
+starts within a few minutes of each other (restart churn the duration check
+misses), and a bundle's frozen pre-session weight disagreeing with the daily
+table's weight for that day.
+
+Pure stdlib (``re``, ``datetime``) plus the sibling ``daily_log`` core (method
+vocabulary); headlessly testable.
 
 Headless tests: python -m unittest test_records_audit.
 """
 
 from __future__ import annotations
 
+import datetime as _dt
 import re
-from typing import Any, List, NamedTuple, Optional, Sequence, Set, Tuple
+from typing import (Any, Dict, Iterable, List, NamedTuple, Optional, Sequence,
+                    Set, Tuple)
 
 from tmaze.core.records import daily_log
 
@@ -38,6 +47,22 @@ from tmaze.core.records import daily_log
 # bundles (5 in ~5 min). Reporting only; nothing is dropped on this basis (real
 # short sessions do happen). See docs/decisions/0097.
 SHORT_SESSION_S = 60.0
+
+# Two sessions of the SAME animal starting within this many seconds of each
+# other are almost certainly one session restarted (a mis-click, a crash, a
+# re-plug) - the earlier one is the fragment. Catches restarts whose fragment
+# ran longer than SHORT_SESSION_S. 5 min: the review's bursts were 1-3 min
+# apart; two genuine sessions of one rat are never that close (the rat has to
+# be taken out and put back). See docs/decisions/0159.
+CHURN_WINDOW_S = 300.0
+
+# The bundle's frozen pre-session weight (animal_state.json, ADR-0077) and the
+# daily table's weight for the same (animal, date) should be the SAME number -
+# one was copied from the other at Start. A difference beyond this many grams
+# means one of them was edited afterwards or typed twice; the audit says which
+# session so the operator can decide which is right. 1 g absorbs a rounding
+# (scales read whole grams). See docs/decisions/0159.
+WEIGHT_MISMATCH_G = 1.0
 
 # A clock-time cell looks like "4:30pm", "16:04", "3:15PM", "5:30", or a bare
 # "6pm"/"1 PM" (hour with minutes, or hour with am/pm - a lone number isn't a
@@ -147,6 +172,137 @@ def short_sessions(rows: Sequence[dict],
     return out
 
 
+def ghost_annotations(annot_rows: Sequence[dict],
+                      on_disk_ids: Iterable[str],
+                      ignore: Optional[Set[str]] = None
+                      ) -> List[Tuple[str, str, str]]:
+    """``(session_id, animal, date)`` for each annotation whose session has NO
+    bundle under any recordings root and is not on the ignore list.
+
+    An annotation is keyed by session id (ADR-0082); if the bundle was deleted,
+    renamed, or lives on a drive that isn't mounted, the note is orphaned and
+    the View sheets show a session the registry can't. ``on_disk_ids`` are the
+    bundle folder names found by scanning the configured roots."""
+    have = {str(s or "").strip() for s in on_disk_ids}
+    skip = ignore or set()
+    out: List[Tuple[str, str, str]] = []
+    for r in annot_rows or []:
+        sid = str(r.get("session_id", "") or "").strip()
+        if not sid or sid in skip or sid in have:
+            continue
+        out.append((sid, str(r.get("animal", "") or "").strip(),
+                    str(r.get("date", "") or "").strip()))
+    return out
+
+
+# Registry columns that are ALL blank when the bundle has no summary/ folder
+# (they come only from session_summary_*.json; ADR-0081).
+_SUMMARY_COLUMNS = ("start_iso", "duration_s", "trials_total", "task_reward_ml")
+
+
+def sessions_without_summary(rows: Sequence[dict]) -> List[str]:
+    """Session ids whose registry row has none of the summary-derived columns
+    filled - the bundle was recorded without a behavioural summary (a crash
+    before Stop, or a very old bundle), so behaviour is unknown for it."""
+    out: List[str] = []
+    for row in rows or []:
+        if all(not str(row.get(c, "") or "").strip() for c in _SUMMARY_COLUMNS):
+            sid = str(row.get("session_id", "") or "").strip()
+            if sid:
+                out.append(sid)
+    return out
+
+
+def _start_time(row: dict) -> Optional[_dt.datetime]:
+    """A session's start as a datetime: the summary's ``start_iso`` when it
+    parses, else the ``<animal>_<YYYYMMDD>_<HHMMSS>`` stamp in the session id
+    (so a bundle without a summary still takes part)."""
+    iso = str(row.get("start_iso", "") or "").strip()
+    if iso:
+        try:
+            return _dt.datetime.fromisoformat(iso).replace(tzinfo=None)
+        except ValueError:
+            pass
+    sid = str(row.get("session_id", "") or "").strip()
+    parts = sid.rsplit("_", 2)
+    if len(parts) == 3 and len(parts[1]) == 8 and len(parts[2]) == 6 \
+            and parts[1].isdigit() and parts[2].isdigit():
+        try:
+            return _dt.datetime.strptime(parts[1] + parts[2], "%Y%m%d%H%M%S")
+        except ValueError:
+            return None
+    return None
+
+
+def churn_pairs(rows: Sequence[dict],
+                window_s: float = CHURN_WINDOW_S
+                ) -> List[Tuple[str, str, float]]:
+    """``(later_session_id, earlier_session_id, gap_s)`` for every pair of
+    CONSECUTIVE same-animal sessions whose starts are less than ``window_s``
+    apart - i.e. a restart. The later session carries the finding (the earlier
+    one is usually the fragment, but the operator decides). Rows without an
+    animal or a parseable start are skipped."""
+    by_animal: Dict[str, List[Tuple[_dt.datetime, str]]] = {}
+    for row in rows or []:
+        animal = str(row.get("animal", "") or "").strip()
+        sid = str(row.get("session_id", "") or "").strip()
+        t = _start_time(row)
+        if not animal or not sid or t is None:
+            continue
+        by_animal.setdefault(animal, []).append((t, sid))
+    out: List[Tuple[str, str, float]] = []
+    for animal in sorted(by_animal):
+        starts = sorted(by_animal[animal])
+        for (t0, s0), (t1, s1) in zip(starts, starts[1:]):
+            gap = (t1 - t0).total_seconds()
+            if gap < window_s:
+                out.append((s1, s0, gap))
+    return out
+
+
+def _num(value: Any) -> Optional[float]:
+    try:
+        return float(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def weight_mismatches(rows: Sequence[dict], daily: Optional[Any],
+                      tolerance_g: float = WEIGHT_MISMATCH_G
+                      ) -> List[Tuple[str, str, str, float, float]]:
+    """``(session_id, animal, date, bundle_weight_g, daily_weight_g)`` for each
+    session whose registry weight came from the BUNDLE (``husbandry_source`` is
+    not the daily-table join) and differs from the daily table's weight for the
+    same (animal, date) by more than ``tolerance_g``.
+
+    Both numbers describe the same weighing, so a disagreement means one was
+    edited or re-typed afterwards; the audit surfaces it rather than picking a
+    winner. Rows with either weight blank/non-numeric are skipped."""
+    if daily is None:
+        return []
+    out: List[Tuple[str, str, str, float, float]] = []
+    for row in rows or []:
+        src = str(row.get("husbandry_source", "") or "").strip()
+        if src in ("", "none", "daily_table_join"):
+            continue
+        bundle_w = _num(row.get("weight_g"))
+        animal = str(row.get("animal", "") or "").strip()
+        date = str(row.get("date", "") or "").strip()
+        if bundle_w is None or not animal or not date:
+            continue
+        try:
+            drow = daily.for_date(animal, date)
+        except Exception:
+            drow = None
+        daily_w = _num((drow or {}).get("weight_g"))
+        if daily_w is None:
+            continue
+        if abs(bundle_w - daily_w) > tolerance_g:
+            out.append((str(row.get("session_id", "") or "").strip(),
+                        animal, date, bundle_w, daily_w))
+    return out
+
+
 # --------------------------------------------------------------- aggregation
 # The detectors above each find one KIND of drift. The pieces below assemble
 # them into a single structured report so every caller - the CLI shell
@@ -233,7 +389,10 @@ def build_report(triples: Sequence[Tuple[str, str, str]],
                  kept_registry: Sequence[dict],
                  daily: Optional[Any],
                  registry: Optional[Any],
-                 acknowledged: Optional[Set[str]] = None) -> List[AuditSection]:
+                 acknowledged: Optional[Set[str]] = None,
+                 annot_rows: Optional[Sequence[dict]] = None,
+                 on_disk_ids: Optional[Iterable[str]] = None,
+                 ignore: Optional[Set[str]] = None) -> List[AuditSection]:
     """Assemble the full integrity report from already-loaded records.
 
     ``daily`` is a ``daily_log.DailyLog`` (or None) and ``registry`` an
@@ -242,7 +401,12 @@ def build_report(triples: Sequence[Tuple[str, str, str]],
     are the joined sessions (see ``session_triples``), ``kept_registry`` the
     registry rows with ignored ids already removed. ``acknowledged`` is the set
     of finding keys the operator has dismissed (``records_audit_ack``); those are
-    partitioned out of each section's active findings."""
+    partitioned out of each section's active findings.
+
+    ``annot_rows`` + ``on_disk_ids`` (the bundle folder names found under the
+    recordings roots) feed the ghost-annotation check; pass ``on_disk_ids=None``
+    when the roots could not be scanned and that section is SKIPPED instead of
+    calling every annotation a ghost. ``ignore`` is the ignore-list."""
     acked = acknowledged or set()
     sections: List[AuditSection] = []
 
@@ -296,6 +460,58 @@ def build_report(triples: Sequence[Tuple[str, str, str]],
         "likely start/stop churn)", findings,
         "if a listed session isn't real, add it to host/session_ignore.json.",
         acked))
+
+    sid = "churn_window"
+    findings = [Finding(f"{sid}:{later}",
+                        f"{later}  starts {gap:.0f} s after {earlier}")
+                for later, earlier, gap in churn_pairs(kept_registry)]
+    sections.append(_section(
+        sid, f"Same-animal sessions starting < {CHURN_WINDOW_S / 60:.0f} min "
+        "apart (likely a restart)", findings,
+        "decide which of the pair is the fragment and add it to "
+        "host/session_ignore.json; acknowledge if both are real.", acked))
+
+    sid = "no_summary"
+    findings = [Finding(f"{sid}:{s}", s)
+                for s in sessions_without_summary(kept_registry)]
+    sections.append(_section(
+        sid, "Sessions whose bundle has no behavioural summary", findings,
+        "the session ended without Stop (crash/kill) or predates the summary "
+        "file; behaviour is unknown for it - acknowledge, or ignore-list it if "
+        "it wasn't a real session.", acked))
+
+    sid = "weight_mismatch"
+    if daily is not None and getattr(daily, "available", False):
+        findings = [Finding(f"{sid}:{s}",
+                            f"{s}  bundle {bw:g} g vs daily_log {dw:g} g  "
+                            f"({a} {d})")
+                    for s, a, d, bw, dw in weight_mismatches(kept_registry, daily)]
+        sections.append(_section(
+            sid, f"Bundle pre-session weight differs from daily_log.csv "
+            f"(> {WEIGHT_MISMATCH_G:g} g)", findings,
+            "one of the two was edited or re-typed after Start; correct the "
+            "wrong one (the bundle's animal_state.json is the frozen record; "
+            "daily_log.csv is what the dashboard trends).", acked))
+    else:
+        sections.append(AuditSection(
+            sid, "Bundle pre-session weight differs from daily_log.csv", [],
+            note="daily_log.csv unavailable - skipped"))
+
+    sid = "ghost_annotations"
+    if on_disk_ids is not None:
+        findings = [Finding(f"{sid}:{s}", f"{s}  ({a} {d})")
+                    for s, a, d in ghost_annotations(
+                        annot_rows or [], on_disk_ids, ignore)]
+        sections.append(_section(
+            sid, "Annotations for sessions with no bundle on any recordings "
+            "root", findings,
+            "if the bundle is on a drive that isn't mounted, mount it and "
+            "re-check; if it was deleted on purpose, remove the annotation row "
+            "(or add the id to host/session_ignore.json).", acked))
+    else:
+        sections.append(AuditSection(
+            sid, "Annotations for sessions with no bundle on any recordings "
+            "root", [], note="recordings roots not scanned - skipped"))
 
     return sections
 

@@ -59,7 +59,7 @@ import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from tmaze.core.records import (
     RecordsFileError,
@@ -311,10 +311,16 @@ class RecordsManager:
         # on disk; ADR-0097). Applied to both registry and annotation-only rows so
         # a stale registry or a leftover annotation can't resurface them.
         self.ignored_sessions = session_ignore.load_ignored()
-        # Bundles on disk the registry doesn't know yet (the staleness hint in
-        # the banner; ADR-0158). Computed here - not on every banner refresh -
-        # because it lists the archive root, which may be a network drive.
-        self.unindexed_sessions = self._scan_unindexed()
+        # Bundle folders under the configured roots, scanned once per load (not
+        # per banner refresh - the archive root may be a network drive). Feeds
+        # the "N bundles not yet indexed" hint (ADR-0158) and the integrity
+        # check's ghost-annotation section (ADR-0159). None = nothing found
+        # anywhere, i.e. the roots are unreachable rather than empty.
+        self.on_disk_sessions: Optional[Set[str]] = self._scan_on_disk()
+        self.unindexed_sessions = session_registry.unindexed_sessions(
+            self.on_disk_sessions or [],
+            [r.get("session_id", "") for r in self.registry_rows],
+            self.ignored_sessions)
 
     def _read_registry_meta(self) -> session_registry.BuildMeta:
         """The registry's provenance header (v2, ADR-0157); blank for a v1 file
@@ -326,16 +332,14 @@ class RecordsManager:
         except OSError:
             return session_registry.BuildMeta()
 
-    def _scan_unindexed(self) -> List[str]:
-        """Session ids present under the configured roots but not in the loaded
-        registry (ignore-list excluded). Best-effort: an unreachable root just
+    def _scan_on_disk(self) -> Optional[Set[str]]:
+        """Bundle folder names under the configured roots; None when none were
+        found at all (unreachable roots). Best-effort: an unreachable root
         contributes nothing."""
         roots = [self.recordings_root, *self.recordings_archives]
-        found = [os.path.basename(os.path.normpath(b))
-                 for b in session_registry.scan_roots(r for r in roots if r)]
-        return session_registry.unindexed_sessions(
-            found, [r.get("session_id", "") for r in self.registry_rows],
-            self.ignored_sessions)
+        found = {os.path.basename(os.path.normpath(b))
+                 for b in session_registry.scan_roots(r for r in roots if r)}
+        return found or None
 
     # ---------------------------------------------------------------- ui
     def _build_ui(self) -> None:
@@ -1445,14 +1449,12 @@ class RecordsManager:
             subprocess.run(["xdg-open", path], check=False)
 
     # ------------------------------------------------------------- integrity
-    def _integrity_check(self) -> None:
-        """Show the read-only cross-record integrity report (bug #260810;
-        ADR-0097): typo'd animal ids, sessions with no husbandry row, water-time
-        cells holding a volume/note, an unknown water_method, and start/stop
-        churn. Uses the records currently in memory and changes nothing - the
-        fixes are the operator's. Findings acknowledged in
-        host/records_audit_ack.json are dismissed from the active list but shown
-        as a dismissed count (ADR-0105)."""
+    def _audit_sections(self) -> "Tuple[List[records_audit.AuditSection], int]":
+        """Run the read-only integrity audit over the records currently in
+        memory: (sections, number of sessions checked). Findings acknowledged in
+        host/records_audit_ack.json are partitioned out (ADR-0105). The
+        ghost-annotation section uses the bundle scan from the last data load
+        (skipped when the roots were unreachable; ADR-0159)."""
         registry = animals.load_registry(self.animals_path)
         triples = records_audit.session_triples(
             self.registry_rows, self.annot_rows, self.ignored_sessions)
@@ -1461,32 +1463,36 @@ class RecordsManager:
                 not in self.ignored_sessions]
         acknowledged = records_audit_ack.load_acked_keys()
         sections = records_audit.build_report(
-            triples, self.daily_rows, kept, self.daily, registry, acknowledged)
-        total = records_audit.total_flagged(sections)
-        self._show_integrity_dialog(sections, total, len(triples))
+            triples, self.daily_rows, kept, self.daily, registry, acknowledged,
+            annot_rows=self.annot_rows, on_disk_ids=self.on_disk_sessions,
+            ignore=self.ignored_sessions)
+        return sections, len(triples)
 
-    def _show_integrity_dialog(
-            self, sections: "List[records_audit.AuditSection]",
-            total: int, n_sessions: int) -> None:
+    def _integrity_check(self) -> None:
+        """Show the read-only cross-record integrity report (bug #260810;
+        ADR-0097): typo'd animal ids, sessions with no husbandry row, water-time
+        cells holding a volume/note, an unknown water_method, start/stop churn,
+        restarts, summary-less bundles, weight disagreements and ghost
+        annotations (ADR-0159). Uses the records currently in memory and
+        changes nothing - the fixes are the operator's."""
+        self._show_integrity_dialog()
+
+    def _show_integrity_dialog(self) -> None:
         """Interactive report: active findings grouped by section in a tree the
         operator can select and ACKNOWLEDGE (dismiss). Acknowledging writes the
         finding's stable key to host/records_audit_ack.json so it stays hidden
         next run; "Manage dismissed..." restores. Read-only w.r.t. the records
-        themselves - only the acknowledgement store is written (ADR-0105)."""
+        themselves - only the acknowledgement store is written (ADR-0105).
+
+        The dialog REFRESHES IN PLACE after an acknowledge/restore (same window,
+        same position, tree re-filled) instead of being destroyed and reopened,
+        so the operator keeps their place while working down a long list."""
         dlg = tk.Toplevel(self.root)
         dlg.title("Records integrity")
         dlg.transient(self.root)
-        acked_n = records_audit.total_acknowledged(sections)
-        header = ("No active problems found." if total == 0
-                  else f"{total} item(s) flagged.")
-        if acked_n:
-            header += f"  ({acked_n} dismissed and hidden.)"
-        ttk.Label(
-            dlg,
-            text=(f"{header}  Checked {n_sessions} session(s). "
-                  "Read-only report - the records are not changed."),
-            foreground=("#2e7d32" if total == 0 else "#9C0006")).pack(
-            side="top", anchor="w", padx=8, pady=(8, 4))
+        header_var = tk.StringVar()
+        header = ttk.Label(dlg, textvariable=header_var)
+        header.pack(side="top", anchor="w", padx=8, pady=(8, 4))
 
         wrap = ttk.Frame(dlg)
         wrap.pack(side="top", fill="both", expand=True, padx=8)
@@ -1499,23 +1505,39 @@ class RecordsManager:
 
         # iid -> finding key, so a selected leaf can be acknowledged.
         iid_to_key: Dict[str, str] = {}
-        for s in sections:
-            if s.skipped:
-                label = f"{s.title}  -  ({s.note})"
-            elif not s.items:
-                extra = (f"  ({s.acknowledged_count} dismissed)"
-                         if s.acknowledged_count else "")
-                label = f"{s.title}  -  none{extra}"
-            else:
-                extra = (f", {s.acknowledged_count} dismissed"
-                         if s.acknowledged_count else "")
-                label = f"{s.title}  ({s.count}{extra})"
-            parent = tree.insert("", "end", text=label, open=True)
-            for finding in s.findings:
-                leaf = tree.insert(parent, "end", text=finding.text)
-                iid_to_key[leaf] = finding.key
-            if s.fix and s.items:
-                tree.insert(parent, "end", text=f"Fix: {s.fix}")
+
+        def refresh() -> None:
+            """Re-run the audit and re-fill the header + tree in place."""
+            sections, n_sessions = self._audit_sections()
+            total = records_audit.total_flagged(sections)
+            acked_n = records_audit.total_acknowledged(sections)
+            text = ("No active problems found." if total == 0
+                    else f"{total} item(s) flagged.")
+            if acked_n:
+                text += f"  ({acked_n} dismissed and hidden.)"
+            header_var.set(f"{text}  Checked {n_sessions} session(s). "
+                           "Read-only report - the records are not changed.")
+            header.configure(foreground=("#2e7d32" if total == 0
+                                         else "#9C0006"))
+            tree.delete(*tree.get_children(""))
+            iid_to_key.clear()
+            for s in sections:
+                if s.skipped:
+                    label = f"{s.title}  -  ({s.note})"
+                elif not s.items:
+                    extra = (f"  ({s.acknowledged_count} dismissed)"
+                             if s.acknowledged_count else "")
+                    label = f"{s.title}  -  none{extra}"
+                else:
+                    extra = (f", {s.acknowledged_count} dismissed"
+                             if s.acknowledged_count else "")
+                    label = f"{s.title}  ({s.count}{extra})"
+                parent = tree.insert("", "end", text=label, open=True)
+                for finding in s.findings:
+                    leaf = tree.insert(parent, "end", text=finding.text)
+                    iid_to_key[leaf] = finding.key
+                if s.fix and s.items:
+                    tree.insert(parent, "end", text=f"Fix: {s.fix}")
 
         btns = ttk.Frame(dlg)
         btns.pack(side="bottom", fill="x", padx=8, pady=8)
@@ -1536,19 +1558,23 @@ class RecordsManager:
             if reason is None:      # cancelled
                 return
             records_audit_ack.acknowledge(key, reason)
-            dlg.destroy()
-            self._integrity_check()     # reopen, refreshed
+            refresh()
 
         ttk.Button(btns, text="Acknowledge selected...",
                    command=acknowledge_selected).pack(side="left")
         ttk.Button(btns, text="Manage dismissed...",
-                   command=lambda: self._manage_acknowledged(dlg)).pack(
+                   command=lambda: self._manage_acknowledged(dlg, refresh)).pack(
+            side="left", padx=(6, 0))
+        ttk.Button(btns, text="Re-check", command=refresh).pack(
             side="left", padx=(6, 0))
         ttk.Button(btns, text="Close", command=dlg.destroy).pack(side="right")
+        refresh()
 
-    def _manage_acknowledged(self, parent: tk.Toplevel) -> None:
+    def _manage_acknowledged(self, parent: tk.Toplevel,
+                             on_change: "Callable[[], None]") -> None:
         """List the acknowledged (dismissed) findings and let the operator RESTORE
-        one (un-acknowledge it, bringing it back into the active report)."""
+        one (un-acknowledge it, bringing it back into the active report).
+        ``on_change`` refreshes the parent report in place after a restore."""
         acked = records_audit_ack.load_ack()
         dlg = tk.Toplevel(parent)
         dlg.title("Dismissed findings")
@@ -1588,9 +1614,11 @@ class RecordsManager:
             if not key:
                 return
             records_audit_ack.unacknowledge(key)
-            dlg.destroy()
-            parent.destroy()
-            self._integrity_check()     # reopen the report, refreshed
+            tree.delete(sel[0])
+            del iid_to_key[sel[0]]
+            on_change()                 # the report behind refreshes in place
+            if not tree.get_children(""):
+                dlg.destroy()
 
         btns = ttk.Frame(dlg)
         btns.pack(side="bottom", fill="x", padx=8, pady=8)
