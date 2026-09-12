@@ -22,8 +22,8 @@ provenance-labelled channels**, never summed (see the registry below).
 | `records_changes.csv` | resources · `records/animal/` | appended by every records write path (Records Manager saves; builders' `--export` / `--import-annotations`) | 1 (comment line) | 0155 |
 | `animal_state.json` | code · per-bundle `config/` | `session_controller` at Start (core `animal_state.py`) | 2 | 0077, 0101 |
 | `session_meta.json` | code · per-bundle `config/` | `session_controller` at Start (core `session_meta.py`) | 1 | 0079 |
-| `session_registry.csv` | code · recordings root (git-ignored) | `build_session_registry.py` (core `session_registry.py`) | 1 (comment line) | 0081 |
-| `session_registry_tags.csv` | code · recordings root (git-ignored) | `build_session_registry.py` | 1 (comment line) | 0081 |
+| `session_registry.csv` | code · `host/data/phase3_recordings/` (git-ignored) | `build_session_registry.py` (core `session_registry.py`) | 2 (comment line + provenance header) | 0081, 0157 |
+| `session_registry_tags.csv` | code · `host/data/phase3_recordings/` (git-ignored) | `build_session_registry.py` | 2 (comment line) | 0081, 0157 |
 
 Related per-bundle streams these join (not re-defined here): the session manifest
 `session_<id>.json` (ADR-0048), the behavioural summary `summary/session_summary_<id>.json`
@@ -133,11 +133,19 @@ Sticky human bookkeeping frozen into the bundle at Start (one per bundle):
 typed a sub-stage), so a reader can tell a derived stage from a typed one
 (ADR-0079).
 
-## `session_registry.csv` (v1)
+## `session_registry.csv` (v2)
 
 The cross-session index — one row per bundle, a full [idempotent
-rebuild](glossary.md#idempotent-rebuild) of everything under the recordings root
-(ADR-0081). Leading `# schema_version=1` comment line, then these columns:
+rebuild](glossary.md#idempotent-rebuild) of everything under the recordings roots
+(ADR-0081, 0113). The file opens with a `# schema_version=2` comment line followed
+by the build's **provenance header** (ADR-0157) — `# built_at=<local ISO time>`,
+`# code_commit=<short sha, "+dirty" if uncommitted changes, or unknown>`,
+`# roots=<JSON list of the folders scanned, in scan order>`, and one
+`# <input>_sha=<12-hex content hash or absent>` line for each joined input
+(`daily_log`, `note_tags`, `session_ignore`) — so a reader can tell which folders
+and which inputs shaped the file. Readers must skip every leading `#` line (the
+shared `read_commented_csv` does; `session_registry.registry_meta` parses them
+back). Then these columns:
 
 - **Identity / timing:** `session_id, animal, date, start_iso, duration_s`.
 - **Husbandry** (preferred from the bundle's `animal_state.json`, else a
@@ -159,15 +167,20 @@ rebuild](glossary.md#idempotent-rebuild) of everything under the recordings root
   `stem_choices`, `nonstem_choices`, `stem_compliance` (= `compliance_cum`).
 - **Session metadata** (from `session_meta.json`): `trainer, stage, stage_source,
   reward_type`.
-- **Provenance:** `bundle` (absolute path to the session folder).
+- **Provenance:** `bundle` (the session folder **relative to its root** — for a
+  bundle directly under a root, just the session id) and `root` (the absolute
+  recordings root it was found under; with duplicates across roots, the
+  first-listed root wins). `session_registry.bundle_path(row)` re-joins them,
+  and still accepts a v1 row (absolute `bundle`, no `root`).
 - **Wide tag columns:** one `tag_<name>` per tag in the *current* `note_tags.json`
   vocabulary (0 when the session has none) — a convenience projection of the tidy
   file below; the column set follows the vocabulary and so is not fixed.
 
-## `session_registry_tags.csv` (v1)
+## `session_registry_tags.csv` (v2)
 
 The [tidy](glossary.md#tidy-long-format), churn-proof form of the tag tallies —
-stable across vocabulary edits. Leading `# schema_version=1` comment line, then:
+stable across vocabulary edits. Leading `# schema_version=2` comment line (the
+number tracks the registry's; the columns are unchanged since v1), then:
 
 `session_id, tag, count` — one row per `(session, tag)`, `count` summing that
 tag's presses in the session (a counter tag reads as its running total; ADR-0074).

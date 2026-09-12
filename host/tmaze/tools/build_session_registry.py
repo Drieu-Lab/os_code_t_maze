@@ -37,7 +37,11 @@ Run (conda env drieu_t_maze; from anywhere - paths resolve by landmark search):
 from __future__ import annotations
 
 import argparse
+import datetime as _dt
+import hashlib
 import os
+import subprocess
+from typing import List, Optional
 
 from tmaze.core.records import animals
 from tmaze.core.records import daily_log
@@ -73,6 +77,52 @@ def _atomic_write(path: str, text: str) -> None:
     os.replace(tmp, path)
 
 
+# ------------------------------------------------------------- provenance
+def _file_sha(path: Optional[str]) -> str:
+    """Short content hash of an input file, or ``absent`` when it isn't there
+    (so the header says which inputs shaped the build; ADR-0157)."""
+    if not path:
+        return "absent"
+    try:
+        with open(path, "rb") as fh:
+            return hashlib.sha256(fh.read()).hexdigest()[:12]
+    except OSError:
+        return "absent"
+
+
+def _code_commit() -> str:
+    """The code repo's short commit sha (``+dirty`` when the tree has
+    uncommitted changes), or ``unknown`` when git isn't available."""
+    try:
+        head = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
+                              cwd=_HERE, capture_output=True, text=True,
+                              timeout=10)
+        if head.returncode != 0:
+            return "unknown"
+        sha = head.stdout.strip() or "unknown"
+        dirty = subprocess.run(["git", "status", "--porcelain",
+                                "--untracked-files=no"], cwd=_HERE,
+                               capture_output=True, text=True, timeout=10)
+        if dirty.returncode == 0 and dirty.stdout.strip():
+            sha += "+dirty"
+        return sha
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+
+
+def build_meta(roots: List[str]) -> session_registry.BuildMeta:
+    """Gather what this build is made from, for the CSV's header lines."""
+    return session_registry.BuildMeta(
+        built_at=_dt.datetime.now().isoformat(timespec="seconds"),
+        code_commit=_code_commit(),
+        roots=[os.path.abspath(r) for r in roots],
+        inputs={
+            "daily_log": _file_sha(daily_log.default_daily_log_path()),
+            "note_tags": _file_sha(NOTE_TAGS_PATH),
+            "session_ignore": _file_sha(session_ignore.default_ignore_path()),
+        })
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--root", action="append", default=None, dest="roots",
@@ -103,7 +153,7 @@ def main(argv=None) -> int:
     reg_path = os.path.join(out_dir, REGISTRY_FILENAME)
     tags_path = os.path.join(out_dir, TAGS_FILENAME)
     _atomic_write(reg_path, session_registry.render_registry_csv(
-        rows, tag_names=vocab.names()))
+        rows, tag_names=vocab.names(), meta=build_meta(roots)))
     _atomic_write(tags_path, session_registry.render_tags_csv(tag_rows))
 
     roots_note = (f"{len(roots)} roots" if len(roots) != 1 else roots[0])

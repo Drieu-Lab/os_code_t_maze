@@ -233,6 +233,111 @@ class TestTagOutputs(unittest.TestCase):
             self.assertTrue(header.startswith("session_id,animal,date,"))
 
 
+class TestSchemaV2Provenance(unittest.TestCase):
+    """Schema v2 (ADR-0157): a self-describing header, root-relative bundle
+    paths + a root column, and the shrink check."""
+
+    def test_bundle_is_root_relative_with_root_column(self):
+        with tempfile.TemporaryDirectory() as root:
+            _make_bundle(root, "600_20260806_120000", summary=_summary())
+            rows, _ = session_registry.build(root)
+            r = rows[0]
+            self.assertEqual(r["bundle"], "600_20260806_120000")
+            self.assertEqual(r["root"], os.path.abspath(root))
+            # And the helper re-joins them to the folder that exists on disk.
+            self.assertTrue(os.path.isdir(session_registry.bundle_path(r)))
+            self.assertEqual(
+                session_registry.bundle_path(r),
+                os.path.normpath(os.path.join(root, "600_20260806_120000")))
+
+    def test_root_column_records_which_root_won(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            primary = os.path.join(tmp, "rig")
+            archive = os.path.join(tmp, "archive")
+            os.makedirs(primary)
+            os.makedirs(archive)
+            _make_bundle(primary, "600_20260201_120000")
+            _make_bundle(archive, "600_20260101_120000")
+            _make_bundle(archive, "600_20260201_120000")   # duplicate id
+            rows, _ = session_registry.build([primary, archive])
+            by_id = {r["session_id"]: r for r in rows}
+            self.assertEqual(by_id["600_20260201_120000"]["root"],
+                             os.path.abspath(primary))   # first root wins
+            self.assertEqual(by_id["600_20260101_120000"]["root"],
+                             os.path.abspath(archive))
+
+    def test_bundle_path_understands_v1_absolute_rows(self):
+        # A v1 registry stored the absolute path in `bundle` and had no root.
+        v1 = {"bundle": r"C:\rec\600_20260807_164732"}
+        self.assertEqual(session_registry.bundle_path(v1),
+                         r"C:\rec\600_20260807_164732")
+        # An absolute bundle beats a stray root; blanks give "".
+        self.assertEqual(session_registry.bundle_path(
+            {"bundle": r"C:\rec\x", "root": r"D:\other"}), r"C:\rec\x")
+        self.assertEqual(session_registry.bundle_path({}), "")
+        self.assertEqual(session_registry.bundle_path({"root": "C:\\r"}), "")
+
+    def test_meta_header_round_trips(self):
+        with tempfile.TemporaryDirectory() as root:
+            _make_bundle(root, "600_20260806_120000", summary=_summary())
+            rows, _ = session_registry.build(root)
+            meta = session_registry.BuildMeta(
+                built_at="2026-09-11T10:00:00", code_commit="abc1234",
+                roots=[root, r"Z:\Ravi\phase3_recordings"],
+                inputs={"daily_log": "deadbeef", "note_tags": "absent",
+                        "session_ignore": "cafe"})
+            text = session_registry.render_registry_csv(rows, tag_names=[],
+                                                        meta=meta)
+            lines = text.splitlines()
+            self.assertEqual(lines[0],
+                             f"# schema_version={session_registry.SCHEMA_VERSION}")
+            self.assertEqual(lines[1], "# built_at=2026-09-11T10:00:00")
+            self.assertEqual(lines[2], "# code_commit=abc1234")
+            self.assertTrue(lines[3].startswith("# roots=["))
+            self.assertEqual(lines[4], "# daily_log_sha=deadbeef")
+            self.assertEqual(lines[5], "# note_tags_sha=absent")
+            self.assertEqual(lines[6], "# session_ignore_sha=cafe")
+            self.assertTrue(lines[7].startswith("session_id,"))
+            # Parses back (roots as a real list, Windows backslashes intact).
+            version, back = session_registry.registry_meta(text)
+            self.assertEqual(version, session_registry.SCHEMA_VERSION)
+            self.assertEqual(back, meta)
+            # The data rows still read normally past the extra comment lines.
+            self.assertEqual(session_registry.registry_ids(text),
+                             ["600_20260806_120000"])
+
+    def test_meta_defaults_and_tolerant_parse(self):
+        meta = session_registry.BuildMeta()
+        lines = meta.comment_lines()
+        self.assertEqual(lines, ["# built_at=", "# code_commit=unknown",
+                                 "# roots=[]"])
+        # Unknown keys, malformed roots and a v1 file (no meta) are harmless.
+        back = session_registry.BuildMeta.from_comments(
+            ["# schema_version=1", "# roots=not json", "# who=cares",
+             "# daily_log_sha=1234"])
+        self.assertEqual(back.roots, [])
+        self.assertEqual(back.code_commit, "unknown")
+        self.assertEqual(back.inputs, {"daily_log": "1234"})
+        self.assertEqual(session_registry.registry_meta("")[0], None)
+        self.assertEqual(session_registry.registry_ids(""), [])
+
+    def test_shrink_check(self):
+        rep = session_registry.shrink_check(
+            ["a", "b", "c"], ["b", "c", "d"])
+        self.assertEqual(rep.vanished, ["a"])
+        self.assertEqual(rep.added, ["d"])
+        self.assertFalse(rep.ok)
+        # Growth / identical sets are fine; blanks are ignored.
+        self.assertTrue(session_registry.shrink_check(
+            ["a", ""], ["a", "b", " "]).ok)
+        self.assertTrue(session_registry.shrink_check([], ["a"]).ok)
+        self.assertTrue(session_registry.shrink_check(["a"], ["a"]).ok)
+        # An empty new scan against a populated previous build: everything
+        # vanished (the "drive not mounted" case).
+        rep = session_registry.shrink_check(["a", "b"], [])
+        self.assertEqual(rep.vanished, ["a", "b"])
+
+
 class TestIgnoreList(unittest.TestCase):
     """Non-real sessions in the ignore-list are skipped without a trace (ADR-0097)."""
 

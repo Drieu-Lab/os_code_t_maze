@@ -75,7 +75,7 @@ from tmaze.core.records import (
     session_annotations,
     session_ignore,
 )
-from tmaze.core.session import session_detail
+from tmaze.core.session import session_detail, session_registry
 from tmaze.paths import (
     archives_env_override,
     host_dir,
@@ -1328,8 +1328,10 @@ class RecordsManager:
         self._current_session_row = row
         self._render_metrics(row)
         self._update_bundle_button(row)
+        # v2 registries store `bundle` relative to its `root` (ADR-0157); the
+        # helper re-joins them and still accepts a v1 absolute path.
         text = session_detail.summary_text(
-            str(row.get("bundle", "")).strip() or None)
+            session_registry.bundle_path(row) or None)
         if not text:
             text = ("No rendered summary for this session.\n\n"
                     "Older bundles (recorded before the summary/ folder was "
@@ -1350,14 +1352,14 @@ class RecordsManager:
     def _update_bundle_button(self, row: Optional[Dict[str, str]]) -> None:
         """Enable 'Open bundle folder' only when the row points at a folder that
         exists on disk (annotation-only / stale rows have no openable bundle)."""
-        path = str((row or {}).get("bundle", "") or "").strip()
+        path = session_registry.bundle_path(row or {})
         ok = bool(path) and os.path.isdir(path)
         self._open_bundle_btn.configure(state=("normal" if ok else "disabled"))
 
     def _open_bundle_folder(self) -> None:
         """Open the selected session's bundle folder in the OS file browser."""
         row = self._current_session_row or {}
-        path = str(row.get("bundle", "") or "").strip()
+        path = session_registry.bundle_path(row)
         if not path or not os.path.isdir(path):
             messagebox.showinfo(
                 "Open bundle folder",

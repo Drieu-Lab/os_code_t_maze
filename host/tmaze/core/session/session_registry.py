@@ -48,6 +48,21 @@ excursion/compliance columns from its ``locomotion`` block (``behavior_stats``,
 ADR-0032, mapped per ADR-0080). This module only selects, joins, labels, and
 serialises what the bundles already hold.
 
+Schema v2 (docs/decisions/0157) makes a build SELF-DESCRIBING and REFUSABLE:
+
+- **Provenance header.** Besides ``# schema_version``, the CSV opens with
+  ``# built_at=``, ``# code_commit=``, ``# roots=`` (JSON list) and one
+  ``# <input>_sha=`` line per joined input (daily log, tag vocabulary, ignore
+  list), so anyone holding the file can tell which folders were scanned and
+  which inputs shaped it (:class:`BuildMeta`).
+- **Root-relative ``bundle`` + a ``root`` column.** A history split across
+  drives (docs/decisions/0113) is recorded as (which root, which folder under
+  it) rather than one absolute path; :func:`bundle_path` re-joins them (and
+  still understands a v1 absolute ``bundle``).
+- **Shrink check.** :func:`shrink_check` compares the previous build's session
+  ids with the new ones so a build that would LOSE sessions (a drive not
+  mounted, a mistyped root) can be refused instead of silently accepted.
+
 Pure stdlib (``json`` / ``csv`` / ``glob`` / ``os``), no Tk/serial; the file
 reads are all best-effort. See docs/records-schema.md for the column reference.
 
@@ -61,14 +76,18 @@ import glob
 import io
 import json
 import os
-from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
+from dataclasses import dataclass, field
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
+from tmaze.core.records import parse_commented_csv
 from tmaze.core.session import session_notes
 
 # Bump when the registry CSV column set / semantics change so an offline reader
 # can branch on it (written as a leading `# schema_version=N` comment line, the
 # same convention as daily_log.csv; docs/decisions/0076/0081).
-SCHEMA_VERSION = 1
+# v2 (docs/decisions/0157): provenance header lines; `bundle` is root-relative
+# and a `root` column is appended.
+SCHEMA_VERSION = 2
 
 # The fixed (non-tag) columns of session_registry.csv, in output order. The
 # per-tag wide columns (tag_<name>) are appended from the current vocabulary at
@@ -90,11 +109,109 @@ REGISTRY_COLUMNS: Tuple[str, ...] = (
     "total_excursions", "stem_choices", "nonstem_choices", "stem_compliance",
     # sticky session metadata (ADR-0079)
     "trainer", "stage", "stage_source", "reward_type",
-    # provenance
-    "bundle",
+    # provenance: the bundle folder RELATIVE to its recordings root (v2; was an
+    # absolute path in v1) + the root it was found under
+    "bundle", "root",
 )
 
 TAGS_COLUMNS: Tuple[str, ...] = ("session_id", "tag", "count")
+
+
+# --------------------------------------------------------------- build meta
+@dataclass
+class BuildMeta:
+    """What a registry build was made FROM, written as ``# key=value`` header
+    lines (after ``# schema_version``) so the CSV describes itself
+    (docs/decisions/0157).
+
+    ``built_at`` is local ISO time; ``code_commit`` the code repo's short sha
+    (or ``unknown``); ``roots`` the folders scanned, in scan order; ``inputs``
+    maps an input name (``daily_log`` / ``note_tags`` / ``session_ignore``) to a
+    short content hash, or ``absent`` when that file was not found. The shell
+    gathers these; this class only formats/parses them.
+    """
+    built_at: str = ""
+    code_commit: str = "unknown"
+    roots: List[str] = field(default_factory=list)
+    inputs: Dict[str, str] = field(default_factory=dict)
+
+    def comment_lines(self) -> List[str]:
+        lines = [f"# built_at={self.built_at}",
+                 f"# code_commit={self.code_commit or 'unknown'}",
+                 "# roots=" + json.dumps(list(self.roots))]
+        for name in sorted(self.inputs):
+            lines.append(f"# {name}_sha={self.inputs[name] or 'absent'}")
+        return lines
+
+    @classmethod
+    def from_comments(cls, comments: Iterable[str]) -> "BuildMeta":
+        """Parse the ``# key=value`` lines back (unknown keys ignored; a missing
+        or malformed ``roots`` reads as [])."""
+        meta = cls()
+        for raw in comments:
+            body = raw.lstrip("#").strip()
+            if "=" not in body:
+                continue
+            key, val = body.split("=", 1)
+            key, val = key.strip(), val.strip()
+            if key == "built_at":
+                meta.built_at = val
+            elif key == "code_commit":
+                meta.code_commit = val or "unknown"
+            elif key == "roots":
+                try:
+                    parsed = json.loads(val)
+                except ValueError:
+                    parsed = []
+                meta.roots = [str(r) for r in parsed] if isinstance(
+                    parsed, list) else []
+            elif key.endswith("_sha"):
+                meta.inputs[key[:-4]] = val
+        return meta
+
+
+# --------------------------------------------------------------- shrink check
+@dataclass
+class ShrinkReport:
+    """Result of :func:`shrink_check`: which session ids the new build would
+    DROP relative to the previous one (``vanished``) and which it adds."""
+    vanished: List[str] = field(default_factory=list)
+    added: List[str] = field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        """True when nothing vanishes (growth or no change is always fine)."""
+        return not self.vanished
+
+
+def shrink_check(previous_ids: Iterable[str],
+                 new_ids: Iterable[str]) -> ShrinkReport:
+    """Compare two builds' session-id sets. A registry is a FULL rebuild, so a
+    session missing from the new scan means its folder is gone or unreachable
+    (an unmounted archive drive, a mistyped root) - almost never intended. The
+    caller decides whether to refuse (docs/decisions/0157)."""
+    prev = {s.strip() for s in previous_ids if s and s.strip()}
+    new = {s.strip() for s in new_ids if s and s.strip()}
+    return ShrinkReport(vanished=sorted(prev - new), added=sorted(new - prev))
+
+
+def registry_ids(text: str) -> List[str]:
+    """The ``session_id`` column of a rendered registry CSV (any schema
+    version), in file order; [] for empty/malformed text."""
+    try:
+        parsed = parse_commented_csv(text)
+    except ValueError:
+        return []
+    return [r.get("session_id", "") for r in parsed.rows if r.get("session_id")]
+
+
+def registry_meta(text: str) -> Tuple[Optional[int], BuildMeta]:
+    """(schema_version, BuildMeta) from a registry CSV's header comments."""
+    try:
+        parsed = parse_commented_csv(text)
+    except ValueError:
+        return None, BuildMeta()
+    return parsed.schema_version, BuildMeta.from_comments(parsed.comments)
 
 
 # --------------------------------------------------------------- file reads
@@ -150,9 +267,10 @@ def scan(root: str) -> List[str]:
             if is_bundle(os.path.join(root, e))]
 
 
-def scan_roots(roots: Iterable[str]) -> List[str]:
-    """Every session bundle across several recordings roots, de-duplicated by
-    session_id (the bundle folder name) with the FIRST listed root winning.
+def scan_roots_with_root(roots: Iterable[str]) -> List[Tuple[str, str]]:
+    """Every session bundle across several recordings roots as ``(root,
+    bundle_dir)`` pairs, de-duplicated by session_id (the bundle folder name)
+    with the FIRST listed root winning.
 
     A recordings history split across drives (the rig's disk plus one or more
     archive locations; docs/decisions/0113) is scanned as one. A session that
@@ -160,7 +278,7 @@ def scan_roots(roots: Iterable[str]) -> List[str]:
     counted once, keeping the copy in the earliest-listed root so an incomplete
     destination copy can't shadow the source. Order within a root is preserved
     (sorted by session_id); across roots, the first root's bundles come first."""
-    out: List[str] = []
+    out: List[Tuple[str, str]] = []
     seen: set = set()
     for root in roots:
         for bundle in scan(root):
@@ -168,8 +286,26 @@ def scan_roots(roots: Iterable[str]) -> List[str]:
             if sid in seen:
                 continue
             seen.add(sid)
-            out.append(bundle)
+            out.append((root, bundle))
     return out
+
+
+def scan_roots(roots: Iterable[str]) -> List[str]:
+    """:func:`scan_roots_with_root` without the root: just the bundle paths."""
+    return [b for _root, b in scan_roots_with_root(roots)]
+
+
+def bundle_path(row: Dict[str, Any]) -> str:
+    """The bundle folder's full path from a registry row: ``root`` joined with
+    the root-relative ``bundle`` (v2), or ``bundle`` as-is when it is already
+    absolute / no ``root`` is present (v1 files). "" when the row has none."""
+    bundle = str(row.get("bundle") or "").strip()
+    root = str(row.get("root") or "").strip()
+    if not bundle:
+        return ""
+    if root and not os.path.isabs(bundle):
+        return os.path.normpath(os.path.join(root, bundle))
+    return bundle
 
 
 # --------------------------------------------------------------- one bundle
@@ -195,14 +331,17 @@ def _ml_from_ul(ul: Any) -> Optional[float]:
         return None
 
 
-def bundle_row(bundle_dir: str,
-               daily: Optional[Any] = None) -> Tuple[Dict[str, Any], Dict[str, int]]:
+def bundle_row(bundle_dir: str, daily: Optional[Any] = None,
+               root: Optional[str] = None) -> Tuple[Dict[str, Any], Dict[str, int]]:
     """Fold one bundle into (base-column dict, per-tag count dict).
 
     ``daily`` is an optional ``daily_log.DailyLog`` used only as the fallback join
     for older bundles without ``animal_state.json`` (and always for the
-    post-session ``supp_water``). Every read is best-effort; missing inputs leave
-    the corresponding columns blank."""
+    post-session ``supp_water``). ``root`` is the recordings root the bundle was
+    found under: when given, ``bundle`` is written RELATIVE to it and ``root``
+    holds its absolute path (v2); without it ``bundle`` is the absolute path and
+    ``root`` blank. Every read is best-effort; missing inputs leave the
+    corresponding columns blank."""
     session_id = _session_id_of(bundle_dir)
     summary = _read_json(_find_one(bundle_dir, "summary",
                                    "session_summary_*.json")) or {}
@@ -226,7 +365,12 @@ def bundle_row(bundle_dir: str,
     row["session_id"] = session_id
     row["animal"] = animal
     row["date"] = date
-    row["bundle"] = os.path.abspath(bundle_dir)
+    if root:
+        row["root"] = os.path.abspath(root)
+        row["bundle"] = os.path.relpath(os.path.abspath(bundle_dir), row["root"])
+    else:
+        row["root"] = None
+        row["bundle"] = os.path.abspath(bundle_dir)
 
     t0 = summary.get("t0") or {}
     row["start_iso"] = t0.get("iso")
@@ -343,10 +487,10 @@ def build(root: Union[str, Iterable[str]], daily: Optional[Any] = None,
     skip = set(ignore or ())
     rows: List[Dict[str, Any]] = []
     tag_rows: List[Tuple[str, str, int]] = []
-    for bundle in scan_roots(roots):
+    for found_root, bundle in scan_roots_with_root(roots):
         if _session_id_of(bundle) in skip:
             continue
-        row, counts = bundle_row(bundle, daily=daily)
+        row, counts = bundle_row(bundle, daily=daily, root=found_root)
         row["_tags"] = counts
         rows.append(row)
         for tag in sorted(counts):
@@ -361,14 +505,19 @@ def _fmt(v: Any) -> Any:
 
 
 def render_registry_csv(rows: List[Dict[str, Any]],
-                        tag_names: Optional[List[str]] = None) -> str:
+                        tag_names: Optional[Sequence[str]] = None,
+                        meta: Optional[BuildMeta] = None) -> str:
     """Render ``session_registry.csv`` text: a ``# schema_version`` comment line,
-    the fixed columns + one ``tag_<name>`` column per current-vocabulary tag
-    (0 when the session has none), then one row per session."""
+    the provenance ``# key=value`` lines from ``meta`` (when given), the fixed
+    columns + one ``tag_<name>`` column per current-vocabulary tag (0 when the
+    session has none), then one row per session."""
     names = list(tag_names or [])
     tag_cols = [f"tag_{n}" for n in names]
     buf = io.StringIO()
     buf.write(f"# schema_version={SCHEMA_VERSION}\n")
+    if meta is not None:
+        for line in meta.comment_lines():
+            buf.write(line + "\n")
     writer = csv.writer(buf, lineterminator="\n")
     writer.writerow(list(REGISTRY_COLUMNS) + tag_cols)
     for row in rows:

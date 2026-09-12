@@ -17,6 +17,8 @@ import os
 import tempfile
 import unittest
 
+from tmaze.core.records import parse_commented_csv
+from tmaze.core.session import session_registry
 from tmaze.tools import build_session_registry as bsr
 
 
@@ -85,6 +87,33 @@ class TestScanAndOutputDecoupled(unittest.TestCase):
             self.assertIn("600_20260101_120000", joined)
             self.assertIn("600_20260201_120000", joined)
             self.assertIn("2 sessions", buf.getvalue())
+
+    def test_writes_provenance_header_and_root_relative_bundles(self):
+        # Schema v2 (ADR-0157): the CSV opens with `# key=value` lines saying
+        # when/from what it was built, and each row records (root, bundle).
+        with tempfile.TemporaryDirectory() as tmp:
+            scan = os.path.join(tmp, "rig_recordings")
+            out = os.path.join(tmp, "out")
+            os.makedirs(scan, exist_ok=True)
+            _make_bundle(scan, "600_20260101_120000")
+            with contextlib.redirect_stdout(io.StringIO()):
+                rc = bsr.main(["--root", scan, "--out-dir", out])
+            self.assertEqual(rc, 0)
+            with open(os.path.join(out, bsr.REGISTRY_FILENAME), "r",
+                      encoding="utf-8") as fh:
+                text = fh.read()
+            version, meta = session_registry.registry_meta(text)
+            self.assertEqual(version, session_registry.SCHEMA_VERSION)
+            self.assertTrue(meta.built_at.startswith("20"))
+            self.assertTrue(meta.code_commit)              # sha or "unknown"
+            self.assertEqual(meta.roots, [os.path.abspath(scan)])
+            self.assertEqual(set(meta.inputs),
+                             {"daily_log", "note_tags", "session_ignore"})
+            rows = parse_commented_csv(text).rows
+            self.assertEqual(rows[0]["bundle"], "600_20260101_120000")
+            self.assertEqual(rows[0]["root"], os.path.abspath(scan))
+            self.assertTrue(os.path.isdir(
+                session_registry.bundle_path(rows[0])))
 
     def test_empty_root_writes_header_only(self):
         with tempfile.TemporaryDirectory() as tmp:
