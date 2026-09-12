@@ -1,0 +1,9 @@
+{
+  "_schema": {
+    "note": "People allowed to edit the coordinated records (ADR-0155). The Records Manager's Operator dropdown is fed from this list and every save is logged in records_changes.csv under the chosen name; the resources builders take the same value via --operator. Add a person by adding a string here and committing. Read by tmaze.core.records.operators."
+  },
+  "schema_version": 1,
+  "operators": [
+    "RJ"
+  ]
+}

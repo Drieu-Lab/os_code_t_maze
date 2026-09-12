@@ -32,6 +32,10 @@ ADR-0085):
   the CSVs (``build_daily_log.py --export``, ``build_session_training_log.py
   --import-annotations``), so the Excel files stay a working fallback for
   remote/no-GUI record-keeping.
+- **Operator + change log** (ADR-0155) - the toolbar's Operator dropdown (from
+  the tracked ``host/operators.json``) must be set before any save/import, and
+  every write appends who-changed-which-cell lines to the append-only
+  ``records/animal/records_changes.csv`` beside the records files.
 
 This module is the SHELL: all data logic is in the pure cores
 (``tmaze.core.records.daily_log / session_annotations / animals / dashboard``);
@@ -62,9 +66,11 @@ from tmaze.core.records import (
     dashboard,
     daily_log,
     file_mtime,
+    operators,
     read_commented_csv,
     records_audit,
     records_audit_ack,
+    records_changelog,
     session_annotations,
     session_ignore,
 )
@@ -184,6 +190,10 @@ class RecordsManager:
         self.daily_path = daily_log.default_daily_log_path()
         self.annot_path = session_annotations.default_annotations_path()
         self.animals_path = animals.animals_json_path()
+        # The append-only per-field change log every save writes to, and the
+        # operator list feeding the toolbar dropdown (ADR-0155).
+        self.changelog_path = records_changelog.default_changelog_path()
+        self.operators = operators.load_operators()
         self.records_dir = os.path.dirname(self.daily_path)
         # The generated daily workbook (hand-editable Entry fallback). Its mtime
         # vs the last sync we performed drives the Import-before-Generate warning
@@ -260,6 +270,23 @@ class RecordsManager:
                    command=self._on_reload).pack(side="left", padx=(6, 0))
         ttk.Button(bar, text="Integrity check",
                    command=self._integrity_check).pack(side="left", padx=(6, 0))
+        # Operator: WHO is editing. Required before any save/import; every
+        # change is logged under this name (ADR-0155). Fed by the tracked
+        # host/operators.json; the last choice is remembered per machine.
+        ttk.Label(bar, text="Operator:").pack(side="left", padx=(14, 2))
+        remembered = str(self._load_prefs().get("operator", "")).strip()
+        self.operator_var = tk.StringVar(
+            value=remembered if remembered in self.operators else "")
+        self.operator_box = ttk.Combobox(
+            bar, textvariable=self.operator_var, values=self.operators,
+            state="readonly", width=8)
+        self.operator_box.pack(side="left")
+        self.operator_box.bind(
+            "<<ComboboxSelected>>",
+            lambda _e: self._save_prefs(operator=self.operator_var.get()))
+        if not self.operators:
+            ttk.Label(bar, text="(none in host/operators.json)",
+                      foreground="#9C0006").pack(side="left", padx=(4, 0))
         self.status_var = tk.StringVar(value="Ready.")
         ttk.Label(bar, textvariable=self.status_var,
                   foreground="#555").pack(side="right")
@@ -570,6 +597,48 @@ class RecordsManager:
             f"You have unsaved changes: {what}\n\nContinue and discard them?",
             default="no")
 
+    # ---- operator + change log (ADR-0155) --------------------------------
+    def _require_operator(self) -> Optional[str]:
+        """The chosen operator, or None after telling the user why nothing was
+        saved. Every write path calls this first so no edit is ever logged
+        anonymously."""
+        op = self.operator_var.get().strip()
+        if op and op in self.operators:
+            return op
+        if not self.operators:
+            messagebox.showwarning(
+                "No operators configured",
+                "host/operators.json lists nobody, so edits can't be "
+                "attributed. Add your initials to its \"operators\" list "
+                "(and commit it), then restart the Records Manager.")
+        else:
+            messagebox.showwarning(
+                "Choose an operator",
+                "Pick your name in the Operator box (toolbar) before saving, "
+                "so the change log records who made this edit.")
+        return None
+
+    def _log_changes(self, changes: List[records_changelog.Change],
+                     operator: str, source: str, file_name: str) -> int:
+        """Append ``changes`` to records_changes.csv; a failure here must not
+        undo the save that already happened, so it is reported, not raised."""
+        try:
+            return records_changelog.append(changes, operator, source,
+                                            file_name, path=self.changelog_path)
+        except OSError as e:
+            messagebox.showwarning(
+                "Change log not written",
+                f"The edit was saved, but could not be logged to "
+                f"{self.changelog_path}:\n{e}")
+            return 0
+
+    @staticmethod
+    def _roster_as_rows(records: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+        """Flatten roster records to string rows for the change-log diff."""
+        return [{"id": str(r.get("id", "")),
+                 "aliases": "; ".join(str(a) for a in (r.get("aliases") or []))}
+                for r in records]
+
     # ---- guarded writes (ADR-0155) ---------------------------------------
     def _guarded_write(self, which: str, path: str, write_fn) -> bool:
         """Run ``write_fn(expect_mtime)`` - a read-merge-write against ``path`` -
@@ -607,6 +676,9 @@ class RecordsManager:
             return False
 
     def _save_daily(self) -> None:
+        operator = self._require_operator()
+        if operator is None:
+            return
         edit = {f: self.d_vars[f].get().strip() for f in daily_log.FIELDS}
         # Hard validation (blocks the save): required key + ISO date + numeric
         # weight/baseline/water mL. Shared with the Excel --export path so both
@@ -635,6 +707,8 @@ class RecordsManager:
         edit["water_regime"] = daily_log.normalize_regime(edit["water_regime"])
         edit["water_method"] = daily_log.normalize_method(edit["water_method"])
 
+        changes: List[records_changelog.Change] = []
+
         def _write(expect_mtime) -> None:
             # Read-for-write so a present-but-unreadable/mis-headed CSV aborts
             # the save rather than being overwritten with just this row (#12).
@@ -642,10 +716,15 @@ class RecordsManager:
             merged = daily_log.upsert_rows(existing, [edit])
             daily_log.write_rows(merged, self.daily_path,
                                  expect_mtime=expect_mtime)
+            changes[:] = records_changelog.diff_rows(
+                existing, merged, daily_log.KEY_FIELDS, daily_log.FIELDS)
 
         if not self._guarded_write("daily", self.daily_path, _write):
             return
-        self._set_status(f"Saved {aid} {date} to daily_log.csv.")
+        n = self._log_changes(changes, operator, "records_manager",
+                              "daily_log.csv")
+        self._set_status(f"Saved {aid} {date} to daily_log.csv "
+                         f"({n} change{'s' if n != 1 else ''} logged).")
         self._daily_dirty = False
         self._load_data()
         self._refresh_daily_table()
@@ -765,6 +844,9 @@ class RecordsManager:
         self._apply_span(result)
 
     def _apply_span(self, spec: Dict[str, str]) -> None:
+        operator = self._require_operator()
+        if operator is None:
+            return
         aid = spec["animal"]
         start, end = spec["start"], spec["end"]
         if not aid:
@@ -819,9 +901,14 @@ class RecordsManager:
             merged = daily_log.upsert_rows(existing, edits)
             daily_log.write_rows(merged, self.daily_path,
                                  expect_mtime=expect_mtime)
+            changes[:] = records_changelog.diff_rows(
+                existing, merged, daily_log.KEY_FIELDS, daily_log.FIELDS)
 
+        changes: List[records_changelog.Change] = []
         if not self._guarded_write("daily", self.daily_path, _write):
             return
+        self._log_changes(changes, operator, "records_manager span",
+                          "daily_log.csv")
         what = []
         if set_regime:
             what.append(f"regime={regime_val or 'restriction'}")
@@ -1484,6 +1571,9 @@ class RecordsManager:
         if not sid:
             messagebox.showwarning("No session", "Pick a session first.")
             return
+        operator = self._require_operator()
+        if operator is None:
+            return
         reg = {r.get("session_id", "").strip(): r for r in self.registry_rows}
         meta = reg.get(sid, {})
         # Denormalised animal/date: prefer the registry, but for an orphan
@@ -1500,6 +1590,8 @@ class RecordsManager:
             "procedures": self.a_proc.get("1.0", "end").strip(),
             "notes": self.a_notes.get("1.0", "end").strip(),
         }
+        changes: List[records_changelog.Change] = []
+
         def _write(expect_mtime) -> None:
             # Read-for-write so a present-but-unreadable/mis-headed CSV aborts
             # the save rather than being overwritten with just this row (#12).
@@ -1507,10 +1599,16 @@ class RecordsManager:
             merged = session_annotations.upsert_rows(existing, [edit])
             session_annotations.write_rows(merged, self.annot_path,
                                            expect_mtime=expect_mtime)
+            changes[:] = records_changelog.diff_rows(
+                existing, merged, (session_annotations.KEY_FIELD,),
+                session_annotations.FIELDS)
 
         if not self._guarded_write("annot", self.annot_path, _write):
             return
-        self._set_status(f"Saved annotation for {sid}.")
+        n = self._log_changes(changes, operator, "records_manager",
+                              "session_annotations.csv")
+        self._set_status(f"Saved annotation for {sid} "
+                         f"({n} change{'s' if n != 1 else ''} logged).")
         self._reset_annotation_modified()
         self._load_data()
         self._refresh_sessions()
@@ -1591,11 +1689,14 @@ class RecordsManager:
         self._set_status(f"{rid} staged for removal - Save roster to apply.")
 
     def _roster_save(self) -> None:
+        operator = self._require_operator()
+        if operator is None:
+            return
         try:
             # Refuse to overwrite a present-but-unreadable animals.json (a save
             # on top of a corrupt file would wipe the roster; #12). Absent is
             # fine - write_records will create it.
-            animals.load_records_for_write(self.animals_path)
+            before = animals.load_records_for_write(self.animals_path)
         except RecordsFileError as e:
             messagebox.showerror("Save refused", str(e))
             return
@@ -1618,7 +1719,12 @@ class RecordsManager:
             messagebox.showerror("Save failed", str(e))
             return
         self.roster = cleaned
-        self._set_status("Saved roster to animals.json.")
+        n = self._log_changes(
+            records_changelog.diff_rows(self._roster_as_rows(before),
+                                        self._roster_as_rows(cleaned), ("id",)),
+            operator, "records_manager", "animals.json")
+        self._set_status(f"Saved roster to animals.json "
+                         f"({n} change{'s' if n != 1 else ''} logged).")
         self._load_data()
         self._refresh_roster()
         self.d_animal["values"] = self.animal_ids
@@ -2175,7 +2281,22 @@ class RecordsManager:
         if self._has_unsaved() and not self._confirm_discard(
                 "Import refreshes every view from disk"):
             return
-        self._run_async("Importing from Excel...", self._do_import)
+        operator = self._require_operator()
+        if operator is None:
+            return
+        # Snapshot the CSVs BEFORE the builders run so the import's effect can
+        # be logged per field under this operator (ADR-0155). Done here on the
+        # UI thread; the worker reads the after-state once the builders finish.
+        try:
+            before_daily = daily_log.load_rows_for_write(self.daily_path)
+            before_annot = session_annotations.load_rows_for_write(
+                self.annot_path)
+        except RecordsFileError as e:
+            messagebox.showerror("Import refused", str(e))
+            return
+        self._run_async("Importing from Excel...",
+                        lambda: self._do_import(operator, before_daily,
+                                                before_annot))
 
     def _on_close(self) -> None:
         """Window-close guard: warn on a running build or unsaved edits (#3)."""
@@ -2197,10 +2318,32 @@ class RecordsManager:
                self._run_script("build_session_training_log.py", [])]
         return "\n".join(log)
 
-    def _do_import(self) -> str:
+    def _do_import(self, operator: str,
+                   before_daily: List[Dict[str, str]],
+                   before_annot: List[Dict[str, str]]) -> str:
+        """Worker: run the two importing builders, then log what they changed
+        (before/after diff of each CSV) to the change log under ``operator``.
+        Runs off the UI thread - file IO only, no Tk calls."""
         log = [self._run_script("build_daily_log.py", ["--export"]),
                self._run_script("build_session_training_log.py",
                                 ["--import-annotations"])]
+        try:
+            n_daily = records_changelog.record(
+                before_daily, daily_log.load_rows(self.daily_path),
+                daily_log.KEY_FIELDS, operator,
+                "records_manager import (build_daily_log --export)",
+                "daily_log.csv", fields=daily_log.FIELDS,
+                path=self.changelog_path)
+            n_annot = records_changelog.record(
+                before_annot, session_annotations.load_rows(self.annot_path),
+                (session_annotations.KEY_FIELD,), operator,
+                "records_manager import (build_session_training_log "
+                "--import-annotations)", "session_annotations.csv",
+                fields=session_annotations.FIELDS, path=self.changelog_path)
+            log.append(f"[change log] {n_daily + n_annot} change(s) logged "
+                       f"for {operator}")
+        except OSError as e:
+            log.append(f"[change log] FAILED to write {self.changelog_path}: {e}")
         return "\n".join(log)
 
     def _build_registry_inprocess(self) -> str:
