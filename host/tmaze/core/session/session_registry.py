@@ -195,6 +195,18 @@ def shrink_check(previous_ids: Iterable[str],
     return ShrinkReport(vanished=sorted(prev - new), added=sorted(new - prev))
 
 
+def unindexed_sessions(scanned_ids: Iterable[str], registry_ids: Iterable[str],
+                       ignore: Optional[Iterable[str]] = None) -> List[str]:
+    """Session ids present on disk (``scanned_ids``) but absent from the
+    registry (``registry_ids``), excluding the ignore-list - i.e. the bundles
+    a rebuild would ADD. Feeds the Records Manager's "N bundles not yet
+    indexed" staleness hint (docs/decisions/0158)."""
+    have = {s.strip() for s in registry_ids if s and s.strip()}
+    skip = {s.strip() for s in (ignore or ()) if s and s.strip()}
+    return sorted({s.strip() for s in scanned_ids if s and s.strip()}
+                  - have - skip)
+
+
 def registry_ids(text: str) -> List[str]:
     """The ``session_id`` column of a rendered registry CSV (any schema
     version), in file order; [] for empty/malformed text."""

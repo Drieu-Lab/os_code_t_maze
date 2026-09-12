@@ -337,6 +337,16 @@ class TestSchemaV2Provenance(unittest.TestCase):
         rep = session_registry.shrink_check(["a", "b"], [])
         self.assertEqual(rep.vanished, ["a", "b"])
 
+    def test_unindexed_sessions(self):
+        # On disk: a, b, c, junk. Indexed: a. Ignored: junk -> b, c to add.
+        self.assertEqual(
+            session_registry.unindexed_sessions(
+                ["a", "b", "c", "junk"], ["a"], ignore={"junk"}),
+            ["b", "c"])
+        self.assertEqual(session_registry.unindexed_sessions(
+            ["a"], ["a", "gone"]), [])          # a vanished id is NOT "unindexed"
+        self.assertEqual(session_registry.unindexed_sessions([], []), [])
+
 
 class TestIgnoreList(unittest.TestCase):
     """Non-real sessions in the ignore-list are skipped without a trace (ADR-0097)."""

@@ -14,6 +14,7 @@ from __future__ import annotations
 import contextlib
 import io
 import os
+import shutil
 import tempfile
 import unittest
 
@@ -114,6 +115,87 @@ class TestScanAndOutputDecoupled(unittest.TestCase):
             self.assertEqual(rows[0]["root"], os.path.abspath(scan))
             self.assertTrue(os.path.isdir(
                 session_registry.bundle_path(rows[0])))
+
+    def test_refuses_to_shrink_unless_allowed(self):
+        # ADR-0158: a rebuild that finds FEWER sessions than the current file
+        # holds (archive unmounted, mistyped root) writes nothing and exits 2;
+        # --allow-shrink accepts it.
+        with tempfile.TemporaryDirectory() as tmp:
+            scan = os.path.join(tmp, "rig_recordings")
+            out = os.path.join(tmp, "out")
+            os.makedirs(scan, exist_ok=True)
+            _make_bundle(scan, "600_20260101_120000")
+            _make_bundle(scan, "601_20260101_130000")
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(bsr.main(["--root", scan, "--out-dir", out]), 0)
+            reg = os.path.join(out, bsr.REGISTRY_FILENAME)
+            with open(reg, "r", encoding="utf-8") as fh:
+                before = fh.read()
+
+            # "Lose" one session (simulates an unreachable root).
+            shutil.rmtree(os.path.join(scan, "601_20260101_130000"))
+
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = bsr.main(["--root", scan, "--out-dir", out])
+            self.assertEqual(rc, 2)
+            self.assertIn("REFUSED", buf.getvalue())
+            self.assertIn("601_20260101_130000", buf.getvalue())
+            self.assertIn("--allow-shrink", buf.getvalue())
+            with open(reg, "r", encoding="utf-8") as fh:
+                self.assertEqual(fh.read(), before)      # untouched
+
+            # Structured form for the GUI: same decision, as data.
+            outcome = bsr.run_build([scan], out)
+            self.assertFalse(outcome.ok)
+            self.assertTrue(outcome.refused_shrink)
+            self.assertEqual(outcome.vanished, ["601_20260101_130000"])
+            self.assertEqual(outcome.previous_sessions, 2)
+            self.assertEqual(outcome.sessions, 1)
+            self.assertIn("REFUSED", outcome.summary())
+
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = bsr.main(["--root", scan, "--out-dir", out,
+                               "--allow-shrink"])
+            self.assertEqual(rc, 0)
+            self.assertIn("dropped 1 previously indexed", buf.getvalue())
+            with open(reg, "r", encoding="utf-8") as fh:
+                self.assertEqual(session_registry.registry_ids(fh.read()),
+                                 ["600_20260101_120000"])
+
+    def test_growth_and_first_build_never_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            scan = os.path.join(tmp, "rig_recordings")
+            out = os.path.join(tmp, "out")
+            os.makedirs(scan, exist_ok=True)
+            _make_bundle(scan, "600_20260101_120000")
+            first = bsr.run_build([scan], out)
+            self.assertTrue(first.ok)
+            self.assertIsNone(first.previous_sessions)   # no file to compare
+            self.assertIsNone(first.shrink)
+            _make_bundle(scan, "600_20260102_120000")
+            second = bsr.run_build([scan], out)
+            self.assertTrue(second.ok)
+            self.assertEqual(second.previous_sessions, 1)
+            self.assertEqual(second.sessions, 2)
+            self.assertIsNone(second.shrink)
+            self.assertEqual(second.vanished, [])
+
+    def test_run_build_reports_errors_as_data(self):
+        # An unwritable output location comes back as ok=False + error, not an
+        # exception in the caller (the GUI's worker thread).
+        with tempfile.TemporaryDirectory() as tmp:
+            scan = os.path.join(tmp, "rig_recordings")
+            os.makedirs(scan, exist_ok=True)
+            blocker = os.path.join(tmp, "not_a_dir")
+            with open(blocker, "w", encoding="utf-8") as fh:
+                fh.write("x")
+            outcome = bsr.run_build([scan], os.path.join(blocker, "out"))
+            self.assertFalse(outcome.ok)
+            self.assertFalse(outcome.refused_shrink)
+            self.assertTrue(outcome.error)
+            self.assertIn("FAILED", outcome.summary())
 
     def test_empty_root_writes_header_only(self):
         with tempfile.TemporaryDirectory() as tmp:

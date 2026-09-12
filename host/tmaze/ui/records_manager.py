@@ -58,6 +58,7 @@ import sys
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from tmaze.core.records import (
@@ -190,6 +191,42 @@ def _read_csv_skip_comments(path: str) -> List[Dict[str, str]]:
         return []
 
 
+@dataclass
+class _StepResult:
+    """One step of a Generate / Import chain, as data (not a text line to
+    sniff; docs/decisions/0158)."""
+    name: str
+    ok: bool
+    detail: str = ""
+
+    def line(self) -> str:
+        tag = "OK" if self.ok else "FAILED"
+        return f"[{self.name} {tag}] {self.detail}".rstrip()
+
+
+@dataclass
+class _ChainOutcome:
+    """The result of a Generate / Import chain: its steps in order, whether it
+    stopped early (a failed step halts the chain so later builders never run
+    on a half-written input), and - for Generate - the registry's shrink
+    report when the build REFUSED because sessions would vanish."""
+    steps: List[_StepResult] = field(default_factory=list)
+    halted: bool = False
+    shrink: Optional[session_registry.ShrinkReport] = None
+    shrink_refused: bool = False
+
+    @property
+    def ok(self) -> bool:
+        return bool(self.steps) and all(s.ok for s in self.steps) \
+            and not self.halted
+
+    def text(self) -> str:
+        lines = [s.line() for s in self.steps]
+        if self.halted:
+            lines.append("Stopped here - the remaining steps were not run.")
+        return "\n".join(lines)
+
+
 class RecordsManager:
     """The records-manager window: a notebook of tabs over the record cores."""
 
@@ -269,10 +306,36 @@ class RecordsManager:
         self.daily = daily_log.DailyLog(self.daily_rows)
         self.annot_rows = session_annotations.load_rows(self.annot_path)
         self.registry_rows = _read_csv_skip_comments(self.registry_path)
+        self.registry_meta = self._read_registry_meta()
         # Non-real sessions to hide from the list (test runs / stray folders kept
         # on disk; ADR-0097). Applied to both registry and annotation-only rows so
         # a stale registry or a leftover annotation can't resurface them.
         self.ignored_sessions = session_ignore.load_ignored()
+        # Bundles on disk the registry doesn't know yet (the staleness hint in
+        # the banner; ADR-0158). Computed here - not on every banner refresh -
+        # because it lists the archive root, which may be a network drive.
+        self.unindexed_sessions = self._scan_unindexed()
+
+    def _read_registry_meta(self) -> session_registry.BuildMeta:
+        """The registry's provenance header (v2, ADR-0157); blank for a v1 file
+        or when the registry is absent."""
+        try:
+            with open(self.registry_path, "r", encoding="utf-8",
+                      newline="") as fh:
+                return session_registry.registry_meta(fh.read())[1]
+        except OSError:
+            return session_registry.BuildMeta()
+
+    def _scan_unindexed(self) -> List[str]:
+        """Session ids present under the configured roots but not in the loaded
+        registry (ignore-list excluded). Best-effort: an unreachable root just
+        contributes nothing."""
+        roots = [self.recordings_root, *self.recordings_archives]
+        found = [os.path.basename(os.path.normpath(b))
+                 for b in session_registry.scan_roots(r for r in roots if r)]
+        return session_registry.unindexed_sessions(
+            found, [r.get("session_id", "") for r in self.registry_rows],
+            self.ignored_sessions)
 
     # ---------------------------------------------------------------- ui
     def _build_ui(self) -> None:
@@ -2081,19 +2144,41 @@ class RecordsManager:
 
     # ---------------------------------------------------------------- refresh
     def _registry_built_str(self) -> str:
-        """When session_registry.csv was last written, human-readable."""
+        """When session_registry.csv was last built, human-readable: the v2
+        header's ``built_at`` when present (what the BUILD recorded), else the
+        file's modification time (a v1 file), else "never"."""
+        built = (getattr(self, "registry_meta", None) or
+                 session_registry.BuildMeta()).built_at
+        if built:
+            try:
+                return dt.datetime.fromisoformat(built).strftime("%Y-%m-%d %H:%M")
+            except ValueError:
+                return built
         m = self._file_mtime(self.registry_path)
         if m is None:
             return "never"
         return dt.datetime.fromtimestamp(m).strftime("%Y-%m-%d %H:%M")
 
     def _refresh_status_banner(self) -> None:
-        """Update the top staleness strip (session count + build time + whether
-        the daily Excel workbook holds edits not yet imported)."""
+        """Update the top staleness strip (session count + build time + bundles
+        not yet indexed + whether the daily Excel workbook holds edits not yet
+        imported)."""
         n = len(self.registry_rows)
         reg = (f"Registry: {n} session{'' if n == 1 else 's'} "
                f"\u00b7 built {self._registry_built_str()}")
-        if self._excel_has_unsynced_edits():
+        stale = len(getattr(self, "unindexed_sessions", []) or [])
+        if stale:
+            reg += (f" \u00b7 {stale} bundle{'' if stale == 1 else 's'} on disk "
+                    "not yet indexed \u2014 run Generate")
+        if stale:
+            # Stale registry outranks the Excel note for colour: the session
+            # list is missing real sessions until Generate runs.
+            excel = ("Daily Excel edited since last sync \u2014 run Import "
+                     "before Generate" if self._excel_has_unsynced_edits()
+                     else "Daily Excel in sync")
+            self.banner_var.set(reg + "   |   " + excel)
+            self.banner.configure(foreground="#9a6700")
+        elif self._excel_has_unsynced_edits():
             self.banner_var.set(
                 reg + "   |   Daily Excel edited since last sync \u2014 run "
                 "Import before Generate, or those edits are overwritten.")
@@ -2460,61 +2545,83 @@ class RecordsManager:
             return
         self.root.destroy()
 
-    def _do_generate(self) -> str:
-        log = [self._build_registry_inprocess(),
-               self._run_script("build_daily_log.py", ["--rebuild"]),
-               self._run_script("build_session_training_log.py", [])]
-        return "\n".join(log)
+    def _do_generate(self, allow_shrink: bool = False) -> _ChainOutcome:
+        """Worker: registry, then the two workbook builders. The chain STOPS at
+        the first failed step (a half-built registry must not feed the View
+        sheets), and stops - without writing - when the registry build would
+        drop sessions unless ``allow_shrink`` (the main thread asks the operator
+        and re-runs with it set; docs/decisions/0158)."""
+        out = _ChainOutcome()
+        reg = self._build_registry_inprocess(allow_shrink)
+        out.steps.append(_StepResult("session registry", reg.ok, reg.summary()))
+        if reg.refused_shrink:
+            out.shrink, out.shrink_refused, out.halted = reg.shrink, True, True
+            return out
+        if reg.unknown_animals:
+            out.steps[-1].detail += ("  WARNING: animal ids not in animals.json: "
+                                     + ", ".join(reg.unknown_animals))
+        if not reg.ok:
+            out.halted = True
+            return out
+        for name, args in (("build_daily_log.py", ["--rebuild"]),
+                           ("build_session_training_log.py", [])):
+            step = self._run_script(name, args)
+            out.steps.append(step)
+            if not step.ok:
+                out.halted = True
+                break
+        return out
 
-    def _do_import(self, operator: str) -> str:
+    def _do_import(self, operator: str) -> _ChainOutcome:
         """Worker: run the two importing builders under ``operator``. They log
         what they changed to records_changes.csv themselves (ADR-0155), so the
-        GUI does not diff here - one writer, one log entry per change."""
-        log = [self._run_script("build_daily_log.py",
-                                ["--export", "--operator", operator]),
-               self._run_script("build_session_training_log.py",
-                                ["--import-annotations", "--operator",
-                                 operator])]
-        return "\n".join(log)
+        GUI does not diff here - one writer, one log entry per change. The
+        second builder is independent of the first, so both always run."""
+        out = _ChainOutcome()
+        out.steps.append(self._run_script(
+            "build_daily_log.py", ["--export", "--operator", operator]))
+        out.steps.append(self._run_script(
+            "build_session_training_log.py",
+            ["--import-annotations", "--operator", operator]))
+        return out
 
-    def _build_registry_inprocess(self) -> str:
-        """Rebuild session_registry.csv by calling the tool's main() directly.
-        No ``--root`` is passed: the tool resolves the same tracked roots config
-        this GUI shows (tmaze.paths.phase3_recordings_roots), so a GUI Generate
-        and a command-line run scan identical folders (docs/decisions/0156). The
-        CSV still lands in the tool's fixed output dir (docs/decisions/0088)."""
-        buf = io.StringIO()
-        try:
-            with contextlib.redirect_stdout(buf):
-                build_session_registry.main([])
-            return "[session registry] " + (buf.getvalue().strip() or "rebuilt")
-        except SystemExit as e:  # the tool raises SystemExit on a missing root
-            return f"[session registry] {e}"
-        except Exception as e:  # noqa: BLE001 - surface any builder error in the log
-            return f"[session registry] FAILED: {e}"
+    def _build_registry_inprocess(self, allow_shrink: bool
+                                  ) -> build_session_registry.BuildOutcome:
+        """Rebuild session_registry.csv through the tool's ``run_build`` (a
+        structured result, no printed text to parse). No roots are passed: the
+        tool resolves the same tracked roots config this GUI shows
+        (tmaze.paths.phase3_recordings_roots), so a GUI Generate and a
+        command-line run scan identical folders (docs/decisions/0156). The CSV
+        still lands in the tool's fixed output dir (docs/decisions/0088)."""
+        with contextlib.redirect_stdout(io.StringIO()):
+            return build_session_registry.run_build(allow_shrink=allow_shrink)
 
-    def _run_script(self, name: str, args: List[str]) -> str:
-        """Run a resources-repo builder as a subprocess; return a one-line result."""
+    def _run_script(self, name: str, args: List[str]) -> _StepResult:
+        """Run a resources-repo builder as a subprocess; return its result."""
         script = os.path.join(self.records_dir, name)
         if not os.path.exists(script):
-            return f"[{name}] not found ({script})"
+            return _StepResult(name, False, f"not found ({script})")
         try:
             proc = subprocess.run([sys.executable, script, *args],
                                   cwd=self.records_dir, capture_output=True,
                                   text=True, timeout=_BUILDER_TIMEOUT_S)
         except (OSError, subprocess.SubprocessError) as e:
-            return f"[{name}] FAILED: {e}"
+            return _StepResult(name, False, str(e))
         out = (proc.stdout or "").strip().replace("\n", " | ")
         err = (proc.stderr or "").strip().replace("\n", " | ")
-        tag = "OK" if proc.returncode == 0 else f"rc={proc.returncode}"
         # A builder needs openpyxl; if this env lacks it, point at the fix rather
         # than leaving a raw ModuleNotFoundError traceback (see docs/decisions/0085).
         if proc.returncode != 0 and "No module named 'openpyxl'" in err:
             err += "  (install it in this env: pip install openpyxl)"
-        return f"[{name} {tag}] {out}{('  ERR: ' + err) if err else ''}"
+        detail = out
+        if proc.returncode != 0:
+            detail = f"rc={proc.returncode}  {out}".strip()
+        if err:
+            detail += "  ERR: " + err
+        return _StepResult(name, proc.returncode == 0, detail)
 
     def _run_async(self, busy_msg: str, work) -> None:
-        """Run ``work`` (returns a log string) off the UI thread, then report."""
+        """Run ``work`` (returns a _ChainOutcome) off the UI thread, then report."""
         if self._busy:
             return
         self._busy = True
@@ -2524,23 +2631,54 @@ class RecordsManager:
             try:
                 result = work()
             except Exception as e:  # noqa: BLE001
-                result = f"FAILED: {e}"
+                result = _ChainOutcome(
+                    steps=[_StepResult("build", False, f"{type(e).__name__}: {e}")],
+                    halted=True)
             self.root.after(0, lambda: self._async_done(result))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _async_done(self, result: str) -> None:
+    def _async_done(self, result: _ChainOutcome) -> None:
         self._busy = False
+        if result.shrink_refused:
+            # Nothing was written. Show what would vanish and let the operator
+            # decide on the main thread (ADR-0158).
+            self._set_status("Generate stopped: sessions would vanish.")
+            if self._confirm_shrink(result.shrink):
+                self._run_async("Generating files (accepting the drop)...",
+                                lambda: self._do_generate(allow_shrink=True))
+            else:
+                self._set_status("Generate cancelled - nothing was written.")
+            return
         self._load_data()
         self.d_animal["values"] = self.animal_ids
-        # A successful Generate/Import leaves the workbook regenerated from the
-        # CSV, so record it as the new in-sync point (unless the builder failed,
-        # to avoid muting a real "Excel edited" warning). See _excel_has_unsynced.
-        if "FAILED" not in result and "rc=" not in result:
+        # A fully successful Generate/Import leaves the workbook regenerated from
+        # the CSV, so record it as the new in-sync point (a failed or halted
+        # chain must not mute a real "Excel edited" warning).
+        if result.ok:
             self._record_xlsx_sync()
         self._refresh_all()
-        self._set_status("Done.")
-        messagebox.showinfo("Result", result)
+        self._set_status("Done." if result.ok else "Finished with errors.")
+        (messagebox.showinfo if result.ok else messagebox.showwarning)(
+            "Result", result.text())
+
+    def _confirm_shrink(self, report: Optional[session_registry.ShrinkReport]
+                        ) -> bool:
+        """Ask whether to accept a registry build that DROPS sessions. Lists the
+        vanishing ids (capped) and explains the likely cause first."""
+        ids = list(report.vanished) if report else []
+        n = len(ids)
+        shown = "\n".join(ids[:15]) + (f"\n... and {n - 15} more" if n > 15 else "")
+        return messagebox.askyesno(
+            "Sessions would vanish from the registry",
+            f"The scan found {n} fewer session{'' if n == 1 else 's'} than the "
+            "current registry holds. Nothing has been written.\n\n"
+            "Usually this means a recordings folder is unreachable (archive "
+            "drive not mounted, path changed in host/recordings_roots.json) - "
+            "check the recordings bar below the tabs.\n\n"
+            f"Missing:\n{shown}\n\n"
+            "Write the smaller registry anyway? (Only if these sessions were "
+            "really deleted or moved to the ignore list.)", default="no")
 
     def _set_status(self, text: str) -> None:
         self.status_var.set(text)

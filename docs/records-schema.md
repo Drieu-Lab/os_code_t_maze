@@ -29,6 +29,17 @@ Related per-bundle streams these join (not re-defined here): the session manifes
 `session_<id>.json` (ADR-0048), the behavioural summary `summary/session_summary_<id>.json`
 (ADR-0071/0073/0078), and the notes log `summary/notes_<id>.jsonl` (ADR-0074).
 
+**Where the bundles are.** The folders scanned for bundles are the tracked
+`host/recordings_roots.json` (ADR-0156): `primary` (null = the rig's write folder)
+plus `archives`; `TMAZE_RECORDINGS_ARCHIVES` overrides the archive list per
+process. The registry tool refuses a rebuild that would drop sessions present in
+the current file unless `--allow-shrink` (ADR-0158). Note for the offline analysis
+repo (`drieu_lab_analysis`): it must not import `tmaze`, so it still resolves the
+roots from the environment variables only and does not yet read this JSON; on a
+machine without `TMAZE_RECORDINGS_ARCHIVES` set it sees the rig folder alone. The
+file is plain JSON (`{"primary": path|null, "archives": [path, ...]}`), so a
+mirror reader there is a small addition when needed.
+
 ## `animals.json` (v1)
 
 Canonical animal identity — the join key between recordings and husbandry.
