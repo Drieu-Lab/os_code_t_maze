@@ -113,6 +113,28 @@ class SessionManifest:
     fiducial: Dict[str, Any] = field(default_factory=_default_fiducial)
     schema_version: int = SCHEMA_VERSION
 
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "SessionManifest":
+        """Reconstruct a manifest from its parsed JSON - the inverse of ``render``.
+
+        Lets an offline tool read an existing ``session_<id>.json``, update a few
+        fields (e.g. register the ``sync/`` streams and flip ``fiducial.method``
+        after a post-hoc LED clock fit; see ``tmaze.tools.sync_fit``) and write it
+        back, rather than clobbering the file the rig wrote. Stays a pure builder
+        (no file I/O - the caller reads/writes); unknown keys are ignored so a newer
+        on-disk manifest still loads, and missing optional keys fall back to the
+        dataclass defaults.
+        """
+        return cls(
+            session_id=d.get("session_id", ""),
+            animal=d.get("animal", ""),
+            t0=dict(d.get("t0") or {}),
+            t_end=d.get("t_end"),
+            streams=dict(d.get("streams") or {}),
+            fiducial=dict(d.get("fiducial") or _default_fiducial()),
+            schema_version=d.get("schema_version", SCHEMA_VERSION),
+        )
+
     def set_stream(self, name: str, value: Any) -> None:
         """Record (or update) one stream's path/descriptor. Idempotent."""
         self.streams[name] = value

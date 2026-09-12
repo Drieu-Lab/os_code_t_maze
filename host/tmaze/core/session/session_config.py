@@ -57,6 +57,9 @@ HOST_CONFIG_FILES = (
     "phase3.json",       # phase3_controller.PHASE3_PATH - cued-task reward/cue/sequence
     "rules.json",        # rules_view.RULES_PATH - rules-engine profiles
     "cue_calibration.json",  # cue_calibration - per-cue speaker volume + frequency (ADR-0125/0148)
+    "led_map.json",      # sync_fit --map - board-LED sync map (fiducials + bindings; ADR-0153/0154).
+    # Best-effort like the rest: absent until a mapping session exists, so most
+    # bundles record present=false until then.
 )
 
 

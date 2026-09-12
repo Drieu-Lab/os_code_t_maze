@@ -77,6 +77,40 @@ class TestManifest(unittest.TestCase):
         obj = json.loads(m.render())
         self.assertEqual(set(obj["t_end"]), {"wall", "mono", "iso"})
 
+    def test_from_dict_round_trips_render(self):
+        # An offline tool must be able to read a rendered manifest back, tweak it,
+        # and re-render it (sync_fit registers the sync/ streams + flips
+        # fiducial.method this way).
+        m = self._make()
+        m.set_stream("camera_video", "video/x.mp4")
+        m.set_end(clock_snapshot())
+        obj = json.loads(m.render())
+        back = SessionManifest.from_dict(obj)
+        self.assertEqual(json.loads(back.render()), obj)
+
+    def test_from_dict_then_mutate_preserves_untouched_fields(self):
+        m = self._make()
+        m.set_stream("camera_video", "video/x.mp4")
+        loaded = SessionManifest.from_dict(json.loads(m.render()))
+        loaded.set_stream("sync_clock_fit", "sync/clock_fit_x.json")
+        loaded.fiducial["method"] = "led-fit"
+        obj = json.loads(loaded.render())
+        # the new registration landed...
+        self.assertEqual(obj["streams"]["sync_clock_fit"], "sync/clock_fit_x.json")
+        self.assertEqual(obj["fiducial"]["method"], "led-fit")
+        # ...without disturbing what the rig wrote (streams + the pending note).
+        self.assertEqual(obj["streams"]["camera_video"], "video/x.mp4")
+        self.assertIn("FW-0018", obj["fiducial"]["pending"])
+
+    def test_from_dict_tolerates_missing_optional_keys(self):
+        back = SessionManifest.from_dict(
+            {"session_id": "s", "animal": "600",
+             "t0": {"wall": 1.0, "mono": 2.0, "iso": "x"}})
+        obj = json.loads(back.render())
+        self.assertEqual(obj["streams"], {})
+        self.assertEqual(obj["fiducial"]["method"], FIDUCIAL_METHOD)
+        self.assertEqual(obj["schema_version"], SCHEMA_VERSION)
+
 
 class TestPathWithinSession(unittest.TestCase):
     """The guard that keeps another session's file out of the manifest (ADR-0066)."""

@@ -110,6 +110,23 @@ class SnapshotTest(unittest.TestCase):
         self.assertIsNone(out["format_path"])
         self.assertFalse(os.path.isfile(os.path.join(dest, "format.json")))
 
+    def test_led_map_is_a_known_config_file(self):
+        # sync_fit --map writes host/led_map.json; the snapshot must carry it into
+        # the bundle like the other host config (ADR-0153/0154).
+        self.assertIn("led_map.json", session_config.HOST_CONFIG_FILES)
+
+    def test_led_map_snapshotted_when_present_missing_otherwise(self):
+        dest = os.path.join(self.root, "config")
+        # Absent by default (no mapping session yet) -> recorded missing.
+        out = session_config.write_config_snapshot(dest, host_dir=self.host)
+        self.assertIn("led_map.json", out["missing"])
+        # Once a map exists it is copied verbatim like the rest.
+        _write(os.path.join(self.host, "led_map.json"), '{"schema_version": 2}')
+        dest2 = os.path.join(self.root, "config2")
+        out2 = session_config.write_config_snapshot(dest2, host_dir=self.host)
+        self.assertIn("led_map.json", out2["present"])
+        self.assertTrue(os.path.isfile(os.path.join(dest2, "led_map.json")))
+
 
 if __name__ == "__main__":
     unittest.main()
