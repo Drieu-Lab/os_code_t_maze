@@ -116,6 +116,7 @@ criteria).
 | [FW-0062](#fw-0062-controlled-vocabulary-for-session-procedures) | Controlled vocabulary for session `procedures` (annotations) instead of free text | `core/records/session_annotations.py`, Records Manager Sessions tab, `build_session_training_log.py` | Proposed |
 | [FW-0063](#fw-0063-hours_since_water-semantics-under-task_earned-water) | Define `hours_since_water` when the day's water is `task_earned` (no `water_off` clock time exists) | `core/records/{animal_state,daily_log}.py`, `session_controller._write_animal_state` | Proposed |
 | [FW-0064](#fw-0064-push-policy-for-the-records-commits) | Push policy for the records commits made by the "Commit records" button (when, where, who) | Records Manager, resources repo remote | Deferred |
+| [FW-0065](#fw-0065-show-age-where-it-matters-and-decide-the-remaining-biographical-fields) | Show the ADR-0161 age on the Sessions tab / dashboard; add sex/strain/vendor to `animals.json` only when a reader exists | `core/session/session_detail.py`, `core/records/{dashboard,animals}.py`, Records Manager | Proposed |
 
 ## Entries
 
@@ -3273,6 +3274,42 @@ without an operator remembering; a failed push is visible in the GUI banner.
 second machine will edit records (then pull-before-commit is also needed).
 
 **ADR needed?** Yes, small - extends ADR-0155.
+
+### FW-0065: Show age where it matters, and decide the remaining biographical fields
+
+- **Status:** Proposed
+- **Date added:** 2026-09-11
+- **Author / Agent:** Agent (Cursor) on behalf of Ravi
+- **Area / modules:** `core/session/session_detail.py` (metrics block), `core/records/dashboard.py` (status strip), `core/records/animals.py` (roster fields), Records Manager Sessions/Dashboard tabs
+- **Related ADRs:** [ADR-0161](decisions/0161-animals-json-v2-date-of-birth.md), [ADR-0075](decisions/0075-canonical-animal-identity.md), [ADR-0089](decisions/0089-sessions-log-browser.md)
+
+**Motivation / context.** ADR-0161 lands `date_of_birth` in `animals.json` and
+the `AnimalRegistry.age_days` arithmetic, but only the Roster tab shows an age.
+The readers that would actually use it - the Sessions-tab metrics block ("age at
+session"), the dashboard status strip, and FW-0060's age-matched baseline - do
+not yet. Separately, sex, strain and vendor were considered for v2 and deferred
+because nothing reads them and the protocol fixes strain/vendor for these
+cohorts; if a reader appears (e.g. the analysis repo's per-animal metadata
+export, or a second cohort with a different vendor), they belong in the same
+file as one more optional field each.
+
+**Sketch of approach.** (1) `session_detail`: an `age` metric line using the
+registry + the row's `date` (the detail core would need the registry passed in,
+or the registry build could add an `age_days` column - prefer the former; a
+stored age drifts). (2) Dashboard strip: `age` next to `% baseline`. (3) Fields:
+add `sex` (`M`/`F`/blank) and `strain` only when a reader exists; keep
+`validate_records` the gate.
+
+**Evaluation / acceptance.** Age visible on the Sessions tab for every session
+whose rat has a birth date; blank rats show `-`; no new file stores an age.
+
+**Effort / risk.** Small per item. Risk: none beyond widening the detail core's
+inputs.
+
+**Open questions.** Whether the analysis repo wants the roster mirrored into its
+Parquet/NWB export (then a `format_version` coordination, not a `tmaze` import).
+
+**ADR needed?** Only for the field additions (extends ADR-0161).
 
 ## Completed
 

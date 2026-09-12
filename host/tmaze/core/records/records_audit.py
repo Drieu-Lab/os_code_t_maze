@@ -173,6 +173,16 @@ def noncanonical_animals(animal_ids: Sequence[str],
     return sorted(unknown)
 
 
+def animals_missing_dob(registry: Optional[Any]) -> List[str]:
+    """Canonical ids in ``animals.json`` with no ``date_of_birth`` recorded
+    (schema v2, ADR-0161). Empty when the registry is unavailable. Age is
+    derived from this one field for every session and welfare row, so a blank
+    means every age downstream is unknown for that rat."""
+    if registry is None or not getattr(registry, "available", False):
+        return []
+    return [aid for aid in registry.ids() if not registry.date_of_birth(aid)]
+
+
 def short_sessions(rows: Sequence[dict],
                    threshold_s: float = SHORT_SESSION_S
                    ) -> List[Tuple[str, float]]:
@@ -439,6 +449,14 @@ def build_report(triples: Sequence[Tuple[str, str, str]],
             sid, "Animal ids not in animals.json", findings,
             "add them to animals.json, or list those sessions in "
             "host/session_ignore.json.", acked))
+        sid = "missing_date_of_birth"
+        findings = [Finding(f"{sid}:{a}", a)
+                    for a in animals_missing_dob(registry)]
+        sections.append(_section(
+            sid, "Animals with no date_of_birth in animals.json", findings,
+            "look the birth date up in the animal-facility / protocol records "
+            "and enter it in the Roster tab (YYYY-MM-DD), then Save roster.",
+            acked))
     else:
         sections.append(AuditSection(
             sid, "Animal ids not in animals.json", [],

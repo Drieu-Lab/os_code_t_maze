@@ -12,8 +12,9 @@ One window to keep the lab's *records* without hand-editing CSVs or workbooks:
   read each one's metrics + rendered summary, and type the qualitative "common
   procedures" + notes for it; saving upserts ``session_annotations.csv`` by
   ``session_id`` (ADR-0089).
-- **Roster** - add/remove rats and edit their aliases; saving validates and
-  writes ``animals.json`` (the identity source of truth).
+- **Roster** - add/remove rats and edit their aliases and date of birth
+  (ADR-0161); saving validates and writes ``animals.json`` (the identity
+  source of truth).
 - **Dashboard** - a read-only welfare view: a compact per-rat status strip
   (% baseline today + <90% flag + grams-to-90% deficit; a not-logged/not-weighed
   alarm; water intake by source) above a single combined 14-day % baseline trend
@@ -306,7 +307,7 @@ class RecordsManager:
             "annot": file_mtime(self.annot_path),
             "animals": file_mtime(self.animals_path),
         }
-        self.roster = animals.load_records(self.animals_path)  # [{id, aliases}]
+        self.roster = animals.load_records(self.animals_path)  # [{id, aliases, date_of_birth}]
         self.animal_ids = [r["id"] for r in self.roster] or ["600", "601", "602"]
         self.daily_rows = daily_log.load_rows(self.daily_path)
         self.daily = daily_log.DailyLog(self.daily_rows)
@@ -773,7 +774,8 @@ class RecordsManager:
     def _roster_as_rows(records: List[Dict[str, Any]]) -> List[Dict[str, str]]:
         """Flatten roster records to string rows for the change-log diff."""
         return [{"id": str(r.get("id", "")),
-                 "aliases": "; ".join(str(a) for a in (r.get("aliases") or []))}
+                 "aliases": "; ".join(str(a) for a in (r.get("aliases") or [])),
+                 "date_of_birth": str(r.get("date_of_birth", "") or "")}
                 for r in records]
 
     # ---- guarded writes (ADR-0155) ---------------------------------------
@@ -1785,13 +1787,18 @@ class RecordsManager:
 
         left = ttk.Frame(tab)
         left.pack(side="left", fill="both", expand=True)
-        ttk.Label(left, text="Rats (id  |  aliases)").pack(side="top", anchor="w")
-        self.r_tree = ttk.Treeview(left, columns=("id", "aliases"),
+        ttk.Label(left, text="Rats (id  |  aliases  |  date of birth)").pack(
+            side="top", anchor="w")
+        self.r_tree = ttk.Treeview(left, columns=("id", "aliases", "dob", "age"),
                                    show="headings", height=14)
         self.r_tree.heading("id", text="id")
         self.r_tree.heading("aliases", text="aliases (comma-separated)")
-        self.r_tree.column("id", width=80, anchor="center")
-        self.r_tree.column("aliases", width=260, anchor="w")
+        self.r_tree.heading("dob", text="date of birth")
+        self.r_tree.heading("age", text="age today")
+        self.r_tree.column("id", width=70, anchor="center")
+        self.r_tree.column("aliases", width=200, anchor="w")
+        self.r_tree.column("dob", width=100, anchor="center")
+        self.r_tree.column("age", width=90, anchor="center")
         self.r_tree.pack(side="top", fill="both", expand=True)
         self.r_tree.bind("<<TreeviewSelect>>", self._load_selected_roster)
 
@@ -1803,34 +1810,49 @@ class RecordsManager:
         ttk.Label(right, text="aliases").grid(row=1, column=0, sticky="e", pady=3)
         self.r_aliases = tk.StringVar()
         ttk.Entry(right, textvariable=self.r_aliases, width=20).grid(row=1, column=1)
+        # Date of birth (animals.json v2, ADR-0161): the one field age is derived
+        # from everywhere. Blank = not yet recorded (the audit lists those).
+        ttk.Label(right, text="date of birth").grid(row=2, column=0, sticky="e",
+                                                    pady=3)
+        self.r_dob = tk.StringVar()
+        ttk.Entry(right, textvariable=self.r_dob, width=14).grid(row=2, column=1,
+                                                                  sticky="w")
+        ttk.Label(right, text="YYYY-MM-DD, blank if unknown",
+                  foreground="#555").grid(row=3, column=1, sticky="w")
         ttk.Button(right, text="Add / update",
-                   command=self._roster_add).grid(row=2, column=0, columnspan=2,
+                   command=self._roster_add).grid(row=4, column=0, columnspan=2,
                                                    sticky="we", pady=(6, 2))
         ttk.Button(right, text="Remove selected",
-                   command=self._roster_remove).grid(row=3, column=0, columnspan=2,
+                   command=self._roster_remove).grid(row=5, column=0, columnspan=2,
                                                       sticky="we")
-        ttk.Separator(right).grid(row=4, column=0, columnspan=2, sticky="we", pady=8)
+        ttk.Separator(right).grid(row=6, column=0, columnspan=2, sticky="we", pady=8)
         ttk.Button(right, text="Save roster -> animals.json",
-                   command=self._roster_save).grid(row=5, column=0, columnspan=2,
+                   command=self._roster_save).grid(row=7, column=0, columnspan=2,
                                                     sticky="we")
         ttk.Label(right, foreground="#555", wraplength=180,
                   text=("Edits stay in this window until you Save. Save validates "
-                        "ids/aliases before writing.")).grid(
-            row=6, column=0, columnspan=2, sticky="we", pady=(8, 0))
+                        "ids/aliases/dates before writing.")).grid(
+            row=8, column=0, columnspan=2, sticky="we", pady=(8, 0))
 
     def _refresh_roster(self) -> None:
         self.r_tree.delete(*self.r_tree.get_children())
+        reg = animals.AnimalRegistry(self.roster)
+        today = dt.date.today()
         for rec in self.roster:
-            self.r_tree.insert("", "end",
-                               values=(rec["id"], ", ".join(rec.get("aliases", []))))
+            days = reg.age_days(rec["id"], today)
+            age = "" if days is None else f"{days} d ({days / 7:.1f} wk)"
+            self.r_tree.insert("", "end", values=(
+                rec["id"], ", ".join(rec.get("aliases", [])),
+                str(rec.get("date_of_birth", "") or ""), age))
 
     def _load_selected_roster(self, _event=None) -> None:
         sel = self.r_tree.selection()
         if not sel:
             return
-        rid, aliases = self.r_tree.item(sel[0], "values")
+        rid, aliases, dob, _age = self.r_tree.item(sel[0], "values")
         self.r_id.set(rid)
         self.r_aliases.set(aliases)
+        self.r_dob.set(dob)
 
     def _roster_add(self) -> None:
         rid = self.r_id.get().strip()
@@ -1838,8 +1860,16 @@ class RecordsManager:
             messagebox.showwarning("Missing id", "Enter a rat id.")
             return
         aliases = [a.strip() for a in self.r_aliases.get().split(",") if a.strip()]
+        dob = self.r_dob.get().strip()
+        # Check the date here too so a typo is caught at Add rather than at
+        # Save, when several staged edits would be refused together.
+        dob_errors = animals.validate_records([{"id": rid, "date_of_birth": dob}])
+        if dob_errors:
+            messagebox.showwarning("Check the date of birth",
+                                   "\n".join(dob_errors))
+            return
         self.roster = [r for r in self.roster if r["id"] != rid]
-        self.roster.append({"id": rid, "aliases": aliases})
+        self.roster.append({"id": rid, "aliases": aliases, "date_of_birth": dob})
         self.roster.sort(key=lambda r: r["id"])
         self._refresh_roster()
         self._set_status(f"{rid} staged - Save roster to write animals.json.")

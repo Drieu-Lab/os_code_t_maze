@@ -16,7 +16,7 @@ provenance-labelled channels**, never summed (see the registry below).
 
 | Artifact | Repo / location | Written by | schema_version | ADR |
 | --- | --- | --- | --- | --- |
-| `animals.json` | resources · `records/animal/` | Records Manager GUI (Roster) or hand-edited | 1 | 0075 |
+| `animals.json` | resources · `records/animal/` | Records Manager GUI (Roster) or hand-edited | 2 | 0075, 0161 |
 | `daily_log.csv` | resources · `records/animal/` | Records Manager GUI (Daily) or `build_daily_log.py` (from the Entry sheet) | 4 (comment line) | 0076, 0100, 0104, 0160 |
 | `session_annotations.csv` | resources · `records/animal/` | Records Manager GUI (Sessions) or `build_session_training_log.py --import-annotations` | 1 (comment line) | 0082 / 0085 |
 | `records_changes.csv` | resources · `records/animal/` | appended by every records write path (Records Manager saves; builders' `--export` / `--import-annotations`) | 1 (comment line) | 0155 |
@@ -40,13 +40,17 @@ machine without `TMAZE_RECORDINGS_ARCHIVES` set it sees the rig folder alone. Th
 file is plain JSON (`{"primary": path|null, "archives": [path, ...]}`), so a
 mirror reader there is a small addition when needed.
 
-## `animals.json` (v1)
+## `animals.json` (v2)
 
 Canonical animal identity — the join key between recordings and husbandry.
 
-- `schema_version` — layout version.
-- `animals[]` — `{id, aliases[]}`: the canonical id plus any loose spellings that
-  normalize to it (ADR-0075).
+- `schema_version` — layout version (a GUI save always writes the current one).
+- `animals[]` — `{id, aliases[], date_of_birth}`: the canonical id plus any loose
+  spellings that normalize to it (ADR-0075), and the animal's birth date as
+  `YYYY-MM-DD` or `""` when not yet recorded (v2, ADR-0161). A v1 file (no
+  `date_of_birth`) still loads with the field blank. Age is never stored: derive
+  it with `AnimalRegistry.age_days(id, on_date)`. The records audit's
+  `missing_date_of_birth` section lists rats whose date is blank.
 
 ## `daily_log.csv` (v4)
 

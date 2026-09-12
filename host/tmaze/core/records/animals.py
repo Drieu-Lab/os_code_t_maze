@@ -27,6 +27,7 @@ Headless tests: python -m unittest test_animals.
 
 from __future__ import annotations
 
+import datetime as _dt
 import json
 import os
 from typing import Dict, List, Optional
@@ -78,11 +79,15 @@ class AnimalRegistry:
     def __init__(self, animals: Optional[List[Dict[str, object]]] = None) -> None:
         self._ids: List[str] = []
         self._by_key: Dict[str, str] = {}
+        self._dob: Dict[str, str] = {}
         for rec in (animals or []):
             aid = str(rec.get("id", "")).strip()
             if not aid or aid in self._ids:
                 continue
             self._ids.append(aid)
+            dob = str(rec.get(DOB_FIELD, "") or "").strip()
+            if dob:
+                self._dob[aid] = dob
             # The canonical id always maps to itself; aliases fill in only if they
             # don't collide with an already-claimed key (first entry wins).
             self._by_key[_key(aid)] = aid
@@ -113,13 +118,42 @@ class AnimalRegistry:
     def is_known(self, raw: str) -> bool:
         return self.normalize(raw) is not None
 
+    def date_of_birth(self, raw: str) -> Optional[str]:
+        """The animal's ``YYYY-MM-DD`` date of birth (schema v2, ADR-0161), or
+        None when unknown / not recorded / the id isn't recognised. Returned
+        as the stored string; use :meth:`age_days` for arithmetic."""
+        aid = self.normalize(raw)
+        if aid is None:
+            return None
+        return self._dob.get(aid)
+
+    def age_days(self, raw: str, on_date) -> Optional[int]:
+        """Whole days from the animal's date of birth to ``on_date`` (a
+        ``datetime.date`` or ISO string), or None when either is unusable.
+        Negative if ``on_date`` precedes the birth date (a data error the
+        audit reports; this method just does the arithmetic)."""
+        dob = _parse_iso(self.date_of_birth(raw))
+        on = on_date if isinstance(on_date, _dt.date) else _parse_iso(on_date)
+        if dob is None or on is None:
+            return None
+        return (on - dob).days
+
     def __len__(self) -> int:
         return len(self._ids)
 
 
+def _parse_iso(value) -> Optional[_dt.date]:
+    """``YYYY-MM-DD`` -> date, else None (blank / malformed)."""
+    try:
+        return _dt.date.fromisoformat(str(value or "").strip())
+    except (TypeError, ValueError):
+        return None
+
+
 def parse_registry(text: str) -> AnimalRegistry:
     """Build a registry from ``animals.json`` text, tolerating a malformed file
-    (anything unparseable yields an empty, unavailable registry)."""
+    (anything unparseable yields an empty, unavailable registry). v1 and v2
+    files both load; a v1 entry simply has no date of birth."""
     try:
         raw = json.loads(text)
     except ValueError:
@@ -153,29 +187,48 @@ def load_registry(path: Optional[str] = None) -> AnimalRegistry:
 # drops the human-readable ``_schema`` note.
 # --------------------------------------------------------------------------- #
 
-# Kept in step with animals.json's own ``schema_version`` (ADR-0075).
-ANIMALS_SCHEMA_VERSION = 1
+# Kept in step with animals.json's own ``schema_version``. v1 (ADR-0075):
+# {id, aliases}. v2 (ADR-0161): adds an optional ``date_of_birth``
+# (``YYYY-MM-DD`` or "") per animal so age can be derived for every session and
+# welfare row instead of living only in the paper protocol records. A v1 file
+# still loads (missing field == unknown); a write stamps the current version.
+ANIMALS_SCHEMA_VERSION = 2
+DOB_FIELD = "date_of_birth"
+
+# The v1 note verbatim, so a write can recognise and refresh it rather than
+# leaving a stale description in an upgraded file (a hand-edited note is kept).
+_V1_NOTE = (
+    "Canonical animal identity (ADR-0075). Each entry is {id, aliases}; the "
+    "id is the lab's rat number used to key session recordings to husbandry "
+    "records. Aliases match loosely (case-, space- and punctuation-"
+    "insensitive), so 'Rat 600' resolves to '600'. This is the single source "
+    "of truth for animal identity, read by the rig at Session Start and by "
+    "the records builders."
+)
 
 # Restored if an existing file has no ``_schema`` block, so a GUI-written file
 # stays self-documenting.
 _DEFAULT_SCHEMA = {
     "note": (
-        "Canonical animal identity (ADR-0075). Each entry is {id, aliases}; the "
-        "id is the lab's rat number used to key session recordings to husbandry "
-        "records. Aliases match loosely (case-, space- and punctuation-"
-        "insensitive), so 'Rat 600' resolves to '600'. This is the single source "
-        "of truth for animal identity, read by the rig at Session Start and by "
-        "the records builders."
+        "Canonical animal identity (ADR-0075, ADR-0161). Each entry is "
+        "{id, aliases, date_of_birth}; the id is the lab's rat number used to "
+        "key session recordings to husbandry records. Aliases match loosely "
+        "(case-, space- and punctuation-insensitive), so 'Rat 600' resolves to "
+        "'600'. date_of_birth is YYYY-MM-DD or \"\" when not yet recorded (the "
+        "records audit lists those). This is the single source of truth for "
+        "animal identity, read by the rig at Session Start and by the records "
+        "builders."
     )
 }
 
 
 def load_records(path: Optional[str] = None) -> List[Dict[str, object]]:
-    """The raw ``[{id, aliases}]`` roster (best-effort; [] if missing/malformed).
+    """The raw ``[{id, aliases, date_of_birth}]`` roster (best-effort; [] if
+    missing/malformed).
 
     Unlike :func:`load_registry`, this keeps each animal's aliases so the GUI can
     show and edit them. Each entry is normalised to ``{"id": str,
-    "aliases": [str, ...]}``.
+    "aliases": [str, ...], "date_of_birth": str}`` ("" when not recorded).
     """
     p = path or animals_json_path()
     try:
@@ -220,9 +273,12 @@ def load_records_for_write(path: Optional[str] = None) -> List[Dict[str, object]
 
 def normalize_records(
         records: List[Dict[str, object]]) -> List[Dict[str, object]]:
-    """Trim ids, drop blank/duplicate aliases, coerce to ``{id, aliases}``.
+    """Trim ids, drop blank/duplicate aliases, coerce to
+    ``{id, aliases, date_of_birth}``.
 
     Blank ids are dropped. Alias order is preserved (first occurrence wins).
+    A missing ``date_of_birth`` (v1 file) becomes ``""``; its VALUE is not
+    checked here - :func:`validate_records` does that.
     """
     out: List[Dict[str, object]] = []
     for rec in records or []:
@@ -240,24 +296,40 @@ def normalize_records(
                 if a and a not in seen:
                     seen.add(a)
                     aliases.append(a)
-        out.append({"id": aid, "aliases": aliases})
+        out.append({"id": aid, "aliases": aliases,
+                    DOB_FIELD: str(rec.get(DOB_FIELD, "") or "").strip()})
     return out
 
 
-def validate_records(records: List[Dict[str, object]]) -> List[str]:
+def validate_records(records: List[Dict[str, object]],
+                     today: Optional[_dt.date] = None) -> List[str]:
     """Human-readable problems with a roster; [] means it's safe to write.
 
     Catches blank ids, duplicate/loosely-colliding ids (e.g. "600" and "Rat 600"
-    as two separate animals), and an alias that would resolve to a *different*
-    animal than its owner (which would make normalization ambiguous).
+    as two separate animals), an alias that would resolve to a *different*
+    animal than its owner (which would make normalization ambiguous), and a
+    non-blank ``date_of_birth`` that isn't a real ``YYYY-MM-DD`` date or lies
+    in the future (``today`` defaults to the current date). A BLANK date of
+    birth is allowed - "not yet recorded" is legitimate and the records audit
+    lists it - so a roster can be saved before every birth date is looked up.
     """
     errors: List[str] = []
     id_keys: Dict[str, str] = {}
+    today_d = today or _dt.date.today()
     for i, rec in enumerate(records or []):
         aid = str(rec.get("id", "")).strip() if isinstance(rec, dict) else ""
         if not aid:
             errors.append(f"Animal #{i + 1}: blank id")
             continue
+        dob_raw = str(rec.get(DOB_FIELD, "") or "").strip()
+        if dob_raw:
+            dob = _parse_iso(dob_raw)
+            if dob is None:
+                errors.append(
+                    f"'{aid}': date of birth '{dob_raw}' must be YYYY-MM-DD")
+            elif dob > today_d:
+                errors.append(
+                    f"'{aid}': date of birth {dob_raw} is in the future")
         k = _key(aid)
         if k in id_keys:
             other = id_keys[k]
@@ -298,19 +370,22 @@ def validate_records(records: List[Dict[str, object]]) -> List[str]:
 
 
 def _read_meta(path: str) -> Dict[str, object]:
-    """Preserve an existing file's ``_schema`` + ``schema_version`` (or defaults)."""
+    """The ``_schema`` note to carry into a write: an existing hand-edited note
+    is preserved; the stock v1 note (or no note) becomes the current default so
+    an upgraded file describes its own layout. ``schema_version`` is always the
+    current :data:`ANIMALS_SCHEMA_VERSION` - a write produces a current-layout
+    file, never a v1 file with v2 fields in it."""
+    schema = _DEFAULT_SCHEMA
     try:
         with open(path, "r", encoding="utf-8") as fh:
             raw = json.load(fh)
         if isinstance(raw, dict):
-            return {
-                "_schema": raw.get("_schema", _DEFAULT_SCHEMA),
-                "schema_version": raw.get("schema_version",
-                                          ANIMALS_SCHEMA_VERSION),
-            }
+            existing = raw.get("_schema")
+            if isinstance(existing, dict) and existing.get("note") != _V1_NOTE:
+                schema = existing
     except (OSError, ValueError):
         pass
-    return {"_schema": _DEFAULT_SCHEMA, "schema_version": ANIMALS_SCHEMA_VERSION}
+    return {"_schema": schema, "schema_version": ANIMALS_SCHEMA_VERSION}
 
 
 def write_records(records: List[Dict[str, object]],
@@ -320,7 +395,8 @@ def write_records(records: List[Dict[str, object]],
 
     Raises ``ValueError`` (without touching disk) if :func:`validate_records`
     finds a problem, so a bad edit can't corrupt the identity source of truth.
-    Preserves the ``_schema`` note and ``schema_version`` of any existing file.
+    Preserves a hand-edited ``_schema`` note of an existing file (refreshing the
+    stock one) and stamps the current ``schema_version`` (see :func:`_read_meta`).
     Writes to a temp file then ``os.replace``.
 
     ``expect_mtime``: the file's :func:`tmaze.core.records.file_mtime` when the

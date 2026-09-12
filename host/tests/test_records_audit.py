@@ -58,6 +58,25 @@ class TestSuspectWaterMethods(unittest.TestCase):
         self.assertEqual(got, [("601", "2026-08-09", "hose")])
 
 
+class TestAnimalsMissingDob(unittest.TestCase):
+    """ADR-0161: rats whose date_of_birth hasn't been recorded yet."""
+
+    def test_lists_ids_without_dob_in_roster_order(self):
+        reg = AnimalRegistry([{"id": "600", "date_of_birth": "2026-01-15"},
+                              {"id": "601"},
+                              {"id": "602", "date_of_birth": ""}])
+        self.assertEqual(records_audit.animals_missing_dob(reg), ["601", "602"])
+        self.assertEqual(records_audit.animals_missing_dob(None), [])
+        self.assertEqual(records_audit.animals_missing_dob(AnimalRegistry([])), [])
+
+    def test_wired_into_report_with_stable_key(self):
+        reg = AnimalRegistry([{"id": "600"}])
+        sections = records_audit.build_report([], [], [], None, reg)
+        by = {s.id: s for s in sections}
+        self.assertEqual([f.key for f in by["missing_date_of_birth"].findings],
+                         ["missing_date_of_birth:600"])
+
+
 class TestUnsplitSuppWater(unittest.TestCase):
     """ADR-0160: legacy supp_water text still awaiting its mL/min split."""
 
@@ -289,7 +308,9 @@ class TestBuildReport(unittest.TestCase):
                          ["suspect_water_methods:600:2026-08-07"])
 
     def test_new_sections_wired_with_stable_keys(self):
-        reg = AnimalRegistry([{"id": "600"}])
+        # DOB recorded so the missing_date_of_birth section (ADR-0161) stays
+        # quiet and the count below is the four ADR-0159 sections only.
+        reg = AnimalRegistry([{"id": "600", "date_of_birth": "2026-01-15"}])
         daily_rows = [{"animal_id": "600", "date": "2026-08-01",
                        "weight_g": "330"}]
         daily = DailyLog(daily_rows)
