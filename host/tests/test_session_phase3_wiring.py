@@ -378,6 +378,38 @@ class SessionPhase3WiringTest(unittest.TestCase):
         self.assertFalse(stale.startswith(session_dir))
         self.assertNotIn("phase3_task", self.session._manifest.streams)
 
+    # ------------------------------------ current-trial commit (ADR-0152)
+    def test_running_block_current_trial_is_published_as_intervention(self):
+        """docs/decisions/0152: the controller must commit the just-advanced CURRENT
+        trial before it re-aligns + publishes, or a running corrective block's
+        current trial shows on the ribbon as NORMAL (blank sched_state) for a frame.
+        Drive a real advance inside a forced block and assert the published current
+        row is already INTERVENTION."""
+        from tmaze.core.phase3.debias import DebiasBlockConfig
+        from tmaze.core.phase3.trial_sequence import GEN_DEBIAS_BLOCKS
+
+        # A debias plan that never AUTO-triggers or exits on its own (min_errors and
+        # the exit/length caps are set out of reach), so the only block is the one
+        # the operator forces and it stays open across the advance we test.
+        self.phase3._current_trial_config = lambda: TrialConfig(
+            max_trials=40, block_size=20, max_same_run=4,
+            generator=GEN_DEBIAS_BLOCKS,
+            debias=DebiasBlockConfig(window=10, min_errors=100,
+                                     exit_consecutive=100, max_block_len=100))
+
+        self._open_gate()
+        self._run_full_trial("left")           # trial 0 (NORMAL); now current == 1
+        # Operator forces a corrective block; it applies on the next committed trial.
+        self.phase3._process_act_item(("cmd", "debias_start"),
+                                      self.phase3._act_snapshot)
+        self._run_full_trial("left")           # trial 1 committed as the block opens
+        self._run_full_trial("left")           # advance -> new current is in-block
+
+        st = self.phase3.published_state()
+        self.assertGreaterEqual(st.current_index, 2)
+        cur = st.rows[st.current_index]
+        self.assertEqual(cur.sched_state, "INTERVENTION")
+
 
 if __name__ == "__main__":
     unittest.main()

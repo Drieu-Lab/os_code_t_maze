@@ -1101,6 +1101,18 @@ class Phase3ControlView(VisionActuator):
             self._extend_trials(snap)
 
         if changed:
+            # Finalize the CURRENT trial's decision before we align + publish the
+            # display. On the frame a trial advances, task.update() commits the OLD
+            # index and only then increments, so the new current trial is not yet
+            # committed - refresh_provisional would then render it from its
+            # pre-commit provisional reading (blank sched_state = looks NORMAL, and
+            # the next cell walks the spine instead of the forced side), so the
+            # ribbon showed the current intervention trial as NORMAL. This is the
+            # same commit _ensure_committed would make one frame later, with no new
+            # animal evidence in between (docs/decisions/0152; ADR-0096). Idempotent
+            # and a no-op for the balanced generator.
+            if self._seq is not None:
+                self._seq.commit(self._task.index)
             # Re-align the display cues of the current + upcoming (not-yet-run)
             # trials to the sequence's current knowledge, so a corrective block that
             # shifts the counterbalanced spine doesn't leave the ribbon showing stale

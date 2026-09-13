@@ -339,5 +339,128 @@ class TestProbeUpcomingIntegration(unittest.TestCase):
         self.assertFalse(any(r.probe for r in all_ribbon_rows(snap)))
 
 
+class TestCurrentTrialCommittedBeforeDisplay(unittest.TestCase):
+    """Regression (docs/decisions/0152): on the frame a trial advances, the new
+    CURRENT trial is not yet committed, so its provisional reading has a blank
+    ``sched_state`` (renders NORMAL, no corrective marker) and the cell after it
+    walks the counterbalanced spine instead of the forced side. The controller must
+    ``commit`` the current trial before it re-aligns + publishes the ribbon; this
+    checks the before/after of that commit at the core level."""
+
+    def _forced_right_block_advanced(self):
+        """Drive a debias session into an open, operator-forced RIGHT block and stop
+        on the frame right after a trial advanced: index == 4 is the new CURRENT
+        trial and is NOT yet committed (block already open across trials 2-3)."""
+        cfg = TrialConfig(max_trials=40, block_size=20, max_same_run=4,
+                          generator=GEN_DEBIAS_BLOCKS,
+                          debias=DebiasBlockConfig(window=10, min_errors=100,
+                                                   exit_consecutive=3,
+                                                   max_block_len=50))
+        seq = TrialSequence(cfg, seed=5)
+        log = Phase3Log(seq, animal="R", session_start_iso="t")
+        # trials 0,1: normal, comply
+        for i in range(2):
+            seq.commit(i)
+            log.set_decision(i)
+            correct = seq.correct_arm(i)
+            side = "left" if correct == LEFT else "right"
+            log.choice_scored(i, side, CORRECT, f"t{i}")
+            seq.record_outcome(i, correct, correct)
+            log.set_decision(i)
+        # operator forces a RIGHT side-bias block; it applies from the next commit
+        seq.force_block(RIGHT)
+        # trials 2,3: block trials (forced RIGHT). The rat keeps failing (chooses
+        # LEFT) so the block never hits its exit criterion and stays open.
+        for i in range(2, 4):
+            seq.commit(i)
+            log.set_decision(i)
+            forced = seq.correct_arm(i)
+            self.assertEqual(forced, RIGHT)
+            log.choice_scored(i, "left", INCORRECT, f"t{i}")
+            seq.record_outcome(i, forced, LEFT)
+            log.set_decision(i)
+        # ...and now the frame advances to trial 4 but has NOT committed it yet.
+        self.assertFalse(seq.is_committed(4))
+        return seq, log
+
+    def test_uncommitted_current_trial_looks_normal_then_fixed_by_commit(self):
+        seq, log = self._forced_right_block_advanced()
+        current = 4  # 0-based index; trial number is current + 1
+
+        # --- Before the fix: publish without committing the current trial ---
+        log.refresh_provisional(current)
+        snap = log.snapshot(current, armed=True)
+        by_trial = {r.trial: r for r in all_ribbon_rows(snap)}
+        cur, nxt = by_trial[current + 1], by_trial[current + 2]
+        # The reported bug: the current intervention trial renders as NORMAL, and the
+        # upcoming cell shows the spine cue instead of the forced RIGHT.
+        self.assertFalse(cur.corrective)
+        self.assertTrue(nxt.corrective)              # block predicted to continue
+        spine_side = nxt.choice_side                 # whatever the balanced spine is
+        self.assertTrue(seq.intervention_will_continue())
+
+        # --- With the fix: commit the current trial, THEN align + publish ---
+        seq.commit(current)
+        log.refresh_provisional(current)
+        snap = log.snapshot(current, armed=True)
+        by_trial = {r.trial: r for r in all_ribbon_rows(snap)}
+        cur, nxt = by_trial[current + 1], by_trial[current + 2]
+        self.assertTrue(cur.corrective)              # current now marked block
+        self.assertEqual(cur.choice_side, RIGHT_LABEL)   # ...and forced RIGHT
+        self.assertTrue(nxt.corrective)              # upcoming still predicted block
+        self.assertEqual(nxt.choice_side, RIGHT_LABEL)   # forced side, not the spine
+        # Guard the second screenshot's symptom: the pre-commit upcoming cue was the
+        # (Left) spine slot, and committing flipped it to the forced RIGHT.
+        self.assertEqual(spine_side, LEFT_LABEL)
+
+    def test_de_alt_current_trial_marked_after_commit(self):
+        # Mirror of the above for a de-alternation block: committing the advanced
+        # current trial is what turns its ribbon marker corrective.
+        from tmaze.core.phase3.alternation import AlternationBlockConfig
+        from tmaze.core.phase3.trial_sequence import GEN_INTERVENTION_BLOCKS
+        cfg = TrialConfig(max_trials=40, block_size=20, max_same_run=4,
+                          generator=GEN_INTERVENTION_BLOCKS,
+                          debias=DebiasBlockConfig(window=10, min_errors=100,
+                                                   exit_consecutive=3,
+                                                   max_block_len=50),
+                          alternation=AlternationBlockConfig(window=10,
+                                                             min_samples=100,
+                                                             exit_repeats_per_side=3,
+                                                             max_block_len=50))
+        seq = TrialSequence(cfg, seed=5)
+        log = Phase3Log(seq, animal="R", session_start_iso="t")
+        for i in range(2):
+            seq.commit(i)
+            log.set_decision(i)
+            correct = seq.correct_arm(i)
+            side = "left" if correct == LEFT else "right"
+            log.choice_scored(i, side, CORRECT, f"t{i}")
+            seq.record_outcome(i, correct, correct)
+            log.set_decision(i)
+        seq.force_block()  # de-alt / side-bias default block
+        for i in range(2, 4):
+            seq.commit(i)
+            log.set_decision(i)
+            forced = seq.correct_arm(i)
+            chosen = LEFT if forced == RIGHT else RIGHT
+            side = "left" if chosen == LEFT else "right"
+            log.choice_scored(i, side, INCORRECT, f"t{i}")
+            seq.record_outcome(i, forced, chosen)
+            log.set_decision(i)
+        current = 4
+        self.assertFalse(seq.is_committed(current))
+
+        log.refresh_provisional(current)
+        snap = log.snapshot(current, armed=True)
+        cur = {r.trial: r for r in all_ribbon_rows(snap)}[current + 1]
+        self.assertFalse(cur.corrective)             # bug: current looks normal
+
+        seq.commit(current)
+        log.refresh_provisional(current)
+        snap = log.snapshot(current, armed=True)
+        cur = {r.trial: r for r in all_ribbon_rows(snap)}[current + 1]
+        self.assertTrue(cur.corrective)              # fixed once committed
+
+
 if __name__ == "__main__":
     unittest.main()
