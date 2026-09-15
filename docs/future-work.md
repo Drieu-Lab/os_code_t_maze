@@ -109,7 +109,7 @@ criteria).
 | [FW-0055](#fw-0055-glossary-terms-for-scientific--epistemic-rigor) | Glossary terms for scientific + epistemic rigor | `docs/glossary.md` | Proposed |
 | [FW-0056](#fw-0056-camera-visible-cue-leds-on-spare-optocoupler-channels) | Camera-visible cue LEDs on spare optocoupler channels (hardware + firmware + `LEDTEST` roll-call) | Rig electronics board + `firmware/cue-guided-task` (`handleCueOn/Off`, `rig_config.h`, `PROTOCOL.md`) | Proposed |
 | [FW-0057](#fw-0057-live-alt-veto-readout-for-the-suppressed-debias-trigger) | Live `[ALT-VETO]` readout for the suppressed debias trigger | Phase 3 live readout (`intervention_stack.py` -> snapshot -> `phase3_stats.py` -> `behavior_view.py`) | Proposed |
-| [FW-0058](#fw-0058-reconcile-the-beam--and-lick-state-polarity-si1--li1-are-the-resting-states-not-broken--active) | Reconcile the beam- and lick-state polarity (`S,<i>,1` and `L,<i>,1` are the resting states in recorded logs; `PROTOCOL.md` rows corrected 2026-09-08, firmware comment + consumer audit open) | `firmware/PROTOCOL.md`, `cue-guided-task.ino` sensor reads, host consumers of the `S`/`L` `active` flag | Proposed |
+| [FW-0058](#fw-0058-reconcile-the-beam--and-lick-state-polarity-si1--li1-are-the-resting-states-not-broken--active) | Reconcile the beam- and lick-state polarity (`S,<i>,1` and `L,<i>,1` were the resting states in recorded logs). RESOLVED by ADR-0164: firmware flip + `PROTO_VERSION` 7->8, root cause the NOYIYO opto "Normal Low / Actuated High". Follow-ups (separate increments): bundle `sensor_polarity` flag + `core/sync/spans.py`/analysis reader | `firmware/PROTOCOL.md`, `cue-guided-task.ino` + `tmaze_test.ino` sensor reads, `rig_config.h`, host consumers of the `S`/`L` `active` flag | Done (ADR-0164) |
 | [FW-0059](#fw-0059-repeatable-retroreflective-marker-scheme-for-the-board) | Design a REPEATABLE retroreflective-marker placement scheme for the electronics board (a physical QA reference for the LED auto-ROI, and a future geometry fallback) | Rig electronics board (physical), `docs/mapping-session-runbook.md`, optional `led_detector` marker check | Proposed |
 | [FW-0060](#fw-0060-age-matched-baseline-weight-for-the-water-restriction-rule) | Age-matched baseline weight for the water-restriction rule (the fixed July baseline makes the 90% flag inert at 115-129%) | `core/records/{dashboard,daily_log,animals}.py`, resources `build_daily_log.py` | Deferred |
 | [FW-0061](#fw-0061-reconcile-the-onedrive-parallel-excel-logs-at-cutover) | Reconcile the OneDrive parallel Excel logs against the CSVs at cutover (one-off diff/import tool) | resources `records/animal/`, a new `tmaze.tools` reconciler | Deferred |
@@ -2982,7 +2982,7 @@ in ADR-0149.
 
 ### FW-0058: Reconcile the beam- and lick-state polarity (`S,<i>,1` / `L,<i>,1` are the resting states, not "broken" / "active")
 
-- **Status:** Proposed
+- **Status:** Done (2026-09-15, ADR-0164) - firmware increment landed; provenance/consumer increments follow
 - **Date added:** 2026-09-08
 - **Author / Agent:** Agent (Cursor) on behalf of Celine
 - **Area / modules:** `firmware/PROTOCOL.md` (the `S` and `L` rows), `firmware/cue-guided-task/cue-guided-task.ino`
@@ -2996,6 +2996,26 @@ in ADR-0149.
   `tools/maze_state_validate.py`; the analysis repo where it reads `S`/`L` lines
 - **Related ADRs / work:** FW-0045 (where this was found),
   [`docs/design/cross-stream-sync-design.md`](design/cross-stream-sync-design.md) §3.7
+
+**RESOLVED (2026-09-15, ADR-0164).** The rig hand check settled the physical
+polarity: with `rig_logger` running, breaking each beam and touching the hub
+lick port printed `S,<i>,0` / `L,<i>,0` on actuation and `...,1` on release for
+all six beams and the centre lick (log `host/data/unknown_20260914_155725.csv`).
+Root cause is documented on the schematic, not a guess: the beams reach the Due
+through a NOYIYO opto marked "Normal Low / Actuated High" (so a broken beam reads
+HIGH at the Due pin), and the lick pins idle HIGH and are pulled LOW on contact -
+the firmware's `== LOW` / `== HIGH` reads labelled REST as active. Fixed at the
+source per ADR-0164: flip the firmware read in both sketches (`sensors == HIGH`,
+`licks == LOW`) and bump `PROTO_VERSION` 7->8, so `S,<i>,1` = beam broken and
+`L,<i>,1` = tongue contact again (also correcting the Open Ephys TTL edge and the
+boot state). Host `protocol.py` is unchanged (it always read `active = state ==
+"1"`), so `rig_view` and `rules_engine` become correct on reflash. Consumer audit
+outcome: after the flip the only host reader that goes WRONG is
+`core/sync/spans.py`, which hard-codes the legacy active state `0` - it (and the
+analysis reader) move to a per-bundle `sensor_polarity` flag in the follow-up
+provenance increment; the rules-engine `L,<i>,1` top-up, previously firing on the
+release edge, now fires on contact. Recorded pre-v8 logs keep their inverted
+meaning, read per `PROTO_VERSION` / `sensor_polarity`.
 
 **Update (2026-09-08, Slice 1 of FW-0045).** Two things done, the rest still
 open. (a) The **lick detector has the same inversion**: over the full session

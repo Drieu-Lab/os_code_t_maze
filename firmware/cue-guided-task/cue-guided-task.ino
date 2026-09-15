@@ -285,9 +285,13 @@ Inputs readInputs() {
   unsigned long t = now - session.startMs;
   in.now = now;
 
-  // Body beams: active-LOW, debounced; beam[i] is a RISING-edge flag for the core.
+  // Body beams via the NOYIYO opto (schematic "Normal Low / Actuated High"): at
+  // the Due pin a broken beam reads HIGH and rest reads LOW, so `raw` is true on
+  // a break. beam[i] is a RISING-edge (break) flag for the core. Corrected in
+  // proto v8 - the read was `== LOW`, which reported the RESTING state as active
+  // and pulsed the FSM/TTL on beam clear. see docs/decisions/0164
   for (int i = 0; i < BEAM_COUNT; i++) {
-    bool raw = (digitalRead(sensorPins[i]) == LOW);
+    bool raw = (digitalRead(sensorPins[i]) == HIGH);
     if (raw != sensRaw[i]) { sensRaw[i] = raw; sensLastChange[i] = now; }
     bool rising = false;
     if (raw != sensStable[i] && (now - sensLastChange[i]) >= SENSOR_DEBOUNCE_MS) {
@@ -298,9 +302,12 @@ Inputs readInputs() {
     in.beam[i] = rising;
   }
 
-  // Lick detectors: active-HIGH, debounced; monitor/display only (not fed to core).
+  // Lick detectors (D12DAB6 via INPUT_PULLUP): the Due pin idles HIGH and is
+  // pulled LOW on tongue contact (at the amp's current LO/DO setting), so `raw`
+  // is true on contact. Monitor/display only (not fed to core). Corrected in
+  // proto v8 - the read was `== HIGH`, which reported idle as active. see docs/decisions/0164
   for (int i = 0; i < 3; i++) {
-    bool raw = (digitalRead(lickPins[i]) == HIGH);
+    bool raw = (digitalRead(lickPins[i]) == LOW);
     if (raw != lickRaw[i]) { lickRaw[i] = raw; lickLastChange[i] = now; }
     if (raw != lickStable[i] && (now - lickLastChange[i]) >= SENSOR_DEBOUNCE_MS) {
       lickStable[i] = raw;
@@ -436,13 +443,13 @@ void setup() {
 
   for (int i = 0; i < BEAM_COUNT; i++) {
     pinMode(sensorPins[i], INPUT_PULLUP);
-    sensRaw[i] = (digitalRead(sensorPins[i]) == LOW);
+    sensRaw[i] = (digitalRead(sensorPins[i]) == HIGH);  // break = HIGH (proto v8; see docs/decisions/0164)
     sensStable[i] = sensRaw[i];
     sensLastChange[i] = millis();
   }
   for (int i = 0; i < 3; i++) {
     pinMode(lickPins[i], INPUT_PULLUP);
-    lickRaw[i] = (digitalRead(lickPins[i]) == HIGH);
+    lickRaw[i] = (digitalRead(lickPins[i]) == LOW);  // contact = LOW (proto v8; see docs/decisions/0164)
     lickStable[i] = lickRaw[i];
     lickLastChange[i] = millis();
   }

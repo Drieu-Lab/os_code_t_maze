@@ -25,7 +25,9 @@
  */
 
 /* ============================ Physical wiring ============================ */
-/* Body-beam sensors (active-LOW, INPUT_PULLUP). Pins from tmaze_test. */
+/* Body-beam sensors: Banner VS2 (NPN) -> NOYIYO opto (schematic "Normal Low /
+ * Actuated High") -> Due INPUT_PULLUP, so at the Due pin a broken beam reads
+ * HIGH and rest reads LOW. Pins from tmaze_test. see docs/decisions/0164 */
 #define PIN_BEAM_LEFT        39 /* 39 */
 #define PIN_BEAM_CENTER      42 /* 42 */
 #define PIN_BEAM_RIGHT       43 /* 43 */
@@ -33,8 +35,10 @@
 #define PIN_BEAM_CENTER_END  38 /* 38 */
 #define PIN_BEAM_LCHOICE     40 /* 40 */
 
-/* Lick detectors (active-HIGH event per tmaze_test). Raw, index-ordered pins;
- * the L,i serial protocol and monitor GUIs use this 0..2 order. */
+/* Lick detectors: Banner D12DAB6 fiber amp -> Due INPUT_PULLUP; the pin idles
+ * HIGH and is pulled LOW on tongue contact (at the amp's current LO/DO setting).
+ * Raw, index-ordered pins; the L,i serial protocol and monitor GUIs use this
+ * 0..2 order. see docs/decisions/0164 */
 #define PIN_LICK_0  37
 #define PIN_LICK_1  36
 #define PIN_LICK_2  35
@@ -205,7 +209,17 @@
 #define DAC_SAMPLE_RATE      80000.0f    /* Hz */
 
 /* ================================ Protocol ============================== */
-/* v7 lets the host set a per-cue playback volume: CUE_ON,<CHOICE|RETURN>,<hz>,
+/* v8 corrects the body-beam and lick STATE polarity. The Due-pin sense was
+ * inverted relative to the physical event (the NOYIYO opto is "Normal Low /
+ * Actuated High" for beams; the lick pin idles HIGH and is pulled LOW on
+ * contact), so pre-v8 firmware printed S,<i>,1 / L,<i>,1 for the RESTING state
+ * and pulsed the FSM/TTL on beam CLEAR. v8 flips the firmware read so S,<i>,1 =
+ * beam broken and L,<i>,1 = tongue contact again (also fixing the FSM/TTL edge
+ * and the boot state). This is a SEMANTIC break, not an appended field, hence
+ * the version bump; recorded bundles carry a per-bundle sensor_polarity flag so
+ * the analysis can tell pre-v8 (inverted) from v8 (corrected) sessions.
+ * see docs/decisions/0164
+ * v7 lets the host set a per-cue playback volume: CUE_ON,<CHOICE|RETURN>,<hz>,
  * <gain> where <gain> is a percent 0..100 of full DAC amplitude (optional and
  * clamped to [CUE_GAIN_PCT_MIN, CUE_GAIN_PCT_MAX]; absent == 100 == v6 level).
  * The firmware scales the tone in the wavetable ISR (integer Q8, see sound.h)
@@ -230,6 +244,6 @@
  * logging (REWARD,<port>,MANUAL), and SESSION_SUMMARY (see docs/decisions/0009);
  * plus full manual solenoid control in cue-guided-task (R<port><sol>[,<ms>] ->
  * SOL ack) and auto well-clean SOL lines at trial start (docs/decisions/0010). */
-#define PROTO_VERSION        7
+#define PROTO_VERSION        8
 
 #endif /* RIG_CONFIG_H */

@@ -1,7 +1,22 @@
-# Rig serial protocol v7
+# Rig serial protocol v8
 
 Both firmware sketches (`cue-guided-task`, `tmaze_test`) and the host tools
-(`maze_gui.py`, `lick_tuner.py`, `rig_logger.py`) speak this protocol. v7 adds a
+(`maze_gui.py`, `lick_tuner.py`, `rig_logger.py`) speak this protocol.
+
+v8 CORRECTS the body-beam (`S`) and lick (`L`) state polarity. The firmware's
+Due-pin read was inverted relative to the physical event - the beams reach the
+Due through a NOYIYO opto marked "Normal Low / Actuated High" and the lick pins
+idle HIGH and are pulled LOW on contact - so pre-v8 firmware reported `S,<i>,1`
+/ `L,<i>,1` for the RESTING state (and pulsed the FSM / Open Ephys TTLs on beam
+CLEAR). v8 flips the firmware read so `S,<i>,1` = beam broken and `L,<i>,1` =
+tongue contact again, which also fixes the choice/return TTL edge and the boot
+state. This is a SEMANTIC change (the field grammar is unchanged), hence the
+version bump: a recorded log's `0,PROTO,<n>` line, and the bundle's
+`sensor_polarity` flag, tell pre-v8 (inverted) from v8 (corrected) data. Old
+logs keep their inverted meaning; the analysis layer branches on the flag. see
+docs/decisions/0164
+
+v7 adds a
 per-cue playback volume: `CUE_ON,<CHOICE|RETURN>,<hz>` gains an optional trailing
 percent, `CUE_ON,<CHOICE|RETURN>,<hz>,<gain>` (0-100 % of full DAC amplitude,
 clamped to `[CUE_GAIN_PCT_MIN, CUE_GAIN_PCT_MAX]`; absent == 100 == the v6 level,
@@ -102,8 +117,8 @@ log can contain several of them.
 | TYPE | Payload | Meaning |
 |------|---------|---------|
 | `TRIAL` | `<index>,LEFT\|RIGHT` | trial `<index>` (1-based) started; correct side |
-| `S` | `<i>,<state>` | body-beam `i` edge; `state` **0 = beam broken (rat crossing), 1 = beam clear (resting)**. Measured on recorded logs 2026-09-08: the `1` spans run for tens of seconds, the `0` spans 50–400 ms, and the board's channel LED goes dark during `0` (`docs/design/cross-stream-sync-design.md` §3.7). Earlier revisions of this row said the opposite; the firmware source comment and the host consumers of the flag are being reconciled under `docs/future-work.md` FW-0058. |
-| `L` | `<i>,<state>` | lick `i` edge; `state` **0 = tongue contact (lick), 1 = idle**. Same inversion and same evidence as `S`: over a full session `1` runs unbroken for minutes while `0` never exceeds 0.3 s (median 92 ms); the lick LED lights during `0`. See FW-0058. |
+| `S` | `<i>,<state>` | body-beam `i` edge. **v8 (this firmware): `state` 1 = beam broken (rat crossing), 0 = beam clear (resting).** PRE-v8 firmware (`0,PROTO,7` and earlier) emitted the INVERTED meaning (`1` = resting, `0` = the 50–400 ms crossing, confirmed on recorded logs 2026-09-08 and by a rig hand check 2026-09-14; `docs/design/cross-stream-sync-design.md` §3.7). Read the log's `0,PROTO,<n>` line / the bundle `sensor_polarity` flag to pick the convention. Corrected under `docs/decisions/0164` (was `docs/future-work.md` FW-0058). |
+| `L` | `<i>,<state>` | lick `i` edge. **v8: `state` 1 = tongue contact (lick), 0 = idle.** PRE-v8 firmware emitted the INVERTED meaning (`1` = idle, `0` = the brief ≤0.3 s contact, median 92 ms). Same polarity story and provenance as `S`; see `docs/decisions/0164`. |
 | `MODE` | `FREEROAM\|FULLTASK` | training mode entered (at boot or on a `MODE` command) |
 | `CHOICE` | `LEFT\|RIGHT` | arm chosen |
 | `OUTCOME` | `CORRECT\|INCORRECT` | choice correctness |

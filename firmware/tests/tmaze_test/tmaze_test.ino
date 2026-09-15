@@ -109,8 +109,10 @@ void updateSensors() {
 
     int raw = digitalRead(sensorPins[i]);
 
-    // HIGH idle → LOW event → invert
-    int state = (raw == LOW) ? 1 : 0;
+    // Via the NOYIYO opto ("Normal Low / Actuated High"): LOW at rest, HIGH on
+    // break -> state 1 = beam broken. Corrected in proto v8 (was `== LOW`, which
+    // reported rest as active). see docs/decisions/0164
+    int state = (raw == HIGH) ? 1 : 0;
 
     if (state != lastSensor[i]) {
       lastSensor[i] = state;
@@ -131,8 +133,9 @@ void updateLicks() {
 
     int raw = digitalRead(lickPins[i]);
 
-    // LOW idle → HIGH event → keep as is
-    int state = (raw == HIGH) ? 1 : 0;
+    // INPUT_PULLUP idles HIGH; contact pulls LOW -> state 1 = tongue contact.
+    // Corrected in proto v8 (was `== HIGH`, which reported idle as active). see docs/decisions/0164
+    int state = (raw == LOW) ? 1 : 0;
 
     if (state != lastLick[i]) {
       lastLick[i] = state;
