@@ -255,6 +255,10 @@ class SessionControlView:
         self._disk_label: Optional[ttk.Label] = None
         self._disk_after: Optional[str] = None
         self._learned_animal = ""         # last animal id seen on the serial stream
+        # Last firmware serial protocol version seen on the 0,PROTO handshake.
+        # Recorded into the bundle as provenance - it fixes the S/L state
+        # polarity convention (proto >= 8 corrected; see docs/decisions/0164).
+        self._firmware_proto: Optional[int] = None
         # Canonical animal-id list (resources repo), loaded best-effort once so
         # Session Start can normalize/validate the entered id (docs/decisions/0075).
         # An empty (unavailable) registry when the resources repo is absent.
@@ -327,9 +331,12 @@ class SessionControlView:
         return self._session_timer.snapshot(time.time())
 
     def apply(self, info) -> None:
-        """Two jobs per serial line: (1) record the last animal id seen on the
-        ``ANIMAL`` handshake as a fallback (the Task tab's field is the primary
-        source now; docs/decisions/0053), and (2) while a session is active,
+        """Two jobs per serial line: (1) record handshake provenance - the last
+        animal id seen on the ``ANIMAL`` handshake as a fallback (the Task tab's
+        field is the primary source now; docs/decisions/0053) and the firmware
+        serial protocol version from ``0,PROTO,<n>`` (stamped into the bundle to
+        fix the S/L polarity convention; docs/decisions/0164) - and (2) while a
+        session is active,
         append the SENSOR + CENTRAL-PORT lines to this session's filtered serial
         file (docs/decisions/0049). Reads the pre-parsed protocol.LineInfo
         (docs/decisions/0056). Runs on the Tk thread (the sole writer of that
@@ -342,6 +349,9 @@ class SessionControlView:
         docs/decisions/0084)."""
         if info.animal:
             self._learned_animal = info.animal
+        proto = protocol.proto_version_from(info.parsed)
+        if proto is not None:
+            self._firmware_proto = proto
         if (self._active and self._serial_file is not None
                 and is_sensor_or_central(
                     info, center_lick_index=self._center_lick,
@@ -1521,7 +1531,8 @@ class SessionControlView:
             result = session_config.write_config_snapshot(
                 config_dir, session_id=self._session_id,
                 extra_sources=extra_sources, runtime_params=runtime_params,
-                format_manifest=bundle_format.format_manifest())
+                format_manifest=bundle_format.format_manifest(
+                    firmware_proto=self._firmware_proto))
         except Exception:
             return False
         if self._manifest is not None:

@@ -24,7 +24,7 @@ regenerates the committed fixture from this manifest + the trial writer).
 """
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from tmaze.core import maze_state
 from tmaze.core.phase3 import phase3_log
@@ -36,7 +36,34 @@ from tmaze.core.phase3.trial_sequence import HIGH, LEFT, LOW, RIGHT
 # which the reader checks to fail loudly on a newer format.
 # v2 (ADR-0154): adds the ``sync`` block below (the offline LED clock-fit stream
 # written by tmaze.tools.sync_fit into sync/).
-FORMAT_VERSION = 2
+# v3 (ADR-0164): adds ``firmware_proto`` + ``sensor_polarity`` - the firmware
+# serial protocol version seen on the run's ``0,PROTO`` handshake and the S/L
+# state convention it implies (proto >= 8 corrected, else the legacy inverted
+# meaning), so the analysis reads each bundle's beam/lick polarity per session.
+FORMAT_VERSION = 3
+
+# The firmware serial protocol version at/after which the body-beam (S) and lick
+# (L) state bit is CORRECTED (1 = broken/contact); below it the recorded meaning
+# is inverted (1 = resting). See firmware/PROTOCOL.md and docs/decisions/0164.
+CORRECTED_POLARITY_PROTO = 8
+
+POLARITY_CORRECTED = "corrected"
+POLARITY_LEGACY = "legacy_inverted"
+POLARITY_UNKNOWN = "unknown"
+
+
+def sensor_polarity_for(firmware_proto: Optional[int]) -> str:
+    """The S/L state convention implied by a firmware serial proto version.
+
+    ``corrected`` (proto >= 8): ``S,<i>,1`` = beam broken, ``L,<i>,1`` = tongue
+    contact. ``legacy_inverted`` (proto < 8): those ``1`` states are the RESTING
+    states. ``unknown``: the ``0,PROTO`` handshake was not seen this run (the
+    reader then infers from date / the trial-CSV proto). See docs/decisions/0164.
+    """
+    if firmware_proto is None:
+        return POLARITY_UNKNOWN
+    return POLARITY_CORRECTED if firmware_proto >= CORRECTED_POLARITY_PROTO \
+        else POLARITY_LEGACY
 
 # One-line meaning per trial-CSV column, keyed by the phase3_log.COLUMNS names.
 # Columns without an entry still appear in the manifest (with an empty string), so
@@ -124,16 +151,23 @@ def _sync() -> Dict[str, Any]:
     }
 
 
-def format_manifest() -> Dict[str, Any]:
+def format_manifest(firmware_proto: Optional[int] = None) -> Dict[str, Any]:
     """The ``config/format.json`` payload: the bundle's machine-readable contract.
 
     Enumerates the token vocabularies, the protocol version, the maze zone names,
     and the trial-CSV column dictionary - all derived from the live cores so the
     manifest is always consistent with what the rig writes.
+
+    ``firmware_proto`` is the version seen on the run's ``0,PROTO`` handshake (the
+    one runtime-observed value here); it is recorded verbatim and used to derive
+    ``sensor_polarity`` - the S/L state convention (see docs/decisions/0164). It
+    is ``None`` (-> ``sensor_polarity`` "unknown") when the handshake was not seen.
     """
     return {
         "format_version": FORMAT_VERSION,
         "proto": phase3_log.PROTO_VERSION,
+        "firmware_proto": firmware_proto,
+        "sensor_polarity": sensor_polarity_for(firmware_proto),
         "zones_version": maze_state.ZONES_VERSION,
         "outcome_labels": [CORRECT, INCORRECT, ABANDONED],
         "cue_labels": [HIGH, LOW],

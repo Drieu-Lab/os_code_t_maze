@@ -1,6 +1,8 @@
 {
-  "format_version": 2,
+  "format_version": 3,
   "proto": 10,
+  "firmware_proto": 8,
+  "sensor_polarity": "corrected",
   "zones_version": 1,
   "outcome_labels": [
     "CORRECT",

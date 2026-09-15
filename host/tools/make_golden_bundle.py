@@ -45,6 +45,9 @@ SID = "600_20260101_120000"
 ANIMAL = "600"
 SEED = 20260830
 N_TRIALS = 6
+# Fixed firmware serial proto for the fixture: a current (v8) session, so
+# format.json carries sensor_polarity = "corrected" (see docs/decisions/0164).
+FIRMWARE_PROTO = 8
 SESSION_START_ISO = "2026-01-01T11:59:55.000"      # gate-arm time (secondary event)
 T0: Dict[str, Any] = {                              # canonical session anchor (ADR-0124)
     "wall": 1000000.0,
@@ -131,7 +134,7 @@ def build_bundle(out_root: str) -> str:
     bundle = os.path.join(out_root, SID)
     _write(os.path.join(bundle, "task", f"phase3_{SID}.csv"), build_log().render_csv())
     _write_json(os.path.join(bundle, "config", "format.json"),
-                bundle_format.format_manifest())
+                bundle_format.format_manifest(firmware_proto=FIRMWARE_PROTO))
     _write_json(os.path.join(bundle, "config", "zones.json"), _ZONES)
     _write_json(os.path.join(bundle, "config", "session_meta.json"),
                 {"trainer": "RJ", "stage": "Phase 3", "schema_version": 1})

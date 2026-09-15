@@ -114,6 +114,13 @@ class TestHandshake(unittest.TestCase):
         self.assertIsNone(animal_id("0,ANIMAL,"))
         self.assertIsNone(animal_id("0,MODE,FREEROAM"))
 
+    def test_proto_version(self):
+        self.assertEqual(protocol.proto_version("0,PROTO,8"), 8)
+        self.assertEqual(protocol.proto_version("0,PROTO, 7 "), 7)
+        self.assertIsNone(protocol.proto_version("0,PROTO,"))
+        self.assertIsNone(protocol.proto_version("0,PROTO,x"))
+        self.assertIsNone(protocol.proto_version("0,ANIMAL,RAT001"))
+
 
 class TestSanitizeAnimalId(unittest.TestCase):
     def test_keeps_slug_chars(self):

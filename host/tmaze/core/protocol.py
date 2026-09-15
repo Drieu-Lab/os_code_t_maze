@@ -161,6 +161,24 @@ def animal_id(line: str) -> Optional[str]:
     return animal_id_from(parse(line))
 
 
+def proto_version_from(p: Optional[ParsedLine]) -> Optional[int]:
+    """The integer version of a pre-parsed "<ms>,PROTO,<n>" handshake, else None."""
+    if p is None or p.type != "PROTO" or not p.fields:
+        return None
+    n = p.fields[0].strip()
+    return int(n) if n.isdigit() else None
+
+
+def proto_version(line: str) -> Optional[int]:
+    """The firmware serial protocol version from a "<ms>,PROTO,<n>" line, else None.
+
+    Emitted once at firmware startup (``0,PROTO,<n>``; see firmware/PROTOCOL.md).
+    The host records it as the session's firmware provenance - in particular it
+    fixes the S/L state polarity convention (proto >= 8 corrected, else the
+    legacy inverted meaning; see docs/decisions/0164)."""
+    return proto_version_from(parse(line))
+
+
 def sanitize_animal_id(name: str) -> str:
     """Filename-safe slug of an animal id: keep alphanumerics plus '-'/'_',
     drop everything else, and fall back to "unknown" if nothing remains. The
