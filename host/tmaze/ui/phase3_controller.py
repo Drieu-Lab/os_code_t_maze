@@ -221,6 +221,14 @@ class Phase3ControlView(VisionActuator):
         self._task_events = TaskEvents() if TaskEvents is not None else None
         self._gate_was_open = False
         self._last_fw_cue = ""            # last firmware CUE echo (for status)
+        # Trial index awaiting a firmware-clock echo (docs/decisions/0165): set on
+        # the actuation thread when the CHOICE cue / prime reward is COMMANDED, then
+        # bound to the trial's *_fw_ms cell when the firmware CUE,ON / SOL,REWARD
+        # echo comes back (routed from the serial thread via _enqueue_act). First
+        # echo wins, then cleared. Actuation-thread state; init here so an echo that
+        # arrives before a session is armed is a harmless no-op.
+        self._pending_cue_ack_index: Optional[int] = None
+        self._pending_reward_ack_index: Optional[int] = None
         # Session data log (plan matrix + live outcomes; ADR-0047), and the state
         # needed to fill it: which cue is sounding (to route the CUE_OFF edge) and
         # the file path. All touched only by the actuation thread. The trial-start
@@ -355,6 +363,17 @@ class Phase3ControlView(VisionActuator):
         if info.cue is not None:
             state, kind, freq = info.cue
             self._last_fw_cue = f"fw: {kind} @ {freq} Hz" if state == "ON" else "fw: off"
+            # The firmware's CHOICE cue-on echo carries the cue onset on the
+            # firmware clock (docs/decisions/0165); route its ms to the actuation
+            # thread (sole log writer) to stamp the trial's choice_cue_on_fw_ms.
+            if state == "ON" and kind == CHOICE and info.parsed is not None:
+                self._enqueue_act(("cue_ack", info.parsed.ms))
+            return
+        # A solenoid / reward echo carries the reward pulse on the firmware clock
+        # (docs/decisions/0165); route its ms to stamp the trial's reward_cmd_fw_ms.
+        if (info.reward is not None or info.sol is not None) \
+                and info.parsed is not None:
+            self._enqueue_act(("reward_ack", info.parsed.ms))
             return
         lick = info.lick
         if lick is not None and self._center_lick is not None:
@@ -586,6 +605,10 @@ class Phase3ControlView(VisionActuator):
             self._process_lick(item[1], item[2], item[3])
         elif item[0] == "cmd":
             self._process_command(item[1], snap)
+        elif item[0] == "cue_ack":
+            self._process_cue_ack(item[1])
+        elif item[0] == "reward_ack":
+            self._process_reward_ack(item[1])
         else:
             self._process_frame(item[1], snap)
 
@@ -623,6 +646,8 @@ class Phase3ControlView(VisionActuator):
         self._reopen_resumes = 0             # a fresh run: no reopens yet
         self._reward_ul = 0.0
         self._active_cue = None
+        self._pending_cue_ack_index = None
+        self._pending_reward_ack_index = None
         # Start a fresh session data file: the planned matrix is written now, then
         # each trial's outcome is filled in as it resolves (ADR-0047). When armed
         # via the Session controller the shared session_id names the file (so the
@@ -805,12 +830,14 @@ class Phase3ControlView(VisionActuator):
         self._send_cmd("CUE_OFF")
         self._active_cue = None
         self._choice_cue_on_iso = None
+        self._pending_cue_ack_index = None
         self._gate.reset()
         # Drop any pending credential prime + open well visit, so an interrupted
         # trial can't carry a stale top-up window into the next one (ADR-0069).
         if self._well is not None:
             self._well.reset()
         self._reward_trial_index = None
+        self._pending_reward_ack_index = None
 
     def _extend_trials(self, snap: _Phase3Snapshot) -> None:
         """Append one balanced block of trials to the live plan (docs/decisions/
@@ -993,6 +1020,9 @@ class Phase3ControlView(VisionActuator):
                 self._send_cmd(
                     f"CUE_ON,CHOICE,{cf},{cue_calibration.gain_pct_for(freq)}")
                 self._active_cue = CHOICE
+                # Await the firmware CUE,ON echo to stamp this trial's cue onset on
+                # the firmware clock (docs/decisions/0165).
+                self._pending_cue_ack_index = idx
                 # Remember this trip's cue-on stamp so a scored excursion can carry
                 # the relative cue-zone dwell (ADR-0108/0109).
                 self._choice_cue_on_iso = iso
@@ -1044,6 +1074,9 @@ class Phase3ControlView(VisionActuator):
                 if fired is not None and self._dispatch_fire(fired):
                     self._reward_count += 1
                     self._reward_trial_index = dec.trial_index
+                    # Await the firmware SOL/REWARD echo to stamp this trial's
+                    # reward on the firmware clock (docs/decisions/0165).
+                    self._pending_reward_ack_index = dec.trial_index
                     # Record the RAW prime width for the per-trial reward magnitude
                     # (ADR-0110); bind locals so the deferred call captures values.
                     ti, prime_ms = dec.trial_index, fired.ms
@@ -1144,6 +1177,31 @@ class Phase3ControlView(VisionActuator):
         if changed:
             self._write_log()
             self._publish_state(armed=True)
+
+    def _process_cue_ack(self, fw_ms) -> None:
+        """Bind a firmware CHOICE cue-on echo's ms to the pending trial's
+        choice_cue_on_fw_ms (docs/decisions/0165). First echo wins (the pending
+        index is cleared once bound); an echo with no pending cue is ignored."""
+        idx = self._pending_cue_ack_index
+        if idx is None:
+            return
+        self._pending_cue_ack_index = None
+        if self._log is not None:
+            self._log.cue_acked(idx, fw_ms)
+            self._write_log()
+
+    def _process_reward_ack(self, fw_ms) -> None:
+        """Bind the first firmware SOL/REWARD echo after a prime to the pending
+        trial's reward_cmd_fw_ms (docs/decisions/0165). First echo wins, so a
+        later lick top-up echo does not overwrite the prime's firmware time; an
+        echo with no pending prime is ignored."""
+        idx = self._pending_reward_ack_index
+        if idx is None:
+            return
+        self._pending_reward_ack_index = None
+        if self._log is not None:
+            self._log.reward_acked(idx, fw_ms)
+            self._write_log()
 
     def _log_call(self, fn) -> None:
         """Run a log mutation only if a session log exists (defensive; the log is
