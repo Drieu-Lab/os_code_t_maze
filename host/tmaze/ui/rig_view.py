@@ -152,7 +152,14 @@ def update(state: RigState, event: Optional[Event]) -> RigState:
 # All coordinates are isolated here so they are easy to nudge after a run.
 
 CANVAS_W = 480
-CANVAS_H = 560            # extra bottom margin for the center-port solenoids
+# The drawn content spans y ~= 68 (top maze wall) to ~548 (center-port solenoid
+# labels). The layout coordinates below were authored with a wide top margin
+# (maze wall at y=70), so the whole drawing is shifted UP by LAYOUT_Y_SHIFT at
+# draw time (applied in the drawing helpers, not baked into each constant) and
+# the canvas is sized to the shifted content + a small margin, so it fits its
+# pane without clipping the bottom or wasting space at the top.
+LAYOUT_Y_SHIFT = -56     # move everything up to remove the dead top margin
+CANVAS_H = 500           # shifted content (~68..548 -> ~12..492) + bottom margin
 
 MARKER_R = 12
 SOL_MARKER_R = 7         # solenoids are smaller, three-to-a-cluster
@@ -349,44 +356,49 @@ class RigView:
 
     @staticmethod
     def _flatten(points) -> list:
-        return [c for pt in points for c in pt]
+        # Every point is (x, y); shift y up by LAYOUT_Y_SHIFT so polygons move
+        # with the markers (see the CANVAS_H note above).
+        return [c for pt in points for c in (pt[0], pt[1] + LAYOUT_Y_SHIFT)]
 
     def _make_marker(self, m: Marker) -> int:
         r = MARKER_R
+        my = m.y + LAYOUT_Y_SHIFT           # shifted draw position (see CANVAS_H)
         circle = self.canvas.create_oval(
-            m.x - r, m.y - r, m.x + r, m.y + r,
+            m.x - r, my - r, m.x + r, my + r,
             fill=COLOR_IDLE, outline="#333333", width=2,
         )
         # Label clear of the corridors: top T-arm markers label above; others
         # label outboard of center (left/right) or below for the central stem.
+        # Classify on the authored geometry (m.x/m.y); place at the shifted my.
         cx = CANVAS_W / 2
         if m.y < 130:
-            tx, ty, anchor = m.x, m.y - r - 4, "s"
+            tx, ty, anchor = m.x, my - r - 4, "s"
         elif m.x < cx - 40:
-            tx, ty, anchor = m.x - r - 4, m.y, "e"
+            tx, ty, anchor = m.x - r - 4, my, "e"
         elif m.x > cx + 40:
-            tx, ty, anchor = m.x + r + 4, m.y, "w"
+            tx, ty, anchor = m.x + r + 4, my, "w"
         else:
-            tx, ty, anchor = m.x, m.y + r + 9, "n"
+            tx, ty, anchor = m.x, my + r + 9, "n"
         self.canvas.create_text(tx, ty, text=m.label, anchor=anchor,
                                 font=("TkDefaultFont", 8))
         return circle
 
     def _make_sol_marker(self, sm: SolenoidMarker) -> int:
         r = SOL_MARKER_R
+        sy = sm.y + LAYOUT_Y_SHIFT          # shifted draw position (see CANVAS_H)
         circle = self.canvas.create_oval(
-            sm.x - r, sm.y - r, sm.x + r, sm.y + r,
+            sm.x - r, sy - r, sm.x + r, sy + r,
             fill=COLOR_IDLE, outline=_sol_outline(sm.sol), width=2,
         )
         cx = CANVAS_W / 2
         # Side columns sit in narrow margins, so role labels read inward (over
         # the open floor) to avoid clipping off-canvas; bottom row labels below.
         if sm.x < cx - 120:        # left margin -> label inward (right)
-            tx, ty, anchor = sm.x + r + 3, sm.y, "w"
+            tx, ty, anchor = sm.x + r + 3, sy, "w"
         elif sm.x > cx + 120:      # right margin -> label inward (left)
-            tx, ty, anchor = sm.x - r - 3, sm.y, "e"
+            tx, ty, anchor = sm.x - r - 3, sy, "e"
         else:                      # bottom cluster -> label below
-            tx, ty, anchor = sm.x, sm.y + r + 3, "n"
+            tx, ty, anchor = sm.x, sy + r + 3, "n"
         self.canvas.create_text(tx, ty, text=sm.label, anchor=anchor,
                                 font=("TkDefaultFont", 7))
         return circle
@@ -406,6 +418,7 @@ class RigView:
             SOL_FLASH_MS, lambda: self.canvas.itemconfig(item, fill=COLOR_IDLE))
 
     def _legend_row(self, x: int, y: int, fill: str, outline: str, text: str) -> int:
+        y = y + LAYOUT_Y_SHIFT              # shifted draw position (see CANVAS_H)
         swatch = self.canvas.create_oval(x, y, x + 14, y + 14, fill=fill,
                                          outline=outline, width=2)
         self.canvas.create_text(x + 22, y + 7, anchor="w", text=text,
@@ -427,8 +440,9 @@ class RigView:
             LEGEND_LEFT_X, LEGEND_LEFT_Y + 40, COLOR_SOLENOID, "#333333",
             "solenoid pulsed"), "legend.solenoid")
 
-        self.canvas.create_text(LEGEND_RIGHT_X, LEGEND_RIGHT_Y - 16, anchor="w",
-                                text="solenoid role:", font=("TkDefaultFont", 8))
+        self.canvas.create_text(LEGEND_RIGHT_X, LEGEND_RIGHT_Y - 16 + LAYOUT_Y_SHIFT,
+                                anchor="w", text="solenoid role:",
+                                font=("TkDefaultFont", 8))
         canvas_tip(self.canvas, self._legend_row(
             LEGEND_RIGHT_X, LEGEND_RIGHT_Y, COLOR_IDLE, COLOR_SOL_REWARD,
             "reward"), "legend.role.reward")
