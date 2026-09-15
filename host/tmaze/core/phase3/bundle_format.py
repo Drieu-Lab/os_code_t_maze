@@ -100,6 +100,10 @@ _COLUMN_DOC: Dict[str, str] = {
     "topup_ms_total": "sum of this trial's lick top-up pulse widths (ms)",
     "probe": "1 on an unrewarded probe trial, else blank",
     "probe_trigger": "1 on the correct trial that started a probe block",
+    "choice_cue_on_fw_ms": "firmware hardware-clock ms of the choice cue onset, "
+                           "from the CUE,ON echo (see docs/decisions/0165)",
+    "reward_cmd_fw_ms": "firmware hardware-clock ms of the prime reward pulse, from "
+                        "the first SOL/REWARD echo (see docs/decisions/0165)",
     "attempt": "1-based attempt number for this trial (append-only edits)",
     "superseded": "1 on a preserved attempt a later Repeat/Back replaced",
     "edit": "operator action that created a >1 attempt (repeat/back)",

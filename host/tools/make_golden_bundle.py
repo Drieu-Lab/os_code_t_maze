@@ -111,9 +111,11 @@ def build_log() -> Phase3Log:
         side = "left" if seq.correct_arm(i) == LEFT else "right"
         log.trial_started(i, _iso(i, "000"))
         log.choice_cue_started(i, _iso(i, "100"))
+        log.cue_acked(i, 12100 + i)                              # firmware CUE,ON echo ms
         log.choice_cue_stopped(i, _iso(i, "200"))
         log.choice_scored(i, side, "CORRECT", _iso(i, "500"))   # always correct
         log.reward_fired(i, _iso(i, "550"), 500)
+        log.reward_acked(i, 12550 + i)                           # firmware SOL/REWARD echo ms
         log.lick(_iso(i, "600"), 12300 + i)
         log.trial_ended(i, _iso(i, "900"))
     return log

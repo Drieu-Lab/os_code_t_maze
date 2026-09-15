@@ -184,6 +184,46 @@ class TestLickAttribution(unittest.TestCase):
         self.assertEqual(log._rows[0].lick_fw_ms, "")
 
 
+class TestFirmwareClockAcks(unittest.TestCase):
+    """The proto-11 firmware-clock twins of the cue-onset / reward stamps
+    (docs/decisions/0165), fed from the firmware's CUE,ON and SOL/REWARD echoes."""
+
+    def test_cue_and_reward_acks_fill_their_cells(self):
+        log = _log()
+        log.choice_cue_started(0, "t_cue_on")
+        log.cue_acked(0, 12100)
+        log.reward_fired(0, "t_reward", 500)
+        log.reward_acked(0, 12550)
+        self.assertEqual(log._rows[0].choice_cue_on_fw_ms, "12100")
+        self.assertEqual(log._rows[0].reward_cmd_fw_ms, "12550")
+
+    def test_first_echo_wins(self):
+        # A later echo (e.g. a lick top-up SOL, or a re-fired cue) must not
+        # overwrite the prime / cue-onset firmware time already recorded.
+        log = _log()
+        log.cue_acked(0, 100)
+        log.cue_acked(0, 200)
+        log.reward_acked(0, 500)
+        log.reward_acked(0, 600)             # top-up echo: ignored here
+        self.assertEqual(log._rows[0].choice_cue_on_fw_ms, "100")
+        self.assertEqual(log._rows[0].reward_cmd_fw_ms, "500")
+
+    def test_none_ms_leaves_cell_blank(self):
+        log = _log()
+        log.cue_acked(0, None)
+        log.reward_acked(0, None)
+        self.assertIsNone(log._rows[0].choice_cue_on_fw_ms)
+        self.assertIsNone(log._rows[0].reward_cmd_fw_ms)
+
+    def test_out_of_range_index_is_ignored(self):
+        log = _log(n=2)
+        log.cue_acked(99, 123)               # no such trial -> no-op, no raise
+        log.reward_acked(-1, 123)
+        for r in log._rows:
+            self.assertIsNone(r.choice_cue_on_fw_ms)
+            self.assertIsNone(r.reward_cmd_fw_ms)
+
+
 class TestRender(unittest.TestCase):
     def test_csv_structure(self):
         log = _log(n=20)
@@ -352,16 +392,19 @@ class TestDebiasLogging(unittest.TestCase):
     def test_new_columns_exist_in_order(self):
         # The six closed-loop columns, then the two reward-magnitude columns
         # (docs/decisions/0110), then the unrewarded-probe markers (probe +
-        # probe_trigger; docs/decisions/0115-probe, 0134), then the trial-edit
-        # lifecycle columns (docs/decisions/0119), in order.
-        self.assertEqual(COLUMNS[-13:],
+        # probe_trigger; docs/decisions/0115-probe, 0134), then the firmware-clock
+        # cue/reward twins (docs/decisions/0165), then the trial-edit lifecycle
+        # columns (docs/decisions/0119), in order.
+        self.assertEqual(COLUMNS[-15:],
                          ("sched_state", "block_id", "block_trigger", "bias",
                           "block_kind", "alt_rate", "prime_ms", "topup_ms_total",
-                          "probe", "probe_trigger", "attempt", "superseded", "edit"))
+                          "probe", "probe_trigger",
+                          "choice_cue_on_fw_ms", "reward_cmd_fw_ms",
+                          "attempt", "superseded", "edit"))
 
-    def test_header_bumped_to_proto10_with_generator(self):
+    def test_header_bumped_to_proto11_with_generator(self):
         header = [ln for ln in _log().render_csv().split("\n") if ln.startswith("#")]
-        self.assertTrue(any("proto=10" in ln for ln in header))
+        self.assertTrue(any("proto=11" in ln for ln in header))
         self.assertTrue(any("generator=balanced" in ln for ln in header))
         # A balanced session records no closed-loop params.
         self.assertFalse(any("debias_blocks" in ln for ln in header))
