@@ -117,6 +117,7 @@ criteria).
 | [FW-0063](#fw-0063-hours_since_water-semantics-under-task_earned-water) | Define `hours_since_water` when the day's water is `task_earned` (no `water_off` clock time exists) | `core/records/{animal_state,daily_log}.py`, `session_controller._write_animal_state` | Proposed |
 | [FW-0064](#fw-0064-push-policy-for-the-records-commits) | Push policy for the records commits made by the "Commit records" button (when, where, who) | Records Manager, resources repo remote | Deferred |
 | [FW-0065](#fw-0065-show-age-where-it-matters-and-decide-the-remaining-biographical-fields) | Show the ADR-0161 age on the Sessions tab / dashboard; add sex/strain/vendor to `animals.json` only when a reader exists | `core/session/session_detail.py`, `core/records/{dashboard,animals}.py`, Records Manager | Proposed |
+| [FW-0066](#fw-0066-record-the-measured-db-and-meter-placement-with-the-cue-volume-calibration) | Record the measured dB (+ meter / mic placement notes) alongside the per-cue gains, mirroring the measured-frequency fields | `host/cue_calibration.json` schema, the cue-calibration UI/tool, `bundle_format` | Proposed |
 
 ## Entries
 
@@ -3330,6 +3331,46 @@ inputs.
 Parquet/NWB export (then a `format_version` coordination, not a `tmaze` import).
 
 **ADR needed?** Only for the field additions (extends ADR-0161).
+
+### FW-0066: Record the measured dB (and meter / placement) with the cue volume calibration
+
+- **Status:** Proposed
+- **Date added:** 2026-09-15
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** `host/cue_calibration.json` schema (`_schema` bump), the cue-calibration UI/tool that writes it, `core/phase3/bundle_format.py` (if the measured level should ride into the bundle)
+- **Related ADRs:** [ADR-0125](decisions/0125-per-cue-volume-calibration.md) (per-cue volume calibration), and the frequency-calibration measured-value pattern it mirrors
+
+**Motivation / context.** `cue_calibration.json` stores the commanded playback
+`gain_pct` per cue, and the gains are hand-tuned so the two cues read the same
+sound level at the rig (e.g. both ~64 dB SPL on 2026-09-15: 4 kHz gain 34 -> 10,
+8 kHz 83 -> 46). But only the *commanded* gain is recorded - the *measured* dB
+that justified it is not, so the equalization is not reproducible or auditable
+from the file alone. The frequency-calibration path already stores a measured
+value (`commanded_hz` vs the measured frequency); the volume path should do the
+same for level.
+
+**Sketch of approach.** Extend the schema (bump `_schema`) with, per cue, an
+optional `measured_db` (the SPL that gain produced) and a free-text `notes`
+field describing the measurement (meter/app used, mic/phone model, and where it
+was placed relative to the speaker - distance and angle). Surface both in the
+cue-calibration UI next to the gain. Optionally fold the measured level +
+placement notes into the session bundle's config snapshot so each session
+records the acoustic calibration it ran under.
+
+**Evaluation / acceptance.** A calibration file (and, if wired, a bundle) that
+records not just the gain but the dB it was tuned to and how that dB was
+measured; a second person can reproduce or sanity-check the equalization from
+the file.
+
+**Effort / risk.** Small. Risk: schema bump needs a reader tolerant of the old
+shape (blank `measured_db`/`notes` on pre-bump files).
+
+**Open questions.** Whether the measured level belongs only in the calibration
+file or also in the per-session bundle (a `format_version` coordination with the
+analysis repo if the latter). Whether to structure the placement (distance_cm /
+angle_deg) or keep it free text.
+
+**ADR needed?** Small - extends ADR-0125 when implemented.
 
 ## Completed
 
