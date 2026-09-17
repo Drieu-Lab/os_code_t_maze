@@ -228,6 +228,7 @@ class Phase3ControlView(VisionActuator):
         # echo wins, then cleared. Actuation-thread state; init here so an echo that
         # arrives before a session is armed is a harmless no-op.
         self._pending_cue_ack_index: Optional[int] = None
+        self._pending_return_cue_ack_index: Optional[int] = None
         self._pending_reward_ack_index: Optional[int] = None
         # Session data log (plan matrix + live outcomes; ADR-0047), and the state
         # needed to fill it: which cue is sounding (to route the CUE_OFF edge) and
@@ -363,11 +364,15 @@ class Phase3ControlView(VisionActuator):
         if info.cue is not None:
             state, kind, freq = info.cue
             self._last_fw_cue = f"fw: {kind} @ {freq} Hz" if state == "ON" else "fw: off"
-            # The firmware's CHOICE cue-on echo carries the cue onset on the
-            # firmware clock (docs/decisions/0165); route its ms to the actuation
-            # thread (sole log writer) to stamp the trial's choice_cue_on_fw_ms.
-            if state == "ON" and kind == CHOICE and info.parsed is not None:
-                self._enqueue_act(("cue_ack", info.parsed.ms))
+            # The firmware's cue-on echo carries the cue onset on the firmware
+            # clock; route its ms to the actuation thread (sole log writer) to
+            # stamp the trial's choice_cue_on_fw_ms (docs/decisions/0165) or
+            # return_cue_on_fw_ms (docs/decisions/0166).
+            if state == "ON" and info.parsed is not None:
+                if kind == CHOICE:
+                    self._enqueue_act(("cue_ack", info.parsed.ms))
+                elif kind == RETURN:
+                    self._enqueue_act(("return_cue_ack", info.parsed.ms))
             return
         # A solenoid / reward echo carries the reward pulse on the firmware clock
         # (docs/decisions/0165); route its ms to stamp the trial's reward_cmd_fw_ms.
@@ -607,6 +612,8 @@ class Phase3ControlView(VisionActuator):
             self._process_command(item[1], snap)
         elif item[0] == "cue_ack":
             self._process_cue_ack(item[1])
+        elif item[0] == "return_cue_ack":
+            self._process_return_cue_ack(item[1])
         elif item[0] == "reward_ack":
             self._process_reward_ack(item[1])
         else:
@@ -647,6 +654,7 @@ class Phase3ControlView(VisionActuator):
         self._reward_ul = 0.0
         self._active_cue = None
         self._pending_cue_ack_index = None
+        self._pending_return_cue_ack_index = None
         self._pending_reward_ack_index = None
         # Start a fresh session data file: the planned matrix is written now, then
         # each trial's outcome is filled in as it resolves (ADR-0047). When armed
@@ -831,6 +839,7 @@ class Phase3ControlView(VisionActuator):
         self._active_cue = None
         self._choice_cue_on_iso = None
         self._pending_cue_ack_index = None
+        self._pending_return_cue_ack_index = None
         self._gate.reset()
         # Drop any pending credential prime + open well visit, so an interrupted
         # trial can't carry a stale top-up window into the next one (ADR-0069).
@@ -1041,6 +1050,9 @@ class Phase3ControlView(VisionActuator):
                 self._send_cmd(
                     f"CUE_ON,RETURN,{cf},{cue_calibration.gain_pct_for(freq)}")
                 self._active_cue = RETURN
+                # Await the firmware CUE,ON return echo to stamp this trial's
+                # return-cue onset on the firmware clock (docs/decisions/0166).
+                self._pending_return_cue_ack_index = idx
                 self._log_call(lambda: self._log.return_cue_started(
                     idx, d.return_arm or "", cue, iso))
                 changed = True
@@ -1188,6 +1200,18 @@ class Phase3ControlView(VisionActuator):
         self._pending_cue_ack_index = None
         if self._log is not None:
             self._log.cue_acked(idx, fw_ms)
+            self._write_log()
+
+    def _process_return_cue_ack(self, fw_ms) -> None:
+        """Bind a firmware RETURN cue-on echo's ms to the pending trial's
+        return_cue_on_fw_ms (docs/decisions/0166). First echo wins; an echo with no
+        pending return cue is ignored (e.g. the return cue is disabled)."""
+        idx = self._pending_return_cue_ack_index
+        if idx is None:
+            return
+        self._pending_return_cue_ack_index = None
+        if self._log is not None:
+            self._log.return_cue_acked(idx, fw_ms)
             self._write_log()
 
     def _process_reward_ack(self, fw_ms) -> None:

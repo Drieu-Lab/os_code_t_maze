@@ -159,11 +159,13 @@ class SessionPhase3WiringTest(unittest.TestCase):
         self.phase3.apply(protocol.classify("12100,CUE,ON,CHOICE,4000"))
         self.phase3.apply(protocol.classify("12550,SOL,2,1"))
         self.phase3.apply(protocol.classify("13000,REWARD,CENTER,500"))
-        self.phase3.apply(protocol.classify("777,CUE,ON,RETURN,8000"))
+        self.phase3.apply(protocol.classify("13500,CUE,ON,RETURN,8000"))
         self.assertIn(("cue_ack", 12100), captured)
         self.assertIn(("reward_ack", 12550), captured)
         self.assertIn(("reward_ack", 13000), captured)
-        self.assertNotIn(("cue_ack", 777), captured)
+        # A RETURN cue echo feeds the return-cue stamp, not the choice one.
+        self.assertIn(("return_cue_ack", 13500), captured)
+        self.assertNotIn(("cue_ack", 13500), captured)
 
     def test_firmware_echoes_stamp_the_trial_fw_ms_cells(self):
         """End of the wiring: the actuation thread binds the echo ms to the pending
@@ -171,15 +173,19 @@ class SessionPhase3WiringTest(unittest.TestCase):
         later (top-up) reward echo does not overwrite the prime's firmware time."""
         self._open_gate()
         self._run_a_trial()                        # arms; a log now exists
-        # The CHOICE cue + prime were commanded for trial 0 (pending targets set).
+        # The CHOICE cue, prime, and RETURN cue were commanded for trial 0.
         self.phase3._pending_cue_ack_index = 0
         self.phase3._pending_reward_ack_index = 0
+        self.phase3._pending_return_cue_ack_index = 0
         self.phase3._process_act_item(("cue_ack", 12100), self.phase3._act_snapshot)
         self.phase3._process_act_item(("reward_ack", 12550),
+                                      self.phase3._act_snapshot)
+        self.phase3._process_act_item(("return_cue_ack", 12800),
                                       self.phase3._act_snapshot)
         row0 = self.phase3._log._rows[0]
         self.assertEqual(row0.choice_cue_on_fw_ms, "12100")
         self.assertEqual(row0.reward_cmd_fw_ms, "12550")
+        self.assertEqual(row0.return_cue_on_fw_ms, "12800")
         # A stray later reward echo (a top-up) must not overwrite the prime's ms.
         self.phase3._pending_reward_ack_index = 0
         self.phase3._process_act_item(("reward_ack", 99999),
