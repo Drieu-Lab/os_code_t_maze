@@ -37,14 +37,16 @@ Timestamp definitions (the corrected Phase 3 timeline):
     via a pending-reward pointer to the trial whose reward it collects. Blank on
     unrewarded trials or if no lick is seen. ``lick_fw_ms`` is the firmware
     hardware clock for that lick (host ISO times carry serial latency).
-  - ``choice_cue_on_fw_ms`` / ``reward_cmd_fw_ms`` = firmware hardware-clock (ms)
-    twins of ``choice_cue_on_iso`` / ``reward_cmd_iso``, captured from the
-    firmware's own echo lines (the ``CUE,ON`` choice echo and the first ``SOL`` /
+  - ``choice_cue_on_fw_ms`` / ``return_cue_on_fw_ms`` / ``reward_cmd_fw_ms`` =
+    firmware hardware-clock (ms) twins of ``choice_cue_on_iso`` /
+    ``return_cue_on_iso`` / ``reward_cmd_iso``, captured from the firmware's own
+    echo lines (the ``CUE,ON`` choice/return echoes and the first ``SOL`` /
     ``REWARD`` echo after the prime). Like ``lick_fw_ms`` they sit on the SAME
     clock the ephys TTLs use, so an offline reader can align cue onset and reward
     to the firmware/neural axis without going through the serial-latency-bearing
-    host ``*_iso`` stamps (S2/L5; see docs/decisions/0165). Blank when no echo was
-    seen (the honest signal).
+    host ``*_iso`` stamps (S2/L5; see docs/decisions/0165, 0166). Blank when no
+    echo was seen (the honest signal) - so ``return_cue_on_fw_ms`` is blank on a
+    run with the return cue disabled, exactly like ``return_cue_on_iso``.
 
 Pure and single-threaded (the Phase 3 actuation thread is the sole caller), like
 the other cores: no Tk/OpenCV/serial, no file I/O (the controller writes the
@@ -70,7 +72,10 @@ _ARM_LABEL = {LEFT: "LEFT", RIGHT: "RIGHT", "left": "LEFT", "right": "RIGHT"}
 # ``choice_cue_on_fw_ms`` / ``reward_cmd_fw_ms`` (append-only; existing columns
 # unchanged) so cue onset + reward carry a firmware-clock time, not just a
 # serial-latency-bearing host ISO stamp (S2/L5).
-PROTO_VERSION = 11
+# v12 (docs/decisions/0166): added ``return_cue_on_fw_ms``, the firmware-clock
+# twin of ``return_cue_on_iso`` (append-only), so the return cue gets the same
+# treatment as the choice cue if/when it is enabled.
+PROTO_VERSION = 12
 
 # CSV column order. The planned block is the "Nx3 cue matrix" (choice + the two
 # return arms) plus the explicit correct_arm; the rest is filled live.
@@ -104,7 +109,10 @@ COLUMNS = (
     # (docs/decisions/0165): the firmware ms carried by the CUE,ON choice echo and
     # by the first SOL/REWARD echo after the prime. Same clock as the ephys TTLs;
     # blank until (and unless) the echo is seen. Append-only for proto 11.
-    "choice_cue_on_fw_ms", "reward_cmd_fw_ms",
+    # ``return_cue_on_fw_ms`` (docs/decisions/0166) is the return-cue twin, appended
+    # LAST for proto 12 (kept after reward_cmd_fw_ms rather than beside the choice
+    # twin so the proto-11 column positions are untouched).
+    "choice_cue_on_fw_ms", "reward_cmd_fw_ms", "return_cue_on_fw_ms",
     # Trial-edit lifecycle (docs/decisions/0119, bug #260810): with append-only
     # trial edits the file is one row per (trial, ATTEMPT). ``attempt`` is the
     # 1-based attempt number for that trial; ``superseded`` is "1" on a preserved
@@ -165,11 +173,13 @@ class _Row:
     # 0134), so it can be excluded from probe accuracy.
     probe: Optional[str] = None
     probe_trigger: Optional[str] = None
-    # Firmware hardware-clock (ms) twins of choice_cue_on_iso / reward_cmd_iso, set
-    # from the firmware's echo lines (docs/decisions/0165). None until the echo is
-    # seen. See :meth:`cue_acked` / :meth:`reward_acked`.
+    # Firmware hardware-clock (ms) twins of choice_cue_on_iso / reward_cmd_iso /
+    # return_cue_on_iso, set from the firmware's echo lines (docs/decisions/0165,
+    # 0166). None until the echo is seen. See :meth:`cue_acked` /
+    # :meth:`reward_acked` / :meth:`return_cue_acked`.
     choice_cue_on_fw_ms: Optional[str] = None
     reward_cmd_fw_ms: Optional[str] = None
+    return_cue_on_fw_ms: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -212,6 +222,7 @@ class Phase3RowView:
     probe_trigger: Optional[str]
     choice_cue_on_fw_ms: Optional[str]
     reward_cmd_fw_ms: Optional[str]
+    return_cue_on_fw_ms: Optional[str]
 
 
 @dataclass(frozen=True)
@@ -532,6 +543,18 @@ class Phase3Log:
         r = self._row(index)
         if r is not None:
             r.return_cue_off_iso = iso
+
+    def return_cue_acked(self, index: int, fw_ms: Optional[int]) -> None:
+        """Record the firmware hardware-clock ms of the RETURN cue ONSET for
+        ``index``, from the firmware's ``CUE,ON`` return echo (docs/decisions/0166).
+
+        The return-cue twin of :meth:`cue_acked`: first echo wins, a missing/None
+        ms leaves the cell blank (and it stays blank on a run with the return cue
+        disabled, like ``return_cue_on_iso``). Firmware-clock twin of
+        ``return_cue_on_iso``."""
+        r = self._row(index)
+        if r is not None and r.return_cue_on_fw_ms is None and fw_ms is not None:
+            r.return_cue_on_fw_ms = str(int(fw_ms))
 
     def trial_ended(self, index: int, iso: str) -> None:
         r = self._row(index)

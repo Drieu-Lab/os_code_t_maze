@@ -104,6 +104,9 @@ _COLUMN_DOC: Dict[str, str] = {
                            "from the CUE,ON echo (see docs/decisions/0165)",
     "reward_cmd_fw_ms": "firmware hardware-clock ms of the prime reward pulse, from "
                         "the first SOL/REWARD echo (see docs/decisions/0165)",
+    "return_cue_on_fw_ms": "firmware hardware-clock ms of the return cue onset, from "
+                           "the CUE,ON echo (blank when the return cue is disabled; "
+                           "see docs/decisions/0166)",
     "attempt": "1-based attempt number for this trial (append-only edits)",
     "superseded": "1 on a preserved attempt a later Repeat/Back replaced",
     "edit": "operator action that created a >1 attempt (repeat/back)",
