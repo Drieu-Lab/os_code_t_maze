@@ -1010,7 +1010,10 @@ class Phase3ControlView(VisionActuator):
         # crossing the stem on its way home (docs/decisions/0067).
         self._gate.set_params(snap.params)
         outbound = task_frame.outbound_used_stem if task_frame is not None else False
-        on_leg = task_frame.left_hub_via_stem if task_frame is not None else False
+        # Feed the cue gate the SHARED trial credential (task_events.trial_trip;
+        # docs/decisions/0168), the same one the scorer + reward read, so all three
+        # agree on what a trial is. It equals left_hub_via_stem today.
+        on_leg = task_frame.trial_trip if task_frame is not None else False
         d = self._gate.step(st.zone, st.direction, st.confidence, st.valid,
                             outbound, on_leg)
         if d.started == CHOICE:
