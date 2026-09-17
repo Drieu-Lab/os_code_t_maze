@@ -18,6 +18,7 @@ Run from host/:  python -m unittest tests.test_session_phase3_wiring
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import tempfile
@@ -191,6 +192,60 @@ class SessionPhase3WiringTest(unittest.TestCase):
         self.phase3._process_act_item(("reward_ack", 99999),
                                       self.phase3._act_snapshot)
         self.assertEqual(self.phase3._log._rows[0].reward_cmd_fw_ms, "12550")
+
+    # -------------------------------- save-on-arm config provenance (ADR-0167)
+    def test_start_persists_live_phase3_config_before_the_snapshot(self):
+        """Save-on-arm: Start must write the tab's live GUI-editable config to
+        phase3.json BEFORE the config snapshot, so the archived copy reflects what
+        the session ARMED with even if the operator never pressed Save. Asserts
+        both the persist->snapshot order and that the persisted file carries the
+        live, un-Saved value (the snapshot then copies it verbatim, ADR-0072)."""
+        # Redirect the tab's config file to a temp path so the test never touches
+        # the real host/phase3.json.
+        cfg_path = os.path.join(self.recordings, "phase3_live.json")
+        self.phase3._config_path = cfg_path
+        # A live, UN-SAVED edit: bump the reward pulse away from what was loaded.
+        live_pulse = self.phase3._current_pulse_ms() + 123
+        self.phase3._pulse_var.set(str(live_pulse))
+
+        order = []
+        real_persist = self.phase3.persist_live_config
+        real_snapshot = self.session._write_config_snapshot
+
+        def spy_persist():
+            order.append("persist")
+            return real_persist()
+
+        def spy_snapshot(config_dir):
+            order.append("snapshot")
+            return real_snapshot(config_dir)
+
+        self.phase3.persist_live_config = spy_persist
+        self.session._write_config_snapshot = spy_snapshot
+
+        self._open_gate()
+        self._start_session()
+
+        self.assertEqual(order[:2], ["persist", "snapshot"],
+                         "phase3.json must be persisted before it is snapshotted")
+        with open(cfg_path, encoding="utf-8") as fh:
+            saved = json.load(fh)
+        self.assertEqual(saved["reward"]["pulse_ms"], live_pulse)
+        # The hand-edited-only sections survive the automatic write untouched.
+        self.assertIn("_schema", saved)
+        self.assertIn("max_trials", saved["sequence"])
+
+    def test_persist_live_config_skips_write_on_invalid_edit(self):
+        """Best-effort: an invalid live edit (min_errors > window) writes nothing
+        and returns a note, so save-on-arm can never corrupt phase3.json or break
+        Start."""
+        cfg_path = os.path.join(self.recordings, "phase3_invalid.json")
+        self.phase3._config_path = cfg_path
+        self.phase3._db_window_var.set("2")
+        self.phase3._db_min_errors_var.set("9")     # > window -> invalid
+        note = self.phase3.persist_live_config()
+        self.assertIsNotNone(note)
+        self.assertFalse(os.path.exists(cfg_path))
 
     @staticmethod
     def _expected_task_files(csv_name):

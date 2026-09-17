@@ -1630,13 +1630,15 @@ class Phase3ControlView(VisionActuator):
         self._alt_cap_var.set(str(al.get("max_block_len", ac.max_block_len)))
         self._sync_debias_enabled()
 
-    def _save_settings(self) -> None:
-        """Persist the tab's reward + cue fields to phase3.json (Save button).
+    def _collect_live_config(self) -> dict:
+        """Fold the tab's live GUI-editable fields into ``self._config`` in place
+        and return it - the single source of truth for both the Save button and the
+        save-on-arm write (:meth:`persist_live_config`).
 
-        Mutates only the operator-editable keys in place (so the ``sequence``
-        section, its ``seed``, and ``_schema`` are preserved), validates the whole
-        config, then writes it. Nothing is written if validation fails. The
-        scientific ``sequence`` params are edited in the file, not here."""
+        Mutates only the operator-editable keys (reward + cue + the debias
+        generator / intervention-block carve-out of ``sequence``; ADR-0070), so the
+        scientific schedule params, the ``seed``, and ``_schema`` are preserved.
+        Does NOT validate or write - callers do that."""
         cfg = self._config
         p = self._current_params()
         cfg["reward"]["pulse_ms"] = self._current_pulse_ms()
@@ -1654,6 +1656,15 @@ class Phase3ControlView(VisionActuator):
             self._current_debias_dict())
         cfg["sequence"].setdefault("alternation_blocks", {}).update(
             self._current_alternation_dict())
+        return cfg
+
+    def _save_settings(self) -> None:
+        """Persist the tab's reward + cue fields to phase3.json (Save button).
+
+        Folds the live fields in (:meth:`_collect_live_config`), validates the
+        whole config, then writes it. Nothing is written if validation fails. The
+        scientific ``sequence`` params are edited in the file, not here."""
+        cfg = self._collect_live_config()
         try:
             validate_phase3_config(cfg)
         except Exception as e:
@@ -1673,6 +1684,41 @@ class Phase3ControlView(VisionActuator):
             "Saved reward + cue + intervention (debias / de-alternation) settings "
             "to phase3.json. (The scientific schedule params - trials/block/tones/"
             "seed - are edited in the file.) New settings apply on the next arm.")
+
+    def persist_live_config(self) -> Optional[str]:
+        """Save-on-arm (P2; docs/decisions/0167): write the tab's live
+        GUI-editable Phase 3 config to ``host/phase3.json`` so the per-session
+        ``config/`` snapshot copied at Start reflects EXACTLY what this armed
+        session will run with - not just what was last hand-Saved.
+
+        Same fields as the Save button (:meth:`_collect_live_config`) but silent
+        (no dialogs) and best-effort: on an invalid edit or a write failure it
+        writes nothing and returns a short note for Start to log, so it can never
+        break Start. Returns None on success. Called on the Tk thread from the
+        Session controller's Start, just before the config snapshot.
+
+        Note: this pins the archived config to the live values AS OF Start. A field
+        changed mid-session is still applied live (the actuation snapshot reads the
+        Tk vars each poll) but is not re-persisted - the same live-tuning caveat the
+        data-file header carries."""
+        if not hasattr(self, "_enable_var"):
+            return None
+        try:
+            cfg = self._collect_live_config()
+            validate_phase3_config(cfg)
+        except Exception as e:
+            return (f"Phase 3 config not persisted (invalid edit): "
+                    f"{type(e).__name__}: {e}")
+        try:
+            save_phase3_config(self._config_path, cfg)
+        except OSError as e:
+            return f"Phase 3 config not persisted: {type(e).__name__}: {e}"
+        self._config_error = ""
+        try:
+            self._refresh_seq_info()
+        except tk.TclError:
+            pass
+        return None
 
     def _reload_settings(self) -> None:
         """Re-read phase3.json from disk into the tab (Reload button), e.g. after

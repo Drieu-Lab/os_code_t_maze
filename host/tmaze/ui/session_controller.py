@@ -1288,6 +1288,15 @@ class SessionControlView:
         else:
             notes.append("Phase 3 unavailable")
 
+        # Save-on-arm (P2, ADR-0167): persist the Phase 3 tab's live GUI-editable
+        # config to host/phase3.json BEFORE the snapshot below, so the archived
+        # config/phase3.json reflects EXACTLY what this armed session runs with -
+        # not just what was last hand-Saved. Best-effort: a note, never a break.
+        if self._phase3 is not None and hasattr(self._phase3, "persist_live_config"):
+            cfg_note = self._phase3.persist_live_config()
+            if cfg_note:
+                notes.append(cfg_note)
+
         # Snapshot the definitions/config that shaped this run into config/ so it
         # stays reproducible after the live host/*.json are re-drawn (ADR-0072).
         if not self._write_config_snapshot(config_dir):
@@ -1510,9 +1519,11 @@ class SessionControlView:
         in the manifest (docs/decisions/0072).
 
         The host-local files (zones/ROI/landmarks/scale, phase3.json, rules.json)
-        are found by session_config itself; the injected ``config_inputs``
-        provider supplies the extras that aren't plain host files (the lens
-        calibration JSON, the active tracker model) and the live scalars
+        are found by session_config itself; ``phase3.json`` was just refreshed from
+        the tab's live values by save-on-arm (see the caller, ADR-0167) so its copy
+        matches this run. The injected ``config_inputs`` provider supplies the
+        extras that aren't plain host files (the lens calibration JSON, the active
+        tracker model) and the live scalars
         (camera transform, tracker/maze params). Best-effort: any failure just
         leaves the snapshot partial and returns False - never breaks Start.
         Returns True when every expected source was captured.
@@ -1601,10 +1612,12 @@ class SessionControlView:
         this session's ``config/phase3.json`` snapshot (docs/decisions/0072/0073).
 
         Reading the per-session copy - not the live tab state - keeps the summary
-        self-contained and consistent with the archived config; the same caveat as
-        the config snapshot applies (a value edited in the tab but not Saved to
-        phase3.json won't be reflected). ``{}`` if the snapshot is missing/
-        unreadable, so the summary just omits the section."""
+        self-contained and consistent with the archived config. Since Start now
+        persists the tab's live GUI-editable fields to phase3.json before the
+        snapshot (save-on-arm, ADR-0167), this per-session copy reflects the values
+        the session armed with; a field changed AFTER Start is applied live but not
+        re-persisted. ``{}`` if the snapshot is missing/unreadable, so the summary
+        just omits the section."""
         if self._session_dir is None:
             return {}
         path = os.path.join(self._session_dir, CONFIG_SUBDIR, "phase3.json")
