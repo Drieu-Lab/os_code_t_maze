@@ -24,22 +24,27 @@ from tmaze.core.phase3.trial_sequence import LEFT, RIGHT, TrialConfig, TrialSequ
 
 
 def frame(valid=True, choice_entered=None, outbound_used_stem=False,
-          loop_closed=None, choice_committed=None, left_hub_via_stem=None):
+          loop_closed=None, choice_committed=None, left_hub_via_stem=None,
+          trial_trip=None):
     """A minimal TaskEventFrame stand-in (only the fields Phase3Task reads).
 
     ``choice_committed`` is the shared once-per-excursion commit edge Phase3Task
     scores off (task_events.py, FW-0020); ``choice_entered`` is retained for the
     fields the estimator sets on the same tick. Phase3Task now scores on the
-    hub-departure credential ``left_hub_via_stem`` (docs/decisions/0099); it
-    defaults to mirroring ``outbound_used_stem`` (both are true on a genuine cued
-    trial) so the existing scoring tests read unchanged, and the divider-jump case
-    sets them apart explicitly."""
+    shared ``trial_trip`` credential (docs/decisions/0168, extending 0099), which
+    currently equals ``left_hub_via_stem``; both default to mirroring
+    ``outbound_used_stem`` (all three are true on a genuine cued trial) so the
+    existing scoring tests read unchanged, and the divider-jump case sets them
+    apart explicitly (left_hub_via_stem/trial_trip False while stem is True)."""
     if left_hub_via_stem is None:
         left_hub_via_stem = outbound_used_stem
+    if trial_trip is None:
+        trial_trip = left_hub_via_stem
     return types.SimpleNamespace(
         valid=valid, choice_entered=choice_entered,
         outbound_used_stem=outbound_used_stem, loop_closed=loop_closed,
-        choice_committed=choice_committed, left_hub_via_stem=left_hub_via_stem)
+        choice_committed=choice_committed, left_hub_via_stem=left_hub_via_stem,
+        trial_trip=trial_trip)
 
 
 def side_of(arm):

@@ -64,26 +64,34 @@ class TaskEventFrame:
     and the behavior readout all consume instead of each re-deriving the latch.
     ``trip_id`` bumps on each commit so consumers can tell excursions apart.
 
+    ``trial_trip`` is THE single "genuine trial excursion" credential every task
+    consumer reads: the Phase 3 scorer, the cue gate (fed in as ``on_outbound_leg``),
+    and the reward rule's ``choice_via_stem`` all key off it, so "what counts as a
+    trial trip" is defined ONCE here (docs/decisions/0168, extending 0099) rather
+    than re-derived - and consistently - in three places. It currently equals
+    ``left_hub_via_stem``; Increment 2a will tighten it in this one spot (AND-in
+    "the outbound leg was not broken by an early return-arm entry"), and all three
+    consumers inherit the tighter rule for free.
+
     ``left_hub_via_stem`` and ``outbound_used_stem`` sound alike but answer
     different questions (see docs/decisions/0067). ``outbound_used_stem`` asks
     whether the stem has been visited AT ALL since the HUB, so it is true on a
-    backwards lap too, once the animal has walked into the stem from the junction.
-    ``left_hub_via_stem`` asks how the trip BEGAN - the animal stepped from the HUB
-    into the stem - so it stays false for a trip that set off up a return arm, or
-    up a side arm and then hopped into the stem over the divider. It is the "this
-    is a genuine trial excursion" credential: the CHOICE cue needs it (its own
-    window IS the stem), and the reward + the RETURN cue now share it too, so a
-    non-trial excursion earns no cue and no reward (docs/decisions/0099).
-    ``departed_hub_via_stem`` is the rising edge of that level - true only on the
-    single tick the departure happens - which the Phase 3 controller uses to stamp
-    a trial start once per outbound run.
+    backwards lap too, once the animal has walked into the stem from the junction;
+    it is now a purely DESCRIPTIVE field (e.g. the ``choice`` credential's stem-vs-
+    nonstem fade reads it), not a trial credential. ``left_hub_via_stem`` asks how
+    the trip BEGAN - the animal stepped from the HUB into the stem - so it stays
+    false for a trip that set off up a return arm, or up a side arm and then hopped
+    into the stem over the divider; it is the basis of ``trial_trip`` and the level
+    whose rising edge (``departed_hub_via_stem``, the Phase 3 trial-start edge) the
+    controller stamps a trial start off, once per outbound run.
     """
     now: float
     valid: bool
     # ---- predicates (this tick / this lap) ----
     at_well: bool                       # zone == HUB and substate == in_well
-    outbound_used_stem: bool            # stem visited since last leaving the HUB
+    outbound_used_stem: bool            # stem visited since last leaving the HUB (DESCRIPTIVE only)
     left_hub_via_stem: bool             # this trip DEPARTED the HUB up the stem
+    trial_trip: bool                    # THE shared trial credential (== left_hub_via_stem now; docs/decisions/0168)
     # ---- edges (true only on the tick they occur) ----
     well_arrived: bool                  # entered the well (in_well) this tick
     departed_hub_via_stem: bool         # departed the HUB up the stem this tick (rising edge of left_hub_via_stem)
@@ -218,10 +226,18 @@ class TaskEvents:
 
         self._prev_at_well = at_well
 
+        # The single credential every task consumer reads (docs/decisions/0168):
+        # a GENUINE trial excursion. Today it is exactly "this trip departed the
+        # hub up the stem"; Increment 2a will AND-in "outbound leg not broken"
+        # HERE, in one place, so the scorer, the cue gate, and the reward's
+        # choice_via_stem all tighten together instead of drifting apart.
+        trial_trip = self._left_hub_via_stem
+
         return TaskEventFrame(
             now=s.now, valid=s.valid,
             at_well=at_well, outbound_used_stem=outbound_used_stem,
             left_hub_via_stem=self._left_hub_via_stem,
+            trial_trip=trial_trip,
             well_arrived=well_arrived,
             departed_hub_via_stem=departed_hub_via_stem,
             choice_entered=choice_entered,

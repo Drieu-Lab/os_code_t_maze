@@ -369,10 +369,15 @@ class TestTrialSequenceProbe(unittest.TestCase):
 
 
 def _frame(**kw):
-    """A duck-typed TaskEventFrame for driving Phase3Task.update()."""
+    """A duck-typed TaskEventFrame for driving Phase3Task.update().
+
+    Phase3Task now scores on the shared ``trial_trip`` credential (== the
+    hub-departure ``left_hub_via_stem`` for now; docs/decisions/0168), so
+    ``trial_trip`` mirrors ``left_hub_via_stem`` unless a test sets it."""
     base = dict(valid=True, choice_committed=None, left_hub_via_stem=False,
                 loop_closed=None)
     base.update(kw)
+    base.setdefault("trial_trip", base["left_hub_via_stem"])
     return types.SimpleNamespace(**base)
 
 

@@ -10,9 +10,10 @@ host/:
 Covers (see docs/decisions/0026): the well-arrival edge; the choice-entered edge
 (left/right); outbound_used_stem (stem vs return-arm approach); left_hub_via_stem
 (how the trip DEPARTED, docs/decisions/0067) and its rising edge
-departed_hub_via_stem (the Phase 3 trial-start edge, FW-0027); clean vs unclean
-loop detection; and the same-side run aggregate (counts every closed loop,
-rewarded or not; resets on a side switch).
+departed_hub_via_stem (the Phase 3 trial-start edge, FW-0027); trial_trip (the one
+shared trial credential, == left_hub_via_stem for now; docs/decisions/0168); clean
+vs unclean loop detection; and the same-side run aggregate (counts every closed
+loop, rewarded or not; resets on a side switch).
 """
 
 from __future__ import annotations
@@ -208,6 +209,42 @@ class TestDepartedHubViaStem(unittest.TestCase):
         h = _Harness()
         for pt in (P_HUB, P_LRETURN, P_LCHOICE, P_JUNCTION, P_STEM):
             self.assertFalse(h.step(pt).departed_hub_via_stem, pt)
+
+
+class TestTrialTrip(unittest.TestCase):
+    """``trial_trip`` is the ONE credential the Phase 3 scorer, the cue gate, and
+    the reward's choice_via_stem all read (docs/decisions/0168). Today it is
+    defined as exactly ``left_hub_via_stem``; these tests pin that equivalence
+    across the departure/hold/clear cycle and the backwards + divider-jump routes,
+    so if Increment 2a tightens ``trial_trip`` the divergence shows up here."""
+
+    def _assert_mirrors_left_hub(self, f, pt=None):
+        self.assertEqual(f.trial_trip, f.left_hub_via_stem, pt)
+
+    def test_mirrors_left_hub_via_stem_over_a_full_trip(self):
+        h = _Harness()
+        # Hub -> depart up the stem -> around and home; trial_trip tracks the
+        # hub-departure level tick by tick.
+        self.assertFalse(h.step(P_HUB).trial_trip)
+        self.assertTrue(h.step(P_STEM).trial_trip)
+        for pt in (P_JUNCTION, P_LCHOICE, P_LRETURN):
+            f = h.step(pt)
+            self.assertTrue(f.trial_trip, pt)
+            self._assert_mirrors_left_hub(f, pt)
+        # Home again -> the credential clears, ready for the next departure.
+        self.assertFalse(h.step(P_HUB).trial_trip)
+
+    def test_backwards_lap_is_not_a_trial_trip(self):
+        # Set off up a return arm and later cross into the stem from the junction:
+        # the stem IS visited (outbound_used_stem) but the trip never departed the
+        # hub up the stem, so it is NOT a trial_trip (the divider-jump case).
+        h = _Harness()
+        for pt in (P_HUB, P_LRETURN, P_LCHOICE, P_JUNCTION):
+            self.assertFalse(h.step(pt).trial_trip, pt)
+        f = h.step(P_STEM)
+        self.assertFalse(f.trial_trip)
+        self.assertTrue(f.outbound_used_stem)   # the two genuinely differ here
+        self._assert_mirrors_left_hub(f)
 
 
 class TestLoopClean(unittest.TestCase):

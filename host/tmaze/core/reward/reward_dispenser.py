@@ -68,6 +68,10 @@ PRIME_MODES = ("well_arrival", "well_lick", "credential")
 # task-event vocabulary; see docs/decisions/0026). CHOICE_CREDENTIALS earn at
 # choice-arm entry and are gated on the shared once-per-excursion choice-commit
 # edge (docs/decisions/0055); clean_loop earns at loop close and needs no latch.
+# ``choice_via_stem`` additionally requires the shared ``trial_trip`` credential
+# (a hub-up-the-stem departure), the SAME one the Phase 3 scorer + choice cue use
+# (docs/decisions/0168); ``choice`` still reads the descriptive ``outbound_used_stem``
+# for its stem-vs-nonstem reward fade (a different question).
 CREDENTIALS = ("choice", "choice_via_stem", "clean_loop")
 CHOICE_CREDENTIALS = ("choice", "choice_via_stem")
 
@@ -212,7 +216,14 @@ class RewardTrigger:
         elif self.credential == "choice_via_stem":
             if task.choice_entered is not None:
                 side = task.choice_entered
-                if task.outbound_used_stem:
+                # "via_stem" now means the SHARED trial credential (task.trial_trip;
+                # docs/decisions/0168), i.e. the trip departed the hub up the stem -
+                # the same credential the Phase 3 scorer and the choice cue use, not
+                # the looser outbound_used_stem (stem visited at all, which a divider
+                # hop satisfies). The rule-file credential NAME is unchanged, so
+                # existing rules.json files keep working (alias). Extends the
+                # hub-departure unification of docs/decisions/0099.
+                if task.trial_trip:
                     # Optional choice-side anti-bias (Phase 2b): redraw the cap on
                     # a side switch, then withhold a stem-gated choice that runs
                     # the same side past the cap. See docs/decisions/0030.

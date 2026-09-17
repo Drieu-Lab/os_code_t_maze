@@ -20,20 +20,21 @@ Design (see docs/decisions/0045):
   - CHOICE fails OPEN: a confidence dropout never cuts a playing tone, and onset
     keeps being attempted while the rat is in the window (a late lock still
     fires). RETURN fails SAFE: the onset is a one-shot decision taken when the
-    rat enters the return zone - if vision is not confident THEN, that return's
+    rat enters the return zone -     if vision is not confident THEN, that return's
     cue is skipped for the whole visit (a missed cue beats a mis-placed one).
-  - RETURN also requires that the trip DEPARTED the hub up the stem: the tone
-    only fires if the rat reached the return arm on a genuine trial excursion, not
-    if it started a run by heading up a return arm from the hub NOR if it set off
-    up a side arm and later hopped into the stem over the divider. Originally this
-    used the looser ``outbound_used_stem`` (stem visited at all since the hub;
+  - RETURN also requires that the trip was a genuine trial excursion: the tone
+    only fires if the rat reached the return arm on a real trial, not if it
+    started a run by heading up a return arm from the hub NOR if it set off up a
+    side arm and later hopped into the stem over the divider. Originally this used
+    the looser ``outbound_used_stem`` (stem visited at all since the hub;
     docs/decisions/0061), but that let a divider-jump trip earn a return cue (and
     a reward) for a trial that never really started; the return cue now shares the
-    ``on_outbound_leg`` hub-departure credential the reward + choice cue use, so
-    all three agree on what a trial is (docs/decisions/0099).
-  - CHOICE likewise requires that the trip DEPARTED the hub up the stem, via the
-    shared ``on_outbound_leg`` credential (task_events: left_hub_via_stem; see
-    docs/decisions/0067). Without it a rat running the lap backwards - out along a
+    ``on_outbound_leg`` credential the reward + choice cue use, so all three agree
+    on what a trial is (docs/decisions/0099, 0168).
+  - CHOICE likewise requires a genuine trial excursion, via the shared
+    ``on_outbound_leg`` credential (fed from task_events ``trial_trip`` - currently
+    the hub-up-the-stem departure ``left_hub_via_stem``; see docs/decisions/0067,
+    0168). Without it a rat running the lap backwards - out along a
     return arm, then home down the stem - heard the trial tone all the way down,
     since the direction gate is off in practice. The credential is held for the
     whole trip and cleared at the hub, so a rat that reverses back into the stem
@@ -144,8 +145,9 @@ class CueGate:
 
         The caller's shared task-phase facts (task_events) credential the cues:
 
-        ``on_outbound_leg`` (CHOICE and RETURN) - this trip DEPARTED the hub up the
-        stem (task_events.left_hub_via_stem; docs/decisions/0067, 0099). Both cues
+        ``on_outbound_leg`` (CHOICE and RETURN) - the shared trial credential
+        (task_events.trial_trip, currently "this trip DEPARTED the hub up the stem";
+        docs/decisions/0067, 0099, 0168). Both cues
         now key off it, the same credential the reward uses, so the cue, the
         reward, and the score agree on what counts as a trial. A trip that set off
         up a return arm - or up a side arm and then hopped into the stem over the

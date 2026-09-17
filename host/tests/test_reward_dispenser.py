@@ -24,6 +24,7 @@ def frame(**kw):
     base = dict(
         valid=True, now=0.0, at_well=False,
         choice_committed=None, choice_entered=None, outbound_used_stem=False,
+        trial_trip=False,
         same_side_choice_run=0, loop_closed=None, loop_clean=False,
         same_side_run=0,
     )
@@ -57,17 +58,20 @@ class TestTriggerCredentials(unittest.TestCase):
         self.assertEqual(len(logs(out, "armed")), 0)
 
     def test_choice_via_stem_denies_nonstem(self):
+        # Not a trial_trip (no hub->stem departure) => denied, even if a choice
+        # arm was entered (docs/decisions/0168).
         t = RewardTrigger({"credential": "choice_via_stem"}, "r")
         out = t.earn(frame(choice_committed="left", choice_entered="left",
-                           outbound_used_stem=False))
+                           trial_trip=False))
         self.assertFalse(t.armed)
         self.assertEqual(logs(out, "credit_denied")[0].detail.get("reason"),
                          "no_stem")
 
     def test_choice_via_stem_credits_on_stem(self):
+        # A genuine trial trip (hub->stem departure) credits (docs/decisions/0168).
         t = RewardTrigger({"credential": "choice_via_stem"}, "r")
         out = t.earn(frame(choice_committed="right", choice_entered="right",
-                           outbound_used_stem=True, same_side_choice_run=1))
+                           trial_trip=True, same_side_choice_run=1))
         self.assertTrue(t.armed)
         self.assertEqual(len(logs(out, "armed")), 1)
 
