@@ -217,12 +217,13 @@ class RewardTrigger:
             if task.choice_entered is not None:
                 side = task.choice_entered
                 # "via_stem" now means the SHARED trial credential (task.trial_trip;
-                # docs/decisions/0168), i.e. the trip departed the hub up the stem -
-                # the same credential the Phase 3 scorer and the choice cue use, not
-                # the looser outbound_used_stem (stem visited at all, which a divider
-                # hop satisfies). The rule-file credential NAME is unchanged, so
-                # existing rules.json files keep working (alias). Extends the
-                # hub-departure unification of docs/decisions/0099.
+                # docs/decisions/0168), i.e. a genuine trial trip (a hub-up-the-stem
+                # departure whose outbound leg was not broken by a return arm;
+                # docs/decisions/0169) - the same credential the Phase 3 scorer and
+                # the choice cue use, not the looser outbound_used_stem (stem visited
+                # at all, which a divider hop satisfies). The rule-file credential
+                # NAME is unchanged, so existing rules.json files keep working
+                # (alias). Extends the hub-departure unification of docs/decisions/0099.
                 if task.trial_trip:
                     # Optional choice-side anti-bias (Phase 2b): redraw the cap on
                     # a side switch, then withhold a stem-gated choice that runs

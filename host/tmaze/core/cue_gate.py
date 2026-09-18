@@ -32,9 +32,10 @@ Design (see docs/decisions/0045):
     ``on_outbound_leg`` credential the reward + choice cue use, so all three agree
     on what a trial is (docs/decisions/0099, 0168).
   - CHOICE likewise requires a genuine trial excursion, via the shared
-    ``on_outbound_leg`` credential (fed from task_events ``trial_trip`` - currently
-    the hub-up-the-stem departure ``left_hub_via_stem``; see docs/decisions/0067,
-    0168). Without it a rat running the lap backwards - out along a
+    ``on_outbound_leg`` credential (fed from task_events ``trial_trip`` - a
+    hub-up-the-stem departure whose outbound leg was not broken by a return arm;
+    see docs/decisions/0067, 0168, 0169). Without it a rat running the lap
+    backwards - out along a
     return arm, then home down the stem - heard the trial tone all the way down,
     since the direction gate is off in practice. The credential is held for the
     whole trip and cleared at the hub, so a rat that reverses back into the stem
@@ -146,8 +147,8 @@ class CueGate:
         The caller's shared task-phase facts (task_events) credential the cues:
 
         ``on_outbound_leg`` (CHOICE and RETURN) - the shared trial credential
-        (task_events.trial_trip, currently "this trip DEPARTED the hub up the stem";
-        docs/decisions/0067, 0099, 0168). Both cues
+        (task_events.trial_trip: a hub-up-the-stem departure whose outbound leg was
+        not broken by a return arm; docs/decisions/0067, 0099, 0168, 0169). Both cues
         now key off it, the same credential the reward uses, so the cue, the
         reward, and the score agree on what counts as a trial. A trip that set off
         up a return arm - or up a side arm and then hopped into the stem over the

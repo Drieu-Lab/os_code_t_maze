@@ -42,6 +42,7 @@ from tmaze.core.maze_state import (
 # clean loop.
 _SIDE_OF_CHOICE = {LEFT_CHOICE: LEFT, RIGHT_CHOICE: RIGHT}
 _RETURN_OF_SIDE = {LEFT: LEFT_RETURN, RIGHT: RIGHT_RETURN}
+_RETURN_ZONES = frozenset({LEFT_RETURN, RIGHT_RETURN})
 
 
 @dataclass(frozen=True)
@@ -68,10 +69,13 @@ class TaskEventFrame:
     consumer reads: the Phase 3 scorer, the cue gate (fed in as ``on_outbound_leg``),
     and the reward rule's ``choice_via_stem`` all key off it, so "what counts as a
     trial trip" is defined ONCE here (docs/decisions/0168, extending 0099) rather
-    than re-derived - and consistently - in three places. It currently equals
-    ``left_hub_via_stem``; Increment 2a will tighten it in this one spot (AND-in
-    "the outbound leg was not broken by an early return-arm entry"), and all three
-    consumers inherit the tighter rule for free.
+    than re-derived - and consistently - in three places. A trip is a trial iff it
+    DEPARTED the hub up the stem (``left_hub_via_stem``) AND its outbound leg was
+    not broken by a return arm before the choice commit (docs/decisions/0169). A
+    stem-departed trip that dips into a return arm on the way out is denied like a
+    divider-jump: no score, no reward, no cue, and the scheduled trial is preserved
+    for the next clean trip. (A return-arm visit AFTER the commit is the normal
+    inbound leg and does NOT break it, so the return cue still fires.)
 
     ``left_hub_via_stem`` and ``outbound_used_stem`` sound alike but answer
     different questions (see docs/decisions/0067). ``outbound_used_stem`` asks
@@ -91,7 +95,7 @@ class TaskEventFrame:
     at_well: bool                       # zone == HUB and substate == in_well
     outbound_used_stem: bool            # stem visited since last leaving the HUB (DESCRIPTIVE only)
     left_hub_via_stem: bool             # this trip DEPARTED the HUB up the stem
-    trial_trip: bool                    # THE shared trial credential (== left_hub_via_stem now; docs/decisions/0168)
+    trial_trip: bool                    # THE shared trial credential: left_hub_via_stem AND outbound leg not broken (docs/decisions/0168, 0169)
     # ---- edges (true only on the tick they occur) ----
     well_arrived: bool                  # entered the well (in_well) this tick
     departed_hub_via_stem: bool         # departed the HUB up the stem this tick (rising edge of left_hub_via_stem)
@@ -114,7 +118,8 @@ class TaskEvents:
     Pure and single-threaded. Holds only the small aggregate state the raw
     RatState does not: the previous ``at_well`` (to detect the arrival edge), the
     last closed-loop side, the same-side run length, per-side loop counts, and the
-    two per-trip latches (the choice-commit re-arm and ``left_hub_via_stem``).
+    per-trip latches (the choice-commit re-arm, ``left_hub_via_stem``, and the
+    ``_outbound_broken`` route-honesty flag behind ``trial_trip``; docs/decisions/0169).
     """
 
     def __init__(self) -> None:
@@ -148,6 +153,13 @@ class TaskEvents:
         # Previous tick's level, to derive the ``departed_hub_via_stem`` rising
         # edge (mirrors ``_prev_at_well`` for ``well_arrived``).
         self._prev_left_hub_via_stem = False
+        # "The outbound leg was broken by a return arm" (docs/decisions/0169, G2):
+        # a trip that departed the hub up the stem but then touched a return arm
+        # BEFORE committing a choice is not a clean trial trip. Armed False, set on
+        # any pre-commit return-arm entry (or a choice committed directly from its
+        # own return arm - the G1 backstop), cleared on HUB presence like the other
+        # per-trip latches (docs/decisions/0038). It is ANDed into ``trial_trip``.
+        self._outbound_broken = False
 
     def update(self, s: RatState) -> TaskEventFrame:
         at_well = bool(s.valid and s.zone == HUB and s.substate == IN_WELL)
@@ -226,12 +238,31 @@ class TaskEvents:
 
         self._prev_at_well = at_well
 
+        # Route-honesty break (docs/decisions/0169): a trip that DID depart the hub
+        # up the stem still fails to be a clean trial if its OUTBOUND leg (before
+        # the choice commit) touched a return arm. Strict (G2): ANY pre-commit
+        # return-arm entry breaks it - before a commit ``_excursion_open`` is True,
+        # so a return-arm entry while it is still open is on the outbound leg (an
+        # inbound return-arm visit, after the commit, does NOT break it, so the
+        # return cue still fires on a clean trial). Backstop (G1): a choice
+        # committed DIRECTLY from its own matching return arm breaks it too, in
+        # case that return-arm entry edge was missed (dropout / brief dwell).
+        # Cleared on HUB presence like the other per-trip latches.
+        if s.valid and s.zone == HUB:
+            self._outbound_broken = False
+        elif s.valid:
+            if s.entered in _RETURN_ZONES and self._excursion_open:
+                self._outbound_broken = True
+            elif (choice_committed is not None
+                  and s.exited == _RETURN_OF_SIDE.get(choice_committed)):
+                self._outbound_broken = True
+
         # The single credential every task consumer reads (docs/decisions/0168):
-        # a GENUINE trial excursion. Today it is exactly "this trip departed the
-        # hub up the stem"; Increment 2a will AND-in "outbound leg not broken"
-        # HERE, in one place, so the scorer, the cue gate, and the reward's
-        # choice_via_stem all tighten together instead of drifting apart.
-        trial_trip = self._left_hub_via_stem
+        # a GENUINE trial excursion - this trip departed the hub up the stem AND
+        # its outbound leg was not broken by a return arm (docs/decisions/0169).
+        # Defined ONCE here, so the scorer, the cue gate, and the reward's
+        # choice_via_stem all read the same tightened rule.
+        trial_trip = self._left_hub_via_stem and not self._outbound_broken
 
         return TaskEventFrame(
             now=s.now, valid=s.valid,

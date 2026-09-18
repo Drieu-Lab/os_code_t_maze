@@ -11,9 +11,10 @@ Covers (see docs/decisions/0026): the well-arrival edge; the choice-entered edge
 (left/right); outbound_used_stem (stem vs return-arm approach); left_hub_via_stem
 (how the trip DEPARTED, docs/decisions/0067) and its rising edge
 departed_hub_via_stem (the Phase 3 trial-start edge, FW-0027); trial_trip (the one
-shared trial credential, == left_hub_via_stem for now; docs/decisions/0168); clean
-vs unclean loop detection; and the same-side run aggregate (counts every closed
-loop, rewarded or not; resets on a side switch).
+shared trial credential = hub-stem departure AND outbound leg not broken by a
+return arm; docs/decisions/0168, 0169); clean vs unclean loop detection; and the
+same-side run aggregate (counts every closed loop, rewarded or not; resets on a
+side switch).
 """
 
 from __future__ import annotations
@@ -23,7 +24,8 @@ import unittest
 
 from tmaze.core.maze_state import (
     HUB, CENTRAL_STEM, JUNCTION, LEFT_CHOICE, RIGHT_CHOICE, LEFT_RETURN,
-    RIGHT_RETURN, LEFT, RIGHT, MazeStateEstimator, MazeStateParams, Zone, ZoneMap,
+    RIGHT_RETURN, LEFT, RIGHT, MazeStateEstimator, MazeStateParams, RatState,
+    Zone, ZoneMap,
 )
 from tmaze.core.task_events import TaskEvents
 
@@ -213,18 +215,21 @@ class TestDepartedHubViaStem(unittest.TestCase):
 
 class TestTrialTrip(unittest.TestCase):
     """``trial_trip`` is the ONE credential the Phase 3 scorer, the cue gate, and
-    the reward's choice_via_stem all read (docs/decisions/0168). Today it is
-    defined as exactly ``left_hub_via_stem``; these tests pin that equivalence
-    across the departure/hold/clear cycle and the backwards + divider-jump routes,
-    so if Increment 2a tightens ``trial_trip`` the divergence shows up here."""
+    the reward's choice_via_stem all read (docs/decisions/0168). A trip is a trial
+    iff it DEPARTED the hub up the stem AND its outbound leg was not broken by a
+    return arm before the choice commit (docs/decisions/0169). These tests pin the
+    clean case (trial_trip == left_hub_via_stem), the two divergences where a
+    stem-departed trip is still NOT a trial (G2 pre-commit return dip; G1 own-
+    return-arm commit backstop), and that a POST-commit return visit does not
+    break it (so the return cue still fires)."""
 
     def _assert_mirrors_left_hub(self, f, pt=None):
         self.assertEqual(f.trial_trip, f.left_hub_via_stem, pt)
 
-    def test_mirrors_left_hub_via_stem_over_a_full_trip(self):
+    def test_clean_trip_mirrors_left_hub_via_stem(self):
         h = _Harness()
-        # Hub -> depart up the stem -> around and home; trial_trip tracks the
-        # hub-departure level tick by tick.
+        # Hub -> depart up the stem -> around and home; on a CLEAN trip trial_trip
+        # tracks the hub-departure level tick by tick.
         self.assertFalse(h.step(P_HUB).trial_trip)
         self.assertTrue(h.step(P_STEM).trial_trip)
         for pt in (P_JUNCTION, P_LCHOICE, P_LRETURN):
@@ -245,6 +250,49 @@ class TestTrialTrip(unittest.TestCase):
         self.assertFalse(f.trial_trip)
         self.assertTrue(f.outbound_used_stem)   # the two genuinely differ here
         self._assert_mirrors_left_hub(f)
+
+    def test_return_arm_on_the_outbound_leg_breaks_the_trip(self):
+        # G2: departed up the stem (a real start) but veered into a return arm
+        # BEFORE committing a choice - the trip is broken, so trial_trip and
+        # left_hub_via_stem now DIVERGE (the trip did depart via the stem).
+        h = _Harness()
+        h.step(P_HUB)
+        self.assertTrue(h.step(P_STEM).trial_trip)      # clean so far
+        f = h.step(P_LRETURN)                           # return arm, pre-commit
+        self.assertFalse(f.trial_trip)                  # broken (G2)
+        self.assertTrue(f.left_hub_via_stem)            # ...but it DID depart up the stem
+        # Stays broken for the rest of the trip (a "correct" choice now scores nothing).
+        self.assertFalse(h.step(P_LCHOICE).trial_trip)
+        # Home clears it; the next clean hub->stem departure is a trial again.
+        h.step(P_HUB)
+        self.assertTrue(h.step(P_STEM).trial_trip)
+
+    def test_return_arm_after_the_commit_does_not_break(self):
+        # The normal inbound leg: commit a choice from the junction, THEN take the
+        # return arm home. A post-commit return-arm visit must NOT break the trip,
+        # or the return cue could never fire on a clean trial.
+        h = _Harness()
+        h.step(P_HUB)
+        h.step(P_STEM)
+        h.step(P_JUNCTION)
+        self.assertTrue(h.step(P_LCHOICE).trial_trip)   # commit from the junction
+        self.assertTrue(h.step(P_LRETURN).trial_trip)   # inbound return arm: still a trial
+
+    def test_choice_committed_from_own_return_arm_backstop(self):
+        # G1 backstop for a MISSED return-arm entry edge: drive task_events with
+        # RatStates directly so no LEFT_RETURN 'entered' edge is ever seen, yet the
+        # choice commits with exited == LEFT_RETURN (came straight from its own
+        # return arm). trial_trip must still be False.
+        te = TaskEvents()
+        te.update(RatState(zone=HUB, valid=True, now=0.0))          # arm / reset
+        f1 = te.update(RatState(zone=CENTRAL_STEM, entered=CENTRAL_STEM,
+                                exited=HUB, valid=True, now=0.1))
+        self.assertTrue(f1.trial_trip)                              # clean stem departure
+        f2 = te.update(RatState(zone=LEFT_CHOICE, entered=LEFT_CHOICE,
+                                exited=LEFT_RETURN, valid=True, now=0.2))
+        self.assertEqual(f2.choice_committed, LEFT)
+        self.assertTrue(f2.left_hub_via_stem)
+        self.assertFalse(f2.trial_trip)                             # broken (G1 backstop)
 
 
 class TestLoopClean(unittest.TestCase):

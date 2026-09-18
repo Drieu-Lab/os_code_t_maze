@@ -253,10 +253,11 @@ class Phase3Task:
         # cued trial is gated on the shared ``trial_trip`` credential - the SAME one
         # the choice cue and the reward's choice_via_stem read (docs/decisions/0168,
         # extending 0067/0099) - so scorer, cue, and reward agree on what a trial
-        # is, defined once in task_events. It is currently "this trip departed the
-        # hub up the stem", not the looser outbound_used_stem (which is also true
-        # when the rat set off up a side arm and later hopped into the stem over the
-        # divider). A commit on a non-trial excursion yields no score and leaves the
+        # is, defined once in task_events. It is the genuine-trial credential (a
+        # hub-up-the-stem departure whose outbound leg was not broken by a return
+        # arm; docs/decisions/0169), not the looser outbound_used_stem (also true
+        # when the rat hopped into the stem over the divider). A commit on a
+        # non-trial excursion yields no score and leaves the
         # trial in place (the trip's single commit is spent, but the trial index
         # only advances after a real score, so the sequence is preserved).
         # _awaiting_return blocks a second score before the rat returns home. ---
