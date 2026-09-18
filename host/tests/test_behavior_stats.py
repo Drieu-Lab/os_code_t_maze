@@ -38,7 +38,7 @@ def frame(now, *, valid=True, choice=None, stem=False, zone=UNKNOWN,
     return TaskEventFrame(
         now=now, valid=valid,
         at_well=False, outbound_used_stem=stem,
-        left_hub_via_stem=stem, trial_trip=stem,
+        left_hub_via_stem=stem, trial_trip=stem, off_track=False,
         well_arrived=False, departed_hub_via_stem=False, choice_entered=choice,
         choice_committed=committed_side,
         loop_closed=None, loop_clean=False,

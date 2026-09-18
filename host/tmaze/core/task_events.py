@@ -77,6 +77,12 @@ class TaskEventFrame:
     for the next clean trip. (A return-arm visit AFTER the commit is the normal
     inbound leg and does NOT break it, so the return cue still fires.)
 
+    ``off_track`` is a passthrough of ``rat_state.off_track`` (docs/decisions/0170):
+    the tracked point has sat in a polygon GAP long enough that the held zone is
+    stale. It is surfaced here so perches are countable at the task level; the cue
+    gate reads the same flag (via the estimator) to release a tone a perched rat
+    would otherwise hold on its stale zone.
+
     ``left_hub_via_stem`` and ``outbound_used_stem`` sound alike but answer
     different questions (see docs/decisions/0067). ``outbound_used_stem`` asks
     whether the stem has been visited AT ALL since the HUB, so it is true on a
@@ -96,6 +102,7 @@ class TaskEventFrame:
     outbound_used_stem: bool            # stem visited since last leaving the HUB (DESCRIPTIVE only)
     left_hub_via_stem: bool             # this trip DEPARTED the HUB up the stem
     trial_trip: bool                    # THE shared trial credential: left_hub_via_stem AND outbound leg not broken (docs/decisions/0168, 0169)
+    off_track: bool                     # rat_state.off_track passthrough: valid point stuck in a polygon gap (docs/decisions/0170)
     # ---- edges (true only on the tick they occur) ----
     well_arrived: bool                  # entered the well (in_well) this tick
     departed_hub_via_stem: bool         # departed the HUB up the stem this tick (rising edge of left_hub_via_stem)
@@ -269,6 +276,7 @@ class TaskEvents:
             at_well=at_well, outbound_used_stem=outbound_used_stem,
             left_hub_via_stem=self._left_hub_via_stem,
             trial_trip=trial_trip,
+            off_track=s.off_track,
             well_arrived=well_arrived,
             departed_hub_via_stem=departed_hub_via_stem,
             choice_entered=choice_entered,

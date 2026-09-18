@@ -203,10 +203,12 @@ def cue_onset_events(rows: List[Tuple[float, object]], zone_map: ZoneMap,
         # layer the rig folds (docs/decisions/0061 for the return cue's stem-out
         # excursion, 0067 for the choice cue's hub departure), rather than
         # re-deriving them here - the offline onset latency then matches the rig
-        # by construction.
+        # by construction. The credential is the shared trial_trip (docs/decisions/
+        # 0168, 0169) and off_track releases a perched-rat tone (docs/decisions/0170),
+        # both exactly as the live controller feeds them.
         f = events.update(s)
         d = gate.step(s.zone, s.direction, s.confidence, s.valid,
-                      f.outbound_used_stem, f.left_hub_via_stem)
+                      f.outbound_used_stem, f.trial_trip, s.off_track)
         if d.started is not None:
             out.append((t, s.zone))
     return out

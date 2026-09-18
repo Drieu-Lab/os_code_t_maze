@@ -1014,8 +1014,10 @@ class Phase3ControlView(VisionActuator):
         # docs/decisions/0168), the same one the scorer + reward read, so all three
         # agree on what a trial is. It equals left_hub_via_stem today.
         on_leg = task_frame.trial_trip if task_frame is not None else False
+        # off_track (docs/decisions/0170) releases a tone the rat would otherwise
+        # hold by perching in a polygon gap (the estimator keeps the last zone).
         d = self._gate.step(st.zone, st.direction, st.confidence, st.valid,
-                            outbound, on_leg)
+                            outbound, on_leg, st.off_track)
         if d.started == CHOICE:
             freq = self._task.current_choice_freq()
             # No valid trial identity (plan exhausted / index out of range) => start

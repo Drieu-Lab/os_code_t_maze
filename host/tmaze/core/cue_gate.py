@@ -136,7 +136,8 @@ class CueGate:
     def step(self, zone: str, direction: Optional[str],
              confidence: float, valid: bool,
              outbound_used_stem: bool = True,
-             on_outbound_leg: bool = True) -> CueDecision:
+             on_outbound_leg: bool = True,
+             off_track: bool = False) -> CueDecision:
         """Fold one RatState into the desired cue state.
 
         Invalid frames (no trustworthy zone) HOLD the current tone and change no
@@ -160,6 +161,14 @@ class CueGate:
         at all since the hub. Kept as an additional guard on the return onset, but
         it is implied by ``on_outbound_leg`` now that the return cue requires the
         hub departure, so it no longer changes the decision on its own.
+
+        ``off_track`` (CHOICE and RETURN; docs/decisions/0170) - the tracked point
+        has been sitting in a polygon GAP long enough that the held zone is stale
+        (the estimator keeps the last zone when a point falls between polygons). A
+        rat parked in a gap therefore reads as "still in the window" and would hold
+        the tone indefinitely; treating off_track as OUT of both windows releases
+        the tone. It fails OPEN like a dropout: the CHOICE cue re-fires on the next
+        confident in-window frame once the rat moves back onto the track.
         """
         if not valid:
             return CueDecision(desired=self._active)
@@ -168,10 +177,14 @@ class CueGate:
         confident = confidence >= p.min_confidence
         # The credential sits OUTSIDE the direction clause so it still gates the
         # cue when require_up_stem is off, which is how the rig runs (ADR-0067).
+        # off_track (docs/decisions/0170) forces the point OUT of both windows so a
+        # rat perched in a polygon gap releases the tone instead of holding it on
+        # the stale zone.
         in_choice = (zone == CENTRAL_STEM
                      and on_outbound_leg
+                     and not off_track
                      and (not p.require_up_stem or direction == UP_STEM))
-        in_return = zone in _RETURN_ZONES
+        in_return = zone in _RETURN_ZONES and not off_track
 
         started: Optional[str] = None
         stopped = False

@@ -149,6 +149,59 @@ class TestHysteresis(unittest.TestCase):
         self.assertIsNone(s.entered)
 
 
+class TestOffTrack(unittest.TestCase):
+    """The off_track "perch" flag (docs/decisions/0170): a valid point sitting in a
+    polygon gap past off_track_after_s. The held zone stays sticky (unchanged), so
+    off_track is an ADDITIVE flag a gap-perched rat trips without breaking any
+    zone/validity consumer."""
+
+    def test_gap_under_threshold_not_off_track(self):
+        eng = make_estimator(off_track_after_s=1.0)
+        eng.update(tr(*P_STEM), 0.0)
+        s = eng.update(tr(*P_GAP), 0.5)              # 0.5s in the gap < 1.0s
+        self.assertEqual(s.zone, CENTRAL_STEM)       # still sticky
+        self.assertTrue(s.valid)
+        self.assertFalse(s.off_track)
+
+    def test_gap_over_threshold_sets_off_track(self):
+        eng = make_estimator(off_track_after_s=1.0)
+        eng.update(tr(*P_STEM), 0.0)
+        eng.update(tr(*P_GAP), 0.2)                  # gap timer starts here
+        s = eng.update(tr(*P_GAP), 1.3)              # 1.1s in the gap >= 1.0s
+        self.assertEqual(s.zone, CENTRAL_STEM)       # zone unchanged
+        self.assertTrue(s.valid)                     # validity unchanged
+        self.assertTrue(s.off_track)
+
+    def test_returning_to_a_zone_clears_off_track(self):
+        eng = make_estimator(off_track_after_s=1.0)
+        eng.update(tr(*P_STEM), 0.0)
+        eng.update(tr(*P_GAP), 0.2)
+        self.assertTrue(eng.update(tr(*P_GAP), 1.5).off_track)
+        s = eng.update(tr(*P_STEM), 1.6)             # back inside a polygon
+        self.assertFalse(s.off_track)
+
+    def test_dropout_mid_perch_does_not_reset_the_timer(self):
+        # A brief tracking dropout while perched must not restart "how long off
+        # track" - the rat has not moved. Timer holds across the invalid tick.
+        eng = make_estimator(off_track_after_s=1.0)
+        eng.update(tr(*P_STEM), 0.0)
+        eng.update(tr(*P_GAP), 0.2)                  # gap timer starts at 0.2
+        d = eng.update(tr(*P_GAP, state="COASTING"), 0.6)  # invalid: held
+        self.assertFalse(d.valid)
+        self.assertFalse(d.off_track)                # off_track is False while invalid
+        s = eng.update(tr(*P_GAP), 1.3)              # re-acquire, still in gap
+        self.assertTrue(s.off_track)                 # 1.1s since 0.2, not since 1.3
+
+    def test_never_off_track_before_first_localization(self):
+        # A gap point before any zone is committed is invalid, never off_track.
+        eng = make_estimator(off_track_after_s=1.0)
+        s0 = eng.update(tr(*P_GAP), 0.0)
+        s1 = eng.update(tr(*P_GAP), 5.0)
+        self.assertFalse(s0.valid)
+        self.assertFalse(s0.off_track)
+        self.assertFalse(s1.off_track)
+
+
 class TestNoFalseTransition(unittest.TestCase):
     def test_invalid_then_reacquire_same_zone_no_edge(self):
         eng = make_estimator()

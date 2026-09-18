@@ -15,12 +15,14 @@ from tmaze.core.maze_state import (CENTRAL_STEM, DOWN_STEM, HUB, JUNCTION, LEFT_
                         LEFT_RETURN, RIGHT_RETURN, UNKNOWN, UP_STEM)
 
 
-def _valid(gate, zone, direction=None, conf=1.0, outbound=True, on_leg=True):
+def _valid(gate, zone, direction=None, conf=1.0, outbound=True, on_leg=True,
+           off_track=False):
     # outbound == the shared outbound_used_stem credential the RETURN cue needs
     # (docs/decisions/0061); on_leg == the left_hub_via_stem credential the CHOICE
-    # cue needs (docs/decisions/0067). Both default True so the tests that are
-    # about the OTHER cue read unchanged.
-    return gate.step(zone, direction, conf, True, outbound, on_leg)
+    # cue needs (docs/decisions/0067); off_track == the perch flag that releases a
+    # tone held on a stale gap zone (docs/decisions/0170). All default so tests
+    # about the OTHER knobs read unchanged.
+    return gate.step(zone, direction, conf, True, outbound, on_leg, off_track)
 
 
 def _invalid(gate):
@@ -83,6 +85,43 @@ class TestChoiceCue(unittest.TestCase):
     def test_choice_disabled(self):
         g = CueGate(CueParams(choice_enabled=False))
         self.assertIsNone(_valid(g, CENTRAL_STEM, UP_STEM).desired)
+
+
+class TestOffTrack(unittest.TestCase):
+    """off_track (docs/decisions/0170) forces the point OUT of both windows so a rat
+    perched in a polygon gap - whose stale zone the estimator holds - releases the
+    tone instead of holding it. It fails OPEN: the CHOICE cue re-fires once the rat
+    moves back onto the track."""
+
+    def test_perch_in_stem_stops_the_choice_tone(self):
+        g = CueGate()
+        self.assertEqual(_valid(g, CENTRAL_STEM, UP_STEM).desired, CHOICE)
+        # Rat parks in a gap: the estimator still reports CENTRAL_STEM but flags
+        # off_track. The tone must stop.
+        d = _valid(g, CENTRAL_STEM, UP_STEM, off_track=True)
+        self.assertIsNone(d.desired)
+        self.assertTrue(d.stopped)
+
+    def test_choice_tone_refires_when_back_on_track(self):
+        g = CueGate()
+        _valid(g, CENTRAL_STEM, UP_STEM)
+        _valid(g, CENTRAL_STEM, UP_STEM, off_track=True)   # stopped
+        # Moves back onto the track, still in the window -> fires again (fail-open).
+        d = _valid(g, CENTRAL_STEM, UP_STEM, off_track=False)
+        self.assertEqual(d.desired, CHOICE)
+        self.assertEqual(d.started, CHOICE)
+
+    def test_off_track_blocks_choice_onset(self):
+        g = CueGate()
+        # Enter the window already off_track -> no onset at all.
+        self.assertIsNone(_valid(g, CENTRAL_STEM, UP_STEM, off_track=True).desired)
+
+    def test_perch_in_return_stops_the_return_tone(self):
+        g = CueGate()
+        self.assertEqual(_valid(g, LEFT_RETURN).desired, RETURN)
+        d = _valid(g, LEFT_RETURN, off_track=True)
+        self.assertIsNone(d.desired)
+        self.assertTrue(d.stopped)
 
 
 class TestChoiceCueOutboundLeg(unittest.TestCase):

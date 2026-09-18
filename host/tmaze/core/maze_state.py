@@ -292,6 +292,7 @@ class MazeStateParams:
     direction_deadband: float = 0.01  # min |delta progress| over the window to assign a direction
     direction_window: int = 3        # ticks of stem_progress used for the direction delta
     history_len: int = 32            # bounded zone-visit history length
+    off_track_after_s: float = 1.0   # a valid point sitting in a polygon gap this long -> off_track (see docs/decisions/0170)
 
 
 # ============================== output records ===============================
@@ -318,6 +319,7 @@ class RatState:
     valid: bool = False                   # False => UNKNOWN (no trustworthy state this tick)
     now: float = 0.0
     history: Tuple[ZoneVisit, ...] = ()   # bounded recent visits (most recent last)
+    off_track: bool = False               # valid point stuck in a polygon gap > off_track_after_s (docs/decisions/0170)
 
     def visited_since(self, target_zone: str, since_zone: str) -> bool:
         """Was ``target_zone`` entered since the animal last LEFT ``since_zone``?
@@ -371,6 +373,9 @@ class MazeStateEstimator:
         self._visits: List[ZoneVisit] = []
         self._prog_window: Deque[float] = deque(maxlen=max(2, self.params.direction_window))
         self._choice_since_hub: Optional[str] = None  # loop-in-progress side (since leaving HUB)
+        # ``now`` when the current unbroken run of valid-in-gap ticks began, else
+        # None. Drives the off_track flag (docs/decisions/0170).
+        self._gap_since: Optional[float] = None
 
     # ------------------------------------------------------------------ tick
     def update(self, track_result, now: float) -> RatState:
@@ -382,7 +387,10 @@ class MazeStateEstimator:
                     and centroid is not None and w > 0 and h > 0)
 
         if not track_ok:
-            # Hold internal committed state; emit UNKNOWN, no edges, no loop.
+            # Hold internal committed state; emit UNKNOWN, no edges, no loop. The
+            # off_track gap timer is NOT touched here: a brief tracking dropout
+            # mid-perch must not reset "how long the rat has been off track"
+            # (docs/decisions/0170). off_track is reported False while invalid.
             self._cand_zone = None
             self._cand_count = 0
             self._prog_window.clear()
@@ -421,6 +429,21 @@ class MazeStateEstimator:
         zone = self._committed if self._committed is not None else UNKNOWN
         valid = self._committed is not None
 
+        # Off-track "perch" timer (docs/decisions/0170): a valid point in a polygon
+        # GAP holds the current zone (sticky, above), so a rat that stops in a gap
+        # would read as "in the stem" forever and never release the cue. Time how
+        # long the point has sat in a gap; once it exceeds off_track_after_s, flag
+        # off_track (zone + valid are UNCHANGED, so a consumer that ignores the flag
+        # is unaffected). The timer clears the instant the point is inside ANY zone
+        # again. Only runs once localized; the invalid path above holds it.
+        if raw is None and self._committed is not None:
+            if self._gap_since is None:
+                self._gap_since = now
+        else:
+            self._gap_since = None
+        off_track = (self._gap_since is not None
+                     and (now - self._gap_since) >= p.off_track_after_s)
+
         substate = None
         if zone == HUB:
             substate = IN_WELL if self.zone_map.in_well(x, y) else OUTSIDE_WELL
@@ -432,7 +455,7 @@ class MazeStateEstimator:
             direction=direction, stem_progress=stem_progress,
             loop_completed=loop_completed, loop_side=loop_side,
             confidence=confidence, valid=valid, now=now,
-            history=tuple(self._visits))
+            history=tuple(self._visits), off_track=off_track)
 
     # --------------------------------------------------------------- helpers
     @staticmethod

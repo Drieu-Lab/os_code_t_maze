@@ -295,6 +295,21 @@ class TestTrialTrip(unittest.TestCase):
         self.assertFalse(f2.trial_trip)                             # broken (G1 backstop)
 
 
+class TestOffTrackPassthrough(unittest.TestCase):
+    """off_track is surfaced on the frame straight from RatState (docs/decisions/
+    0170), so perches are countable at the task level without reaching into
+    rat_state."""
+
+    def test_off_track_mirrors_rat_state(self):
+        te = TaskEvents()
+        f_on = te.update(RatState(zone=CENTRAL_STEM, valid=True, now=0.0,
+                                  off_track=True))
+        self.assertTrue(f_on.off_track)
+        f_off = te.update(RatState(zone=CENTRAL_STEM, valid=True, now=0.1,
+                                   off_track=False))
+        self.assertFalse(f_off.off_track)
+
+
 class TestLoopClean(unittest.TestCase):
     def test_clean_left_loop(self):
         h = _Harness()
