@@ -176,6 +176,13 @@ self-explanatory. Different repo, different need.)
 
 - Keep the change to one purpose and small enough for a human to review in a
   sitting (see the AI-assisted change rules in `AGENTS.md`).
+- A **rig-parameter file** edited for a session (`host/phase3.json`,
+  `host/cue_calibration.json`, `host/rules.json`, and the like) is committed the
+  **same day**, with the reason for the change in the commit message. The
+  per-session bundle snapshot is the record of *what value ran*; git is the
+  record of *when and why it changed*. Don't let a tweaked parameter file sit
+  uncommitted across sessions — a later reader can't tell a deliberate change
+  from an accident.
 - Run the tests; add one for any pure-core change.
 - Update `PROGRAMS.md` if you added/changed a runnable, and add an ADR for any
   non-obvious decision (both per `AGENTS.md`).
