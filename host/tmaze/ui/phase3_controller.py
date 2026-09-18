@@ -76,8 +76,9 @@ from tmaze.core.phase3.phase3_log import Phase3Log, Phase3StateSnapshot
 from tmaze.core.session.session_notes import (
     AUTO_ALT_END, AUTO_ALT_START, AUTO_BACK, AUTO_DEBIAS_END,
     AUTO_DEBIAS_START, AUTO_PROBE_DISABLED, AUTO_PROBE_ENABLED, AUTO_PROBE_END,
-    AUTO_PROBE_START, AUTO_REPEAT, AUTO_RESUME, AUTO_SKIP)
-from tmaze.core.phase3.phase3_task import ABANDONED, CORRECT, INCORRECT, Phase3Config, Phase3Task
+    AUTO_PROBE_START, AUTO_REPEAT, AUTO_RESUME, AUTO_SKIP, AUTO_UNCUED)
+from tmaze.core.phase3.phase3_task import (
+    ABANDONED, CORRECT, INCORRECT, UNCUED, Phase3Config, Phase3Task)
 from tmaze.core.reward.reward_dispenser import WellDispenser
 from tmaze.core.reward.reward_volume import format_volume, reward_volume_ul
 from tmaze.core.rig_config import load_rig_config
@@ -284,6 +285,11 @@ class Phase3ControlView(VisionActuator):
         # Live tallies (thread-written, Tk-read for status).
         self._correct = 0
         self._incorrect = 0
+        # UNCUED trips this run (a choice committed with no cue that trip;
+        # docs/decisions/0171) - shown in the status line so the operator sees the
+        # rig failing to cue. The authoritative cumulative count is the log
+        # snapshot (live + archived); this mirrors it for the live readout.
+        self._uncued = 0
         # Unrewarded probe-trial tallies (probe_blocks.py): scored probe trials and
         # of those how many were correct, for the conditional status segment.
         self._probe_done = 0
@@ -649,6 +655,7 @@ class Phase3ControlView(VisionActuator):
         self._reward_trial_index = None
         self._active_seed = snap.seed
         self._correct = self._incorrect = self._reward_count = 0
+        self._uncued = 0
         self._probe_done = self._probe_correct = 0
         self._reopen_resumes = 0             # a fresh run: no reopens yet
         self._reward_ul = 0.0
@@ -1000,6 +1007,12 @@ class Phase3ControlView(VisionActuator):
             # context alongside the start stamp (no-op for the balanced generator).
             self._log_call(lambda: self._log.trial_started(idx, iso))
             self._log_call(lambda: self._log.set_decision(idx))
+            # Scope the choice-cue-on stamp to THIS trip: clear it at the trial-start
+            # edge (runs just before the cue block below, which re-sets it if the
+            # cue fires this trip), so a commit with no cue this lap reads as UNCUED
+            # (docs/decisions/0171) instead of inheriting an earlier trip's onset -
+            # and the cue-zone dwell (ADR-0108) stays scoped to the current trip.
+            self._choice_cue_on_iso = None
             changed = True
 
         # WHEN: the positional cue gate. Host supplies identity via ,<hz> (v6).
@@ -1073,7 +1086,11 @@ class Phase3ControlView(VisionActuator):
 
         # WHAT/score: fold the task frame -> reward + advancement.
         if task_frame is not None:
-            dec = self._task.update(task_frame)
+            # Whether the CHOICE cue actually SOUNDED this trip (the per-trip onset
+            # stamp, cleared at the hub). A commit with no cue is scored UNCUED and
+            # the planned trial re-runs, not consumed (docs/decisions/0171).
+            dec = self._task.update(task_frame,
+                                    self._choice_cue_on_iso is not None)
             if dec.choice_side is not None and dec.outcome is not None:
                 self._log_call(lambda: self._log.choice_scored(
                     dec.trial_index, dec.choice_side, dec.outcome, iso))
@@ -1107,10 +1124,23 @@ class Phase3ControlView(VisionActuator):
             if dec.advanced:
                 self._log_call(lambda: self._log.trial_ended(dec.trial_index, iso))
                 changed = True
+            if dec.uncued_cleared:
+                # The uncued trip is spent but the trial did NOT advance: archive
+                # the uncued attempt (preserved in the CSV via the ADR-0119 path)
+                # and clear the live row so the SAME planned trial re-runs
+                # (docs/decisions/0171); mark it on the timeline.
+                self._log_call(lambda: self._log.supersede_trial(
+                    dec.trial_index, "uncued"))
+                self._emit_intervention(
+                    AUTO_UNCUED, "uncued trip (no cue this trip) - trial re-run",
+                    dec.trial_index, iso)
+                changed = True
             if dec.outcome == CORRECT:
                 self._correct += 1
             elif dec.outcome == INCORRECT:
                 self._incorrect += 1
+            elif dec.outcome == UNCUED:
+                self._uncued += 1
             # A correct-choice PROBE just fired on THIS trial (docs/decisions/0134):
             # note where it landed in the session log (the trigger is automatic, so
             # this is the only START marker). Gate on the SCORING edge
@@ -1391,6 +1421,11 @@ class Phase3ControlView(VisionActuator):
         done = self._correct + self._incorrect
         acc = (100.0 * self._correct / done) if done else 0.0
         extra = f"  drops:{self._act_drops}" if self._act_drops else ""
+        # UNCUED trips (a commit with no cue this trip; docs/decisions/0171) never
+        # scored/rewarded - show the count when any occurred so the operator sees
+        # the rig failing to cue the animal (the trial re-runs, not advances).
+        if self._uncued:
+            extra += f"  uncued:{self._uncued}"
         # A mid-session tracking flicker was resumed, not restarted (ADR-0120):
         # show the count so the operator knows the run survived the reopen.
         if self._reopen_resumes:
@@ -2203,6 +2238,8 @@ class Phase3ControlView(VisionActuator):
         arm = _ARM_SHORT.get(row.correct_arm, "?")
         if row.outcome == ABANDONED:
             result = "skipped"
+        elif row.outcome == UNCUED:
+            result = "uncued"
         elif row.outcome is not None:
             chosen = _ARM_SHORT.get(row.chosen_arm, "?")
             result = f"chose {chosen} {'OK' if row.outcome == CORRECT else 'X'}"

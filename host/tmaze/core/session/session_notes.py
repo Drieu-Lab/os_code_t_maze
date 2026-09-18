@@ -65,6 +65,11 @@ AUTO_PROBE_ENABLED = "auto:probe_enabled"
 AUTO_REPEAT = "auto:repeat"
 AUTO_SKIP = "auto:skip"
 AUTO_BACK = "auto:back"
+# A genuine trial excursion committed with no CHOICE cue that trip (docs/decisions/
+# 0171): the rig scores it UNCUED (no reward), archives the attempt, and re-runs the
+# planned trial. Recorded on the timeline so a reader/operator can see when and how
+# often the rig failed to cue the animal.
+AUTO_UNCUED = "auto:uncued"
 # A mid-session cue-gate REOPEN that was resumed (not restarted): tracking was
 # toggled off/on or the firmware briefly changed mode, so the gate flickered while
 # the SAME session stayed active. The run is resumed with its data preserved

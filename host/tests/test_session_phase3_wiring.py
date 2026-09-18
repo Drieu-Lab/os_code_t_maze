@@ -460,6 +460,32 @@ class SessionPhase3WiringTest(unittest.TestCase):
         self.assertNotIn("CUE_ON,CHOICE", sends)
         self.assertNotIn("CUE_ON,RETURN", sends)
 
+    def test_uncued_trip_is_not_scored_and_reruns(self):
+        """A genuine trip whose CHOICE cue never sounds (cue disabled) is UNCUED:
+        no score, no reward, the trial index does NOT advance (the planned trial
+        re-runs), and the uncued attempt is preserved + counted (docs/decisions/
+        0171)."""
+        self._open_gate()
+        self.phase3._choice_var.set(False)      # choice cue OFF -> no cue this trip
+        self._run_full_trial("left")
+
+        self.assertEqual(self.phase3._uncued, 1)
+        self.assertEqual(self.phase3._correct + self.phase3._incorrect, 0)
+        self.assertEqual(self.phase3._reward_count, 0)
+        self.assertEqual(self.phase3._task.index, 0)        # not advanced: re-run
+        # The uncued attempt is preserved (archived) and the cumulative count rides
+        # the published snapshot even though the live row was cleared for the re-run.
+        self.assertEqual(self.phase3.published_state().uncued, 1)
+
+    def test_cued_trip_still_scores_and_advances(self):
+        """Control: with the cue enabled the SAME trip scores + advances and is not
+        UNCUED - confirming it is the cue-on state that gates the classification."""
+        self._open_gate()                       # choice cue enabled by default
+        self._run_full_trial("left")
+        self.assertEqual(self.phase3._uncued, 0)
+        self.assertEqual(self.phase3._correct + self.phase3._incorrect, 1)
+        self.assertEqual(self.phase3._task.index, 1)
+
     def test_manifest_never_records_a_file_outside_the_session(self):
         """The backstop, independent of the rebind: a reported path from outside
         the session's tree is refused rather than recorded."""
