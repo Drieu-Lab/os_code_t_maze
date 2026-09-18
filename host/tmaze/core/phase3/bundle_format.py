@@ -109,7 +109,7 @@ _COLUMN_DOC: Dict[str, str] = {
                            "see docs/decisions/0166)",
     "attempt": "1-based attempt number for this trial (append-only edits)",
     "superseded": "1 on a preserved attempt a later Repeat/Back replaced",
-    "edit": "operator action that created a >1 attempt (repeat/back)",
+    "edit": "action that created a >1 attempt: operator repeat/back, or 'uncued' (auto: no cue that trip; see docs/decisions/0171)",
 }
 
 
