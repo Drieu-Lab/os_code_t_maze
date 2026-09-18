@@ -27,6 +27,12 @@ FW-0020). The scoring credential is the SAME ``trial_trip`` the choice cue and t
 reward read, so the cue, the reward, and the score agree on what a trial is,
 defined once in task_events (docs/decisions/0067, 0099, 0168).
 
+A trial_trip commit where the CHOICE cue never actually sounded this trip is not a
+real trial: it is scored ``UNCUED`` (no reward, index NOT advanced), so the planned
+trial - its cue identity - re-runs on the next clean cued trip instead of being
+consumed by a silent commit (docs/decisions/0171). The controller tells us whether
+the cue sounded via the ``choice_cue_on`` argument.
+
 Pure and single-threaded (the Phase 3 actuation thread), like the other cores;
 no Tk/OpenCV/serial, no locks.
 """
@@ -48,6 +54,13 @@ INCORRECT = "INCORRECT"
 # the stats readout can exclude it from accuracy and the ribbon can mark it
 # neutrally.
 ABANDONED = "ABANDONED"
+# Outcome for a genuine trial excursion (trial_trip) where the rat committed a
+# choice but the CHOICE cue never sounded this trip - the animal was not actually
+# cued, so the choice is not scored, earns no reward, and the PLANNED trial (its
+# cue identity) is re-run rather than consumed (docs/decisions/0171). Like
+# ABANDONED it is a non-scored token excluded from accuracy; unlike it, the task
+# emits it automatically (not an operator action).
+UNCUED = "UNCUED"
 
 
 @dataclass(frozen=True)
@@ -89,6 +102,10 @@ class Phase3Decision:
     outcome: Optional[str] = None
     reward: bool = False
     advanced: bool = False
+    # An UNCUED trial's return lap just cleared: the trip is spent but the trial
+    # index did NOT advance, so the controller archives the uncued attempt and the
+    # planned trial re-runs (docs/decisions/0171). Distinct from ``advanced``.
+    uncued_cleared: bool = False
     complete: bool = False
     sched_state: str = "NORMAL"
     block_id: int = 0
@@ -117,6 +134,11 @@ class Phase3Task:
         # trip" guard now lives in the shared task_events choice-commit edge
         # (docs/decisions/0055, FW-0020), so no separate _scored_this_trial flag.
         self._awaiting_return = False
+        # A commit happened with no cue this trip: block a re-score AND (unlike
+        # _awaiting_return) suppress the index advance on the return lap, so the
+        # planned trial re-runs (docs/decisions/0171). Cleared on that return lap
+        # and by the manual trial-control buttons, like _awaiting_return.
+        self._uncued_pending = False
         # Rewind the closed-loop debias scheduler too (no-op for the balanced
         # generator), so a Restart re-decides the schedule from scratch.
         self.seq.reset_debias()
@@ -144,6 +166,7 @@ class Phase3Task:
         that was abandoned."""
         abandoned = self._index
         self._awaiting_return = False
+        self._uncued_pending = False
         if self._index < len(self.seq):
             self._index += 1
         return abandoned
@@ -154,6 +177,7 @@ class Phase3Task:
         Clears the awaiting-return latch so the SAME trial can be re-scored on the
         next up-the-stem excursion; the cursor does not move. Returns the index."""
         self._awaiting_return = False
+        self._uncued_pending = False
         return self._index
 
     def step_back(self) -> int:
@@ -162,6 +186,7 @@ class Phase3Task:
         Clears the awaiting-return latch and decrements the index (floored at 0).
         Returns the new current index."""
         self._awaiting_return = False
+        self._uncued_pending = False
         if self._index > 0:
             self._index -= 1
         return self._index
@@ -230,13 +255,20 @@ class Phase3Task:
         return self.seq.is_debias
 
     # ----------------------------------------------------------------- tick
-    def update(self, frame) -> Phase3Decision:
+    def update(self, frame, choice_cue_on: bool = True) -> Phase3Decision:
         """Fold one TaskEventFrame; return the trial decision for this tick.
 
         ``frame`` is a duck-typed task_events.TaskEventFrame (fields read by name:
         ``valid``, ``choice_committed``, ``trial_trip``, ``loop_closed``).
         Invalid frames are inert (no scoring/advance), so a tracking dropout never
         fabricates a choice or advances a trial.
+
+        ``choice_cue_on`` is whether the CHOICE cue actually SOUNDED on this trip
+        (the controller passes ``self._choice_cue_on_iso is not None``, cleared at
+        the hub). A genuine ``trial_trip`` commit with no cue this trip is scored
+        ``UNCUED`` - not rewarded, not advanced, the planned trial re-run
+        (docs/decisions/0171). It defaults True so a caller that does not track cue
+        state (tests of the scoring/advance mechanics) keeps the pre-0171 behaviour.
         """
         idx = self._index
         # Fix this trial's side before reading it (the closed-loop decision point;
@@ -264,6 +296,19 @@ class Phase3Task:
         choice_side = getattr(frame, "choice_committed", None)
         if (choice_side in _ARM_OF_SIDE and getattr(frame, "trial_trip", False)
                 and not self._awaiting_return):
+            # A genuine trial excursion that was never CUED this trip is not a real
+            # trial: record UNCUED, dispense nothing, and do NOT advance - the
+            # planned trial re-runs on the next clean cued trip (docs/decisions/
+            # 0171). The commit still latches _awaiting_return so a second choice
+            # this trip can't re-score; _uncued_pending flips the return lap from
+            # "advance" to "clear-and-re-run".
+            if not choice_cue_on:
+                self._awaiting_return = True
+                self._uncued_pending = True
+                return Phase3Decision(
+                    trial_index=idx, correct_arm=correct,
+                    choice_side=choice_side, outcome=UNCUED,
+                    reward=False, **meta)
             chosen = _ARM_OF_SIDE[choice_side]
             is_correct = (chosen == correct)
             self._awaiting_return = True
@@ -292,10 +337,17 @@ class Phase3Task:
                 outcome=CORRECT if is_correct else INCORRECT,
                 reward=reward, **meta)
 
-        # --- Advance on the return lap (rat back at the hub after the choice). ---
+        # --- Return lap (rat back at the hub after the choice). A normally scored
+        # trial advances; an UNCUED trip clears WITHOUT advancing so its planned
+        # trial re-runs (docs/decisions/0171). ---
         if self._awaiting_return and getattr(frame, "loop_closed", None) is not None:
-            self._index += 1
             self._awaiting_return = False
+            if self._uncued_pending:
+                self._uncued_pending = False
+                return Phase3Decision(
+                    trial_index=idx, correct_arm=correct,
+                    uncued_cleared=True, complete=self.complete, **meta)
+            self._index += 1
             return Phase3Decision(
                 trial_index=idx, correct_arm=correct,
                 advanced=True, complete=self.complete, **meta)

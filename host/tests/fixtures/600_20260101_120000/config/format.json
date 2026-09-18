@@ -7,7 +7,8 @@
   "outcome_labels": [
     "CORRECT",
     "INCORRECT",
-    "ABANDONED"
+    "ABANDONED",
+    "UNCUED"
   ],
   "cue_labels": [
     "HIGH",
@@ -33,7 +34,7 @@
     "return_cue_left": "planned left return-arm cue tone (HIGH/LOW)",
     "return_cue_right": "planned right return-arm cue tone (HIGH/LOW)",
     "chosen_arm": "arm the rat actually chose (LEFT/RIGHT)",
-    "outcome": "trial result (CORRECT/INCORRECT/ABANDONED)",
+    "outcome": "trial result (CORRECT/INCORRECT/ABANDONED/UNCUED)",
     "rewarded": "1 if a reward was delivered, else 0",
     "topups": "count of lick top-up reward pulses delivered",
     "return_arm_used": "return arm the rat took back to the hub (LEFT/RIGHT)",

@@ -75,6 +75,24 @@ class TestAbandonedExcluded(unittest.TestCase):
         self.assertEqual(st.accuracy_cum, 1.0)
 
 
+class TestUncuedSurfaced(unittest.TestCase):
+    def test_uncued_is_counted_but_excluded_from_completed(self):
+        # An UNCUED trip (docs/decisions/0171) is surfaced as its own count and,
+        # like ABANDONED, kept out of completed/accuracy.
+        log = _log(n=20)
+        _resolve(log, 0, "left", CORRECT)
+        log.choice_scored(1, "left", "UNCUED", "t_uncued")   # committed with no cue
+        st = compute(log.snapshot(2, armed=True))
+        self.assertEqual(st.uncued, 1)
+        self.assertEqual(st.completed, 1)                    # UNCUED not completed
+        self.assertEqual(st.correct, 1)
+        self.assertEqual(st.accuracy_cum, 1.0)
+
+    def test_no_uncued_defaults_to_zero(self):
+        self.assertEqual(compute(_log(n=20).snapshot(0, armed=True)).uncued, 0)
+        self.assertEqual(compute(None).uncued, 0)
+
+
 class TestEmpty(unittest.TestCase):
     def test_none_snapshot_is_all_empty(self):
         s = compute(None)

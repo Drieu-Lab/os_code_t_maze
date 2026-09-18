@@ -102,6 +102,11 @@ class Phase3Stats:
     completed: int                   # trials with a scored outcome
     correct: int
     incorrect: int
+    # UNCUED attempts this session (docs/decisions/0171): genuine trial excursions
+    # committed with no CHOICE cue that trip - excluded from ``completed`` /
+    # accuracy (like ABANDONED), surfaced as its own count. Cumulative (live +
+    # archived), read straight from the snapshot's own tally.
+    uncued: int
     # Correct count over OUT-OF-BLOCK completed trials only - the numerator that
     # matches ``accuracy_cum`` (whose denominator is ``oob_completed``). Distinct
     # from ``correct`` (all completed, including forced in-block trials), so the
@@ -403,6 +408,7 @@ def compute(snapshot: Optional[Phase3StateSnapshot], *,
     return Phase3Stats(
         window_n=n, total=total, current_index=current_index,
         completed=ncomp, correct=correct, incorrect=incorrect,
+        uncued=(snapshot.uncued if snapshot is not None else 0),
         oob_correct=correct_oob,
         accuracy_cum=accuracy_cum, accuracy_win=accuracy_win,
         high_accuracy=_accuracy(high), high_completed=len(high),

@@ -553,6 +553,13 @@ def _cued_lines(st: Optional["Phase3Stats"]) -> list:
     lines = [
         f"  Completed:   {st.completed}/{st.total}   "
         f"correct {st.correct}  incorrect {st.incorrect}",
+    ]
+    # UNCUED trips (a choice committed with no cue that trip; docs/decisions/0171)
+    # are not scored/rewarded and the planned trial re-runs - show the count only
+    # when any occurred, so a normal session's readout is unchanged.
+    if getattr(st, "uncued", 0):
+        lines.append(f"  Uncued:      {st.uncued}   (no cue this trip; not scored)")
+    lines += [
         f"  Accuracy:    {_pct(st.accuracy_cum)}  "
         f"(last {n}: {_pct(st.accuracy_win)})   "
         f"[{st.oob_correct}/{st.oob_completed}]",

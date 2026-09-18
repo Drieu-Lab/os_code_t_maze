@@ -58,7 +58,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, fields, replace
 from typing import Any, Dict, List, Optional, Tuple
 
-from tmaze.core.phase3.phase3_task import ABANDONED
+from tmaze.core.phase3.phase3_task import ABANDONED, UNCUED
 from tmaze.core.phase3.trial_sequence import HIGH, LEFT, LOW, RIGHT, TrialSequence
 
 # Row values use these arm labels (uppercased); the sequence uses int LEFT/RIGHT
@@ -303,6 +303,11 @@ class Phase3StateSnapshot:
     # clear reactively when a block exits or is cancelled.
     intervention_next: bool = False
     probe_upcoming: int = 0
+    # Cumulative count of UNCUED attempts this session (docs/decisions/0171): a
+    # genuine trial excursion committed with no CHOICE cue that trip - not scored,
+    # not rewarded, the planned trial re-run. Counts live rows AND archived
+    # (superseded) attempts so it survives the re-run overwriting the live row.
+    uncued: int = 0
 
 
 @dataclass(frozen=True)
@@ -679,6 +684,12 @@ class Phase3Log:
             Phase3RowView(trial=i + 1, **{n: getattr(r, n) for n in names})
             for i, r in enumerate(self._rows)
         )
+        # Cumulative UNCUED count (docs/decisions/0171): live rows still showing
+        # UNCUED PLUS every archived UNCUED attempt, so it stays correct after a
+        # re-run overwrites the live row (the attempt was archived on its clear).
+        uncued = (sum(1 for r in self._rows if r.outcome == UNCUED)
+                  + sum(1 for (_i, _a, _e, r) in self._archive
+                        if r.outcome == UNCUED))
         c = self.cfg
         db = getattr(c, "debias", None)
         al = getattr(c, "alternation", None)
@@ -706,7 +717,8 @@ class Phase3Log:
             probe_armed=seq.probe_armed,
             return_enabled=self.return_enabled,
             intervention_next=seq.intervention_will_continue(),
-            probe_upcoming=seq.probe_upcoming())
+            probe_upcoming=seq.probe_upcoming(),
+            uncued=uncued)
 
     # ------------------------------------------------------------- render
     def _header_comment(self) -> List[str]:

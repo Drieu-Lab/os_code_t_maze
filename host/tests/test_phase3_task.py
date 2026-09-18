@@ -18,7 +18,7 @@ from tmaze.core.maze_state import (
     HUB, CENTRAL_STEM, JUNCTION, LEFT_CHOICE, RIGHT_CHOICE, LEFT_RETURN,
     RIGHT_RETURN, MazeStateEstimator, MazeStateParams, Zone, ZoneMap,
 )
-from tmaze.core.phase3.phase3_task import CORRECT, INCORRECT, Phase3Config, Phase3Task
+from tmaze.core.phase3.phase3_task import CORRECT, INCORRECT, UNCUED, Phase3Config, Phase3Task
 from tmaze.core.task_events import TaskEvents
 from tmaze.core.phase3.trial_sequence import LEFT, RIGHT, TrialConfig, TrialSequence
 
@@ -144,6 +144,67 @@ class TestPhase3Task(unittest.TestCase):
         self.assertTrue(d.complete)
         self.assertIsNone(d.outcome)
         self.assertIsNone(t.current_correct_arm())
+
+
+class TestUncued(unittest.TestCase):
+    """A genuine trial_trip commit with no CHOICE cue that trip is UNCUED: not
+    scored, not rewarded, and the planned trial re-runs (docs/decisions/0171)."""
+
+    def test_uncued_commit_is_not_scored_or_rewarded(self):
+        t = make_task()
+        correct = t.current_correct_arm()
+        d = t.update(frame(choice_committed=side_of(correct), outbound_used_stem=True),
+                     choice_cue_on=False)
+        self.assertEqual(d.outcome, UNCUED)
+        self.assertEqual(d.choice_side, side_of(correct))   # what the rat did is kept
+        self.assertFalse(d.reward)
+        self.assertFalse(d.advanced)
+        self.assertEqual(t.index, 0)                        # trial not consumed
+
+    def test_uncued_return_lap_clears_without_advancing(self):
+        t = make_task()
+        correct = t.current_correct_arm()
+        t.update(frame(choice_committed=side_of(correct), outbound_used_stem=True),
+                 choice_cue_on=False)
+        d = t.update(frame(loop_closed=side_of(correct)))
+        self.assertTrue(d.uncued_cleared)
+        self.assertFalse(d.advanced)
+        self.assertEqual(t.index, 0)                        # SAME trial still current
+
+    def test_planned_trial_reruns_and_scores_once_cued(self):
+        t = make_task()
+        correct = t.current_correct_arm()
+        # Uncued trip, then home: index preserved.
+        t.update(frame(choice_committed=side_of(correct), outbound_used_stem=True),
+                 choice_cue_on=False)
+        t.update(frame(loop_closed=side_of(correct)))
+        self.assertEqual(t.index, 0)
+        # Re-run the SAME trial, this time cued -> scores + advances normally.
+        d = t.update(frame(choice_committed=side_of(correct), outbound_used_stem=True),
+                     choice_cue_on=True)
+        self.assertEqual(d.outcome, CORRECT)
+        self.assertTrue(d.reward)
+        d2 = t.update(frame(loop_closed=side_of(correct)))
+        self.assertTrue(d2.advanced)
+        self.assertEqual(t.index, 1)
+
+    def test_cue_on_default_scores_normally(self):
+        # The default (no choice_cue_on arg) is "cued", so pre-0171 callers/tests
+        # keep scoring - only an explicit choice_cue_on=False yields UNCUED.
+        t = make_task()
+        correct = t.current_correct_arm()
+        d = t.update(frame(choice_committed=side_of(correct), outbound_used_stem=True))
+        self.assertEqual(d.outcome, CORRECT)
+
+    def test_uncued_only_on_a_trial_trip(self):
+        # A non-trial-trip commit (divider jump) is still just unscored, NOT UNCUED
+        # - UNCUED is reserved for a GENUINE trip that simply wasn't cued.
+        t = make_task()
+        correct = t.current_correct_arm()
+        d = t.update(frame(choice_committed=side_of(correct), outbound_used_stem=True,
+                           left_hub_via_stem=False), choice_cue_on=False)
+        self.assertIsNone(d.outcome)
+        self.assertEqual(t.index, 0)
 
 
 class TestManualControls(unittest.TestCase):

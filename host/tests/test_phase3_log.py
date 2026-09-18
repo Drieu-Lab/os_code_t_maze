@@ -618,5 +618,30 @@ class TestProbeDisableLogging(unittest.TestCase):
         self.assertFalse(any("probe_enabled=" in ln for ln in header))
 
 
+class TestUncuedCount(unittest.TestCase):
+    """The snapshot's cumulative UNCUED tally counts live AND archived attempts,
+    so it survives the re-run overwriting the live row (docs/decisions/0171)."""
+
+    def test_live_uncued_row_is_counted(self):
+        log = _log()
+        log.choice_scored(0, "left", "UNCUED", "t0")
+        self.assertEqual(log.snapshot(0, armed=True).uncued, 1)
+
+    def test_archived_uncued_survives_the_rerun(self):
+        log = _log()
+        log.choice_scored(0, "left", "UNCUED", "t0")     # uncued attempt
+        log.supersede_trial(0, "uncued")                 # archived on the return lap
+        self.assertEqual(log.snapshot(0, armed=True).uncued, 1)   # archive still counts
+        log.choice_scored(0, "right", "CORRECT", "t0b")  # the re-run scores cued
+        snap = log.snapshot(0, armed=True)
+        self.assertEqual(snap.uncued, 1)                 # live=CORRECT + archived UNCUED
+        self.assertEqual(snap.rows[0].outcome, "CORRECT")
+
+    def test_no_uncued_on_a_clean_session(self):
+        log = _log()
+        log.choice_scored(0, "left", "CORRECT", "t0")
+        self.assertEqual(log.snapshot(0, armed=True).uncued, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

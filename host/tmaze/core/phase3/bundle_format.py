@@ -28,7 +28,7 @@ from typing import Any, Dict, Optional
 
 from tmaze.core import maze_state
 from tmaze.core.phase3 import phase3_log
-from tmaze.core.phase3.phase3_task import ABANDONED, CORRECT, INCORRECT
+from tmaze.core.phase3.phase3_task import ABANDONED, CORRECT, INCORRECT, UNCUED
 from tmaze.core.phase3.trial_sequence import HIGH, LEFT, LOW, RIGHT
 
 # Bump when the format.json layout / semantics change. Kept in lockstep with the
@@ -75,7 +75,7 @@ _COLUMN_DOC: Dict[str, str] = {
     "return_cue_left": "planned left return-arm cue tone (HIGH/LOW)",
     "return_cue_right": "planned right return-arm cue tone (HIGH/LOW)",
     "chosen_arm": "arm the rat actually chose (LEFT/RIGHT)",
-    "outcome": "trial result (CORRECT/INCORRECT/ABANDONED)",
+    "outcome": "trial result (CORRECT/INCORRECT/ABANDONED/UNCUED)",
     "rewarded": "1 if a reward was delivered, else 0",
     "topups": "count of lick top-up reward pulses delivered",
     "return_arm_used": "return arm the rat took back to the hub (LEFT/RIGHT)",
@@ -176,7 +176,7 @@ def format_manifest(firmware_proto: Optional[int] = None) -> Dict[str, Any]:
         "firmware_proto": firmware_proto,
         "sensor_polarity": sensor_polarity_for(firmware_proto),
         "zones_version": maze_state.ZONES_VERSION,
-        "outcome_labels": [CORRECT, INCORRECT, ABANDONED],
+        "outcome_labels": [CORRECT, INCORRECT, ABANDONED, UNCUED],
         "cue_labels": [HIGH, LOW],
         "arm_labels": [phase3_log._ARM_LABEL[LEFT], phase3_log._ARM_LABEL[RIGHT]],
         "zone_names": list(maze_state.EDITABLE_ZONES),
