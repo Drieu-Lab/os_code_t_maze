@@ -105,6 +105,7 @@ from tmaze.core.session import session_config
 from tmaze.core.session import session_meta
 from tmaze.core.session import session_notes
 from tmaze.core.session import session_summary
+from tmaze.core import provenance
 from tmaze.core.session.session_log import SessionManifest, clock_snapshot, path_within_session
 from tmaze.core.session.session_serial import capture_filename
 from tmaze.core.session.session_timer import SessionTimer
@@ -1294,6 +1295,12 @@ class SessionControlView:
             session_id=self._session_id, animal=animal, t0=clock_snapshot())
         self._manifest_path = os.path.join(
             self._session_dir, f"session_{self._session_id}.json")
+        # Record what produced this session - code sha, python/package versions,
+        # host, firmware proto (declared in rig_config.h + last seen on the wire).
+        # P1/P6, docs/decisions/0180. Guarded inside collect(), so it never blocks
+        # Start; firmware_proto_seen is "unknown" until a handshake was observed.
+        self._manifest.set_provenance(
+            provenance.collect(firmware_proto_seen=self._firmware_proto))
 
         # Bind the note log to this session's on-disk file and flush whatever the
         # operator jotted before Start (footgun fix: do NOT wipe pre-Start notes;

@@ -48,10 +48,10 @@ import argparse
 import datetime as _dt
 import hashlib
 import os
-import subprocess
 from dataclasses import dataclass, field
 from typing import List, Optional
 
+from tmaze.core import provenance
 from tmaze.core.records import animals
 from tmaze.core.records import daily_log
 from tmaze.core.records import note_tags
@@ -99,31 +99,11 @@ def _file_sha(path: Optional[str]) -> str:
         return "absent"
 
 
-def _code_commit() -> str:
-    """The code repo's short commit sha (``+dirty`` when the tree has
-    uncommitted changes), or ``unknown`` when git isn't available."""
-    try:
-        head = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
-                              cwd=_HERE, capture_output=True, text=True,
-                              timeout=10)
-        if head.returncode != 0:
-            return "unknown"
-        sha = head.stdout.strip() or "unknown"
-        dirty = subprocess.run(["git", "status", "--porcelain",
-                                "--untracked-files=no"], cwd=_HERE,
-                               capture_output=True, text=True, timeout=10)
-        if dirty.returncode == 0 and dirty.stdout.strip():
-            sha += "+dirty"
-        return sha
-    except (OSError, subprocess.SubprocessError):
-        return "unknown"
-
-
 def build_meta(roots: List[str]) -> session_registry.BuildMeta:
     """Gather what this build is made from, for the CSV's header lines."""
     return session_registry.BuildMeta(
         built_at=_dt.datetime.now().isoformat(timespec="seconds"),
-        code_commit=_code_commit(),
+        code_commit=provenance.code_commit(),
         roots=[os.path.abspath(r) for r in roots],
         inputs={
             "daily_log": _file_sha(daily_log.default_daily_log_path()),

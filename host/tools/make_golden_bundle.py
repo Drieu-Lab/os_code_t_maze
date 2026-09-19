@@ -54,6 +54,17 @@ T0: Dict[str, Any] = {                              # canonical session anchor (
     "mono": 2.0,
     "iso": "2026-01-01T12:00:00.000",
 }
+# Fixed provenance stub for the fixture (manifest schema v3, docs/decisions/0180):
+# NEVER collect live git/package/host values here - they would make the fixture
+# non-reproducible. Mirrors the shape of tmaze.core.provenance.collect().
+PROVENANCE: Dict[str, Any] = {
+    "code_commit": "0000000",
+    "python_version": "3.13.0",
+    "host_name": "golden-fixture",
+    "packages": {"tmaze": "0.0.0", "numpy": "0.0.0"},
+    "firmware_proto_source": FIRMWARE_PROTO,
+    "firmware_proto_seen": FIRMWARE_PROTO,
+}
 
 # A small but realistic zone map (normalised polygons). Stands in for the live
 # host/zones.json so the fixture is self-contained + deterministic; ``version``
@@ -147,6 +158,7 @@ def build_bundle(out_root: str) -> str:
             "camera_video": f"video/{SID}.mp4",
             "camera_sidecar": f"video/{SID}.csv",
         },
+        provenance=PROVENANCE,
     )
     _write(os.path.join(bundle, f"session_{SID}.json"), manifest.render())
     _write(os.path.join(bundle, "video", f"{SID}.csv"), _SIDECAR)

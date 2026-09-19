@@ -981,8 +981,20 @@ def main() -> int:
             try:
                 params["camera"] = {"orientation": ORIENTATION,
                                     "undistort_alpha": UNDISTORT_ALPHA}
-                if CALIBRATION_PATH:
-                    files["camera_calibration.json"] = CALIBRATION_PATH
+                # Hash the calibration ACTUALLY loaded into the camera (P5,
+                # docs/decisions/0180), so a "Load calibration..." file is what the
+                # snapshot records; fall back to the default constant when none is
+                # loaded (or the camera isn't up).
+                cam = camera_ref.get("cam")
+                calib_path = None
+                if cam is not None:
+                    try:
+                        calib_path = cam.current_calibration_path()
+                    except Exception:
+                        calib_path = None
+                calib_path = calib_path or CALIBRATION_PATH
+                if calib_path:
+                    files["camera_calibration.json"] = calib_path
             except Exception:
                 pass
             if tracker is not None:

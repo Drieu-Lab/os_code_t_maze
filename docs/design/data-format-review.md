@@ -105,7 +105,7 @@ stay fast); "End" = written once at Stop; "Start" = written once at Session Star
 
 | Artifact | Format | Versioning | When | Atomic? | Writer (core → shell) |
 |---|---|---|---|---|---|
-| `session_<id>.json` (manifest) | JSON | `schema_version: 2` | Live (paths as they resolve; `t_end` on Stop) | Yes (temp+rename) | `session_log.py` → `session_controller.py` |
+| `session_<id>.json` (manifest) | JSON | `schema_version: 3` (v3 adds `provenance` + append-only `post_hoc`, ADR-0180) | Live (paths as they resolve; `provenance` at Start; `t_end` on Stop) | Yes (temp+rename) | `session_log.py` ← `provenance.py` → `session_controller.py` |
 | `config/format.json` | JSON | `format_version: 1` (+ `proto`, `zones_version`) | Start | Yes (`_atomic_json`) | `phase3/bundle_format.py` → `session_config.py` |
 | `config/config_snapshot.json` | JSON | `schema_version: 1` + per-file SHA-256 | Start | Yes | `session_config.py` |
 | `config/*.json` (zones, rules, phase3, …) | JSON | mixed (`_schema`/`version` per file) | Start (verbatim copies) | copy | `session_config.py` |
@@ -137,7 +137,10 @@ the derived feature/metric modules built on those frames. The cross-session inde
   `_atomic_write`), so a crash mid-session cannot corrupt them (ADR-0047).
 - **Provenance is captured.** `config_snapshot.json` copies every config that
   shaped the run and records a SHA-256 (a content fingerprint) per file (ADR-0072),
-  so you can prove which zones/rules/model produced a session.
+  so you can prove which zones/rules/model produced a session; the manifest's
+  `provenance` block (schema v3, ADR-0180) adds the code sha, Python + package
+  versions, host, and firmware proto (declared + last seen) so you also know which
+  code, environment, and firmware produced it.
 - **One canonical clock anchor.** `session_t0_*` (host wall + monotonic + ISO,
   captured at Start) is stamped into the trial CSV header, the video sidecar
   header, and the manifest, so every stream can be tied to one session zero
@@ -177,7 +180,7 @@ Grades reflect the state *after* ADR-0142. Scale: Strong / Good / Fair / Weak.
 |---|---|---|
 | **Durable, atomic, crash-safe writes** | **Strong** | Trial/excursion/manifest/notes/config all temp+rename; serial is append+flush (append-only, safe). Only soft spots: video sidecar rows aren't flushed per row, and `model_*.npz` is a plain copy (immutable input, low risk). |
 | **Immutability of raw capture** | **Strong** | Config frozen at Start; trial CSV edits are append-only with `attempt`/`superseded` (ADR-0119), never destructive. |
-| **Provenance / reproducibility** | **Good** | `config_snapshot.json` hashes every config; seed + tones + params in the CSV header. Gap: no code version (git SHA) stamped in the bundle (FW-0039), and closed-loop schedules aren't reproducible from seed alone (documented in-header). |
+| **Provenance / reproducibility** | **Strong** (was Good) | `config_snapshot.json` hashes every config (now the calibration ACTUALLY loaded, P5) + seed/tones/params in the CSV header, and the manifest's `provenance` block (schema v3, ADR-0180) stamps the code sha, Python + package versions, host, and firmware proto (declared + last seen). Residual: firmware `VERSION` string awaits Reflash A; closed-loop schedules still aren't reproducible from seed alone (documented in-header). |
 | **Self-describing / discoverability** | **Good** (was Fair) | `format.json` now names tokens, zones, proto, and per-column meanings. Gaps: no *units* or *data types* in the dictionary; no human-readable data-dictionary doc; the manifest points at streams with absolute paths (see below). |
 | **One data dictionary (meaning + units + dtype)** | **Fair** | `format.json.columns` gives one-line meanings for the trial CSV only. No units, no dtypes; other streams (sidecar, serial, excursions) have no machine-readable dictionary. Analysis still reads every column as text and back-fills defaults. |
 | **Extensibility without hacks** | **Good** | New stream = new file; new trial column appends to `phase3_log.COLUMNS` and auto-appears in `format.json`. Version guards make additive change safe. Residual smell: run parameters are packed into overloaded `#`-comment header lines parsed by a bespoke tokenizer. |

@@ -695,6 +695,15 @@ class CameraView:
                    f"({cal_w}x{cal_h}{rms_txt})")
         return True
 
+    def current_calibration_path(self) -> Optional[str]:
+        """Path of the calibration JSON currently loaded into the undistorter, or
+        ``None`` when none is loaded. Lets the session config snapshot hash the
+        calibration actually IN USE rather than the default constant (P5,
+        docs/decisions/0180)."""
+        calib = self._undistorter.calibration
+        path = calib.get("path") if calib else None
+        return path or None
+
     def _maybe_undistort(self, arr):
         """Undistort a raw BGR frame if a matching calibration is active.
 

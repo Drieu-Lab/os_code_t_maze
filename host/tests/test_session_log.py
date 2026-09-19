@@ -51,6 +51,9 @@ class TestManifest(unittest.TestCase):
         self.assertIsNone(obj["t_end"])
         self.assertEqual(obj["streams"], {})
         self.assertEqual(set(obj["t0"]), {"wall", "mono", "iso"})
+        # schema v3: provenance + append-only post_hoc default empty (ADR-0180)
+        self.assertEqual(obj["provenance"], {})
+        self.assertEqual(obj["post_hoc"], [])
 
     def test_default_fiducial_is_host_t0_with_pending_upgrade(self):
         obj = json.loads(self._make().render())
@@ -69,6 +72,21 @@ class TestManifest(unittest.TestCase):
         self.assertEqual(obj["streams"]["phase3_task"],
                          "host/data/phase3_RAT600_x.csv")
         self.assertEqual(obj["streams"]["serial_log"]["animal"], "RAT600")
+
+    def test_provenance_and_post_hoc_round_trip(self):
+        # schema v3 (ADR-0180): the rig records provenance at Start; an offline
+        # tool appends a post_hoc edit record; both survive a render/from_dict cycle.
+        m = self._make()
+        m.set_provenance({"code_commit": "abc1234",
+                          "packages": {"tmaze": "0.1"}})
+        m.add_post_hoc({"tool": "sync_fit", "tool_version": 1,
+                        "at": "2026-01-01T00:00:00",
+                        "fields_changed": ["streams.sync_clock_fit", "fiducial.method"]})
+        obj = json.loads(m.render())
+        self.assertEqual(obj["provenance"]["code_commit"], "abc1234")
+        self.assertEqual(len(obj["post_hoc"]), 1)
+        self.assertEqual(obj["post_hoc"][0]["tool"], "sync_fit")
+        self.assertEqual(json.loads(SessionManifest.from_dict(obj).render()), obj)
 
     def test_set_end_stamps_the_end_anchor(self):
         m = self._make()

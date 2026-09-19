@@ -16,5 +16,17 @@
     "method": "host-t0",
     "pending": "firmware SYNC TTL + camera LED barcode (see docs/future-work.md FW-0018)"
   },
-  "schema_version": 2
+  "provenance": {
+    "code_commit": "0000000",
+    "python_version": "3.13.0",
+    "host_name": "golden-fixture",
+    "packages": {
+      "tmaze": "0.0.0",
+      "numpy": "0.0.0"
+    },
+    "firmware_proto_source": 8,
+    "firmware_proto_seen": 8
+  },
+  "post_hoc": [],
+  "schema_version": 3
 }

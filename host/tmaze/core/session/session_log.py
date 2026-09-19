@@ -43,7 +43,9 @@ from typing import Any, Dict, Optional
 
 # Bump when the manifest layout changes so an offline reader can branch on it.
 # v2 adds the ``config_dir`` / ``config_snapshot`` streams (docs/decisions/0072).
-SCHEMA_VERSION = 2
+# v3 adds the ``provenance`` block (code/firmware/env versions) and the append-only
+# ``post_hoc`` edit log (docs/decisions/0180).
+SCHEMA_VERSION = 3
 
 # How the session is anchored today, and the deferred hardware upgrade that would
 # attach at the same session-start seam (see docs/future-work.md FW-0018).
@@ -104,6 +106,11 @@ class SessionManifest:
     ``streams`` maps a stream name (``phase3_task``, ``camera_video``, ...) to its
     resolved path (or a small descriptor dict for the serial log, whose exact
     filename the host can't know - it names itself in a separate process).
+    ``provenance`` records what produced the session - code/firmware/env versions
+    (from ``tmaze.core.provenance``; docs/decisions/0180). ``post_hoc`` is an
+    append-only log of edits an OFFLINE tool made after Stop (e.g. ``sync_fit``
+    registering the clock fit) - the rig writes it empty; only post-hoc tools
+    append.
     """
     session_id: str
     animal: str
@@ -111,6 +118,8 @@ class SessionManifest:
     t_end: Optional[Dict[str, Any]] = None
     streams: Dict[str, Any] = field(default_factory=dict)
     fiducial: Dict[str, Any] = field(default_factory=_default_fiducial)
+    provenance: Dict[str, Any] = field(default_factory=dict)
+    post_hoc: list = field(default_factory=list)
     schema_version: int = SCHEMA_VERSION
 
     @classmethod
@@ -132,6 +141,8 @@ class SessionManifest:
             t_end=d.get("t_end"),
             streams=dict(d.get("streams") or {}),
             fiducial=dict(d.get("fiducial") or _default_fiducial()),
+            provenance=dict(d.get("provenance") or {}),
+            post_hoc=list(d.get("post_hoc") or []),
             schema_version=d.get("schema_version", SCHEMA_VERSION),
         )
 
@@ -142,6 +153,17 @@ class SessionManifest:
     def set_end(self, t_end: Dict[str, Any]) -> None:
         """Stamp the session-end clock anchor."""
         self.t_end = t_end
+
+    def set_provenance(self, provenance: Dict[str, Any]) -> None:
+        """Record the code/firmware/env versions that produced this session
+        (from ``tmaze.core.provenance.collect``; docs/decisions/0180)."""
+        self.provenance = dict(provenance)
+
+    def add_post_hoc(self, entry: Dict[str, Any]) -> None:
+        """Append one post-Stop edit record (``{tool, tool_version, at,
+        fields_changed}``) - used by offline tools like ``sync_fit`` when they
+        write back into the manifest (docs/decisions/0180)."""
+        self.post_hoc.append(dict(entry))
 
     def render(self) -> str:
         """Render the whole manifest as pretty JSON text (the shell writes it).
