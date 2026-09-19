@@ -293,6 +293,26 @@ class TestExtendAndAbandon(unittest.TestCase):
         log.trial_abandoned(1, "t_end")
         self.assertEqual(log._rows[1].outcome, "CORRECT")   # scored row preserved
 
+    def test_skip_of_scored_trial_fills_trial_end_iso(self):
+        """T3: Skipping an already-scored trial (whose loop had not yet closed)
+        keeps its outcome but fills the blank trial_end_iso, so the row carries a
+        real end stamp for the ITI/dead-time math."""
+        log = _log()
+        log.choice_scored(1, "left", "CORRECT", "t_choice")
+        self.assertIsNone(log._rows[1].trial_end_iso)
+        log.trial_abandoned(1, "t_skip")
+        self.assertEqual(log._rows[1].outcome, "CORRECT")     # score untouched
+        self.assertEqual(log._rows[1].trial_end_iso, "t_skip")  # end now stamped
+
+    def test_skip_does_not_overwrite_an_existing_end(self):
+        """A trial that already closed keeps its original end time on a later
+        abandon (never overwritten)."""
+        log = _log()
+        log.choice_scored(1, "left", "CORRECT", "t_choice")
+        log.trial_ended(1, "t_end")
+        log.trial_abandoned(1, "t_skip")
+        self.assertEqual(log._rows[1].trial_end_iso, "t_end")
+
     def test_planned_trials_header_reflects_extension(self):
         s = _seq(n=20)
         log = Phase3Log(s, animal="R", session_start_iso="t")

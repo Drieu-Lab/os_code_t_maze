@@ -577,15 +577,19 @@ class Phase3Log:
 
     def trial_abandoned(self, index: int, iso: str) -> None:
         """Mark a trial the operator abandoned mid-run (Skip / Repeat buttons;
-        docs/decisions/0058). Records the distinct ``ABANDONED`` outcome and the
-        end time, but only if the trial was not already scored - so a genuine
-        CORRECT/INCORRECT is never overwritten by a stray abandon."""
+        docs/decisions/0058). Always stamps the end time if it is still blank -
+        including when the trial was ALREADY scored and then Skipped (T3), so the
+        row carries a real ``trial_end_iso`` for the ITI/dead-time math instead of
+        a start+outcome with no end. The distinct ``ABANDONED`` outcome is claimed
+        only when the trial was NOT already scored, so a genuine CORRECT/INCORRECT
+        is never overwritten by an abandon."""
         r = self._row(index)
-        if r is None or r.outcome is not None:
+        if r is None:
             return
-        r.outcome = ABANDONED
         if r.trial_end_iso is None:
             r.trial_end_iso = iso
+        if r.outcome is None:
+            r.outcome = ABANDONED
 
     def _clear_live(self, r: _Row) -> None:
         """Reset a row's live (filled) fields to unrecorded, keeping its planned
