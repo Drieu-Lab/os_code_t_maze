@@ -125,9 +125,10 @@ PHASE3_LICK_DEBOUNCE_MS = 150
 # as rules.json (docs/decisions/0031).
 PHASE3_PATH = os.path.join(str(host_dir()), "phase3.json")
 
-# Per-session data files live under host/data/ (same tree as rig_logger.py).
-# host/ is found by landmark search, not relative to this module (ADR-0083).
-DATA_DIR = os.path.join(str(host_dir()), "data")
+# Phase 3 writes its trial + excursion CSVs ONLY into a live session's task/
+# folder (docs/decisions/0049); when armed WITHOUT a session it keeps the planned
+# matrix in memory until Start binds a folder (Increment 4b, docs/decisions/0177)
+# - so there is no host/data orphan and no such module-level fallback dir.
 
 # Physical return arm ("left"/"right", from CueGate) -> trial_sequence side int,
 # to look up that arm's planned return cue (see docs/decisions/0047).
@@ -689,18 +690,27 @@ class Phase3ControlView(VisionActuator):
                               session_id=snap.session_id,
                               session_t0=snap.session_t0,
                               return_enabled=snap.params.return_enabled)
-        # Write into the session's task/ folder when armed via a session, else the
-        # default host/data/ tree (docs/decisions/0049). _write_log makes the dir.
-        out_dir = snap.session_out_dir or DATA_DIR
-        self._log_path = os.path.join(out_dir, f"{base}.csv")
-        self._write_log()
+        # Bind + write into the session's task/ folder ONLY when armed via a
+        # session (docs/decisions/0049). When armed WITHOUT one (the ADR-0060
+        # arm-before-Start order, or a standalone tab), keep the planned matrix IN
+        # MEMORY: _log_path stays None so _write_log is a no-op and no host/data
+        # orphan is created. The Start rebind (_rebind_session_output) binds the
+        # real path and does the first write, which renders the WHOLE table - so
+        # any trials run between arm and Start are preserved (docs/decisions/0066,
+        # 0177 Increment 4b).
+        if snap.session_out_dir:
+            self._log_path = os.path.join(snap.session_out_dir, f"{base}.csv")
+            self._write_log()
+        else:
+            self._log_path = None            # in memory until a session exists
         # Fresh excursion-event log alongside the trial CSV (ADR-0109), named in
         # lockstep with the trial file (so a restart's _r<n> tag carries over).
         self._excursion_log = ExcursionLog(
             animal=animal, session_id=snap.session_id, session_start_iso=_now_iso())
         self._excursion_path = self._excursion_path_for(self._log_path)
         self._choice_cue_on_iso = None
-        self._write_excursion_log()
+        if self._excursion_path is not None:
+            self._write_excursion_log()
         self._publish_state(armed=True)      # expose the fresh plan to other tabs
         self._send_cmd("CUE,VISION")         # host owns the DAC; suppress auto-tone
 
@@ -1451,9 +1461,14 @@ class Phase3ControlView(VisionActuator):
         if not snap.gate_open:
             self._status_text = warn + f"gated ({self._gate_reason()})"
             return
+        # Armed but no session owns a folder yet: the task runs and the plan is
+        # held in memory, but nothing is on disk until Start binds task/ (Increment
+        # 4b, docs/decisions/0177). Say so loudly so a run isn't mistaken for one
+        # that is being recorded.
+        rec = "" if self._log_path is not None else "NOT RECORDING - start a session  "
         if snap.paused:
             self._status_text = (
-                warn + "PAUSED  (cues muted; still armed - press Resume)")
+                warn + rec + "PAUSED  (cues muted; still armed - press Resume)")
             return
         n = len(self._seq) if self._seq is not None else 0
         idx = self._task.index if self._task is not None else 0
@@ -1491,7 +1506,7 @@ class Phase3ControlView(VisionActuator):
         elif probe_enabled and not probe_armed:
             probe += "  [PROBE OFF]"
         self._status_text = (
-            warn +
+            warn + rec +
             f"ARMED  seed:{self._active_seed}  trial:{min(idx + 1, n)}/{n}  "
             f"correct:{self._correct}/{done} ({acc:.0f}%)  "
             f"rewards:{self._reward_count} ({format_volume(self._reward_ul)}){probe}  "

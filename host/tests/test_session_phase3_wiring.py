@@ -31,7 +31,7 @@ from tmaze.core.session.session_notes import AUTO_SEND_FAILED, AUTO_WRITE_FAILED
 from tmaze.core.maze_state import (
     CENTRAL_STEM, HUB, IN_WELL, LEFT_CHOICE, RIGHT_CHOICE, UP_STEM, RatState)
 from tmaze.core.phase3.trial_sequence import TrialConfig
-from tmaze.ui.phase3_controller import DATA_DIR, Phase3ControlView
+from tmaze.ui.phase3_controller import Phase3ControlView
 from tmaze.ui.session_controller import SessionControlView
 
 # How long to wait for the actuation thread to apply an enqueued command. The work
@@ -279,8 +279,9 @@ class SessionPhase3WiringTest(unittest.TestCase):
         exists. The file must still end up in the session's task/ folder."""
         self._open_gate()
         self._run_a_trial()
-        self.assertTrue(self.phase3.current_log_path().startswith(DATA_DIR),
-                        "pre-session arm should use the host/data fallback")
+        self.assertIsNone(self.phase3.current_log_path(),
+                          "pre-session arm keeps the plan in memory - no orphan on "
+                          "disk (Increment 4b)")
 
         session_dir = self._start_session()
         self._run_a_trial()
@@ -295,6 +296,31 @@ class SessionPhase3WiringTest(unittest.TestCase):
         # The excursion-event log is registered as its own stream (ADR-0109).
         self.assertEqual(self.session._manifest.streams["phase3_excursions"],
                          expected[:-4] + "_excursions.csv")
+
+    def test_armed_without_session_writes_nothing_and_says_not_recording(self):
+        """Increment 4b: arming before a session exists keeps the plan in memory -
+        no trial/excursion file on disk, and the status line says NOT RECORDING so
+        a run is never mistaken for one that is being recorded."""
+        self._open_gate()
+        self._run_a_trial()                        # armed, gate open, no session
+
+        self.assertIsNone(self.phase3.current_log_path())
+        self.assertIsNone(self.phase3.current_excursion_path())
+        # A write attempt in this state is a no-op (guarded on _log_path is None),
+        # so nothing lands and no write error is recorded either.
+        self.phase3._write_log()
+        self.phase3._write_excursion_log()
+        self.assertEqual(self.phase3._write_errors, {})
+
+        self.phase3._publish_status(self.phase3._act_snapshot)
+        self.assertIn("NOT RECORDING", self.phase3._status_text)
+
+        # Start binds a folder; the status then drops the warning and the file
+        # appears, complete with the pre-Start trial.
+        self._start_session()
+        self.assertIsNotNone(self.phase3.current_log_path())
+        self.phase3._publish_status(self.phase3._act_snapshot)
+        self.assertNotIn("NOT RECORDING", self.phase3._status_text)
 
     def test_rebound_file_keeps_the_trials_run_before_start(self):
         """Rebinding re-points the path; it must not lose the table built while
@@ -344,9 +370,10 @@ class SessionPhase3WiringTest(unittest.TestCase):
         self._run_a_trial()
         self.camera.tracking = True
         self._run_a_trial()
-        self.assertTrue(
-            self.phase3.current_log_path().startswith(DATA_DIR),
-            "a re-arm after Stop must not write into the closed session's folder")
+        self.assertIsNone(
+            self.phase3.current_log_path(),
+            "a re-arm after Stop keeps the plan in memory (no orphan, no write "
+            "into the closed session's folder; Increment 4b)")
 
         dir_b = self._start_session()
         self._run_a_trial()
@@ -402,7 +429,9 @@ class SessionPhase3WiringTest(unittest.TestCase):
         import unittest.mock as mock
 
         self._open_gate()
-        self._run_a_trial()                        # arms; a normal write succeeded
+        self._run_a_trial()
+        self._start_session()                      # binds the task/ log path
+        self.phase3._write_log()                   # a normal write succeeded
         self.phase3._publish_status(self.phase3._act_snapshot)
         self.assertNotIn("DISK WRITE FAILED", self.phase3._status_text)
 
@@ -427,7 +456,8 @@ class SessionPhase3WiringTest(unittest.TestCase):
         import unittest.mock as mock
 
         self._open_gate()
-        self._run_a_trial()                        # arms; bind the log path
+        self._run_a_trial()
+        self._start_session()                      # binds the task/ log path
 
         order = []
         real_fsync, real_replace = os.fsync, os.replace
@@ -632,10 +662,12 @@ class SessionPhase3WiringTest(unittest.TestCase):
         the session's tree is refused rather than recorded."""
         self._open_gate()
         self._run_a_trial()
-        stale = self.phase3.current_log_path()
-        # Pin the reported path so no rebind can take effect - which is what the
-        # manifest sees if its resolve poll wins the race, or if some future change
-        # reintroduces a stale binding.
+        # Pin the reported path to one OUTSIDE any session tree, so no rebind can
+        # take effect - which is what the manifest sees if its resolve poll wins
+        # the race, or if some future change reintroduces a stale binding. (4b no
+        # longer has a host/data fallback to stand in as the out-of-session path,
+        # so fabricate one explicitly.)
+        stale = os.path.join(self.recordings, "not_a_session", "phase3_stale.csv")
         self.phase3.current_log_path = lambda: stale
 
         session_dir = self._start_session()
