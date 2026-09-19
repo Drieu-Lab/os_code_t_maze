@@ -26,6 +26,7 @@ Dependencies: pyserial (already required by the original GUIs).
 from __future__ import annotations
 
 import argparse
+import queue
 import signal
 import socket
 import sys
@@ -33,7 +34,14 @@ import threading
 import time
 from typing import List, Optional
 
-import serial
+try:
+    import serial
+except ImportError:
+    # pyserial is required to actually OWN the COM port (the broker's day job), but
+    # not for the TCP fan-out logic (Client/broadcast), which headless tests
+    # exercise without a serial port. Import stays soft so those tests run in an
+    # env without pyserial; open_serial() raises a clear error if it's really used.
+    serial = None  # type: ignore[assignment]
 
 from tmaze.core.protocol import leading_ms
 from tmaze.core.serial_liveness import DEAD, PROBE, LivenessMonitor, LivenessParams
@@ -49,6 +57,13 @@ STATS_INTERVAL_S = 10.0
 # wedged Due froze every client's commands indefinitely - and silently, because
 # the blocked write held serial_lock. see docs/decisions/0062
 WRITE_TIMEOUT_S = 1.0
+# Per-client outbound backlog cap (review finding R1, docs/decisions/0183). Each
+# client drains its OWN bounded queue on its OWN writer thread, so broadcast() only
+# ever appends - a slow or stuck client can never block the serial reader (and thus
+# never back-pressure the Due into firing valves/TTLs late). A client whose backlog
+# reaches this many lines is too slow to keep up and is dropped. At the rig's line
+# rate (~tens/s of short lines) this is many seconds of buffer.
+MAX_QUEUED_LINES = 2000
 # The liveness probe. STATUS (not PING) keeps PONG reserved as the session-start
 # fiducial. see docs/decisions/0062
 LIVENESS_PROBE_CMD = "STATUS"
@@ -63,7 +78,7 @@ OPEN_FAIL_SUMMARY_S = 60.0
 stop_event = threading.Event()
 
 clients_lock = threading.Lock()
-clients: List[socket.socket] = []
+clients: List["Client"] = []
 
 serial_lock = threading.Lock()  # serializes writes to the Due
 ser: Optional[serial.Serial] = None
@@ -99,7 +114,10 @@ def log(msg: str) -> None:
 
 
 # ================= SERIAL =================
-def open_serial(port: str, baud: int) -> serial.Serial:
+def open_serial(port: str, baud: int) -> "serial.Serial":
+    if serial is None:
+        raise RuntimeError("pyserial is not installed; the broker needs it to open "
+                           "the Due's COM port (pip install pyserial)")
     s = serial.Serial(port, baud, timeout=0.1, write_timeout=WRITE_TIMEOUT_S)
     # Opening the Programming port asserts DTR, which the ATmega16U2 turns into a
     # reset of the SAM3X, so this also waits out a reboot. see docs/decisions/0065
@@ -241,38 +259,112 @@ def _close_serial() -> None:
 
 # ================= TCP =================
 # Single-owner broker fans every Due line out to all clients. see docs/decisions/0001
-def broadcast(line: str) -> None:
-    """Send ``line + "\\n"`` to every connected client; drop any that fail."""
-    payload = (line + "\n").encode("utf-8", errors="ignore")
-    dropped: List[socket.socket] = []
-    with clients_lock:
-        for c in clients:
-            try:
-                c.sendall(payload)
-            except Exception:
-                dropped.append(c)
-        for c in dropped:
-            try:
-                clients.remove(c)
-            except ValueError:
-                pass
-    for c in dropped:
-        peer = _peer_str(c)
+class Client:
+    """One connected TCP client: a socket plus a BOUNDED outbound queue drained by
+    its OWN writer thread (review finding R1, docs/decisions/0183).
+
+    The point: ``broadcast`` (which runs on the serial-reader thread) only ever
+    APPENDS to this queue - it never calls ``sendall``. So a slow or stuck client
+    stalls only its own queue/thread, never the serial reader. A client that falls
+    ``MAX_QUEUED_LINES`` behind is dropped rather than allowed to back-pressure the
+    whole rig.
+    """
+
+    def __init__(self, sock: socket.socket, addr) -> None:
+        self.sock = sock
+        self.peer = f"{addr[0]}:{addr[1]}"
+        self.out: "queue.Queue[Optional[bytes]]" = queue.Queue(maxsize=MAX_QUEUED_LINES)
+        self._close_lock = threading.Lock()
+        self._closing = False
+        self.writer = threading.Thread(
+            target=self._writer_loop, name=f"client-writer-{self.peer}",
+            daemon=True)
+
+    def start(self) -> None:
+        self.writer.start()
+
+    def enqueue(self, payload: bytes) -> bool:
+        """Queue one line to send. Returns False if the backlog is full (the client
+        is too slow) - the caller then drops it. Never blocks."""
         try:
-            c.close()
+            self.out.put_nowait(payload)
+            return True
+        except queue.Full:
+            return False
+
+    def backlog(self) -> int:
+        return self.out.qsize()
+
+    def _writer_loop(self) -> None:
+        """Drain the queue with blocking ``sendall`` - on THIS thread, so a stuck
+        socket blocks only here. A send failure drops the client."""
+        while not stop_event.is_set():
+            try:
+                payload = self.out.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            if payload is None:          # shutdown sentinel from close()
+                break
+            try:
+                self.sock.sendall(payload)
+            except Exception:
+                drop_client(self, "send failed")
+                return
+
+    def close(self) -> None:
+        """Idempotently wake the writer and close the socket."""
+        with self._close_lock:
+            if self._closing:
+                return
+            self._closing = True
+        try:
+            self.out.put_nowait(None)    # wake a writer waiting in get()
+        except queue.Full:
+            pass                          # sock.close() below unblocks a stuck send
+        try:
+            self.sock.close()
         except Exception:
             pass
-        log(f"client dropped (send failed): {peer}")
 
 
-def client_reader_thread(client_sock: socket.socket, addr) -> None:
+def drop_client(client: "Client", reason: str) -> None:
+    """Remove ``client`` from the fan-out and close it. Idempotent and safe to call
+    from any thread (broadcast overflow, writer send-failure, reader disconnect);
+    only the caller that actually removes it logs."""
+    removed = False
+    with clients_lock:
+        try:
+            clients.remove(client)
+            removed = True
+        except ValueError:
+            pass
+    client.close()
+    if removed:
+        log(f"client dropped ({reason}): {client.peer} (backlog {client.backlog()})")
+
+
+def broadcast(line: str) -> None:
+    """ENQUEUE ``line + "\\n"`` to every client's outbound queue - never sends here,
+    so the serial reader is never blocked by a slow client. A client whose queue is
+    full is dropped (R1, docs/decisions/0183)."""
+    payload = (line + "\n").encode("utf-8", errors="ignore")
+    overflowed: List[Client] = []
+    with clients_lock:
+        for c in clients:
+            if not c.enqueue(payload):
+                overflowed.append(c)
+    for c in overflowed:                  # drop OUTSIDE the lock (it re-acquires)
+        drop_client(c, "too slow: outbound queue full")
+
+
+def client_reader_thread(client: "Client") -> None:
     """Forward each newline-terminated command from the client to the Due."""
-    peer = f"{addr[0]}:{addr[1]}"
+    peer = client.peer
     buf = b""
     try:
         while not stop_event.is_set():
             try:
-                chunk = client_sock.recv(4096)
+                chunk = client.sock.recv(4096)
             except OSError as e:
                 log(f"client {peer} recv error: {e}")
                 break
@@ -287,15 +379,16 @@ def client_reader_thread(client_sock: socket.socket, addr) -> None:
                 _forward_to_due(cmd, peer)
     finally:
         with clients_lock:
+            already_gone = client not in clients
             try:
-                clients.remove(client_sock)
+                clients.remove(client)
             except ValueError:
                 pass
-        try:
-            client_sock.close()
-        except Exception:
-            pass
-        log(f"client disconnected: {peer}")
+        client.close()
+        # If it was already removed it was dropped for cause (logged there);
+        # avoid a duplicate line for the same client.
+        if not already_gone:
+            log(f"client disconnected: {peer}")
 
 
 def _write_to_due(cmd: str, source: str) -> bool:
@@ -329,14 +422,6 @@ def _forward_to_due(cmd: str, peer: str) -> None:
             stats["to_due"] += 1
 
 
-def _peer_str(sock: socket.socket) -> str:
-    try:
-        addr = sock.getpeername()
-        return f"{addr[0]}:{addr[1]}"
-    except OSError:
-        return "<closed>"
-
-
 # ================= STATS =================
 def stats_thread() -> None:
     while not stop_event.is_set():
@@ -351,11 +436,16 @@ def stats_thread() -> None:
             stats["probes"] = 0
         with clients_lock:
             n = len(clients)
+            max_backlog = max((c.backlog() for c in clients), default=0)
         # Probes only appear once the port has gone quiet, so a non-zero count in
         # the log is the timestamp of when trouble started.
         probe_note = f"  probes={probes}" if probes else ""
+        # A non-zero max_backlog means a client is falling behind the fan-out (R1);
+        # it's dropped at MAX_QUEUED_LINES, so this is the early warning.
+        backlog_note = (f"  max_backlog={max_backlog}/{MAX_QUEUED_LINES}"
+                        if max_backlog else "")
         log(f"stats: clients={n}  from_due={from_due}/{STATS_INTERVAL_S:.0f}s  "
-            f"to_due={to_due}/{STATS_INTERVAL_S:.0f}s{probe_note}")
+            f"to_due={to_due}/{STATS_INTERVAL_S:.0f}s{probe_note}{backlog_note}")
 
 
 def _sleep_until_stop(seconds: float) -> bool:
@@ -456,11 +546,13 @@ def main() -> int:
                 continue
             peer = f"{addr[0]}:{addr[1]}"
             log(f"client connected: {peer}")
+            client = Client(client_sock, addr)
             with clients_lock:
-                clients.append(client_sock)
+                clients.append(client)
+            client.start()                 # its own outbound writer thread (R1)
             t = threading.Thread(
                 target=client_reader_thread,
-                args=(client_sock, addr),
+                args=(client,),
                 name=f"client-{peer}",
                 daemon=True,
             )
@@ -473,16 +565,14 @@ def main() -> int:
         except Exception:
             pass
         with clients_lock:
-            for c in clients:
-                try:
-                    c.shutdown(socket.SHUT_RDWR)
-                except Exception:
-                    pass
-                try:
-                    c.close()
-                except Exception:
-                    pass
+            current = list(clients)
             clients.clear()
+        for c in current:
+            try:
+                c.sock.shutdown(socket.SHUT_RDWR)
+            except Exception:
+                pass
+            c.close()                      # wakes + closes its writer thread
         _close_serial()
         log("bye")
     return 0
