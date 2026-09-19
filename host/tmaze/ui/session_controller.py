@@ -281,6 +281,15 @@ class SessionControlView:
         # folded from disk into the summary on Stop.
         self._notelog = session_notes.NoteLog()
         self._notes_path: Optional[str] = None
+        # Per-file write-failure tracking (docs/decisions/0174), the session-shell
+        # twin of Phase 3's ADR-0121 surface: a slot ("manifest"/"serial"/"summary"
+        # /"notes"/"animal_state"/"session_meta") maps to the basename of a bundle
+        # file whose last atomic write FAILED, so the status line can warn - by
+        # name - that data is not on disk, instead of the old silent ``pass``.
+        self._write_errors: dict = {}
+        # The base status text (without the write-failure prefix) so the periodic
+        # poll can re-render the warning over it without losing the live message.
+        self._status_base: str = ""
         # User-defined intervention-tag vocabulary, persisted across sessions in
         # host/note_tags.json (docs/decisions/0074).
         self._tag_vocab = note_tags.load_tags(NOTE_TAGS_PATH)
@@ -646,6 +655,55 @@ class SessionControlView:
     def _now_iso(self) -> str:
         return datetime.now().isoformat(timespec="milliseconds")
 
+    # -------------------------------------------------- write-failure surface
+    def _record_write_result(self, slot: str, path: Optional[str],
+                             exc: Optional[OSError], *, note: bool = True) -> None:
+        """Track an atomic-write attempt for a bundle ``slot`` (docs/decisions/0174),
+        the session-shell twin of Phase 3's ADR-0121 surface. A failure records the
+        file name so the status line warns it is NOT on disk (was a silent
+        ``pass``); a success clears the slot so a transient hiccup that recovers
+        stops warning. On a NEW failure (``note`` True) it also appends an
+        ``auto:write_failed`` timeline note IN-MEMORY - not force-persisted, so a
+        failing NOTES write can't recurse; it reaches disk on the next healthy
+        write and folds into the summary regardless. ``serial`` is recorded on the
+        serial reader thread, so it passes ``note=False`` (the note log is
+        Tk-thread-owned) and relies on the status warning alone."""
+        if exc is None:
+            self._write_errors.pop(slot, None)
+            return
+        new_failure = slot not in self._write_errors
+        name = os.path.basename(path) if path else slot
+        self._write_errors[slot] = name
+        if note and new_failure:
+            try:
+                self._notelog.add_auto(
+                    session_notes.AUTO_WRITE_FAILED,
+                    f"{slot} write failed ({name}) - not on disk",
+                    iso=self._now_iso(), mono=time.monotonic(),
+                    trial_index=self._current_trial_index())
+            except Exception:
+                pass
+
+    def _write_warn(self) -> str:
+        """A loud status-line prefix when a bundle file could not be written to
+        disk (docs/decisions/0174), else "". Names the files so the operator knows
+        what is at risk; shown while the failure persists since it may outlast the
+        run - mirrors Phase 3's ``_write_warn``."""
+        if not self._write_errors:
+            return ""
+        files = ", ".join(sorted(set(self._write_errors.values())))
+        return f"!! DISK WRITE FAILED: {files} - data not saved !!  "
+
+    def _set_status(self, text: str) -> None:
+        """Set the session status line, remembering ``text`` as the base and
+        prepending any active write-failure warning (docs/decisions/0174) so the
+        warning rides over whatever the live message is."""
+        self._status_base = text
+        try:
+            self._status_var.set(self._write_warn() + text)
+        except tk.TclError:
+            pass
+
     def _current_trial_index(self) -> Optional[int]:
         """The 0-based Phase 3 trial in progress right now, or None when no Phase
         3 controller/snapshot is available - stamped onto a new note so it lands
@@ -725,8 +783,14 @@ class SessionControlView:
             return
         try:
             self._atomic_write(self._notes_path, self._notelog.render_jsonl())
-        except OSError:
-            pass
+        except OSError as exc:
+            # Record (not swallow) so the status line warns the notes file is not
+            # on disk (docs/decisions/0174). note=False: _record_write_result would
+            # otherwise append a note here and re-enter note handling while the
+            # notes write is the very thing failing.
+            self._record_write_result("notes", self._notes_path, exc, note=False)
+        else:
+            self._record_write_result("notes", self._notes_path, None)
 
     def _refresh_notes_button(self) -> None:
         """Show the running entry count on the Notes button (quiet feedback that
@@ -1117,8 +1181,10 @@ class SessionControlView:
         path = os.path.join(config_dir, ANIMAL_STATE_FILENAME)
         try:
             self._atomic_write(path, state.render())
-        except OSError:
+        except OSError as exc:
+            self._record_write_result("animal_state", path, exc)
             return "animal state: write failed"
+        self._record_write_result("animal_state", path, None)
         if (self._manifest is not None
                 and path_within_session(path, self._session_dir)):
             self._manifest.set_stream(ANIMAL_STATE_STREAM_KEY, path)
@@ -1167,8 +1233,10 @@ class SessionControlView:
         path = os.path.join(config_dir, SESSION_META_FILENAME)
         try:
             self._atomic_write(path, meta.render())
-        except OSError:
+        except OSError as exc:
+            self._record_write_result("session_meta", path, exc)
             return "session meta: write failed"
+        self._record_write_result("session_meta", path, None)
         if (self._manifest is not None
                 and path_within_session(path, self._session_dir)):
             self._manifest.set_stream(SESSION_META_STREAM_KEY, path)
@@ -1314,7 +1382,7 @@ class SessionControlView:
         self._start_btn.configure(text="Stop session")
         self._resolve_paths()   # first pass + schedules the poll
         extra = f"  [{'; '.join(notes)}]" if notes else ""
-        self._status_var.set(f"ACTIVE  {self._session_id}{extra}")
+        self._set_status(f"ACTIVE  {self._session_id}{extra}")
 
     def _stop_session(self) -> None:
         # Stop the session clock (freezes the Phase 3 panel's session line at its
@@ -1360,9 +1428,12 @@ class SessionControlView:
         self._active = False
         try:
             self._start_btn.configure(text="Start session")
-            self._status_var.set(f"session ended: {self._session_id}")
         except tk.TclError:
             pass
+        # Repeat any write-failure warning at Stop (docs/decisions/0174) so a disk
+        # fault that struck during the run is not lost when the status changes; the
+        # session still closes cleanly. _set_status prepends _write_warn().
+        self._set_status(f"session ended: {self._session_id}")
 
     def _mark_session_start(self, _t0) -> None:
         """The single session-start fiducial seam (see docs/decisions/0048).
@@ -1424,6 +1495,13 @@ class SessionControlView:
 
         if changed:
             self._write_manifest()
+
+        # Keep the write-failure warning current over the live status line
+        # (docs/decisions/0174): a manifest / notes / serial write may have failed
+        # since the last poll, so re-render the ACTIVE status with the warning
+        # prefixed while any slot is failing.
+        if self._write_errors and self._status_base:
+            self._set_status(self._status_base)
 
         if reschedule and self._active and not self._closed:
             try:
@@ -1497,13 +1575,20 @@ class SessionControlView:
 
     def _write_serial(self, line: str) -> None:
         """Append one matched firmware line, host-wall-clock stamped (rig_logger
-        column format). Best-effort; never raises into the serial callback."""
+        column format). Never raises into the serial callback. A failure is
+        recorded so the status line warns the serial log is not on disk
+        (docs/decisions/0174); recorded WITHOUT a timeline note (this runs on the
+        serial reader thread, not the Tk thread that owns the note log) and only
+        on failure - the per-line success path stays off the write-error map so a
+        recorded warning persists rather than flapping on this hot stream."""
         try:
             ts = datetime.now().isoformat(timespec="milliseconds")
             self._serial_file.write(f"{ts},{line}\n")
             self._serial_file.flush()
-        except (OSError, ValueError):
-            pass
+        except (OSError, ValueError) as exc:
+            self._record_write_result(
+                "serial", getattr(self._serial_file, "name", None), exc,
+                note=False)
 
     def _close_serial(self) -> None:
         if self._serial_file is not None:
@@ -1581,10 +1666,18 @@ class SessionControlView:
                 summary_dir, f"session_summary_{self._session_id}.json")
             text_path = os.path.join(
                 summary_dir, f"session_summary_{self._session_id}.txt")
-            self._atomic_write(json_path, summary.render_json())
-            self._atomic_write(text_path, summary.render_text())
-            self._manifest.set_stream("summary_json", json_path)
-            self._manifest.set_stream("summary_text", text_path)
+            try:
+                self._atomic_write(json_path, summary.render_json())
+                self._atomic_write(text_path, summary.render_text())
+            except OSError as exc:
+                # Surface it rather than silently losing the end-of-session summary
+                # (docs/decisions/0174); the stream pointers stay unset so the
+                # manifest never points at a file that isn't there.
+                self._record_write_result("summary", json_path, exc)
+            else:
+                self._record_write_result("summary", json_path, None)
+                self._manifest.set_stream("summary_json", json_path)
+                self._manifest.set_stream("summary_text", text_path)
         except Exception:
             pass
 
@@ -1693,5 +1786,7 @@ class SessionControlView:
                 fh.flush()
                 os.fsync(fh.fileno())
             os.replace(tmp, self._manifest_path)
-        except OSError:
-            pass
+        except OSError as exc:
+            self._record_write_result("manifest", self._manifest_path, exc)
+        else:
+            self._record_write_result("manifest", self._manifest_path, None)

@@ -27,7 +27,7 @@ import tkinter as tk
 import unittest
 
 from tmaze.core import protocol
-from tmaze.core.session.session_notes import AUTO_SEND_FAILED
+from tmaze.core.session.session_notes import AUTO_SEND_FAILED, AUTO_WRITE_FAILED
 from tmaze.core.maze_state import (
     CENTRAL_STEM, HUB, IN_WELL, LEFT_CHOICE, RIGHT_CHOICE, UP_STEM, RatState)
 from tmaze.core.phase3.trial_sequence import TrialConfig
@@ -432,6 +432,34 @@ class SessionPhase3WiringTest(unittest.TestCase):
         self.assertIn("fsync", order, "trial CSV must be fsync'd")
         self.assertLess(order.index("fsync"), order.index("replace"),
                         "fsync must precede the atomic rename")
+
+    def test_session_write_failure_is_surfaced_and_session_still_closes(self):
+        """docs/decisions/0174 (L3): a failed session-bundle write (here the
+        end-of-session summary) is recorded per-slot, warned about loudly in the
+        status line, and left as an in-memory auto:write_failed timeline note -
+        yet Stop still closes the session cleanly (the data lives in memory)."""
+        import unittest.mock as mock
+
+        self._open_gate()
+        self._run_a_trial()
+        self._start_session()                      # binds manifest + session dir
+        self.assertNotIn("DISK WRITE FAILED", self.session._status_var.get())
+
+        # The bundle disk write fails: recorded, not swallowed, and noted.
+        self.session._atomic_write = mock.Mock(side_effect=OSError("disk full"))
+        self.session._write_session_summary()
+        self.assertIn("summary", self.session._write_errors)
+        self.assertTrue(
+            any(e.tag == AUTO_WRITE_FAILED and e.is_auto()
+                for e in self.session._notelog.entries()),
+            "expected an in-memory auto:write_failed note")
+
+        # Stop still closes the session, and repeats the warning by name.
+        self.session._stop_session()
+        self.assertFalse(self.session._active)
+        status = self.session._status_var.get()
+        self.assertIn("DISK WRITE FAILED", status)
+        self.assertIn("session_summary", status)
 
     # ---------------------------------------------- auto-extend (ADR-0150)
     def _feed(self, state):

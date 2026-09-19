@@ -76,6 +76,13 @@ AUTO_UNCUED = "auto:uncued"
 # and records this on the timeline so a reader/operator can see the rig dropped a
 # cue - distinct from the animal simply not being cued by position.
 AUTO_SEND_FAILED = "auto:send_failed"
+# A bundle file could NOT be written to disk (docs/decisions/0174): the atomic
+# write of a session stream (manifest / summary / notes / animal_state /
+# session_meta) raised, so that file is not (or not fully) on disk. Recorded on
+# the timeline so the bundle itself carries a record of what was at risk, distinct
+# from a clean session - the loud rig-side status-line warning is the primary
+# signal (this note cannot land if the storage is completely gone).
+AUTO_WRITE_FAILED = "auto:write_failed"
 # A mid-session cue-gate REOPEN that was resumed (not restarted): tracking was
 # toggled off/on or the firmware briefly changed mode, so the gate flickered while
 # the SAME session stayed active. The run is resumed with its data preserved

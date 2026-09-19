@@ -65,14 +65,24 @@ left as-is.
 pattern: a `_write_errors` dict + `_record_write_result(slot, path, exc)` across
 its six writers (`manifest`, `serial`, `summary`, `notes`, `animal_state`,
 `session_meta`); the hot `serial` slot records once, not per line. A failure is
-surfaced three ways: (1) a loud, always-visible status-line prefix naming the
-at-risk files (mirrors Phase 3's `_write_warn`), kept during the run since a
-failure may outlast it, and repeated at Stop - the session still closes; (2) an
-`auto:write_failed` timeline note per failure (slot + filename), which lives in
-the notes JSONL and folds into the summary; (3) a `write_errors` list on the
-manifest. (2) and (3) are best-effort **in-bundle** records - with the honest
-caveat that if the storage is *completely* dead they cannot land either, which is
-exactly why the RAM-resident status-line warning is the primary signal.
+surfaced two ways: (1) a loud, always-visible status-line prefix naming the
+at-risk files (mirrors Phase 3's `_write_warn`), refreshed on the periodic Tk
+poll during the run since a failure may outlast it, and repeated at Stop - the
+session still closes; (2) an `auto:write_failed` timeline note per failure (slot
++ filename) recorded on the shared timeline via the existing notes stream, so the
+bundle carries a record of what was at risk. The note is best-effort **in-bundle**
+- with the honest caveat that if the storage is *completely* dead it cannot land
+either, which is exactly why the RAM-resident status-line warning is the primary
+signal. The note is appended IN-MEMORY (not force-persisted) so a failing notes
+write cannot recurse; it reaches disk on the next healthy notes write and is
+folded into the summary regardless (the summary falls back to the in-memory log
+when the file is unreadable). Because the per-line `serial` slot is recorded on
+the serial reader thread (not the Tk thread that owns the note log), it gets the
+status-line warning but not a timeline note.
+
+No manifest/format change: this is rig-repo-only. A `write_errors` manifest field
+was considered and rejected (see below) to avoid a bundle-format coordination for
+a record the timeline note already provides.
 
 ## Alternatives considered
 
@@ -89,9 +99,13 @@ exactly why the RAM-resident status-line warning is the primary signal.
 - **Per-line `fsync` on the serial stream.** Rejected: too heavy on a hot stream;
   per-line `flush()` is retained.
 - **Surface L3 failures only in the GUI (no in-bundle record).** Rejected: a
-  transient or single-file failure should leave evidence in the bundle; the note
-  + manifest field capture the common cases the status line alone would lose once
-  the window closed.
+  transient or single-file failure should leave evidence in the bundle; the
+  `auto:write_failed` timeline note captures the common cases the status line
+  alone would lose once the window closed.
+- **Add a `write_errors` list to the manifest.** Rejected: it would change the
+  bundle format (a mirror + golden-fixture coordination in the analysis repo) for
+  a record the timeline note already carries in the notes stream; kept this
+  rig-repo-only.
 - **Modal messagebox at Stop instead of the status line.** Rejected: blocks the
   between-sessions flow; the non-blocking, always-visible status prefix matches
   ADR-0121 and cannot be dismissed-and-forgotten while the fault persists.
@@ -105,8 +119,8 @@ exactly why the RAM-resident status-line warning is the primary signal.
   `animal_state`, and `session_meta` are durable up to their last write; the
   sidecar is durable to within ~1 s of the newest recorded frame.
 - A disk fault is now loud and named at the rig, and (storage permitting) leaves
-  a timeline note + manifest field so the bundle carries evidence of what was at
-  risk.
+  an `auto:write_failed` timeline note so the bundle carries evidence of what was
+  at risk.
 - The per-line serial append is durable only to its OS flush, not fsync (stated
   guarantee); the rename itself is not directory-fsync'd on the rig.
 
