@@ -792,11 +792,16 @@ def main() -> int:
     router.subscribe_mode(lambda mode: reward_tally.reset())
     router.subscribe_mode(lambda mode: lick_tally.reset())
 
-    def on_line(line: str) -> None:
+    def on_line(recv_wall: float, recv_mono: float, line: str) -> None:
         # Parse ONCE, then fan the pre-parsed line out. The reward/lick tallies
         # ADD here; their MODE reset (and the mode label) run via the router's
         # mode seam, which fires before modules see the line (FW-0021/0022).
+        # Attach the reader-thread receipt stamps (docs/decisions/0175) to the
+        # single LineInfo so the serial capture can stamp at receipt, not decision
+        # time. classify() leaves them None; only this fan-out sets them.
         info = protocol.classify(line)
+        info = dataclasses.replace(
+            info, recv_wall=recv_wall, recv_mono=recv_mono)
         if info.lick is not None:
             index, rising = info.lick
             if rising:
@@ -807,7 +812,7 @@ def main() -> int:
                 dur if dur is not None else DEFAULT_REWARD_PULSE_MS, manual)
         router.dispatch(info)
 
-    client.on_line(on_line)
+    client.on_line_stamped(on_line)
     client.on_status(status_var.set)
 
     try:

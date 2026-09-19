@@ -365,7 +365,7 @@ class SessionControlView:
                 and is_sensor_or_central(
                     info, center_lick_index=self._center_lick,
                     center_sol_port=CENTER_SOL_PORT)):
-            self._write_serial(info.raw)
+            self._write_serial(info.raw, recv_wall=info.recv_wall)
 
     def _apply_active_liquid(self, *_args) -> None:
         """Push the "Reward" field's liquid to the shared dispatcher so per-fire
@@ -1566,23 +1566,37 @@ class SessionControlView:
                 "PONG session-start fiducial) - see docs/decisions/0049, 0124\n")
             self._serial_file.write(f"# session_id={self._session_id}\n")
             self._serial_file.write(
-                "# wall_clock_iso,firmware_line (ms,TYPE,payload...)\n")
+                "# wall_clock_iso = host wall clock at line RECEIPT (time.time() on "
+                "the reader thread, docs/decisions/0175), NOT decision time; "
+                "firmware_line = ms,TYPE,payload...\n")
+            self._serial_file.write(
+                "# wall_clock_iso,firmware_line\n")
             self._serial_file.flush()
             return True
         except OSError:
             self._serial_file = None
             return False
 
-    def _write_serial(self, line: str) -> None:
+    def _write_serial(self, line: str, recv_wall: Optional[float] = None) -> None:
         """Append one matched firmware line, host-wall-clock stamped (rig_logger
         column format). Never raises into the serial callback. A failure is
         recorded so the status line warns the serial log is not on disk
         (docs/decisions/0174); recorded WITHOUT a timeline note (this runs on the
         serial reader thread, not the Tk thread that owns the note log) and only
         on failure - the per-line success path stays off the write-error map so a
-        recorded warning persists rather than flapping on this hot stream."""
+        recorded warning persists rather than flapping on this hot stream.
+
+        ``recv_wall`` is the reader-thread RECEIPT wall clock (time.time()) taken
+        the instant the line arrived (docs/decisions/0175); it is used verbatim so
+        the stamp reflects when the host had the bytes, not when this Tk callback
+        ran. It falls back to ``datetime.now()`` only when absent (a line that
+        carried no receipt stamp)."""
         try:
-            ts = datetime.now().isoformat(timespec="milliseconds")
+            if recv_wall is not None:
+                ts = datetime.fromtimestamp(recv_wall).isoformat(
+                    timespec="milliseconds")
+            else:
+                ts = datetime.now().isoformat(timespec="milliseconds")
             self._serial_file.write(f"{ts},{line}\n")
             self._serial_file.flush()
         except (OSError, ValueError) as exc:

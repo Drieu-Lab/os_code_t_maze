@@ -433,6 +433,44 @@ class SessionPhase3WiringTest(unittest.TestCase):
         self.assertLess(order.index("fsync"), order.index("replace"),
                         "fsync must precede the atomic rename")
 
+    def test_filtered_serial_stamps_line_at_receipt_not_write_time(self):
+        """docs/decisions/0175 (S3): the per-session serial capture stamps each
+        line with the reader-thread RECEIPT wall clock passed through from the
+        LineInfo (recv_wall), NOT datetime.now() at the moment the Tk callback
+        got round to writing. We feed a fixed receipt epoch and confirm the row
+        carries exactly that instant."""
+        from datetime import datetime
+
+        self._open_gate()                          # arm Phase 3 so Start proceeds
+        self._start_session()                      # opens serial/ + the handle
+        self.assertIsNotNone(self.session._serial_file)
+
+        recv_wall = 1_600_000_000.5                # a fixed, unmistakable instant
+        expected = datetime.fromtimestamp(recv_wall).isoformat(
+            timespec="milliseconds")
+        self.session._write_serial("123,S,0,1", recv_wall=recv_wall)
+
+        with open(self.session._serial_path, encoding="utf-8") as fh:
+            rows = [ln for ln in fh.read().splitlines()
+                    if ln and not ln.startswith("#")]
+        self.assertEqual(rows[-1], f"{expected},123,S,0,1")
+
+    def test_filtered_serial_falls_back_to_now_without_a_receipt_stamp(self):
+        """A line that carried no receipt stamp (recv_wall=None) still gets a
+        wall-clock stamp - the pre-0175 datetime.now() path - so the column is
+        never blank."""
+        self._open_gate()                          # arm Phase 3 so Start proceeds
+        self._start_session()
+        self.session._write_serial("456,L,0,1")    # no recv_wall
+
+        with open(self.session._serial_path, encoding="utf-8") as fh:
+            rows = [ln for ln in fh.read().splitlines()
+                    if ln and not ln.startswith("#")]
+        # <iso>,456,L,0,1 - a non-empty ISO stamp precedes the firmware line.
+        stamp, _, rest = rows[-1].partition(",")
+        self.assertEqual(rest, "456,L,0,1")
+        self.assertTrue(stamp and "T" in stamp, f"expected an ISO stamp, got {stamp!r}")
+
     def test_session_write_failure_is_surfaced_and_session_still_closes(self):
         """docs/decisions/0174 (L3): a failed session-bundle write (here the
         end-of-session summary) is recorded per-slot, warned about loudly in the

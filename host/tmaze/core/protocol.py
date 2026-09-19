@@ -272,6 +272,16 @@ class LineInfo:
     reward: Optional[Tuple[bool, Optional[int]]]
     animal: Optional[str]
     cue: Optional[Tuple[str, Optional[str], Optional[int]]]
+    # Host-side receipt stamps (docs/decisions/0175), attached at the GUI fan-out
+    # point via dataclasses.replace when the line arrived through the stamped
+    # reader callback (RigClient.on_line_stamped). ``recv_wall`` is time.time()
+    # and ``recv_mono`` is time.monotonic() captured on the reader thread the
+    # instant the bytes arrived - before the Tk hop. Both stay None when the line
+    # did not carry a stamp (e.g. re-classified on another thread), so consumers
+    # must fall back (the serial capture uses datetime.now() then). classify()
+    # never sets them; only the fan-out does.
+    recv_wall: Optional[float] = None
+    recv_mono: Optional[float] = None
 
 
 def classify(line: str) -> LineInfo:

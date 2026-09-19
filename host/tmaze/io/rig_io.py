@@ -49,6 +49,13 @@ class RigClient:
         self._thread: Optional[threading.Thread] = None
 
         self._line_cb: Optional[Callable[[str], None]] = None
+        # Optional receipt-stamped line callback (docs/decisions/0175): fired with
+        # (recv_wall, recv_mono, line), where the stamps are captured on THIS reader
+        # thread the moment the bytes arrive - before the Tk hop - so a consumer can
+        # record when a line actually reached the host, not when Tk got round to it.
+        # Takes precedence over ``_line_cb`` when set; ``_line_cb`` stays the plain
+        # fallback so other clients (rig_logger, lick_tuner, ...) are unaffected.
+        self._line_stamped_cb: Optional[Callable[[float, float, str], None]] = None
         self._status_cb: Optional[Callable[[str], None]] = None
 
     # ------------------------------------------------------------------ API
@@ -56,6 +63,20 @@ class RigClient:
     def on_line(self, cb: Callable[[str], None]) -> None:
         """Register a callback for each newline-terminated line received."""
         self._line_cb = cb
+
+    def on_line_stamped(
+        self, cb: Callable[[float, float, str], None]
+    ) -> None:
+        """Register a receipt-stamped line callback (docs/decisions/0175).
+
+        Fires with ``(recv_wall, recv_mono, line)`` on the Tk main thread, where
+        the stamps (``time.time()`` / ``time.monotonic()``) are taken on the
+        reader thread the instant the bytes arrive - before the Tk hop, which can
+        be delayed under GUI load. Use this over ``on_line`` when you need to know
+        WHEN a line reached the host (e.g. to timestamp the serial capture at
+        receipt rather than at decision time). Takes precedence over ``on_line``.
+        """
+        self._line_stamped_cb = cb
 
     def on_status(self, cb: Callable[[str], None]) -> None:
         """Register a callback for connection-state messages."""
@@ -140,6 +161,12 @@ class RigClient:
 
             try:
                 chunk = sock.recv(self.RECV_BYTES)
+                # Receipt stamp: taken the instant recv() returns, i.e. when the
+                # host actually has the bytes. Every line carved out of this chunk
+                # shares it (they arrived together); a line split across chunks is
+                # stamped when its terminating newline arrives (docs/decisions/0175).
+                recv_wall = time.time()
+                recv_mono = time.monotonic()
             except OSError as e:
                 if self._stop.is_set():
                     return
@@ -159,8 +186,10 @@ class RigClient:
             while b"\n" in buf:
                 raw_line, buf = buf.split(b"\n", 1)
                 line = raw_line.decode("utf-8", errors="ignore").rstrip("\r")
-                if line and self._line_cb is not None:
-                    self._dispatch_line(line)
+                if line and (
+                    self._line_stamped_cb is not None or self._line_cb is not None
+                ):
+                    self._dispatch_line(recv_wall, recv_mono, line)
 
     def _try_reconnect(self) -> bool:
         """Attempt one reconnect; return True on success."""
@@ -185,14 +214,28 @@ class RigClient:
             except OSError:
                 pass
 
-    def _dispatch_line(self, line: str) -> None:
+    def _dispatch_line(
+        self, recv_wall: float, recv_mono: float, line: str
+    ) -> None:
+        """Hop one received line to the Tk thread, preferring the stamped callback.
+
+        The receipt stamps travel with the line so the consumer sees when the
+        bytes arrived (docs/decisions/0175), not when this ``after`` finally ran.
+        """
+        stamped = self._line_stamped_cb
+        if stamped is not None:
+            try:
+                self._root.after(0, stamped, recv_wall, recv_mono, line)
+            except RuntimeError:
+                # root may be torn down already; safe to ignore
+                pass
+            return
         cb = self._line_cb
         if cb is None:
             return
         try:
             self._root.after(0, cb, line)
         except RuntimeError:
-            # root may be torn down already; safe to ignore
             pass
 
     def _fire_status(self, text: str) -> None:
