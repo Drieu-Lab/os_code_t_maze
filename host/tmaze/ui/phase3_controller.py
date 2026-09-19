@@ -76,9 +76,9 @@ from tmaze.core.phase3.excursion_log import (
 from tmaze.core.phase3.phase3_log import Phase3Log, Phase3StateSnapshot
 from tmaze.core.session.session_notes import (
     AUTO_ALT_END, AUTO_ALT_START, AUTO_BACK, AUTO_DEBIAS_END,
-    AUTO_DEBIAS_START, AUTO_PROBE_DISABLED, AUTO_PROBE_ENABLED, AUTO_PROBE_END,
-    AUTO_PROBE_START, AUTO_REPEAT, AUTO_RESUME, AUTO_SEND_FAILED, AUTO_SKIP,
-    AUTO_UNCUED)
+    AUTO_DEBIAS_START, AUTO_FIRMWARE_RESET, AUTO_PROBE_DISABLED,
+    AUTO_PROBE_ENABLED, AUTO_PROBE_END, AUTO_PROBE_START, AUTO_REPEAT,
+    AUTO_RESUME, AUTO_SEND_FAILED, AUTO_SKIP, AUTO_UNCUED)
 from tmaze.core.phase3.phase3_task import (
     ABANDONED, CORRECT, INCORRECT, UNCUED, Phase3Config, Phase3Task)
 from tmaze.core.reward.reward_dispenser import WellDispenser
@@ -217,6 +217,11 @@ class Phase3ControlView(VisionActuator):
         self._on_intervention: Optional[Callable[[dict], None]] = None
         self.frame = ttk.Frame(parent)
         self._mode = ""                   # last firmware MODE token
+        # Last firmware session-clock ms seen on ANY line, tracked on the serial-
+        # reader thread to detect a mid-session Due reboot: a fresh PROTO handshake
+        # after we've seen a running clock (>0) is a firmware reset (S8,
+        # docs/decisions/0184). None until the first timed line arrives.
+        self._last_fw_ms: Optional[int] = None
         self._closed = False
 
         # State owned by the actuation thread.
@@ -298,6 +303,9 @@ class Phase3ControlView(VisionActuator):
         # the send reported failure, so no cue onset was logged and (for CHOICE) the
         # trip scores UNCUED. Shown in the status line so a dropped cue is visible.
         self._send_fails = 0
+        # Mid-session firmware reboots detected + survived this run (S8,
+        # docs/decisions/0184); shown in the status line, counted from a real arm.
+        self._fw_resets = 0
         # Unrewarded probe-trial tallies (probe_blocks.py): scored probe trials and
         # of those how many were correct, for the conditional status segment.
         self._probe_done = 0
@@ -372,6 +380,18 @@ class Phase3ControlView(VisionActuator):
         center-well lick edges (the reward-collection lick) and hand them to the
         actuation thread, which is the sole writer of the data log (this method
         runs on the serial-reader thread; ADR-0043/0047)."""
+        # A fresh PROTO handshake after we've already seen a running firmware clock
+        # means the Due rebooted mid-session (S8, docs/decisions/0184). Hand it to
+        # the actuation thread (sole actuator) to re-assert CUE,VISION + log it;
+        # carry the last ms seen before the reset. Guard on _last_fw_ms > 0 so the
+        # INITIAL startup handshake (clock still 0) is not mistaken for a reset.
+        if protocol.is_boot_handshake(info.raw):
+            if self._last_fw_ms is not None and self._last_fw_ms > 0:
+                self._enqueue_act(("firmware_reset", self._last_fw_ms, _now_iso()))
+            self._last_fw_ms = 0
+            return
+        if info.parsed is not None:
+            self._last_fw_ms = info.parsed.ms
         if info.mode is not None:
             self._mode = info.mode.upper()
             return
@@ -630,6 +650,8 @@ class Phase3ControlView(VisionActuator):
             self._process_return_cue_ack(item[1])
         elif item[0] == "reward_ack":
             self._process_reward_ack(item[1])
+        elif item[0] == "firmware_reset":
+            self._process_firmware_reset(item[1], item[2])
         else:
             self._process_frame(item[1], snap)
 
@@ -667,6 +689,7 @@ class Phase3ControlView(VisionActuator):
         self._send_fails = 0
         self._probe_done = self._probe_correct = 0
         self._reopen_resumes = 0             # a fresh run: no reopens yet
+        self._fw_resets = 0                  # ...nor firmware reboots (ADR-0184)
         self._reward_ul = 0.0
         self._active_cue = None
         self._pending_cue_ack_index = None
@@ -810,12 +833,14 @@ class Phase3ControlView(VisionActuator):
         self._publish_state(armed=snap.gate_open)
 
     def _emit_intervention(self, tag: str, text: str, trial_index: int,
-                           iso: str) -> None:
+                           iso: str, *, extra: Optional[dict] = None) -> None:
         """Hand one operator-intervention event to the attached sink (the Session
         controller's note-log drain; docs/decisions/0111). Runs on the actuation
         thread, so it only builds the event + calls the enqueue-only sink; a
         missing sink (manual arm / standalone) or a raising sink is swallowed so a
-        note never disturbs the task."""
+        note never disturbs the task. ``extra`` merges in event-specific fields the
+        sink may act on beyond the note (e.g. firmware_reset's ``last_fw_ms`` that
+        the Session controller records in the manifest; docs/decisions/0184)."""
         cb = self._on_intervention
         if cb is None:
             return
@@ -826,6 +851,8 @@ class Phase3ControlView(VisionActuator):
             "mono": time.monotonic(),
             "trial_index": trial_index,
         }
+        if extra:
+            event.update(extra)
         try:
             cb(event)
         except Exception:
@@ -983,6 +1010,35 @@ class Phase3ControlView(VisionActuator):
             AUTO_RESUME, "tracking reopened mid-session - resumed (data preserved)",
             idx, _now_iso())
         self._publish_state(armed=True)
+
+    def _process_firmware_reset(self, last_fw_ms, iso: str) -> None:
+        """Survive a mid-session Due reboot (S8, docs/decisions/0184).
+
+        The serial reader saw a fresh ``PROTO`` handshake after the firmware clock
+        was already running, so the board rebooted (power glitch / watchdog / stray
+        reset) and lost its state - including ``cueSourceVision``, which a reboot
+        clears back to firmware-driven beam tones. If we were driving Phase 3 cues
+        (gate open), re-take the DAC (``CUE,VISION``) and clear stale per-trip
+        cue/gate/well state so no leftover tone sounds and the next trial waits for a
+        fresh hub->stem run - the same reclaim the reopen path does, minus the
+        sequence rebuild (the task, trial index, and data file are untouched, so the
+        run continues). Always logged: a note on the timeline AND a manifest
+        ``firmware_resets`` entry (carrying ``last_fw_ms`` so an offline reader can
+        split the firmware ms timeline at the reboot, since its clock restarts at 0).
+        """
+        self._fw_resets += 1
+        if self._gate_was_open:
+            self._silence_and_rearm()        # CUE_OFF + per-trip cue/gate/well reset
+            self._send_cmd("CUE,VISION")     # host re-owns the DAC (a reboot cleared it)
+            note = ("firmware reset detected mid-session - re-asserted CUE,VISION "
+                    "(run preserved)")
+        else:
+            note = ("firmware reset detected mid-session - no active cue drive "
+                    "(firmware autonomy already in effect)")
+        idx = self._task.index if self._task is not None else 0
+        self._emit_intervention(AUTO_FIRMWARE_RESET, note, idx, iso,
+                                extra={"last_fw_ms": last_fw_ms})
+        self._publish_state(armed=self._gate_was_open)
 
     def _process_frame(self, bundle, snap) -> None:
         # Gate edges own the DAC-authority handshake + a clean session (re)start.
@@ -1508,6 +1564,11 @@ class Phase3ControlView(VisionActuator):
         # show the count so the operator knows the run survived the reopen.
         if self._reopen_resumes:
             extra += f"  resumes:{self._reopen_resumes}"
+        # Mid-session Due reboots the host caught and re-asserted through (ADR-0184):
+        # show the count so a survived reset isn't invisible (the matching
+        # auto:firmware_reset notes + manifest carry the detail).
+        if self._fw_resets:
+            extra += f"  fw_reset:{self._fw_resets}"
         # Conditional probe segment: only after the first scored probe BLOCK trial
         # (so a normal session's status line is unchanged), plus a live PROBE tag
         # while a probe block is running and a [PROBE OFF] tag when the operator has

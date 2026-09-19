@@ -54,6 +54,8 @@ class TestManifest(unittest.TestCase):
         # schema v3: provenance + append-only post_hoc default empty (ADR-0180)
         self.assertEqual(obj["provenance"], {})
         self.assertEqual(obj["post_hoc"], [])
+        # schema v4: firmware_resets default empty (ADR-0184)
+        self.assertEqual(obj["firmware_resets"], [])
 
     def test_default_fiducial_is_host_t0_with_pending_upgrade(self):
         obj = json.loads(self._make().render())
@@ -86,6 +88,20 @@ class TestManifest(unittest.TestCase):
         self.assertEqual(obj["provenance"]["code_commit"], "abc1234")
         self.assertEqual(len(obj["post_hoc"]), 1)
         self.assertEqual(obj["post_hoc"][0]["tool"], "sync_fit")
+        self.assertEqual(json.loads(SessionManifest.from_dict(obj).render()), obj)
+
+    def test_firmware_resets_round_trip(self):
+        # schema v4 (ADR-0184): a mid-session Due reboot the host survived is logged
+        # as {host_iso, last_fw_ms}; the list survives a render/from_dict cycle.
+        m = self._make()
+        m.add_firmware_reset("2026-01-01T12:03:00.000-05:00", 183456)
+        m.add_firmware_reset("2026-01-01T12:07:30.000-05:00", None)
+        obj = json.loads(m.render())
+        self.assertEqual(len(obj["firmware_resets"]), 2)
+        self.assertEqual(obj["firmware_resets"][0],
+                         {"host_iso": "2026-01-01T12:03:00.000-05:00",
+                          "last_fw_ms": 183456})
+        self.assertIsNone(obj["firmware_resets"][1]["last_fw_ms"])
         self.assertEqual(json.loads(SessionManifest.from_dict(obj).render()), obj)
 
     def test_set_end_stamps_the_end_anchor(self):

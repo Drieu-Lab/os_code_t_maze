@@ -28,5 +28,6 @@
     "firmware_proto_seen": 8
   },
   "post_hoc": [],
-  "schema_version": 3
+  "firmware_resets": [],
+  "schema_version": 4
 }

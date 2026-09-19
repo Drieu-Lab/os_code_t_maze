@@ -768,6 +768,13 @@ class SessionControlView:
                 tag, str(event.get("text", "")),
                 iso=event.get("iso"), mono=event.get("mono"),
                 trial_index=event.get("trial_index"))
+            # A firmware reset also lands in the manifest so an offline reader can
+            # split the firmware ms timeline at the reboot (docs/decisions/0184).
+            if (tag == session_notes.AUTO_FIRMWARE_RESET
+                    and self._manifest is not None):
+                self._manifest.add_firmware_reset(
+                    str(event.get("iso") or ""), event.get("last_fw_ms"))
+                self._write_manifest()
 
     def _persist_notes(self) -> None:
         """Atomically rewrite the whole notes JSONL file (docs/decisions/0074).

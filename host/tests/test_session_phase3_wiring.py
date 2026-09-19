@@ -27,7 +27,8 @@ import tkinter as tk
 import unittest
 
 from tmaze.core import protocol
-from tmaze.core.session.session_notes import AUTO_SEND_FAILED, AUTO_WRITE_FAILED
+from tmaze.core.session.session_notes import (
+    AUTO_FIRMWARE_RESET, AUTO_SEND_FAILED, AUTO_WRITE_FAILED)
 from tmaze.core.maze_state import (
     CENTRAL_STEM, HUB, IN_WELL, LEFT_CHOICE, RIGHT_CHOICE, UP_STEM, RatState)
 from tmaze.core.phase3.trial_sequence import TrialConfig
@@ -658,6 +659,70 @@ class SessionPhase3WiringTest(unittest.TestCase):
         self.assertEqual(self.phase3._correct + self.phase3._incorrect, 0)
         self.assertEqual(self.phase3._reward_count, 0)
         self.assertEqual(self.phase3._task.index, 0)
+
+    # ---------------------------------------- firmware reset (S8, ADR-0184)
+    def test_firmware_reboot_is_detected_and_reasserts_cue_vision(self):
+        """docs/decisions/0184 (S8): a fresh PROTO handshake after the firmware
+        clock was already running is a mid-session Due reboot. apply() (serial
+        thread) routes it to the actuation thread ONCE, carrying the last ms seen;
+        the handler re-takes the DAC (CUE,VISION) and surfaces an auto:firmware_reset
+        note. The INITIAL handshake (clock still 0) is NOT treated as a reset."""
+        events = []
+        self.phase3._on_intervention = events.append
+        sends = []
+
+        def _record_send(cmd):                 # send -> bool (docs/decisions/0173)
+            sends.append(cmd)
+            return True
+        self.phase3._send = _record_send
+        self.phase3._gate_was_open = True       # we were driving Phase 3 cues
+
+        # Intercept the hand-off so the reset is applied synchronously (no thread).
+        enqueued = []
+        self.phase3._enqueue_act = enqueued.append
+
+        # A real running clock, then the reboot's PROTO line.
+        self.phase3.apply(protocol.classify("183456,S,0,1"))   # clock now > 0
+        self.phase3.apply(protocol.classify("0,PROTO,12"))     # <- reboot
+
+        self.assertEqual(len(enqueued), 1, "exactly one firmware_reset hand-off")
+        self.assertEqual(enqueued[0][0], "firmware_reset")
+        self.assertEqual(enqueued[0][1], 183456)               # last ms before reset
+
+        # Apply it on the actuation path.
+        self.phase3._process_act_item(enqueued[0], self.phase3._act_snapshot)
+        self.assertEqual(self.phase3._fw_resets, 1)
+        self.assertIn("CUE,VISION", sends)                     # DAC re-asserted
+        reset_notes = [e for e in events if e["tag"] == AUTO_FIRMWARE_RESET]
+        self.assertEqual(len(reset_notes), 1)
+        self.assertEqual(reset_notes[0]["last_fw_ms"], 183456)
+
+        # A second PROTO right after (clock reset to 0) is NOT a fresh reset.
+        enqueued.clear()
+        self.phase3.apply(protocol.classify("0,PROTO,12"))
+        self.assertEqual(enqueued, [])
+
+    def test_firmware_reset_lands_in_the_manifest(self):
+        """The session controller folds the auto:firmware_reset event into the note
+        log AND records a firmware_resets entry in the manifest (docs/decisions/
+        0184), so an offline reader can split the firmware ms timeline at the reboot."""
+        self._open_gate()
+        self._run_a_trial()
+        self._start_session()                      # wires the intervention sink + manifest
+        self.phase3._gate_was_open = True
+
+        iso = "2026-01-01T12:03:00.000-05:00"
+        # Run the handler directly (as the actuation thread would) -> the sink
+        # enqueues to the session; the Tk-side drain folds it in.
+        self.phase3._process_firmware_reset(183456, iso)
+        self.session._drain_interventions()
+
+        self.assertEqual(self.session._manifest.firmware_resets,
+                         [{"host_iso": iso, "last_fw_ms": 183456}])
+        self.assertTrue(
+            any(e.tag == AUTO_FIRMWARE_RESET and e.is_auto()
+                for e in self.session._notelog.entries()),
+            "expected an auto:firmware_reset note in the log")
 
     def test_manifest_never_records_a_file_outside_the_session(self):
         """The backstop, independent of the rebind: a reported path from outside

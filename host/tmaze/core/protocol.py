@@ -179,6 +179,21 @@ def proto_version(line: str) -> Optional[int]:
     return proto_version_from(parse(line))
 
 
+def is_boot_handshake(line: str) -> bool:
+    """Whether ``line`` is the firmware's startup ``PROTO`` handshake.
+
+    ``0,PROTO,<n>`` is printed once by ``setup()`` at every boot and NOWHERE else,
+    so seeing it again mid-session is the unambiguous signal that the Due rebooted
+    (power glitch, watchdog, a stray reset) - a firmware reset (review finding S8,
+    docs/decisions/0184). A MODE switch also restarts the firmware SESSION clock to
+    ~0 but does NOT re-emit ``PROTO``, so keying the reset detector on ``PROTO``
+    avoids a false positive on an operator mode change; the caller decides it is a
+    RESET (rather than the initial handshake) by tracking that a session was already
+    running. Pure/total, like the rest of this module."""
+    p = parse(line)
+    return p is not None and p.type == "PROTO"
+
+
 def sanitize_animal_id(name: str) -> str:
     """Filename-safe slug of an animal id: keep alphanumerics plus '-'/'_',
     drop everything else, and fall back to "unknown" if nothing remains. The

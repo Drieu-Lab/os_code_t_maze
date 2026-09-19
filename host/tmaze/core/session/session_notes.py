@@ -89,6 +89,12 @@ AUTO_WRITE_FAILED = "auto:write_failed"
 # (docs/decisions/0120), recorded here so the operator can see the flicker
 # happened without it being mistaken for a new run.
 AUTO_RESUME = "auto:resume"
+# A mid-session firmware REBOOT the host detected (the Due re-emitted its startup
+# PROTO handshake) and survived: the host re-asserts CUE,VISION so beam-triggered
+# auto-tones don't creep back while it drives Phase 3 cues, and the manifest logs
+# the reset (docs/decisions/0184). Recorded so a reboot - which restarts the
+# firmware clock at 0 - is visible on the session timeline.
+AUTO_FIRMWARE_RESET = "auto:firmware_reset"
 
 
 def is_auto_tag(tag: Optional[str]) -> bool:

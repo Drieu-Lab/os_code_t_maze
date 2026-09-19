@@ -45,7 +45,9 @@ from typing import Any, Dict, Optional
 # v2 adds the ``config_dir`` / ``config_snapshot`` streams (docs/decisions/0072).
 # v3 adds the ``provenance`` block (code/firmware/env versions) and the append-only
 # ``post_hoc`` edit log (docs/decisions/0180).
-SCHEMA_VERSION = 3
+# v4 adds the ``firmware_resets`` list - mid-session Due reboots the host detected
+# and survived (docs/decisions/0184). Empty on a clean session.
+SCHEMA_VERSION = 4
 
 # How the session is anchored today, and the deferred hardware upgrade that would
 # attach at the same session-start seam (see docs/future-work.md FW-0018).
@@ -120,6 +122,7 @@ class SessionManifest:
     fiducial: Dict[str, Any] = field(default_factory=_default_fiducial)
     provenance: Dict[str, Any] = field(default_factory=dict)
     post_hoc: list = field(default_factory=list)
+    firmware_resets: list = field(default_factory=list)
     schema_version: int = SCHEMA_VERSION
 
     @classmethod
@@ -143,6 +146,7 @@ class SessionManifest:
             fiducial=dict(d.get("fiducial") or _default_fiducial()),
             provenance=dict(d.get("provenance") or {}),
             post_hoc=list(d.get("post_hoc") or []),
+            firmware_resets=list(d.get("firmware_resets") or []),
             schema_version=d.get("schema_version", SCHEMA_VERSION),
         )
 
@@ -164,6 +168,15 @@ class SessionManifest:
         fields_changed}``) - used by offline tools like ``sync_fit`` when they
         write back into the manifest (docs/decisions/0180)."""
         self.post_hoc.append(dict(entry))
+
+    def add_firmware_reset(self, host_iso: str, last_fw_ms: Optional[int]) -> None:
+        """Record one mid-session firmware reboot the host detected + survived
+        (docs/decisions/0184): ``host_iso`` is the host receipt time of the boot
+        handshake, ``last_fw_ms`` the firmware session-clock ms seen just before
+        the reset (``None`` if unknown). Lets an offline reader split the firmware
+        timeline at each reboot (its ms restarts at 0)."""
+        self.firmware_resets.append(
+            {"host_iso": host_iso, "last_fw_ms": last_fw_ms})
 
     def render(self) -> str:
         """Render the whole manifest as pretty JSON text (the shell writes it).

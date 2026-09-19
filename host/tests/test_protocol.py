@@ -121,6 +121,16 @@ class TestHandshake(unittest.TestCase):
         self.assertIsNone(protocol.proto_version("0,PROTO,x"))
         self.assertIsNone(protocol.proto_version("0,ANIMAL,RAT001"))
 
+    def test_is_boot_handshake(self):
+        # A PROTO line is the boot marker (ADR-0184); nothing else is, and a
+        # malformed line never raises.
+        self.assertTrue(protocol.is_boot_handshake("0,PROTO,8"))
+        self.assertTrue(protocol.is_boot_handshake("0,PROTO, 12 "))
+        self.assertFalse(protocol.is_boot_handshake("0,MODE,PHASE3"))
+        self.assertFalse(protocol.is_boot_handshake("183456,S,0,1"))
+        self.assertFalse(protocol.is_boot_handshake("garbage"))
+        self.assertFalse(protocol.is_boot_handshake(""))
+
 
 class TestSanitizeAnimalId(unittest.TestCase):
     def test_keeps_slug_chars(self):
