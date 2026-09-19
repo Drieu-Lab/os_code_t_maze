@@ -92,6 +92,21 @@ class SessionPhase3WiringTest(unittest.TestCase):
         except tk.TclError as exc:            # no display (headless CI)
             raise unittest.SkipTest(f"Tk unavailable: {exc}")
         self.root.withdraw()
+        # Neutralize the BLOCKING modal dialogs for the whole suite: this test
+        # drives the real Tk shells with a real display, so any code path that
+        # pops a messagebox (e.g. _start_session's "arm Phase 3 first" warning
+        # when a test forgets to arm) would HANG an unattended run waiting for a
+        # human click. Stub the display dialogs to no-ops (they return nothing the
+        # code branches on); an un-armed Start then just falls through and the
+        # test's own assertions catch the logic, instead of the suite blocking.
+        # The real popups are unchanged on the rig. (Ask/return dialogs are left
+        # alone; no test here depends on one, and the injected ask_weight already
+        # answers the only interactive prompt in these flows.)
+        import unittest.mock as mock
+        for _name in ("showwarning", "showerror", "showinfo"):
+            _p = mock.patch(f"tkinter.messagebox.{_name}")
+            _p.start()
+            self.addCleanup(_p.stop)
         self.recordings = tempfile.mkdtemp(prefix="test_session_wiring_")
         self.addCleanup(shutil.rmtree, self.recordings, ignore_errors=True)
         self.camera = _FakeCamera()
