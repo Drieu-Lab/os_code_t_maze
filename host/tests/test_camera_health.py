@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import unittest
 
-from tmaze.core.camera_health import account_block_gap
+from tmaze.core.camera_health import account_block_gap, recording_deltas
 
 
 class TestAccountBlockGap(unittest.TestCase):
@@ -65,6 +65,26 @@ class TestAccountBlockGap(unittest.TestCase):
         last = 100
         last, gap = account_block_gap(last, 103)   # 101,102 truly lost
         self.assertEqual((last, gap), (103, 2))
+
+
+class TestRecordingDeltas(unittest.TestCase):
+    def test_deltas_are_current_minus_baseline(self):
+        base = {"grabbed": 1000, "src_drops": 5, "incomplete": 2,
+                "queue_drops": 1, "track_skips": 3, "saved": 0}
+        cur = {"grabbed": 1600, "src_drops": 8, "incomplete": 2,
+               "queue_drops": 4, "track_skips": 3, "saved": 590}
+        self.assertEqual(
+            recording_deltas(cur, base),
+            {"grabbed": 600, "src_drops": 3, "incomplete": 0,
+             "queue_drops": 3, "track_skips": 0, "saved": 590})
+
+    def test_missing_baseline_key_treated_as_zero(self):
+        self.assertEqual(recording_deltas({"grabbed": 10}, {}), {"grabbed": 10})
+
+    def test_negative_delta_clamped_to_zero(self):
+        # A counter reset (current below baseline) must never report a negative.
+        self.assertEqual(recording_deltas({"src_drops": 2}, {"src_drops": 9}),
+                         {"src_drops": 0})
 
 
 if __name__ == "__main__":

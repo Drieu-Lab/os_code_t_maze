@@ -49,7 +49,7 @@ from tmaze.ui.gui_deps import (  # noqa: E402
 )
 from tmaze.vision.calibration import Undistorter, load_calibration  # noqa: E402
 from tmaze.core import protocol  # noqa: E402  (shared serial-line parser; see docs/decisions/0024)
-from tmaze.core.camera_health import account_block_gap  # noqa: E402  (pure BlockID-gap accounting; ADR-0147)
+from tmaze.core.camera_health import account_block_gap, recording_deltas  # noqa: E402  (pure BlockID-gap accounting + per-recording deltas; ADR-0147)
 from tmaze.core.records.animals import resources_root  # noqa: E402  (sibling resources-repo resolver)
 from tmaze.paths import camera_output_dir  # noqa: E402  (single source for the recordings root; ADR-0088)
 from tmaze.core.maze_state import IN_WELL as _IN_WELL  # noqa: E402  (HUB well substate label)
@@ -311,6 +311,10 @@ class CameraView:
         self._track_pub = TrackPublisher()     # freshest (result, block_id, mono_ts)
         self._counters_lock = threading.Lock()
         self._counters = _Counters()
+        # Cumulative-counter snapshot taken when the current recording opened, so
+        # the per-recording camera_stats can report THIS video's deltas (L8; the
+        # counters below are lifetime-since-launch except ``saved``). See ADR-0147.
+        self._rec_counter_baseline: dict = {}
         self._cam_fps = DEFAULT_FPS
         # Live grab-rate readout state (see _measure_fps): last sampled grab count
         # + monotonic time, and the last computed fps we keep showing between windows.
@@ -1249,6 +1253,16 @@ class CameraView:
                         last_sidecar_flush = time.monotonic()
                         with self._counters_lock:
                             self._counters.saved = 0
+                            # Snapshot the cumulative counters so this recording's
+                            # camera_stats can report its own deltas (L8, ADR-0147).
+                            c = self._counters
+                            self._rec_counter_baseline = {
+                                "grabbed": c.grabbed, "saved": 0,
+                                "src_drops": c.src_drops,
+                                "incomplete": c.incomplete,
+                                "queue_drops": c.queue_drops,
+                                "track_skips": c.track_skips,
+                            }
                         if writer is None:
                             self._recording.clear()  # open failed; bail cleanly
                             self._post(self._reset_record_button)
@@ -1364,11 +1378,16 @@ class CameraView:
             return
         with self._counters_lock:
             c = self._counters
+            # Lifetime-since-launch totals (except ``saved``, which resets per
+            # recording). ``grabbed`` + ``track_skips`` are now written too (L8;
+            # they were tracked but never persisted, so #260810 couldn't see them).
             counters = {
+                "grabbed": c.grabbed,
                 "saved": c.saved,
                 "src_drops": c.src_drops,
                 "incomplete": c.incomplete,
                 "queue_drops": c.queue_drops,
+                "track_skips": c.track_skips,
             }
             transport = {
                 "failed_buffer": c.stat_failed_buffer,
@@ -1384,6 +1403,11 @@ class CameraView:
             "video": os.path.basename(params.video_path),
             "settings": settings,
             "counters": counters,
+            # Deltas FOR THIS recording (current cumulative - the open-time
+            # snapshot), so a multi-recording session can attribute drops to the
+            # right video (L8; ADR-0147). ``saved`` is already per-recording.
+            "counters_this_recording": recording_deltas(
+                counters, self._rec_counter_baseline),
             "transport": transport,
             "written_wall_clock": time.strftime("%Y-%m-%d %H:%M:%S"),
         }

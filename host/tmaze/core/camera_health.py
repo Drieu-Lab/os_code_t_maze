@@ -6,7 +6,27 @@ docs/decisions/0147.
 """
 from __future__ import annotations
 
-from typing import Optional, Tuple
+from typing import Dict, Mapping, Optional, Tuple
+
+
+def recording_deltas(current: Mapping[str, int],
+                     baseline: Mapping[str, int]) -> Dict[str, int]:
+    """Per-recording counter deltas = current cumulative minus the snapshot taken
+    when the recording opened (docs/decisions/0147, review finding L8).
+
+    The camera-health counters (``grabbed`` / ``src_drops`` / ``incomplete`` /
+    ``queue_drops`` / ``track_skips``) run cumulatively since app launch; only
+    ``saved`` resets per recording. Subtracting the open-time baseline gives the
+    count FOR THIS recording - what a multi-recording session bundle needs to
+    answer "how many drops happened in THIS video" (bug #260810_CameraSrcDrops),
+    which the lifetime totals alone can't. A key present in ``current`` but not in
+    ``baseline`` is treated as baseline 0; each delta is clamped at 0 so a counter
+    reset / rollover can never report a negative."""
+    out: Dict[str, int] = {}
+    for k, v in current.items():
+        d = v - baseline.get(k, 0)
+        out[k] = d if d >= 0 else 0
+    return out
 
 
 def account_block_gap(last_block: Optional[int],
