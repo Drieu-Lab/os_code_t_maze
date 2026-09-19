@@ -17,13 +17,22 @@ The same-side run is recomputed here over stem-gated commits (see the counting
 note below) rather than read from task_events' same_side_choice_run, so all
 readout measures share one counting unit. See docs/decisions/0032 and FW-0007.
 
-Distance. Locomotion is summed from successive smoothed centroids using a caller-
-supplied scale object (rules_engine.Scale) exposing ``distance_cm(p_px, q_px)``
-and ``valid()`` - the single canonical px<->cm conversion; no second calibration
-is introduced. A confidence gap is treated as a DISCONTINUITY: on any
-non-accumulated tick the last position is dropped, so the straight-line jump when
-tracking re-acquires a distance away is never added (a conservative undercount
-rather than fabricated distance). See docs/decisions/0032.
+Distance. Locomotion is summed from the smoothed centroid using a caller-supplied
+scale object (rules_engine.Scale) exposing ``distance_cm(p_px, q_px)`` and
+``valid()`` - the single canonical px<->cm conversion; no second calibration is
+introduced. It uses an ANCHOR + DEAD-BAND, not consecutive-pair summing (fixes
+bug #260904_DistanceCreep / docs/decisions/0185): distance is added only once the
+centroid has travelled at least ``deadband_cm`` (default 1 cm) from the last
+COUNTED point (the anchor); sub-dead-band ticks add nothing and leave the anchor
+put, so a resting animal's tracker jitter/wiggle (a run of tiny in-place hops that
+each used to slip under the jump cap and accumulate) no longer manufactures fake
+distance. Real movement past the band is counted as the straight-line anchor->point
+segment (a small <=1 cm quantization, deliberately a conservative undercount). A
+confidence gap or an over-cap single-tick jump is a DISCONTINUITY: both the
+per-tick position and the anchor are dropped/reset, so the straight-line jump when
+tracking re-acquires a distance away is never added. ``distance_method`` on the
+snapshot records this so a reader knows the dead-band was applied. See
+docs/decisions/0032 and docs/decisions/0185.
 
 Time. Throughput and distance-rate denominators use ACTIVE time - the summed dt
 between successive update() calls, capped per-tick so a paused/backgrounded
@@ -58,6 +67,11 @@ from tmaze.core.task_events import TaskEventFrame
 DEFAULT_WINDOW = 10          # rolling window size, in most-recent choice entries
 DEFAULT_MAX_DT_S = 0.5       # per-tick cap on the gap counted as active time
 DEFAULT_MAX_JUMP_PX = 200.0  # reject a single-tick centroid jump larger than this
+# Minimum displacement (cm) from the last COUNTED point before a distance segment
+# is added (bug #260904_DistanceCreep; docs/decisions/0185). 1 cm is well above the
+# rat centroid's resting jitter yet small against real locomotion, so a still animal
+# accumulates zero distance while a moving one is counted with <=1 cm quantization.
+DEFAULT_DEADBAND_CM = 1.0
 
 
 @dataclass(frozen=True)
@@ -101,6 +115,10 @@ class BehaviorSnapshot:
     distance_cm: float
     distance_contributed: bool                   # any valid-scale segment summed
     distance_m_per_min: Optional[float]
+    # How distance_cm was computed, for provenance (docs/decisions/0185): the
+    # anchor + dead-band method + its threshold, e.g. "anchor_deadband_1cm". A
+    # pre-0185 bundle lacks this key (it used the old consecutive-pair summing).
+    distance_method: str
 
 
 class BehaviorStats:
@@ -113,10 +131,12 @@ class BehaviorStats:
 
     def __init__(self, window_n: int = DEFAULT_WINDOW,
                  max_dt_s: float = DEFAULT_MAX_DT_S,
-                 max_jump_px: float = DEFAULT_MAX_JUMP_PX) -> None:
+                 max_jump_px: float = DEFAULT_MAX_JUMP_PX,
+                 deadband_cm: float = DEFAULT_DEADBAND_CM) -> None:
         self._window_n = max(1, int(window_n))
         self._max_dt_s = float(max_dt_s)
         self._max_jump_px = float(max_jump_px)
+        self._deadband_cm = max(0.0, float(deadband_cm))
         self.reset()
 
     def reset(self) -> None:
@@ -136,6 +156,11 @@ class BehaviorStats:
         self._distance_cm = 0.0
         self._distance_contributed = False
         self._last_pos: Optional[Tuple[float, float]] = None
+        # Last COUNTED position (dead-band anchor; docs/decisions/0185). Distinct
+        # from _last_pos (the previous tick, for the per-tick jump cap): the anchor
+        # holds still through sub-dead-band jitter and only advances when real
+        # displacement crosses the band.
+        self._anchor: Optional[Tuple[float, float]] = None
 
     def set_window(self, window_n: int) -> None:
         """Resize the rolling window, preserving the most recent entries."""
@@ -148,9 +173,11 @@ class BehaviorStats:
     def mark_gap(self) -> None:
         """Break continuity (called on pause/resume). Drops the timing and
         position anchors so the idle interval is counted as neither active time
-        nor distance."""
+        nor distance (the dead-band anchor too, so movement during the gap is not
+        added as one straight-line segment on resume; docs/decisions/0185)."""
         self._last_now = None
         self._last_pos = None
+        self._anchor = None
 
     def update(self, frame: TaskEventFrame,
                pos_px: Optional[Tuple[float, float]] = None,
@@ -176,19 +203,35 @@ class BehaviorStats:
         usable = (frame.valid and pos_px is not None
                   and scale is not None and scale.valid())
         if not usable:
-            # Discontinuity: drop the anchor so a later re-acquisition does not
-            # add the straight-line jump across the untrusted gap.
+            # Discontinuity: drop BOTH the per-tick position and the dead-band
+            # anchor so a later re-acquisition does not add the straight-line jump
+            # across the untrusted gap (docs/decisions/0185).
             self._last_pos = None
+            self._anchor = None
             return
-        if self._last_pos is not None:
-            d_px = math.hypot(pos_px[0] - self._last_pos[0],
-                              pos_px[1] - self._last_pos[1])
-            if d_px <= self._max_jump_px:
-                self._distance_cm += scale.distance_cm(self._last_pos, pos_px)
-                self._distance_contributed = True
-            # A jump over the cap (a spurious confident hop) is skipped, and the
-            # anchor advances to the new point so we don't chain onto a stale one.
+        prev = self._last_pos
         self._last_pos = pos_px
+        if prev is not None:
+            d_px = math.hypot(pos_px[0] - prev[0], pos_px[1] - prev[1])
+            if d_px > self._max_jump_px:
+                # A spurious confident single-tick teleport: don't add it, and
+                # RESTART the anchor at the new point so the next segment measures
+                # from here, never chaining across the untrusted jump.
+                self._anchor = pos_px
+                return
+        if self._anchor is None:
+            self._anchor = pos_px
+            return
+        # Dead-band: add distance only once the centroid is at least deadband_cm
+        # from the last counted point. Below the band the anchor stays put, so a
+        # resting animal's jitter (many sub-band hops around one spot) accumulates
+        # nothing; once real displacement crosses the band we count the anchor->
+        # point segment and advance the anchor (fixes #260904; docs/decisions/0185).
+        seg_cm = scale.distance_cm(self._anchor, pos_px)
+        if seg_cm >= self._deadband_cm:
+            self._distance_cm += seg_cm
+            self._distance_contributed = True
+            self._anchor = pos_px
 
     def _accumulate_choice(self, frame: TaskEventFrame) -> None:
         # Count only the FIRST choice-zone entry per hub->...->hub trip (a figure-8
@@ -265,7 +308,13 @@ class BehaviorStats:
             active_s=self._active_s, trials_per_min=trials_per_min,
             distance_cm=self._distance_cm,
             distance_contributed=self._distance_contributed,
-            distance_m_per_min=dist_m_per_min)
+            distance_m_per_min=dist_m_per_min,
+            distance_method=self._distance_method())
+
+    def _distance_method(self) -> str:
+        """Provenance token for how ``distance_cm`` was computed (docs/decisions/
+        0185): the anchor + dead-band method and its threshold in cm."""
+        return f"anchor_deadband_{self._deadband_cm:g}cm"
 
     @staticmethod
     def _fracs(left: int, right: int) -> Optional[Tuple[float, float]]:

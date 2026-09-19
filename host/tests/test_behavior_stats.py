@@ -313,6 +313,48 @@ class TestDistance(unittest.TestCase):
         snap = s.snapshot()
         self.assertAlmostEqual(snap.distance_cm, 15.0)   # 10 + 5, never the ~400 jump
 
+    def test_resting_jitter_under_deadband_adds_nothing(self):
+        # Bug #260904_DistanceCreep: a still animal's tracker jitter used to chain
+        # into fake distance. With the anchor + 1 cm dead-band, many sub-1-cm hops
+        # around one spot accumulate exactly zero (docs/decisions/0185).
+        s = BehaviorStats()
+        scale = Scale(cm_per_px=1.0)                  # 1 px == 1 cm; dead-band 1 cm
+        s.update(frame(0.0), pos_px=(0.0, 0.0), scale=scale)          # anchor
+        for i in range(1, 51):                        # 50 ticks of wiggle < 1 cm
+            x = 0.6 if i % 2 else -0.6                # 0.72 cm from the anchor
+            s.update(frame(i * 0.05), pos_px=(x, 0.4), scale=scale)
+        snap = s.snapshot()
+        self.assertEqual(snap.distance_cm, 0.0)       # no creep
+        self.assertFalse(snap.distance_contributed)
+
+    def test_movement_past_deadband_is_counted(self):
+        # Clear >1 cm steps are still summed (as straight-line anchor->point).
+        s = BehaviorStats()
+        scale = Scale(cm_per_px=1.0)
+        s.update(frame(0.0), pos_px=(0.0, 0.0), scale=scale)          # anchor
+        for i in range(1, 11):                        # ten 2 cm steps in a line
+            s.update(frame(i * 0.05), pos_px=(2.0 * i, 0.0), scale=scale)
+        self.assertAlmostEqual(s.snapshot().distance_cm, 20.0)
+
+    def test_slow_crawl_is_counted_once_it_crosses_the_band(self):
+        # A genuine slow drift (each step sub-band) is NOT lost: the anchor holds
+        # until the cumulative displacement crosses 1 cm, then counts and re-anchors
+        # - band-quantized, never zero and never more than the true path.
+        s = BehaviorStats()
+        scale = Scale(cm_per_px=1.0)
+        s.update(frame(0.0), pos_px=(0.0, 0.0), scale=scale)          # anchor
+        for i in range(1, 8):                         # 0.4 cm steps: 0.4 .. 2.8 cm
+            s.update(frame(i * 0.05), pos_px=(0.4 * i, 0.0), scale=scale)
+        d = s.snapshot().distance_cm
+        self.assertGreater(d, 0.0)
+        self.assertLessEqual(d, 0.4 * 7)              # <= true path (conservative)
+
+    def test_distance_method_is_recorded(self):
+        self.assertEqual(BehaviorStats().snapshot().distance_method,
+                         "anchor_deadband_1cm")
+        self.assertEqual(BehaviorStats(deadband_cm=2.5).snapshot().distance_method,
+                         "anchor_deadband_2.5cm")
+
     def test_no_scale_means_no_distance(self):
         s = BehaviorStats()
         s.update(frame(0.0), pos_px=(0.0, 0.0), scale=None)

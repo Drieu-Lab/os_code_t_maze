@@ -668,5 +668,6 @@ def _locomotor_lines(sn: Optional["BehaviorSnapshot"]) -> list:
         f"  Throughput:  {sn.stem_choices} stem trips   "
         f"{_rate(sn.trials_per_min)}/min   "
         f"(active {_duration(sn.active_s)})",
-        f"  Distance:    {dist_m:.1f} m   {_rate(sn.distance_m_per_min)} m/min",
+        f"  Distance:    {dist_m:.1f} m   {_rate(sn.distance_m_per_min)} m/min"
+        + (f"   [{method}]" if (method := getattr(sn, "distance_method", "")) else ""),
     ]
