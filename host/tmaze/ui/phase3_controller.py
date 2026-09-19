@@ -1328,9 +1328,11 @@ class Phase3ControlView(VisionActuator):
         """Atomically persist the whole table (temp file + os.replace), so a crash
         never leaves a half-written CSV. Cheap for a few hundred rows.
 
-        A write failure is NOT swallowed: it is recorded and surfaced in the
-        status line (docs/decisions/0121), because a silently dropped write means
-        the session's data is not on disk."""
+        The temp file is flushed AND fsync'd before the rename (docs/decisions/0174)
+        so "crash-safe" means the bytes are on the physical disk, not merely
+        un-torn in the OS cache. A write failure is NOT swallowed: it is recorded
+        and surfaced in the status line (docs/decisions/0121), because a silently
+        dropped write means the session's data is not on disk."""
         if self._log is None or self._log_path is None:
             return
         try:
@@ -1338,6 +1340,8 @@ class Phase3ControlView(VisionActuator):
             tmp = self._log_path + ".tmp"
             with open(tmp, "w", encoding="utf-8", newline="") as fh:
                 fh.write(self._log.render_csv())
+                fh.flush()
+                os.fsync(fh.fileno())
             os.replace(tmp, self._log_path)
         except OSError as exc:
             self._record_write_result("task", self._log_path, exc)
@@ -1416,7 +1420,8 @@ class Phase3ControlView(VisionActuator):
 
     def _write_excursion_log(self) -> None:
         """Atomically persist the excursion event log (temp file + os.replace),
-        the same crash-safe write as :meth:`_write_log`."""
+        the same crash-safe write as :meth:`_write_log` - flushed + fsync'd before
+        the rename (docs/decisions/0174)."""
         if self._excursion_log is None or self._excursion_path is None:
             return
         try:
@@ -1424,6 +1429,8 @@ class Phase3ControlView(VisionActuator):
             tmp = self._excursion_path + ".tmp"
             with open(tmp, "w", encoding="utf-8", newline="") as fh:
                 fh.write(self._excursion_log.render_csv())
+                fh.flush()
+                os.fsync(fh.fileno())
             os.replace(tmp, self._excursion_path)
         except OSError as exc:
             self._record_write_result("excursions", self._excursion_path, exc)

@@ -1667,17 +1667,22 @@ class SessionControlView:
 
     def _atomic_write(self, path: str, text: str) -> None:
         """Write ``text`` to ``path`` atomically (temp file + os.replace), like the
-        manifest writer, so a crash mid-write never leaves a half-written file."""
+        manifest writer, so a crash mid-write never leaves a half-written file. The
+        temp file is flushed AND fsync'd before the rename (docs/decisions/0174) so
+        the bytes are durably on disk, not merely un-torn in the OS write cache."""
         os.makedirs(os.path.dirname(path), exist_ok=True)
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8", newline="") as fh:
             fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
         os.replace(tmp, path)
 
     # ------------------------------------------------------------- manifest I/O
     def _write_manifest(self) -> None:
         """Atomically persist the manifest (temp file + os.replace), so a crash
-        mid-session never leaves a half-written file."""
+        mid-session never leaves a half-written file. The temp file is flushed +
+        fsync'd before the rename (docs/decisions/0174) so it is durably on disk."""
         if self._manifest is None or self._manifest_path is None:
             return
         try:
@@ -1685,6 +1690,8 @@ class SessionControlView:
             tmp = self._manifest_path + ".tmp"
             with open(tmp, "w", encoding="utf-8", newline="") as fh:
                 fh.write(self._manifest.render())
+                fh.flush()
+                os.fsync(fh.fileno())
             os.replace(tmp, self._manifest_path)
         except OSError:
             pass

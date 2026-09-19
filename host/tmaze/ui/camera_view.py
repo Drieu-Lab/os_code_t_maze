@@ -1229,6 +1229,11 @@ class CameraView:
         csv_file = None
         csv_writer = None
         saved_idx = 0
+        # Wall-time of the last sidecar flush. The CSV is otherwise only flushed on
+        # close, so an unclean end would lose the whole session's buffered per-frame
+        # rows; we force a flush at least once a second (docs/decisions/0174), which
+        # bounds a crash's sidecar loss to ~1 s regardless of frame rate.
+        last_sidecar_flush = 0.0
         active_params: Optional[_RecParams] = None
         try:
             while not self._stop.is_set():
@@ -1241,6 +1246,7 @@ class CameraView:
                         writer, csv_file, csv_writer = self._open_outputs(params)
                         active_params = params
                         saved_idx = 0
+                        last_sidecar_flush = time.monotonic()
                         with self._counters_lock:
                             self._counters.saved = 0
                         if writer is None:
@@ -1263,6 +1269,17 @@ class CameraView:
                 if writer is not None:
                     ok = self._write_frame(writer, csv_writer, saved_idx, frame, meta)
                     saved_idx += 1
+                    # Keep the sidecar durable within ~1 s of the newest frame
+                    # (docs/decisions/0174), so an unclean end loses at most the
+                    # last second of per-frame rows rather than the whole buffer.
+                    now_mono = time.monotonic()
+                    if csv_file is not None and now_mono - last_sidecar_flush >= 1.0:
+                        try:
+                            csv_file.flush()
+                            os.fsync(csv_file.fileno())
+                        except (OSError, ValueError):
+                            pass
+                        last_sidecar_flush = now_mono
                     if not ok:
                         # Surface the failure and stop cleanly rather than
                         # silently producing an empty video + header-only CSV.

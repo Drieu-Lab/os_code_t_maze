@@ -404,6 +404,35 @@ class SessionPhase3WiringTest(unittest.TestCase):
         self.phase3._publish_status(self.phase3._act_snapshot)
         self.assertNotIn("DISK WRITE FAILED", self.phase3._status_text)
 
+    def test_trial_csv_is_fsynced_before_rename(self):
+        """docs/decisions/0174 (L4): the trial CSV is flushed AND fsync'd to the
+        physical disk BEFORE os.replace, so "crash-safe" means the bytes are
+        durable, not merely un-torn in the OS write cache. We assert the fsync
+        happens while the temp file still exists (i.e. before the rename)."""
+        import unittest.mock as mock
+
+        self._open_gate()
+        self._run_a_trial()                        # arms; bind the log path
+
+        order = []
+        real_fsync, real_replace = os.fsync, os.replace
+
+        def _rec_fsync(fd):
+            order.append("fsync")
+            return real_fsync(fd)
+
+        def _rec_replace(src, dst):
+            order.append("replace")
+            return real_replace(src, dst)
+
+        with mock.patch("os.fsync", _rec_fsync), \
+                mock.patch("os.replace", _rec_replace):
+            self.phase3._write_log()
+
+        self.assertIn("fsync", order, "trial CSV must be fsync'd")
+        self.assertLess(order.index("fsync"), order.index("replace"),
+                        "fsync must precede the atomic rename")
+
     # ---------------------------------------------- auto-extend (ADR-0150)
     def _feed(self, state):
         """Publish the gate snapshot then fold one synthetic frame, exactly as the
