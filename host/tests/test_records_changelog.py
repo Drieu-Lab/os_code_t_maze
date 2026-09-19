@@ -134,7 +134,10 @@ class TestAppendAndLoad(unittest.TestCase):
                    "daily_log.csv", path=p)
             e = load_entries(p)
         self.assertEqual(e[0].ts, e[1].ts)
-        self.assertRegex(e[0].ts, r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$")
+        # Offset-aware (docs/decisions/0182): trailing UTC offset (or Z) now present.
+        self.assertRegex(
+            e[0].ts,
+            r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:[+-]\d{2}:\d{2}|Z)$")
 
     def test_record_combines_diff_and_append(self):
         with tempfile.TemporaryDirectory() as d:

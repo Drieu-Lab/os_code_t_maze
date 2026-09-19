@@ -33,7 +33,7 @@ import hashlib
 import json
 import os
 import shutil
-from datetime import datetime
+from tmaze.core.timeutil import now_iso
 from typing import Any, Dict, List, Mapping, Optional
 
 from tmaze.paths import host_dir as _host_dir
@@ -149,7 +149,7 @@ def write_config_snapshot(dest_dir: str, *, session_id: str = "",
     snapshot = {
         "schema_version": SCHEMA_VERSION,
         "session_id": session_id,
-        "generated_iso": datetime.now().isoformat(timespec="milliseconds"),
+        "generated_iso": now_iso(),  # offset-aware (docs/decisions/0182)
         "files": entries,
         "runtime_params_file": (
             "runtime_params.json" if runtime_params_path else None),

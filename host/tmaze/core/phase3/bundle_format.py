@@ -40,7 +40,11 @@ from tmaze.core.phase3.trial_sequence import HIGH, LEFT, LOW, RIGHT
 # serial protocol version seen on the run's ``0,PROTO`` handshake and the S/L
 # state convention it implies (proto >= 8 corrected, else the legacy inverted
 # meaning), so the analysis reads each bundle's beam/lick polarity per session.
-FORMAT_VERSION = 3
+# v4 (ADR-0182): host ISO stamps are now OFFSET-AWARE (carry the UTC offset), the
+# trial CSV gains a ``cue_calibration`` header line, the excursions CSV gains the
+# session_t0 header block, and this manifest gains ``stream_notes`` (S5/S6). The
+# analysis mirror localises pre-v4 naive stamps to the rig zone; see its parse_iso.
+FORMAT_VERSION = 4
 
 # The firmware serial protocol version at/after which the body-beam (S) and lick
 # (L) state bit is CORRECTED (1 = broken/contact); below it the recorded meaning
@@ -146,6 +150,23 @@ _SYNC_CLOCK_FIT_FIELDS: Dict[str, str] = {
 }
 
 
+# Reader-facing caveats about the camera streams (S5/S6, docs/decisions/0182).
+# Mirrored WORD-FOR-WORD in the analysis repo's phase3_format docstrings so a
+# reader on either side is warned about the two easy mistakes: trusting the mp4's
+# own timestamps, and treating a sidecar track_* row as computed on that frame.
+_STREAM_NOTES: Dict[str, str] = {
+    "camera_video": ("container timestamps are nominal-rate (pts += 1 at "
+                     "round(fps)); use the sidecar host_unix_s / cam_timestamp "
+                     "for time (see camera_stats fps_measured; docs/decisions/0181)"),
+    "camera_sidecar_track": ("track_* columns are the LATEST PUBLISHED tracker "
+                             "result, not necessarily computed on this frame - "
+                             "join on track_src_block_id (docs/decisions/0040)"),
+    "camera_sidecar_host_unix_s": ("host wall-clock epoch seconds at frame GRAB "
+                                   "(the cross-stream anchor); host_unix_s_written "
+                                   "is the later write instant (docs/decisions/0181)"),
+}
+
+
 def _sync() -> Dict[str, Any]:
     """The ``sync`` block: the LED clock-fit stream's on-disk shape (see above)."""
     return {
@@ -181,5 +202,6 @@ def format_manifest(firmware_proto: Optional[int] = None) -> Dict[str, Any]:
         "arm_labels": [phase3_log._ARM_LABEL[LEFT], phase3_log._ARM_LABEL[RIGHT]],
         "zone_names": list(maze_state.EDITABLE_ZONES),
         "columns": _columns(),
+        "stream_notes": dict(_STREAM_NOTES),
         "sync": _sync(),
     }

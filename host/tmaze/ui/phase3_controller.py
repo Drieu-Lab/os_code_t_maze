@@ -62,6 +62,7 @@ from typing import Callable, Optional
 
 from tmaze.core import protocol
 from tmaze.core import cue_calibration
+from tmaze.core.timeutil import now_iso
 from tmaze.core.cue_gate import CHOICE, RETURN, CueGate, CueParams
 from tmaze.core.phase3.alternation import AlternationBlockConfig
 from tmaze.core.phase3.debias import DebiasBlockConfig
@@ -143,8 +144,9 @@ SEQ_LIST_ROWS = 8               # visible rows of the scrollable planned-trial l
 
 
 def _now_iso() -> str:
-    """Host wall-clock stamp for a logged event (millisecond resolution)."""
-    return datetime.now().isoformat(timespec="milliseconds")
+    """Host wall-clock stamp for a logged event (offset-aware, ms resolution;
+    docs/decisions/0182)."""
+    return now_iso()
 
 
 @dataclass(frozen=True)
@@ -689,7 +691,8 @@ class Phase3ControlView(VisionActuator):
                               max_topups=snap.max_topups,
                               session_id=snap.session_id,
                               session_t0=snap.session_t0,
-                              return_enabled=snap.params.return_enabled)
+                              return_enabled=snap.params.return_enabled,
+                              cue_calibration=self._resolve_cue_calibration())
         # Bind + write into the session's task/ folder ONLY when armed via a
         # session (docs/decisions/0049). When armed WITHOUT one (the ADR-0060
         # arm-before-Start order, or a standalone tab), keep the planned matrix IN
@@ -706,7 +709,8 @@ class Phase3ControlView(VisionActuator):
         # Fresh excursion-event log alongside the trial CSV (ADR-0109), named in
         # lockstep with the trial file (so a restart's _r<n> tag carries over).
         self._excursion_log = ExcursionLog(
-            animal=animal, session_id=snap.session_id, session_start_iso=_now_iso())
+            animal=animal, session_id=snap.session_id, session_start_iso=_now_iso(),
+            session_t0=snap.session_t0)
         self._excursion_path = self._excursion_path_for(self._log_path)
         self._choice_cue_on_iso = None
         if self._excursion_path is not None:
@@ -1333,6 +1337,21 @@ class Phase3ControlView(VisionActuator):
             self._write_errors.pop(slot, None)
         else:
             self._write_errors[slot] = os.path.basename(path) if path else slot
+
+    def _resolve_cue_calibration(self) -> dict:
+        """The tones AS PLAYED this run: commanded Hz + gain % for the HIGH and LOW
+        tones, resolved from cue_calibration.json (P3, docs/decisions/0182). Sent
+        into the trial-log header so the file records the played tones, not just
+        the raw calibration snapshot. Falls back to identity/full-volume for an
+        un-calibrated tone (the module's own defaults)."""
+        cfg = self._seq.cfg
+        high_hz, low_hz = cfg.high_tone_hz, cfg.low_tone_hz
+        return {
+            "high_cmd_hz": cue_calibration.commanded_hz_for(high_hz),
+            "high_gain_pct": cue_calibration.gain_pct_for(high_hz),
+            "low_cmd_hz": cue_calibration.commanded_hz_for(low_hz),
+            "low_gain_pct": cue_calibration.gain_pct_for(low_hz),
+        }
 
     def _write_log(self) -> None:
         """Atomically persist the whole table (temp file + os.replace), so a crash

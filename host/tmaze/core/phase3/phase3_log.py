@@ -348,10 +348,17 @@ class Phase3Log:
                  reward_pulse_ms: int = 500, max_topups: int = 0,
                  session_id: str = "",
                  session_t0: Optional[Dict[str, Any]] = None,
-                 return_enabled: bool = True) -> None:
+                 return_enabled: bool = True,
+                 cue_calibration: Optional[Dict[str, Any]] = None) -> None:
         self.animal = animal
         self.seed = sequence.seed
         self.cfg = sequence.cfg
+        # Resolved cue playback calibration for THIS run (P3, docs/decisions/0182):
+        # the commanded Hz + gain % actually sent for the HIGH and LOW tones (from
+        # cue_calibration.json via the shell), rendered into the header so the file
+        # records the tones as played, not just the raw calibration snapshot. None
+        # on a manual arm / when the shell didn't resolve it (line omitted).
+        self.cue_calibration = dict(cue_calibration) if cue_calibration else None
         # Whether the return-arm cue is played this run (a display hint for panels;
         # the planned return-cue columns are recorded regardless). See snapshot().
         self.return_enabled = return_enabled
@@ -749,6 +756,18 @@ class Phase3Log:
             f"seed={self.seed} proto={PROTO_VERSION}",
             f"# high_tone_is_left={c.high_tone_is_left} "
             f"high_tone_hz={c.high_tone_hz} low_tone_hz={c.low_tone_hz}",
+        ]
+        # The tones AS PLAYED this run (commanded Hz + gain %, resolved from
+        # cue_calibration.json; P3, docs/decisions/0182). Keys are cue_-prefixed so
+        # the offline header parser reads them unambiguously.
+        cc = self.cue_calibration
+        if cc:
+            lines.append(
+                f"# cue_calibration high_cmd_hz={cc.get('high_cmd_hz', '')} "
+                f"high_gain_pct={cc.get('high_gain_pct', '')} "
+                f"low_cmd_hz={cc.get('low_cmd_hz', '')} "
+                f"low_gain_pct={cc.get('low_gain_pct', '')}")
+        lines += [
             f"# block_size={c.block_size} max_same_run={c.max_same_run} "
             f"max_alt_run={c.max_alt_run} "
             f"max_trials={c.max_trials} planned_trials={len(self._rows)} "

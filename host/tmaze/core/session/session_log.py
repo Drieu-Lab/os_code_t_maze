@@ -38,7 +38,7 @@ import json
 import os.path
 import time
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from tmaze.core.timeutil import now_iso
 from typing import Any, Dict, Optional
 
 # Bump when the manifest layout changes so an offline reader can branch on it.
@@ -63,7 +63,7 @@ def clock_snapshot() -> Dict[str, Any]:
     return {
         "wall": time.time(),
         "mono": time.monotonic(),
-        "iso": datetime.now().isoformat(timespec="milliseconds"),
+        "iso": now_iso(),  # offset-aware (docs/decisions/0182)
     }
 
 

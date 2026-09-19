@@ -146,8 +146,11 @@ class ChangeEntry:
 
 
 def now_iso() -> str:
-    """Local wall-clock time to the second, ISO 8601 (what ``ts`` holds)."""
-    return _dt.datetime.now().isoformat(timespec="seconds")
+    """Host wall-clock time to the second, ISO 8601 - now OFFSET-AWARE (what
+    ``ts`` holds; docs/decisions/0182). Existing rows are untouched (append-only);
+    new rows carry the host UTC offset."""
+    from tmaze.core.timeutil import now_iso as _now_iso
+    return _now_iso(timespec="seconds")
 
 
 def append(changes: Iterable[Change], operator: str, source: str, file: str,

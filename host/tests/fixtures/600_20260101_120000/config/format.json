@@ -1,5 +1,5 @@
 {
-  "format_version": 3,
+  "format_version": 4,
   "proto": 12,
   "firmware_proto": 8,
   "sensor_polarity": "corrected",
@@ -65,6 +65,11 @@
     "attempt": "1-based attempt number for this trial (append-only edits)",
     "superseded": "1 on a preserved attempt a later Repeat/Back replaced",
     "edit": "action that created a >1 attempt: operator repeat/back, or 'uncued' (auto: no cue that trip; see docs/decisions/0171)"
+  },
+  "stream_notes": {
+    "camera_video": "container timestamps are nominal-rate (pts += 1 at round(fps)); use the sidecar host_unix_s / cam_timestamp for time (see camera_stats fps_measured; docs/decisions/0181)",
+    "camera_sidecar_track": "track_* columns are the LATEST PUBLISHED tracker result, not necessarily computed on this frame - join on track_src_block_id (docs/decisions/0040)",
+    "camera_sidecar_host_unix_s": "host wall-clock epoch seconds at frame GRAB (the cross-stream anchor); host_unix_s_written is the later write instant (docs/decisions/0181)"
   },
   "sync": {
     "stream": "sync",

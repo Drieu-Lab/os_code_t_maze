@@ -491,7 +491,9 @@ class SessionPhase3WiringTest(unittest.TestCase):
         self.assertIsNotNone(self.session._serial_file)
 
         recv_wall = 1_600_000_000.5                # a fixed, unmistakable instant
-        expected = datetime.fromtimestamp(recv_wall).isoformat(
+        # Offset-aware receipt stamp (docs/decisions/0182): the host UTC offset is
+        # attached so the instant is unambiguous off-rig.
+        expected = datetime.fromtimestamp(recv_wall).astimezone().isoformat(
             timespec="milliseconds")
         self.session._write_serial("123,S,0,1", recv_wall=recv_wall)
 

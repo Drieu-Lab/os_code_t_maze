@@ -33,7 +33,7 @@ Headless tests: python -m unittest test_excursion_log.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 # Excursion type + outcome vocabularies (kept as named constants so callers and
 # tests agree on the exact tokens written to the CSV).
@@ -88,10 +88,16 @@ class ExcursionLog:
     """Append-only log of Phase 3 outbound excursions (stem + non-stem)."""
 
     def __init__(self, *, animal: str, session_id: str,
-                 session_start_iso: str) -> None:
+                 session_start_iso: str,
+                 session_t0: Optional[Dict[str, Any]] = None) -> None:
         self.animal = animal
         self.session_id = session_id
         self.session_start_iso = session_start_iso
+        # Canonical session anchor (manifest t0: host wall+mono+iso at Start), so
+        # this file self-anchors to the one instant every stream shares, matching
+        # the trial CSV's header block (L9, docs/decisions/0124/0182). None on a
+        # manual arm / before Start Session.
+        self.session_t0 = session_t0
         self._rows: List[ExcursionRow] = []
 
     def __len__(self) -> int:
@@ -117,9 +123,18 @@ class ExcursionLog:
 
     # ------------------------------------------------------------- render
     def _header_comment(self) -> List[str]:
-        return [
+        lines = [
             f"# phase3_excursions animal={self.animal} "
             f"session_id={self.session_id} proto=1",
+        ]
+        # Canonical session anchor, matching the trial CSV's block (L9,
+        # docs/decisions/0124/0182), so the excursions file self-anchors too.
+        if self.session_t0:
+            lines.append(
+                f"# session_t0_iso={self.session_t0.get('iso', '')} "
+                f"session_t0_wall={self.session_t0.get('wall', '')} "
+                f"session_t0_mono={self.session_t0.get('mono', '')}")
+        lines += [
             f"# session_start_iso={self.session_start_iso}",
             "# note: iso is a host actuation-decision time (serial latency ~ms); "
             "mono is the host monotonic clock (seconds). see docs/decisions/0109",
@@ -128,6 +143,7 @@ class ExcursionLog:
             "denied trip (linked_trial blank). cue_dwell_s is a relative host-clock "
             "dwell, not a reaction time (docs/decisions/0108)",
         ]
+        return lines
 
     def render_csv(self) -> str:
         """Render the whole log (header comment + column row + events) as CSV."""

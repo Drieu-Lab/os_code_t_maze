@@ -39,6 +39,7 @@ import time
 from datetime import datetime
 
 from tmaze.core import protocol
+from tmaze.core.timeutil import now_iso
 from tmaze.paths import repo_root
 
 # Session logs live in host/data/ regardless of where the logger is launched
@@ -79,7 +80,7 @@ class SessionLog:
         print(f"[rig_logger] logging to {self.path}", flush=True)
 
     def _write(self, line: str) -> None:
-        ts = datetime.now().isoformat(timespec="milliseconds")
+        ts = now_iso()  # offset-aware (docs/decisions/0182)
         self._file.write(f"{ts},{line}\n")
         self._file.flush()
 

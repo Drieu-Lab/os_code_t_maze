@@ -144,7 +144,11 @@ UNDISTORT_ALPHA = 0.0
 # rig_ms is the LATEST firmware session ms seen at grab - it lags and RESETS to 0
 # on a MODE switch (blanked on that line here), so it is NOT monotonic and must
 # not be used as a standalone clock.
-SIDECAR_COLUMNS = ("frame_idx", "host_unix_s", "rig_ms", "cam_block_id", "cam_timestamp")
+# host_unix_s is the wall time at GRAB (the cross-stream anchor); host_unix_s_written
+# is the wall time when the row is written (after debayer/undistort/orient/encode),
+# so grab->write processing latency is measurable offline (S4/S5, docs/decisions/0182).
+SIDECAR_COLUMNS = ("frame_idx", "host_unix_s", "rig_ms", "cam_block_id",
+                   "cam_timestamp", "host_unix_s_written")
 
 # Nominal camera-clock tick rate (Hz) for GigE Vision: the device timestamp counts
 # in nanoseconds. Written into the sidecar header as the fallback when the camera's
@@ -1374,8 +1378,12 @@ class CameraView:
         try:
             writer.write(frame)
             host_unix_s, rig_ms, block_id, cam_ts, track, track_src = meta
+            # Wall time at WRITE (after processing), so grab->write latency is
+            # measurable against host_unix_s (grab time); docs/decisions/0182.
+            written = time.time()
             csv_writer.writerow(
-                [idx, f"{host_unix_s:.6f}", rig_ms, block_id, cam_ts]
+                [idx, f"{host_unix_s:.6f}", rig_ms, block_id, cam_ts,
+                 f"{written:.6f}"]
                 + list(track) + [track_src])
             # Track the saved-frame grab-time span for fps_measured (S5).
             if self._rec_first_hu is None:

@@ -45,13 +45,13 @@ Run (conda env drieu_t_maze; from anywhere - paths resolve by landmark search):
 from __future__ import annotations
 
 import argparse
-import datetime as _dt
 import hashlib
 import os
 from dataclasses import dataclass, field
 from typing import List, Optional
 
 from tmaze.core import provenance
+from tmaze.core.timeutil import now_iso
 from tmaze.core.records import animals
 from tmaze.core.records import daily_log
 from tmaze.core.records import note_tags
@@ -102,7 +102,7 @@ def _file_sha(path: Optional[str]) -> str:
 def build_meta(roots: List[str]) -> session_registry.BuildMeta:
     """Gather what this build is made from, for the CSV's header lines."""
     return session_registry.BuildMeta(
-        built_at=_dt.datetime.now().isoformat(timespec="seconds"),
+        built_at=now_iso(timespec="seconds"),  # offset-aware (docs/decisions/0182)
         code_commit=provenance.code_commit(),
         roots=[os.path.abspath(r) for r in roots],
         inputs={

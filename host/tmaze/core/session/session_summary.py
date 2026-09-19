@@ -61,6 +61,8 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from datetime import datetime
+
+from tmaze.core.timeutil import now_iso
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from tmaze.core.reward import reward_volume
@@ -352,8 +354,7 @@ def build_summary(*, session_id: str, animal: str,
         notes=list(notes) if notes else [],
         manual_pulses_ms=list(manual_pulses_ms) if manual_pulses_ms else [],
         pre_start_trials=pre_start_trials,
-        generated_iso=generated_iso or datetime.now().isoformat(
-            timespec="seconds"))
+        generated_iso=generated_iso or now_iso(timespec="seconds"))
 
 
 def count_trials_started_before(start_isos, t0_iso: Optional[str]) -> int:

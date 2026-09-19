@@ -48,11 +48,21 @@ N_TRIALS = 6
 # Fixed firmware serial proto for the fixture: a current (v8) session, so
 # format.json carries sensor_polarity = "corrected" (see docs/decisions/0164).
 FIRMWARE_PROTO = 8
-SESSION_START_ISO = "2026-01-01T11:59:55.000"      # gate-arm time (secondary event)
+# Offset-aware ISO stamps (format v4, ADR-0182). The fixture is dated January, so
+# the rig's local offset (America/New_York) is EST = -05:00; a v4 bundle carries
+# the offset so the analysis mirror parses it natively (no assume_tz needed).
+TZ_OFFSET = "-05:00"
+SESSION_START_ISO = f"2026-01-01T11:59:55.000{TZ_OFFSET}"   # gate-arm (secondary event)
 T0: Dict[str, Any] = {                              # canonical session anchor (ADR-0124)
     "wall": 1000000.0,
     "mono": 2.0,
-    "iso": "2026-01-01T12:00:00.000",
+    "iso": f"2026-01-01T12:00:00.000{TZ_OFFSET}",
+}
+# Fixed cue playback calibration for the fixture's trial-CSV header (P3, ADR-0182):
+# the HIGH/LOW tones as played (commanded Hz + gain %). Fixed, never read live.
+CUE_CALIBRATION: Dict[str, Any] = {
+    "high_cmd_hz": 8000, "high_gain_pct": 46,
+    "low_cmd_hz": 4000, "low_gain_pct": 10,
 }
 # Fixed provenance stub for the fixture (manifest schema v3, docs/decisions/0180):
 # NEVER collect live git/package/host values here - they would make the fixture
@@ -106,8 +116,9 @@ _SIDECAR = (
 
 
 def _iso(trial: int, frac: str) -> str:
-    """A fixed ISO stamp for trial ``trial`` (0-based) within minute 12:00."""
-    return f"2026-01-01T12:00:{trial:02d}.{frac}"
+    """A fixed OFFSET-AWARE ISO stamp for trial ``trial`` (0-based) within minute
+    12:00 (format v4, ADR-0182)."""
+    return f"2026-01-01T12:00:{trial:02d}.{frac}{TZ_OFFSET}"
 
 
 def build_log() -> Phase3Log:
@@ -117,7 +128,8 @@ def build_log() -> Phase3Log:
         seed=SEED,
     )
     log = Phase3Log(seq, animal=ANIMAL, session_start_iso=SESSION_START_ISO,
-                    session_id=SID, session_t0=T0, reward_pulse_ms=500)
+                    session_id=SID, session_t0=T0, reward_pulse_ms=500,
+                    cue_calibration=CUE_CALIBRATION)
     for i in range(N_TRIALS):
         side = "left" if seq.correct_arm(i) == LEFT else "right"
         log.trial_started(i, _iso(i, "000"))

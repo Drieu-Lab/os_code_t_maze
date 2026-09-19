@@ -106,6 +106,7 @@ from tmaze.core.session import session_meta
 from tmaze.core.session import session_notes
 from tmaze.core.session import session_summary
 from tmaze.core import provenance
+from tmaze.core.timeutil import now_iso
 from tmaze.core.session.session_log import SessionManifest, clock_snapshot, path_within_session
 from tmaze.core.session.session_serial import capture_filename
 from tmaze.core.session.session_timer import SessionTimer
@@ -648,7 +649,8 @@ class SessionControlView:
     # from disk on Stop (see _write_session_summary).
 
     def _now_iso(self) -> str:
-        return datetime.now().isoformat(timespec="milliseconds")
+        # Offset-aware host wall-clock stamp (docs/decisions/0182).
+        return now_iso()
 
     # -------------------------------------------------- write-failure surface
     def _record_write_result(self, slot: str, path: Optional[str],
@@ -1589,10 +1591,12 @@ class SessionControlView:
         carried no receipt stamp)."""
         try:
             if recv_wall is not None:
-                ts = datetime.fromtimestamp(recv_wall).isoformat(
+                # Offset-aware: attach the host UTC offset to the receipt instant
+                # so the stamp is unambiguous off-rig (docs/decisions/0182).
+                ts = datetime.fromtimestamp(recv_wall).astimezone().isoformat(
                     timespec="milliseconds")
             else:
-                ts = datetime.now().isoformat(timespec="milliseconds")
+                ts = now_iso()
             self._serial_file.write(f"{ts},{line}\n")
             self._serial_file.flush()
         except (OSError, ValueError) as exc:

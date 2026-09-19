@@ -106,7 +106,7 @@ stay fast); "End" = written once at Stop; "Start" = written once at Session Star
 | Artifact | Format | Versioning | When | Atomic? | Writer (core → shell) |
 |---|---|---|---|---|---|
 | `session_<id>.json` (manifest) | JSON | `schema_version: 3` (v3 adds `provenance` + append-only `post_hoc`, ADR-0180) | Live (paths as they resolve; `provenance` at Start; `t_end` on Stop) | Yes (temp+rename) | `session_log.py` ← `provenance.py` → `session_controller.py` |
-| `config/format.json` | JSON | `format_version: 1` (+ `proto`, `zones_version`) | Start | Yes (`_atomic_json`) | `phase3/bundle_format.py` → `session_config.py` |
+| `config/format.json` | JSON | `format_version: 4` (+ `proto`, `zones_version`, `firmware_proto`, `sensor_polarity`, `stream_notes`; v4 = offset-aware ISO stamps, ADR-0182) | Start | Yes (`_atomic_json`) | `phase3/bundle_format.py` → `session_config.py` |
 | `config/config_snapshot.json` | JSON | `schema_version: 1` + per-file SHA-256 | Start | Yes | `session_config.py` |
 | `config/*.json` (zones, rules, phase3, …) | JSON | mixed (`_schema`/`version` per file) | Start (verbatim copies) | copy | `session_config.py` |
 | `config/model_*.npz` | NumPy binary | none in file; hashed in snapshot | Start | `shutil.copy2` | `session_config.py` |
@@ -166,9 +166,12 @@ aligning behavior to video or ephys.
 | `lick_fw_ms` | trial CSV | Firmware hardware-clock ms of the rewarded lick; **resets on MODE** (ADR-0064) | Tying a lick to the firmware timeline (currently write-only in analysis) |
 | `session_start_iso` | trial CSV header | Gate-arm time (may precede `t0`) | Secondary; not session zero |
 
-The analysis join that matters most today is host-ISO → epoch (`iso_to_unix`,
-reading naive stamps as *local* time to match `host_unix_s`; ADR-0128). `lick_fw_ms`
-and several `*_iso` columns are written but not yet consumed downstream.
+The analysis join that matters most today is host-ISO → epoch
+(`trajectories.parse_iso`). Since format **v4** (ADR-0182) the host ISO stamps are
+**offset-aware** (they carry the rig's UTC offset), so the join is timezone-portable;
+pre-v4 naive stamps are localised to the *rig* zone (`assume_tz`), not the reader's
+(the old ADR-0128 "read as local" behaviour was the S9 bug for off-rig analysis).
+`lick_fw_ms` and several `*_iso` columns are written but not yet consumed downstream.
 
 ---
 
