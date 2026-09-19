@@ -25,6 +25,7 @@ from __future__ import annotations
 import socket
 import threading
 import time
+from collections import deque
 from typing import Callable, Optional
 
 
@@ -57,6 +58,18 @@ class RigClient:
         # fallback so other clients (rig_logger, lick_tuner, ...) are unaffected.
         self._line_stamped_cb: Optional[Callable[[float, float, str], None]] = None
         self._status_cb: Optional[Callable[[str], None]] = None
+
+        # Received-line batching (docs/decisions/0176). The reader thread drops
+        # each received line here and schedules ONE Tk drain per burst instead of
+        # one root.after per line, so a burst of N lines costs one Tk hop, not N.
+        # ``_pending`` holds (recv_wall, recv_mono, line) in arrival order;
+        # ``_drain_scheduled`` is True from the moment a burst schedules its drain
+        # until that drain empties the queue, so extra lines in the same burst just
+        # append. Guarded by ``_pending_lock`` (reader thread appends, Tk thread
+        # drains).
+        self._pending: "deque[tuple[float, float, str]]" = deque()
+        self._pending_lock = threading.Lock()
+        self._drain_scheduled = False
 
     # ------------------------------------------------------------------ API
 
@@ -217,26 +230,65 @@ class RigClient:
     def _dispatch_line(
         self, recv_wall: float, recv_mono: float, line: str
     ) -> None:
-        """Hop one received line to the Tk thread, preferring the stamped callback.
+        """Queue one received line and schedule at most ONE Tk drain per burst.
 
         The receipt stamps travel with the line so the consumer sees when the
-        bytes arrived (docs/decisions/0175), not when this ``after`` finally ran.
+        bytes arrived (docs/decisions/0175), not when the drain finally ran. The
+        lines are delivered in arrival order on the Tk thread by ``_drain``
+        (docs/decisions/0176) - many lines from one ``recv`` cost one ``after``.
         """
-        stamped = self._line_stamped_cb
-        if stamped is not None:
-            try:
-                self._root.after(0, stamped, recv_wall, recv_mono, line)
-            except RuntimeError:
-                # root may be torn down already; safe to ignore
-                pass
-            return
-        cb = self._line_cb
-        if cb is None:
+        with self._pending_lock:
+            self._pending.append((recv_wall, recv_mono, line))
+            schedule = not self._drain_scheduled
+            if schedule:
+                self._drain_scheduled = True
+        if not schedule:
             return
         try:
-            self._root.after(0, cb, line)
+            self._root.after(0, self._drain)
         except RuntimeError:
-            pass
+            # root may be torn down already; drop the flag so a later burst can
+            # try again (the queued line is harmless if never drained at shutdown).
+            with self._pending_lock:
+                self._drain_scheduled = False
+
+    def _drain(self) -> None:
+        """Deliver all queued lines, in order, on the Tk thread (docs/decisions/0176).
+
+        Pops one at a time so a line that arrives mid-drain (a callback that
+        re-enters) is delivered in the same pass, and clears ``_drain_scheduled``
+        only once the queue is empty so the NEXT burst schedules a fresh drain. If
+        a callback raises, any still-queued lines are re-scheduled before the
+        error propagates, so one bad line never strands the rest of the burst.
+        """
+        try:
+            while True:
+                with self._pending_lock:
+                    if not self._pending:
+                        self._drain_scheduled = False
+                        return
+                    recv_wall, recv_mono, line = self._pending.popleft()
+                self._deliver(recv_wall, recv_mono, line)
+        except BaseException:
+            with self._pending_lock:
+                if self._pending:
+                    try:
+                        self._root.after(0, self._drain)
+                    except RuntimeError:
+                        self._drain_scheduled = False
+                else:
+                    self._drain_scheduled = False
+            raise
+
+    def _deliver(self, recv_wall: float, recv_mono: float, line: str) -> None:
+        """Hand one line to the registered callback, preferring the stamped one."""
+        stamped = self._line_stamped_cb
+        if stamped is not None:
+            stamped(recv_wall, recv_mono, line)
+            return
+        cb = self._line_cb
+        if cb is not None:
+            cb(line)
 
     def _fire_status(self, text: str) -> None:
         cb = self._status_cb
