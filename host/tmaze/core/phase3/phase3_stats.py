@@ -58,6 +58,14 @@ Measure definitions (all over the COMPLETED trials only):
     per width rather than converting a summed-ms total - exact even under a mid-run
     pulse-width change (docs/decisions/0110). Empty for a pre-magnitude session.
 
+The three WATER counts (``rewarded`` / ``topups`` / ``reward_pulses_by_ms``) run over
+the completed trials PLUS any preserved (superseded) attempts the animal actually
+drank before a Repeat/Back re-ran the trial (docs/decisions/0119, 0172; L1). Reward
+water is delivered on the wire and a trial edit does not undo it, so counting only
+the live rows would under-report the day's intake in the welfare records. Every
+OTHER measure (accuracy, side bias, reward RATE, win-stay/lose-shift, dwell) stays on
+the live one-per-trial rows, so a re-run trial is scored exactly once.
+
 Pure stdlib, headless-testable over deterministic snapshots (build a Phase3Log,
 fill it via its public methods, ``.snapshot(idx, armed=...)``):
     python -m unittest test_phase3_stats
@@ -126,16 +134,23 @@ class Phase3Stats:
     left_choices: int
     right_choices: int
     # ---- reward ----
+    # Rewarded PRIME count for the water estimate: over ALL completed trials PLUS any
+    # preserved (superseded) attempts the animal drank before a Repeat/Back re-ran
+    # the trial (docs/decisions/0119, 0172; L1). It wants every pulse delivered on
+    # the wire, so it deliberately counts more than one per trial index when a
+    # rewarded trial was later re-run. NOT the reward-rate numerator (that is
+    # ``oob_rewarded``, one per live trial). See docs/decisions/0092.
     rewarded: int
     # Rewarded count over OUT-OF-BLOCK completed trials only - the numerator that
-    # matches ``reward_rate`` (denominator ``oob_completed``); ``rewarded`` stays
-    # over ALL completed for the water estimate (which wants every pulse). Equal
-    # for a balanced session. See docs/decisions/0092.
+    # matches ``reward_rate`` (denominator ``oob_completed``). Live rows only (one
+    # per trial), so a re-run trial is scored once. Equal to ``rewarded`` for a
+    # balanced session with no trial edits. See docs/decisions/0092.
     oob_rewarded: int
     reward_rate: Optional[float]               # rewarded_oob / oob_completed
-    # Total lick-triggered TOP-UP pulses over the completed trials (extras beyond
-    # each ``rewarded`` prime; docs/decisions/0069). Summed here so the per-session
-    # water estimate has a single source for the pulse count (docs/decisions/0073).
+    # Total lick-triggered TOP-UP pulses for the water estimate: over the completed
+    # trials PLUS preserved superseded attempts (extras beyond each ``rewarded``
+    # prime; docs/decisions/0069, 0172). Summed here so the per-session water
+    # estimate has a single source for the pulse count (docs/decisions/0073).
     topups: int
     # ---- naive strategy (outcome-based; see module docstring) ----
     win_stay: Optional[float]
@@ -221,7 +236,8 @@ class Phase3Stats:
     probe_accuracy: Optional[float] = None
     # ---- per-width reward pulse tally (calibration-free; see docs/decisions/0110) --
     # Maps a pulse width in ms (as a string key, e.g. "500") to the number of pulses
-    # delivered at that width over the completed trials (primes + lick top-ups).
+    # delivered at that width over the completed trials + superseded attempts (primes
+    # + lick top-ups; docs/decisions/0172).
     # Empty when no width was recorded (a pre-magnitude session). Volume is NON-
     # linear in ms, so downstream water math sums reward_volume_ul(width) * count per
     # width rather than converting a summed-ms total. See session_summary.
@@ -275,7 +291,8 @@ def _cue_dwells(rows: List[Phase3RowView]) -> List[float]:
 
 
 def _reward_pulses_by_ms(rows: List[Phase3RowView]) -> Dict[str, int]:
-    """Tally delivered reward pulses by width (ms) over ``rows`` (completed trials).
+    """Tally delivered reward pulses by width (ms) over ``rows`` (the completed
+    trials plus any preserved superseded attempts; docs/decisions/0172).
 
     A rewarded trial contributes ONE prime pulse at ``prime_ms``; its top-ups
     contribute ``topups`` pulses whose per-pulse width is reconstructed from the
@@ -369,14 +386,24 @@ def compute(snapshot: Optional[Phase3StateSnapshot], *,
     sided = left + right
     lr_bias = (left / sided, right / sided) if sided else None
 
-    rewarded = sum(1 for r in completed if r.rewarded == "1")
+    # Water counts (``rewarded`` / ``topups`` / ``reward_pulses_by_ms``) run over the
+    # completed trials PLUS any preserved (superseded) attempts the animal actually
+    # drank before a Repeat/Back re-ran the trial (docs/decisions/0119, 0172; L1).
+    # Water is delivered on the wire, not undone by a trial edit, so undercounting it
+    # would under-report the day's intake in the welfare records. An unrewarded
+    # superseded attempt (``rewarded != "1"``, no top-ups) contributes nothing, so
+    # this only adds real pulses. Accuracy / reward_rate / side-bias stay on the live
+    # ``completed``/``oob`` rows (one per trial), so a re-run trial is scored once.
+    superseded = list(snapshot.superseded_rows) if snapshot is not None else []
+    water_rows = completed + superseded
+    rewarded = sum(1 for r in water_rows if r.rewarded == "1")
     rewarded_oob = sum(1 for r in oob if r.rewarded == "1")
     reward_rate = (rewarded_oob / noob) if noob else None
-    topups = sum(_int_or_zero(r.topups) for r in completed)
-    # Per-width pulse tally over completed trials (calibration-free; ADR-0110), so
-    # downstream water math can sum non-linear per-width volumes exactly even under
-    # a mid-run pulse-width change.
-    reward_pulses_by_ms = _reward_pulses_by_ms(completed)
+    topups = sum(_int_or_zero(r.topups) for r in water_rows)
+    # Per-width pulse tally over completed + superseded rewarded attempts
+    # (calibration-free; ADR-0110), so downstream water math can sum non-linear
+    # per-width volumes exactly even under a mid-run pulse-width change.
+    reward_pulses_by_ms = _reward_pulses_by_ms(water_rows)
 
     win_stay, lose_shift = _win_stay_lose_shift(completed)
 

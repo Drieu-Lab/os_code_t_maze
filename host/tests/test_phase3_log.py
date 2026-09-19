@@ -578,6 +578,28 @@ class TestTrialEditArchive(unittest.TestCase):
         self.assertIsNotNone(res)
         self.assertTrue(res.probe)
 
+    def test_snapshot_exposes_superseded_rows_for_water(self):
+        # The archived attempt is published on ``superseded_rows`` (keyed to its
+        # trial, its reward fields intact) so the water tally can count it, while
+        # ``rows`` stays one-per-trial (docs/decisions/0172; L1).
+        log = _log(n=3)
+        self.assertEqual(log.snapshot(0, armed=True).superseded_rows, ())
+        log.choice_scored(0, "left", "CORRECT", "t0")
+        log.reward_fired(0, "t_reward", 500)
+        log.supersede_trial(0, "repeat")
+        log.choice_scored(0, "right", "INCORRECT", "t0b")   # the re-run
+        snap = log.snapshot(1, armed=True)
+        # rows is still one per planned trial (the re-run overwrote the live row).
+        self.assertEqual(len(snap.rows), 3)
+        self.assertEqual(snap.rows[0].outcome, "INCORRECT")
+        # ...and the preserved rewarded attempt rides on superseded_rows.
+        self.assertEqual(len(snap.superseded_rows), 1)
+        sup = snap.superseded_rows[0]
+        self.assertEqual(sup.trial, 1)
+        self.assertEqual(sup.outcome, "CORRECT")
+        self.assertEqual(sup.rewarded, "1")
+        self.assertEqual(sup.prime_ms, "500")
+
 
 def _probe_log(block_len=10, windows=((40, 60),), seed=123):
     cfg = TrialConfig(max_trials=60, block_size=20, max_same_run=3,

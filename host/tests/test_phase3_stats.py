@@ -438,6 +438,60 @@ class TestRewardPulsesByMs(unittest.TestCase):
         self.assertEqual(compute(None).reward_pulses_by_ms, {})
 
 
+class TestSupersededWater(unittest.TestCase):
+    """Water counts fold in preserved (superseded) attempts (docs/decisions/0172;
+    L1): reward the animal drank on a trial later Repeated/Backed is still counted,
+    while accuracy / reward-rate stay on the live one-per-trial rows."""
+
+    def test_repeat_on_rewarded_trial_preserves_water_but_not_accuracy(self):
+        log = _log(n=20)
+        _resolve(log, 0, "left", CORRECT, prime_ms=500)   # rewarded attempt #1
+        log.supersede_trial(0, "repeat")                  # archive it, re-run
+        _resolve(log, 0, "left", CORRECT, prime_ms=500)   # rewarded attempt #2
+        s = compute(log.snapshot(1, armed=True))
+        # Scored once: one completed trial, 100% accuracy, reward RATE over live rows.
+        self.assertEqual(s.completed, 1)
+        self.assertAlmostEqual(s.accuracy_cum, 1.0)
+        self.assertEqual(s.oob_rewarded, 1)
+        self.assertAlmostEqual(s.reward_rate, 1.0)
+        # ...but the animal drank TWO 500 ms primes, so water counts both.
+        self.assertEqual(s.rewarded, 2)
+        self.assertEqual(s.reward_pulses_by_ms, {"500": 2})
+
+    def test_superseded_topups_are_counted(self):
+        log = _log(n=20)
+        _resolve(log, 0, "left", CORRECT, prime_ms=500)
+        log.topup_fired(0, 300)
+        log.topup_fired(0, 300)                           # 2 top-ups on attempt #1
+        log.supersede_trial(0, "back")                    # archive, re-run
+        _resolve(log, 0, "left", CORRECT, prime_ms=500)   # attempt #2: prime only
+        s = compute(log.snapshot(1, armed=True))
+        self.assertEqual(s.rewarded, 2)                   # two primes drank
+        self.assertEqual(s.topups, 2)                     # two top-ups from attempt #1
+        self.assertEqual(s.reward_pulses_by_ms, {"500": 2, "300": 2})
+
+    def test_unrewarded_superseded_attempt_contributes_no_water(self):
+        log = _log(n=20)
+        _resolve(log, 0, "right", INCORRECT, rewarded=False)   # unrewarded attempt
+        log.supersede_trial(0, "repeat")                       # archive, re-run
+        _resolve(log, 0, "left", CORRECT, prime_ms=500)        # re-run, rewarded
+        s = compute(log.snapshot(1, armed=True))
+        self.assertEqual(s.completed, 1)
+        self.assertAlmostEqual(s.accuracy_cum, 1.0)
+        self.assertEqual(s.rewarded, 1)                        # only the live prime
+        self.assertEqual(s.topups, 0)
+        self.assertEqual(s.reward_pulses_by_ms, {"500": 1})
+
+    def test_no_supersede_leaves_snapshot_and_counts_unchanged(self):
+        log = _log(n=20)
+        _resolve(log, 0, "left", CORRECT, prime_ms=500)
+        snap = log.snapshot(1, armed=True)
+        self.assertEqual(snap.superseded_rows, ())
+        s = compute(snap)
+        self.assertEqual(s.rewarded, 1)
+        self.assertEqual(s.reward_pulses_by_ms, {"500": 1})
+
+
 class TestDisarmedSnapshotStillReads(unittest.TestCase):
     def test_completed_session_snapshot(self):
         # A disarmed (gate closed) snapshot still carries the table; compute reads

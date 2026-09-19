@@ -308,6 +308,15 @@ class Phase3StateSnapshot:
     # not rewarded, the planned trial re-run. Counts live rows AND archived
     # (superseded) attempts so it survives the re-run overwriting the live row.
     uncued: int = 0
+    # Preserved (superseded) trial attempts from the archive (docs/decisions/0119):
+    # each a Phase3RowView of an earlier attempt that a later Repeat/Back replaced,
+    # one per (trial, attempt) that recorded behavior. DELIBERATELY separate from
+    # ``rows`` (which stays one-per-trial so the ribbon/traces/seq-list/reader are
+    # unaffected): only the water tally reads these, to count reward pulses the
+    # animal actually drank on an attempt that was later re-run (L1; docs/decisions/
+    # 0172). A row's ``rewarded``/``prime_ms``/``topups`` are what matter here, so an
+    # unrewarded superseded attempt (ABANDONED/UNCUED/empty) contributes nothing.
+    superseded_rows: Tuple[Phase3RowView, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -684,6 +693,14 @@ class Phase3Log:
             Phase3RowView(trial=i + 1, **{n: getattr(r, n) for n in names})
             for i, r in enumerate(self._rows)
         )
+        # Preserved (superseded) attempts as views, keyed to their trial (docs/
+        # decisions/0119); read only by the water tally so a Repeat/Back on a
+        # rewarded trial still counts the reward the animal drank (docs/decisions/
+        # 0172). Kept OUT of ``rows`` to leave the one-per-trial contract intact.
+        superseded_rows = tuple(
+            Phase3RowView(trial=idx + 1, **{n: getattr(r, n) for n in names})
+            for (idx, _attempt, _edit, r) in self._archive
+        )
         # Cumulative UNCUED count (docs/decisions/0171): live rows still showing
         # UNCUED PLUS every archived UNCUED attempt, so it stays correct after a
         # re-run overwrites the live row (the attempt was archived on its clear).
@@ -718,7 +735,7 @@ class Phase3Log:
             return_enabled=self.return_enabled,
             intervention_next=seq.intervention_will_continue(),
             probe_upcoming=seq.probe_upcoming(),
-            uncued=uncued)
+            uncued=uncued, superseded_rows=superseded_rows)
 
     # ------------------------------------------------------------- render
     def _header_comment(self) -> List[str]:

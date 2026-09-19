@@ -149,7 +149,10 @@ class SessionSummary:
         Counts the correct-choice prime pulses (``cued.rewarded``) plus the lick
         top-up pulses (``cued.topups``) - both from the Phase 3 stats core, not
         recomputed here - converted to microliters via the shared ``reward_volume``
-        bench calibration (docs/decisions/0019). This is an ESTIMATE of
+        bench calibration (docs/decisions/0019). Those counts include reward the
+        animal drank on a trial later Repeated/Backed (superseded attempts), so an
+        edited rewarded trial is not undercounted (docs/decisions/0172; L1). This
+        is an ESTIMATE of
         task-delivered reward only: operator/manual pulses are not counted here -
         they are the separate ``manual_water`` channel (docs/decisions/0073/0084) -
         so on its own it can undercount the day's true intake.
