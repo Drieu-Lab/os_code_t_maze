@@ -9,6 +9,31 @@ from __future__ import annotations
 from typing import Dict, Mapping, Optional, Tuple
 
 
+def fps_measured(saved_frames: int,
+                 first_host_unix_s: Optional[float],
+                 last_host_unix_s: Optional[float]) -> Optional[float]:
+    """The recording's ACTUAL frame rate from the sidecar's host-grab stamps.
+
+    The mp4 container timestamps frames at the *nominal* rate (``pts += 1`` at
+    ``round(fps)``), so the video's own timestamps are not real time (review
+    finding S5); the truth is the per-frame ``host_unix_s`` in the sidecar. This
+    reduces that to one number a bundle reader can trust: the mean rate over the
+    saved span = (N-1) intervals / (last - first grab time). Returns ``None`` when
+    it can't be computed (< 2 frames, or a non-positive/absent span), so the
+    caller writes ``null`` rather than a divide-by-zero or a fake rate.
+
+    N-1 (not N) because N frames define N-1 inter-frame gaps; the difference is
+    immaterial at session length but keeps the number honest for short clips.
+    """
+    if (saved_frames is None or saved_frames < 2
+            or first_host_unix_s is None or last_host_unix_s is None):
+        return None
+    span = last_host_unix_s - first_host_unix_s
+    if span <= 0:
+        return None
+    return (saved_frames - 1) / span
+
+
 def recording_deltas(current: Mapping[str, int],
                      baseline: Mapping[str, int]) -> Dict[str, int]:
     """Per-recording counter deltas = current cumulative minus the snapshot taken

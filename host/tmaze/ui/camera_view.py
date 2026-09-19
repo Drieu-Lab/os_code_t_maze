@@ -49,7 +49,7 @@ from tmaze.ui.gui_deps import (  # noqa: E402
 )
 from tmaze.vision.calibration import Undistorter, load_calibration  # noqa: E402
 from tmaze.core import protocol  # noqa: E402  (shared serial-line parser; see docs/decisions/0024)
-from tmaze.core.camera_health import account_block_gap, recording_deltas  # noqa: E402  (pure BlockID-gap accounting + per-recording deltas; ADR-0147)
+from tmaze.core.camera_health import account_block_gap, fps_measured, recording_deltas  # noqa: E402  (pure BlockID-gap accounting + per-recording deltas + measured fps; ADR-0147)
 from tmaze.core.records.animals import resources_root  # noqa: E402  (sibling resources-repo resolver)
 from tmaze.paths import camera_output_dir  # noqa: E402  (single source for the recordings root; ADR-0088)
 from tmaze.core.maze_state import IN_WELL as _IN_WELL  # noqa: E402  (HUB well substate label)
@@ -145,6 +145,14 @@ UNDISTORT_ALPHA = 0.0
 # on a MODE switch (blanked on that line here), so it is NOT monotonic and must
 # not be used as a standalone clock.
 SIDECAR_COLUMNS = ("frame_idx", "host_unix_s", "rig_ms", "cam_block_id", "cam_timestamp")
+
+# Nominal camera-clock tick rate (Hz) for GigE Vision: the device timestamp counts
+# in nanoseconds. Written into the sidecar header as the fallback when the camera's
+# GevTimestampTickFrequency node can't be read, so an offline reader can convert
+# raw cam_timestamp ticks -> seconds. tick_hz_source records whether it came from
+# the node ("node") or this default ("default"); an offline fit can supersede it
+# with a measured value (see tools/led_sync_prototype.py).
+CAM_TICK_HZ_DEFAULT = 1_000_000_000
 
 # Extra sidecar column written after TRACK_COLUMNS. Tracking now runs on its own
 # worker off the grab thread (see docs/decisions/0040), so a recorded frame carries
@@ -315,7 +323,17 @@ class CameraView:
         # the per-recording camera_stats can report THIS video's deltas (L8; the
         # counters below are lifetime-since-launch except ``saved``). See ADR-0147.
         self._rec_counter_baseline: dict = {}
+        # First/last host_unix_s (grab wall time) of the frames saved in the
+        # current recording, so camera_stats can report the ACTUAL fps (S5). Reset
+        # when a recording opens; updated as each frame is written.
+        self._rec_first_hu: Optional[float] = None
+        self._rec_last_hu: Optional[float] = None
         self._cam_fps = DEFAULT_FPS
+        # Camera hardware-clock tick rate (Hz) + where it came from, read off the
+        # camera at open by the grab thread and written into each sidecar header so
+        # cam_timestamp ticks are convertible to seconds offline (S6, L9).
+        self._cam_tick_hz: int = CAM_TICK_HZ_DEFAULT
+        self._cam_tick_hz_source: str = "default"
         # Live grab-rate readout state (see _measure_fps): last sampled grab count
         # + monotonic time, and the last computed fps we keep showing between windows.
         self._fps_last_grabbed: Optional[int] = None
@@ -1045,6 +1063,15 @@ class CameraView:
             # labeled secondary event.
             "session_t0_iso": (session_t0.get("iso", "") if session_t0 else ""),
             "session_t0_wall": (session_t0.get("wall", "") if session_t0 else ""),
+            # The monotonic partner to the anchor above, so the sidecar carries the
+            # SAME three-part session zero as the trial CSV + manifest (L9,
+            # docs/decisions/0124). Blank for a manual Record-button recording.
+            "session_t0_mono": (session_t0.get("mono", "") if session_t0 else ""),
+            # Camera hardware-clock tick rate (Hz) + its source, so raw
+            # cam_timestamp ticks convert to seconds offline (S6). Read off the
+            # camera at open; "default" = the GigE nominal fallback.
+            "cam_timestamp_tick_hz": self._cam_tick_hz,
+            "tick_hz_source": self._cam_tick_hz_source,
             # rig_ms is the latest firmware session ms at grab; it resets on a MODE
             # switch and is NOT monotonic - use host_unix_s + cam_block_id offline
             # (docs/decisions/0124).
@@ -1107,6 +1134,7 @@ class CameraView:
             converter.OutputPixelFormat = pylon.PixelType_BGR8packed
             converter.OutputBitAlignment = pylon.OutputBitAlignment_MsbAligned
             self._read_fps(camera)
+            self._read_tick_hz(camera)
             camera.StartGrabbing(pylon.GrabStrategy_OneByOne)
             self._post(self._set_conn_status, self._describe_device(device))
             self._post(self._set_record_enabled, True)
@@ -1158,6 +1186,12 @@ class CameraView:
                     if not succeeded:
                         continue
 
+                    # Stamp host wall time at GRAB - the instant this buffer came
+                    # back from the camera - NOT after debayer/undistort/orient
+                    # (which add variable latency). This is the reliable
+                    # cross-stream anchor the sidecar's host_unix_s column records
+                    # (S4; docs/decisions/0124).
+                    grab_wall = time.time()
                     cam_ts = self._safe_timestamp(grab)
                     arr = converter.Convert(grab).GetArray()  # HxWx3 BGR uint8
                     arr = self._maybe_undistort(arr)          # lens correction (ADR-0015)
@@ -1191,7 +1225,7 @@ class CameraView:
                         track = track_row(snap[0] if snap is not None else None)
                         track_src = ("" if snap is None or snap[1] is None
                                      else snap[1])
-                        meta = (time.time(), self._latest_rig_ms,
+                        meta = (grab_wall, self._latest_rig_ms,
                                 "" if block_id is None else block_id,
                                 "" if cam_ts is None else cam_ts,
                                 track, track_src)
@@ -1259,6 +1293,10 @@ class CameraView:
                         writer, csv_file, csv_writer = self._open_outputs(params)
                         active_params = params
                         saved_idx = 0
+                        # Reset the grab-time span so fps_measured covers only this
+                        # recording (S5).
+                        self._rec_first_hu = None
+                        self._rec_last_hu = None
                         last_sidecar_flush = time.monotonic()
                         with self._counters_lock:
                             self._counters.saved = 0
@@ -1339,6 +1377,10 @@ class CameraView:
             csv_writer.writerow(
                 [idx, f"{host_unix_s:.6f}", rig_ms, block_id, cam_ts]
                 + list(track) + [track_src])
+            # Track the saved-frame grab-time span for fps_measured (S5).
+            if self._rec_first_hu is None:
+                self._rec_first_hu = host_unix_s
+            self._rec_last_hu = host_unix_s
             with self._counters_lock:
                 self._counters.saved = idx + 1
             return True
@@ -1418,6 +1460,12 @@ class CameraView:
             "counters_this_recording": recording_deltas(
                 counters, self._rec_counter_baseline),
             "transport": transport,
+            # The ACTUAL frame rate from the sidecar host-grab stamps (S5): the mp4
+            # container timestamps are nominal-rate, so this is what an offline
+            # reader should trust. None when < 2 frames were saved.
+            "fps_nominal": params.header.get("fps", ""),
+            "fps_measured": fps_measured(
+                counters["saved"], self._rec_first_hu, self._rec_last_hu),
             "written_wall_clock": time.strftime("%Y-%m-%d %H:%M:%S"),
         }
         try:
@@ -1552,6 +1600,23 @@ class CameraView:
                     return
             except Exception:
                 continue
+
+    def _read_tick_hz(self, camera) -> None:
+        """Read the camera-clock tick frequency (Hz) so cam_timestamp ticks are
+        convertible to seconds offline (S6). Falls back to the GigE nominal
+        (CAM_TICK_HZ_DEFAULT) and records the source for the sidecar header."""
+        for attr in ("GevTimestampTickFrequency", "TimestampTickFrequency"):
+            try:
+                node = getattr(camera, attr)
+                val = int(node.GetValue())
+                if val > 0:
+                    self._cam_tick_hz = val
+                    self._cam_tick_hz_source = "node"
+                    return
+            except Exception:
+                continue
+        self._cam_tick_hz = CAM_TICK_HZ_DEFAULT
+        self._cam_tick_hz_source = "default"
 
     def _apply_pfs_if_pending(self, camera) -> None:
         with self._pfs_lock:

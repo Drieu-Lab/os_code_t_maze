@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import unittest
 
-from tmaze.core.camera_health import account_block_gap, recording_deltas
+from tmaze.core.camera_health import account_block_gap, fps_measured, recording_deltas
 
 
 class TestAccountBlockGap(unittest.TestCase):
@@ -85,6 +85,26 @@ class TestRecordingDeltas(unittest.TestCase):
         # A counter reset (current below baseline) must never report a negative.
         self.assertEqual(recording_deltas({"src_drops": 2}, {"src_drops": 9}),
                          {"src_drops": 0})
+
+
+class TestFpsMeasured(unittest.TestCase):
+    def test_mean_rate_over_saved_span(self):
+        # 31 frames over a 1.0 s span = 30 intervals -> 30 fps.
+        self.assertAlmostEqual(fps_measured(31, 1000.0, 1001.0), 30.0)
+
+    def test_uses_n_minus_one_intervals(self):
+        # 2 frames 0.5 s apart is one interval -> 2 fps (not 4).
+        self.assertAlmostEqual(fps_measured(2, 100.0, 100.5), 2.0)
+
+    def test_none_below_two_frames(self):
+        self.assertIsNone(fps_measured(1, 100.0, 100.0))
+        self.assertIsNone(fps_measured(0, None, None))
+
+    def test_none_on_nonpositive_or_absent_span(self):
+        self.assertIsNone(fps_measured(100, 100.0, 100.0))   # zero span
+        self.assertIsNone(fps_measured(100, 101.0, 100.0))   # negative span
+        self.assertIsNone(fps_measured(100, None, 100.0))    # no first stamp
+        self.assertIsNone(fps_measured(100, 100.0, None))    # no last stamp
 
 
 if __name__ == "__main__":
