@@ -76,7 +76,8 @@ from tmaze.core.phase3.phase3_log import Phase3Log, Phase3StateSnapshot
 from tmaze.core.session.session_notes import (
     AUTO_ALT_END, AUTO_ALT_START, AUTO_BACK, AUTO_DEBIAS_END,
     AUTO_DEBIAS_START, AUTO_PROBE_DISABLED, AUTO_PROBE_ENABLED, AUTO_PROBE_END,
-    AUTO_PROBE_START, AUTO_REPEAT, AUTO_RESUME, AUTO_SKIP, AUTO_UNCUED)
+    AUTO_PROBE_START, AUTO_REPEAT, AUTO_RESUME, AUTO_SEND_FAILED, AUTO_SKIP,
+    AUTO_UNCUED)
 from tmaze.core.phase3.phase3_task import (
     ABANDONED, CORRECT, INCORRECT, UNCUED, Phase3Config, Phase3Task)
 from tmaze.core.reward.reward_dispenser import WellDispenser
@@ -290,6 +291,10 @@ class Phase3ControlView(VisionActuator):
         # rig failing to cue. The authoritative cumulative count is the log
         # snapshot (live + archived); this mirrors it for the live readout.
         self._uncued = 0
+        # Cue commands that did NOT reach the wire this run (docs/decisions/0173):
+        # the send reported failure, so no cue onset was logged and (for CHOICE) the
+        # trip scores UNCUED. Shown in the status line so a dropped cue is visible.
+        self._send_fails = 0
         # Unrewarded probe-trial tallies (probe_blocks.py): scored probe trials and
         # of those how many were correct, for the conditional status segment.
         self._probe_done = 0
@@ -656,6 +661,7 @@ class Phase3ControlView(VisionActuator):
         self._active_seed = snap.seed
         self._correct = self._incorrect = self._reward_count = 0
         self._uncued = 0
+        self._send_fails = 0
         self._probe_done = self._probe_correct = 0
         self._reopen_resumes = 0             # a fresh run: no reopens yet
         self._reward_ul = 0.0
@@ -810,6 +816,17 @@ class Phase3ControlView(VisionActuator):
             cb(event)
         except Exception:
             pass
+
+    def _note_send_failed(self, kind: str, trial_index: int, iso: str) -> None:
+        """Record that a ``kind`` ("CHOICE"/"RETURN") cue command did not reach the
+        wire (docs/decisions/0173): bump the run counter for the status line and
+        emit an ``auto:send_failed`` timeline note, so a dropped cue is visible and
+        distinguishable from the animal simply not being cued by position."""
+        self._send_fails += 1
+        self._emit_intervention(
+            AUTO_SEND_FAILED,
+            f"{kind} cue send failed (not on the wire) - no cue this trip",
+            trial_index, iso)
 
     def _supersede_trial(self, index: int, edit: str, tag: str, text: str,
                          iso: str) -> None:
@@ -1044,16 +1061,25 @@ class Phase3ControlView(VisionActuator):
                 # target, but key the volume balance to the TARGET freq (ADR-0148
                 # extends 0125).
                 cf = cue_calibration.commanded_hz_for(freq)
-                self._send_cmd(
+                sent = self._send_cmd(
                     f"CUE_ON,CHOICE,{cf},{cue_calibration.gain_pct_for(freq)}")
-                self._active_cue = CHOICE
-                # Await the firmware CUE,ON echo to stamp this trial's cue onset on
-                # the firmware clock (docs/decisions/0165).
-                self._pending_cue_ack_index = idx
-                # Remember this trip's cue-on stamp so a scored excursion can carry
-                # the relative cue-zone dwell (ADR-0108/0109).
-                self._choice_cue_on_iso = iso
-                self._log_call(lambda: self._log.choice_cue_started(idx, iso))
+                # Record the cue as sounding ONLY when the command reached the wire
+                # (docs/decisions/0173). A dropped send stamps nothing: no onset row,
+                # no firmware-ack wait, and _choice_cue_on_iso stays None so the trip
+                # scores UNCUED (docs/decisions/0171) - honest end to end. The gate
+                # has latched "in cue", so it will not re-fire this trip; the tone
+                # simply does not play.
+                if sent:
+                    self._active_cue = CHOICE
+                    # Await the firmware CUE,ON echo to stamp this trial's cue onset
+                    # on the firmware clock (docs/decisions/0165).
+                    self._pending_cue_ack_index = idx
+                    # Remember this trip's cue-on stamp so a scored excursion can
+                    # carry the relative cue-zone dwell (ADR-0108/0109).
+                    self._choice_cue_on_iso = iso
+                    self._log_call(lambda: self._log.choice_cue_started(idx, iso))
+                else:
+                    self._note_send_failed("CHOICE", idx, iso)
                 changed = True
         elif d.started == RETURN:
             # Identity now comes from this arm's planned return schedule, looked up
@@ -1065,14 +1091,20 @@ class Phase3ControlView(VisionActuator):
             # than a full-volume bare "CUE_ON,RETURN" (docs/decisions/0150).
             if freq is not None:
                 cf = cue_calibration.commanded_hz_for(freq)
-                self._send_cmd(
+                sent = self._send_cmd(
                     f"CUE_ON,RETURN,{cf},{cue_calibration.gain_pct_for(freq)}")
-                self._active_cue = RETURN
-                # Await the firmware CUE,ON return echo to stamp this trial's
-                # return-cue onset on the firmware clock (docs/decisions/0166).
-                self._pending_return_cue_ack_index = idx
-                self._log_call(lambda: self._log.return_cue_started(
-                    idx, d.return_arm or "", cue, iso))
+                # Same rule as CHOICE (docs/decisions/0173): log the return cue only
+                # when it reached the wire; a dropped send records nothing and just
+                # notes the failure.
+                if sent:
+                    self._active_cue = RETURN
+                    # Await the firmware CUE,ON return echo to stamp this trial's
+                    # return-cue onset on the firmware clock (docs/decisions/0166).
+                    self._pending_return_cue_ack_index = idx
+                    self._log_call(lambda: self._log.return_cue_started(
+                        idx, d.return_arm or "", cue, iso))
+                else:
+                    self._note_send_failed("RETURN", idx, iso)
                 changed = True
         elif d.stopped:
             self._send_cmd("CUE_OFF")
@@ -1426,6 +1458,11 @@ class Phase3ControlView(VisionActuator):
         # the rig failing to cue the animal (the trial re-runs, not advances).
         if self._uncued:
             extra += f"  uncued:{self._uncued}"
+        # Cue sends that never reached the wire (docs/decisions/0173): a real fault
+        # (broker/socket down) worth showing so a silent rig isn't mistaken for a
+        # well-behaved one - the matching auto:send_failed notes carry the detail.
+        if self._send_fails:
+            extra += f"  send_fail:{self._send_fails}"
         # A mid-session tracking flicker was resumed, not restarted (ADR-0120):
         # show the count so the operator knows the run survived the reopen.
         if self._reopen_resumes:
@@ -1453,13 +1490,20 @@ class Phase3ControlView(VisionActuator):
             f"rewards:{self._reward_count} ({format_volume(self._reward_ul)}){probe}  "
             f"{self._last_fw_cue}{extra}")
 
-    def _send_cmd(self, cmd: str) -> None:
+    def _send_cmd(self, cmd: str) -> bool:
+        """Send one command to the broker; return whether it reached the wire.
+
+        False when no send is wired (``_send is None``), the injected send reported
+        failure (``RigClient.send`` returns a bool; docs/decisions/0173), or it
+        raised. Callers that log a command as done - the cue-onset stamps - gate
+        that logging on this return so the trial CSV never records a cue that did
+        not actually play."""
         if self._send is None:
-            return
+            return False
         try:
-            self._send(cmd)
+            return bool(self._send(cmd))
         except Exception:
-            pass
+            return False
 
     def _dispatch_fire(self, fire) -> bool:
         """Route a dispenser ``FireReward`` (prime or top-up) through the shared

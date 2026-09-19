@@ -95,19 +95,28 @@ class RigClient:
         if self._thread is not None and self._thread.is_alive():
             self._thread.join(timeout=2.0)
 
-    def send(self, cmd: str) -> None:
-        """Send a single command line to the broker (newline appended)."""
+    def send(self, cmd: str) -> bool:
+        """Send a single command line to the broker (newline appended).
+
+        Returns whether the line reached the wire: True on a successful
+        ``sendall``, False when there is no socket (not connected / dropped) or
+        ``sendall`` raised ``OSError`` (the status line still reports the failure).
+        The truthful return lets a caller avoid logging a command as sent when it
+        was not - e.g. the Phase 3 controller records a cue onset only when its
+        send returned True (docs/decisions/0173)."""
         if not cmd.endswith("\n"):
             cmd = cmd + "\n"
         data = cmd.encode("utf-8", errors="ignore")
         with self._sock_lock:
             sock = self._sock
             if sock is None:
-                return
+                return False
             try:
                 sock.sendall(data)
             except OSError as e:
                 self._fire_status(f"Send failed: {e}")
+                return False
+        return True
 
     # ------------------------------------------------------------- internals
 

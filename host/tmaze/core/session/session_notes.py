@@ -70,6 +70,12 @@ AUTO_BACK = "auto:back"
 # planned trial. Recorded on the timeline so a reader/operator can see when and how
 # often the rig failed to cue the animal.
 AUTO_UNCUED = "auto:uncued"
+# A cue command that did NOT reach the wire (docs/decisions/0173): the socket to
+# the broker was down or the send raised, so the tone did not actually play. The
+# rig does NOT log a cue onset for it (a cue is recorded only when it went out),
+# and records this on the timeline so a reader/operator can see the rig dropped a
+# cue - distinct from the animal simply not being cued by position.
+AUTO_SEND_FAILED = "auto:send_failed"
 # A mid-session cue-gate REOPEN that was resumed (not restarted): tracking was
 # toggled off/on or the firmware briefly changed mode, so the gate flickered while
 # the SAME session stayed active. The run is resumed with its data preserved

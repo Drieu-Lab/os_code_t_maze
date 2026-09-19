@@ -27,6 +27,7 @@ import tkinter as tk
 import unittest
 
 from tmaze.core import protocol
+from tmaze.core.session.session_notes import AUTO_SEND_FAILED
 from tmaze.core.maze_state import (
     CENTRAL_STEM, HUB, IN_WELL, LEFT_CHOICE, RIGHT_CHOICE, UP_STEM, RatState)
 from tmaze.core.phase3.trial_sequence import TrialConfig
@@ -96,7 +97,10 @@ class SessionPhase3WiringTest(unittest.TestCase):
         self.camera = _FakeCamera()
         self.phase3 = Phase3ControlView(
             self.root, camera=self.camera, pipeline=_FakePipeline(),
-            send=lambda _cmd: None, animal_id=lambda: "600")
+            # A send returns whether it reached the wire (RigClient.send -> bool,
+            # docs/decisions/0173); the controller logs a cue only when it did, so
+            # the double must report success or every cue reads as dropped.
+            send=lambda _cmd: True, animal_id=lambda: "600")
         # This is a headless regression test with a REAL Tk display, so the
         # operator-facing "pre-session weight" modal is not skipped by its headless
         # guard: with no daily-table row for rat 600, _start_session() would pop
@@ -439,7 +443,11 @@ class SessionPhase3WiringTest(unittest.TestCase):
         self.phase3._current_trial_config = lambda: TrialConfig(
             max_trials=2, block_size=2, max_same_run=0)
         sends = []
-        self.phase3._send = sends.append
+
+        def _record_send(cmd):                 # send -> bool (docs/decisions/0173)
+            sends.append(cmd)
+            return True
+        self.phase3._send = _record_send
 
         self._open_gate()
         for _ in range(4):                     # 4 > the 2 planned trials
@@ -485,6 +493,29 @@ class SessionPhase3WiringTest(unittest.TestCase):
         self.assertEqual(self.phase3._uncued, 0)
         self.assertEqual(self.phase3._correct + self.phase3._incorrect, 1)
         self.assertEqual(self.phase3._task.index, 1)
+
+    def test_failed_cue_send_is_not_logged_and_scores_uncued(self):
+        """docs/decisions/0173 (L2b): when the CHOICE cue command does not reach the
+        wire (the send reports failure), the rig records NO cue onset, counts the
+        drop, emits an auto:send_failed note, and - because nothing was cued - the
+        trip scores UNCUED (no score/reward, planned trial re-runs)."""
+        events = []
+        self.phase3._on_intervention = events.append
+        self._open_gate()                       # choice cue enabled by default
+        self.phase3._send = lambda _cmd: False  # every command fails to send
+        self._run_full_trial("left")
+
+        # The dropped cue is counted and noted, and no onset was written.
+        self.assertEqual(self.phase3._send_fails, 1)
+        self.assertIsNone(self.phase3._log._rows[0].choice_cue_on_iso)
+        self.assertTrue(any(e["tag"] == AUTO_SEND_FAILED for e in events),
+                        "expected an auto:send_failed note")
+        # No tone played, so the commit is UNCUED: not scored, not rewarded, the
+        # trial index does not advance.
+        self.assertEqual(self.phase3._uncued, 1)
+        self.assertEqual(self.phase3._correct + self.phase3._incorrect, 0)
+        self.assertEqual(self.phase3._reward_count, 0)
+        self.assertEqual(self.phase3._task.index, 0)
 
     def test_manifest_never_records_a_file_outside_the_session(self):
         """The backstop, independent of the rebind: a reported path from outside
