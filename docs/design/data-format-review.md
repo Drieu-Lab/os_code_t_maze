@@ -89,7 +89,7 @@ A representative real bundle inspected for this review: `601_20260828_180049`
     phase3_<id>.csv                          # per-trial table (the core record)
     phase3_<id>_excursions.csv               # per-outbound-trip events
   serial/
-    sensors_<id>.csv                         # filtered firmware serial capture
+    serial_<id>.csv                          # complete firmware serial capture (ADR-0178)
   summary/
     session_summary_<id>.json / .txt         # end-of-session behavioral summary
     notes_<id>.jsonl                         # operator + auto note timeline
@@ -114,7 +114,7 @@ stay fast); "End" = written once at Stop; "Start" = written once at Session Star
 | `config/session_meta.json` | JSON | `schema_version: 1` | Start | Yes | `session_meta.py` → controller |
 | `task/phase3_<id>.csv` | CSV + `#` header | `proto=` in header (now `PROTO_VERSION`) | **Live (per trial)** | Yes (whole-file temp+rename) | `phase3_log.py` → `phase3_controller.py` |
 | `task/phase3_<id>_excursions.csv` | CSV + `#` header | `proto=1` in header | **Live (per trip)** | Yes | `excursion_log.py` → `phase3_controller.py` |
-| `serial/sensors_<id>.csv` | CSV-ish (`iso,line`) | `#` header only | **Live (append)** | Append + flush | `session_serial.py` → `session_controller.py` |
+| `serial/serial_<id>.csv` | CSV-ish (`iso,line`) | `#` header only | **Live (append)** | Append + fsync | `session_serial.py` → `session_controller.py` |
 | `summary/notes_<id>.jsonl` | JSONL | per-entry fields | Live (rewrite on each edit) | Yes | `session_notes.py` → controller |
 | `summary/session_summary_<id>.json` | JSON | `schema_version: 6` | End | Yes | `session_summary.py` → controller |
 | `summary/session_summary_<id>.txt` | text | — (human report) | End | Yes | `session_summary.py` → controller |

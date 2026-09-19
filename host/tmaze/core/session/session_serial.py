@@ -1,11 +1,20 @@
 """
-session_serial.py - which raw serial lines go in the per-session serial log.
+session_serial.py - the per-session serial capture: naming + a filtered-view helper.
 
-A pure predicate (protocol-only; no Tk/IO) deciding whether a firmware line
-belongs in the per-session raw-signal capture the Session controller writes into
-a session's ``serial/`` folder (see docs/decisions/0049). By the experimenter's
-scope, that capture is the SENSOR + CENTRAL-PORT subset of the stream, not the
-whole thing (the complete verbatim stream stays with ``rig_logger.py``):
+Since docs/decisions/0178 the Session controller writes the COMPLETE verbatim
+serial stream it receives between Start and Stop into a session's ``serial/``
+folder as ``serial_<id>.csv`` (host-receipt-stamped, docs/decisions/0175). Before
+that (docs/decisions/0049) it wrote only a SENSOR + CENTRAL-PORT subset to
+``sensors_<id>.csv`` and left the full stream to ``rig_logger.py``.
+
+Two things live here, both pure (protocol-only; no Tk/IO):
+
+- ``capture_filename`` / ``resolve_capture_path`` - the on-disk name of that
+  capture, and a reader-side resolver that prefers the full ``serial_<id>.csv``
+  and falls back to the legacy ``sensors_<id>.csv`` so tools read either.
+- ``is_sensor_or_central`` - the old capture predicate, kept as a READER helper:
+  a consumer that wants only the SENSOR + CENTRAL-PORT view of a full capture
+  (the pre-0178 subset) can filter with it. It selects:
 
   - every body-beam sensor edge ``S,<i>,<state>`` - the rat's position signal;
   - the CENTRAL reward-well activity: its lick edges ``L,<center>,<state>`` and
@@ -13,24 +22,42 @@ whole thing (the complete verbatim stream stays with ``rig_logger.py``):
     see docs/decisions/0007) plus the central solenoid ack ``SOL,<center>,<sol>``;
   - the ``PONG`` session-start fiducial - the reply to the single ``PING`` the
     host sends at Start Session (see docs/decisions/0048/0062). It is NOT sensor
-    data, but keeping it makes the bundle self-anchoring: the ``PONG`` line
-    carries the firmware session ms (its own prefix) AND, via the per-line
-    host-wall prefix the writer adds, the host wall time - one clean tie point
-    that lets an offline tool map firmware-clock events onto the host timeline
-    from inside the bundle rather than only the full logger (see docs/decisions/0124).
+    data, but it is a clean firmware-clock<->host-wall tie point (docs/decisions/0124).
 
-Everything else (other-port licks, cue echoes, MODE/handshake, ...) is left
-to the full logger. Keeping this as a pure function makes the capture rule easy
-to read and to test without a rig.
+Everything else (other-port licks, cue echoes, MODE/handshake, ...) is what the
+filtered view drops - and exactly what the full capture now keeps.
 
 Headless tests: python -m unittest test_session_serial   (from host/)
 """
 
 from __future__ import annotations
 
+import os
 from typing import Optional
 
 from tmaze.core import protocol
+
+
+def capture_filename(session_id: str) -> str:
+    """Name of a session's serial capture file (the full stream, docs/decisions/0178)."""
+    return f"serial_{session_id}.csv"
+
+
+def resolve_capture_path(serial_dir: str, session_id: str) -> str:
+    """Path to a bundle's serial capture within its ``serial/`` folder.
+
+    Prefers the full-stream ``serial_<id>.csv`` (docs/decisions/0178) when it
+    exists, else falls back to the pre-0178 filtered ``sensors_<id>.csv`` so a
+    reader works on old and new bundles alike. Returns the full-stream path when
+    neither exists (the caller's open then raises with the current-format name).
+    """
+    full = os.path.join(serial_dir, capture_filename(session_id))
+    if os.path.exists(full):
+        return full
+    legacy = os.path.join(serial_dir, f"sensors_{session_id}.csv")
+    if os.path.exists(legacy):
+        return legacy
+    return full
 
 
 def is_sensor_or_central(info: protocol.LineInfo, *,

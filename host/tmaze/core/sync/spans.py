@@ -5,7 +5,8 @@ A *span* is "channel X was in state Y from t0 to t1". Both streams we align
 are expressed this way before anything is matched:
 
 - **Serial spans** come from the per-session serial capture
-  (``serial/sensors_<id>.csv``: one ``<host iso>,<firmware line>`` per row).
+  (``serial/serial_<id>.csv``, the full stream since docs/decisions/0178, or the
+  pre-0178 ``sensors_<id>.csv``: one ``<host iso>,<firmware line>`` per row).
   A beam that reads ``S,2,0`` at t0 and ``S,2,1`` at t1 gives a span of channel
   ``S2=0``; the opposite pairing gives ``S2=1``. Both states are emitted so a
   test can check the polarity against real logs, but only the ACTIVE state is

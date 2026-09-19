@@ -18,9 +18,11 @@ Three ways to run (env ``drieu_t_maze``, any directory):
     python -m tmaze.tools.sync_fit <bundle_dir> --dry-run --out <folder>
 
     # Build host/led_map.json from a NO-RAT mapping session (fire every valve,
-    # break every beam by hand); use the FULL rig_logger CSV so the left/right
-    # reward + rinse/drain valve acks are present - see docs/mapping-session-runbook.md:
-    python -m tmaze.tools.sync_fit <bundle_dir> --map --serial <rig_logger.csv>
+    # break every beam by hand). The in-bundle capture is now the FULL stream
+    # (docs/decisions/0178), so its own serial log carries the left/right reward +
+    # rinse/drain valve acks - no --serial override needed for new bundles; pass
+    # one only for a pre-0178 (filtered) bundle. See docs/mapping-session-runbook.md:
+    python -m tmaze.tools.sync_fit <bundle_dir> --map [--serial <rig_logger.csv>]
 
     # No bundle, no video: check the core end to end on synthetic data:
     python -m tmaze.tools.sync_fit --selftest
@@ -58,6 +60,7 @@ from dataclasses import asdict
 from datetime import datetime
 from typing import Dict, List, Optional, Sequence, Tuple
 
+from tmaze.core.session import session_serial
 from tmaze.core.session.session_log import SessionManifest
 from tmaze.core.sync import clockfit, led_map as LM, matching, pipeline
 from tmaze.core.sync import spans as S
@@ -88,12 +91,11 @@ def _read_frames(bundle: str, sid: str) -> Tuple[Dict[str, str], List[S.Frame]]:
 
 def _read_events(bundle: str, sid: str, serial_path: Optional[str] = None) -> Dict[str, List[S.Span]]:
     """Serial spans for the session. Defaults to the bundle's per-session capture
-    (``serial/sensors_<id>.csv``), which by design holds only body beams + the
-    CENTRAL well's lick/reward/solenoid (session_serial.py). ``serial_path``
-    overrides it with any ``<iso>,<ms>,TYPE,...`` log - use the FULL rig_logger
-    CSV for a mapping session, whose left/right-reward and rinse/drain valve acks
-    the filtered capture drops."""
-    path = serial_path or os.path.join(bundle, "serial", f"sensors_{sid}.csv")
+    - the COMPLETE verbatim stream ``serial/serial_<id>.csv`` (docs/decisions/0178),
+    falling back to the pre-0178 filtered ``sensors_<id>.csv`` for older bundles.
+    ``serial_path`` overrides it with any ``<iso>,<ms>,TYPE,...`` log."""
+    path = serial_path or session_serial.resolve_capture_path(
+        os.path.join(bundle, "serial"), sid)
     with open(path, encoding="utf-8") as f:
         return S.serial_spans(S.parse_serial_csv(f))
 

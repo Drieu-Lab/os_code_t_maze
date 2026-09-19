@@ -11,7 +11,8 @@ the camera's hardware clock? See docs/design/cross-stream-sync-design.md, Phase 
 What it does, in order:
 
 1. Reads the bundle's video sidecar (`video/<id>.csv`: frame_idx, host_unix_s,
-   cam_timestamp) and the per-session serial subset (`serial/sensors_<id>.csv`:
+   cam_timestamp) and the per-session serial capture (`serial/serial_<id>.csv`,
+   the full stream since docs/decisions/0178, or the pre-0178 `sensors_<id>.csv`:
    beam edges S, solenoid acks SOL, REWARD, PONG), each line stamped with the
    host wall clock and the firmware ms.
 2. Pass 1 over a window of frames: crops the board region and accumulates a
@@ -59,6 +60,7 @@ except Exception as e:  # pragma: no cover
     sys.exit(1)
 
 from tmaze.core import protocol
+from tmaze.core.session import session_serial
 
 
 # ------------------------------------------------------------------ bundle IO
@@ -123,7 +125,7 @@ def load_sidecar(bundle: str) -> Tuple[Dict[str, str], List[Frame]]:
 
 def load_events(bundle: str) -> List[Event]:
     sid = _bundle_id(bundle)
-    path = os.path.join(bundle, "serial", f"sensors_{sid}.csv")
+    path = session_serial.resolve_capture_path(os.path.join(bundle, "serial"), sid)
     out: List[Event] = []
     with open(path, encoding="utf-8") as f:
         for line in f:

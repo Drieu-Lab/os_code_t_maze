@@ -17,7 +17,7 @@ On Start it creates a per-session folder tree under the recordings root
         session_<session_id>.json     the manifest (correlation index)
         video/   <session_id>.<mkv|mp4> + sidecar .csv (+ _background.png)
         task/    phase3_<session_id>.csv
-        serial/  sensors_<session_id>.csv   (filtered raw serial - see below)
+        serial/  serial_<session_id>.csv    (complete raw serial - see below)
         config/  the definitions that shaped the run (zones/ROI/landmarks/scale,
                  phase3.json/rules.json, lens calibration, active model) + a
                  runtime_params.json + config_snapshot.json index - so the
@@ -42,13 +42,14 @@ On Start (once Phase 3 is confirmed armed) it:
     NOT arm Phase 3, which the operator has already done; docs/decisions/0060).
     Phase 3 re-points an already-open data file into that folder, since its gate
     opened before this moment and so cannot bind it (docs/decisions/0066);
-  - opens a per-session **filtered** raw-serial file in ``serial/``: while the
-    session is active it appends the SENSOR + CENTRAL-PORT lines it already sees
-    via ``apply()`` (body-beam edges + the central well's lick/reward/solenoid; the
-    subset chosen by the experimenter), stamped with the host wall clock in the
-    ``rig_logger`` column format. The predicate lives in ``session_serial.py``. The
-    complete verbatim stream still belongs to the separate ``rig_logger.py`` process
-    (ADR-0002/0003), recorded as a descriptor in the manifest;
+  - opens a per-session raw-serial file in ``serial/`` holding the **complete**
+    verbatim stream: while the session is active it appends EVERY line it sees via
+    ``apply()`` (body-beam + all lick edges, reward/solenoid acks, cue echoes,
+    MODE/handshake, heartbeat), stamped with the host RECEIPT wall clock
+    (docs/decisions/0175) in the ``rig_logger`` column format. This is the bundle's
+    own full serial log (docs/decisions/0178, superseding the ADR-0049 filtered
+    subset); the ``session_serial`` predicate is kept only as a reader-side helper
+    for consumers that want the old sensor/central view;
   - calls ``mark_session_start`` - the single fiducial seam - which today writes
     the host-t0 anchor into the manifest and (best-effort) sends ``PING`` so a
     ``PONG`` lands in the serial log as a coarse shared marker. This is where a
@@ -104,9 +105,8 @@ from tmaze.core.session import session_config
 from tmaze.core.session import session_meta
 from tmaze.core.session import session_notes
 from tmaze.core.session import session_summary
-from tmaze.core.rig_config import load_rig_config
 from tmaze.core.session.session_log import SessionManifest, clock_snapshot, path_within_session
-from tmaze.core.session.session_serial import is_sensor_or_central
+from tmaze.core.session.session_serial import capture_filename
 from tmaze.core.session.session_timer import SessionTimer
 from tmaze import paths
 from tmaze.paths import host_dir, phase3_recordings_root
@@ -115,7 +115,6 @@ from tmaze.paths import host_dir, phase3_recordings_root
 # GUI passes <camera default>/phase3_recordings (see docs/decisions/0049).
 # Single-sourced from tmaze.paths so this fallback and the rig's real output
 # agree (env-overridable via TMAZE_RECORDINGS_DIR; see docs/decisions/0088).
-DATA_DIR = os.path.join(str(host_dir()), "data")   # host/data (ADR-0083)
 DEFAULT_RECORDINGS_ROOT = str(phase3_recordings_root())
 
 # Per-session subfolders (one per stream family).
@@ -127,10 +126,6 @@ SUMMARY_SUBDIR = "summary"
 # Per-session config snapshot (geometry/task/calibration + runtime params) folder
 # so the run is reproducible after the live host/*.json change (docs/decisions/0072).
 CONFIG_SUBDIR = "config"
-
-# The central reward well's solenoid port ("Center / start"; docs/decisions/0007,
-# 0022) - used to keep only that port's valve acks in the filtered serial file.
-CENTER_SOL_PORT = 2
 
 # Operator note streams (docs/decisions/0074). The per-session note log lives in
 # the summary/ folder as JSON Lines and is registered under this manifest key;
@@ -226,9 +221,6 @@ class SessionControlView:
         # operator-facing modal; a headless caller/test injects a non-interactive
         # one so Start never blocks on a dialog (docs/decisions/0083).
         self._ask_weight = ask_weight
-        # Central-well lick channel (from the rig pin map; None -> central licks
-        # simply aren't captured) for the filtered serial file. ADR-0022/0049.
-        self._center_lick = load_rig_config().lick_index_by_role.get("center")
         # A titled panel matching the other Rig-view bottom-strip controls
         # (Training mode / Solenoid test / ...), placed in the right column under
         # the behavior readout; see docs/decisions/0048.
@@ -361,10 +353,12 @@ class SessionControlView:
         proto = protocol.proto_version_from(info.parsed)
         if proto is not None:
             self._firmware_proto = proto
-        if (self._active and self._serial_file is not None
-                and is_sensor_or_central(
-                    info, center_lick_index=self._center_lick,
-                    center_sol_port=CENTER_SOL_PORT)):
+        # Capture the COMPLETE verbatim stream between Start and Stop into the
+        # bundle (docs/decisions/0178): every line the session sees, not the old
+        # sensor + central-port subset. The full stream keeps the cue echoes,
+        # MODE/handshake and heartbeat an offline reader needs and costs only ~KB
+        # per session over the filtered set. Stamped at host receipt (ADR-0175).
+        if self._active and self._serial_file is not None and info.raw:
             self._write_serial(info.raw, recv_wall=info.recv_wall)
 
     def _apply_active_liquid(self, *_args) -> None:
@@ -1330,19 +1324,14 @@ class SessionControlView:
         meta_note = self._write_session_meta(config_dir)
         if meta_note:
             notes.append(meta_note)
-        # Open the per-session filtered serial file (sensors + central port). Its
-        # path is recorded even if the open fails (it just stays empty).
-        self._serial_path = os.path.join(serial_dir, f"sensors_{self._session_id}.csv")
+        # Open the per-session serial file: the COMPLETE verbatim stream received
+        # between Start and Stop (docs/decisions/0178), so the bundle carries its
+        # own full serial log rather than pointing at the separate rig_logger.py
+        # file. Its path is recorded even if the open fails (it just stays empty).
+        self._serial_path = os.path.join(serial_dir, capture_filename(self._session_id))
         if not self._open_serial(self._serial_path):
             notes.append("serial capture unavailable")
-        self._manifest.set_stream("serial_sensors", self._serial_path)
-        # The COMPLETE verbatim stream still belongs to the separate rig_logger.py
-        # process, whose filename the host can't know (ADR-0002/0003) - record how
-        # to find it (dir + animal + time window) rather than a path.
-        self._manifest.set_stream("serial_full", {
-            "dir": DATA_DIR, "animal": animal,
-            "match": "rig_logger.py file with the enclosing wall-clock time window",
-        })
+        self._manifest.set_stream("serial_full", self._serial_path)
 
         cam_started = self._camera_start(self._video_dir)
         if not cam_started:
@@ -1562,8 +1551,8 @@ class SessionControlView:
             os.makedirs(os.path.dirname(path), exist_ok=True)
             self._serial_file = open(path, "w", encoding="utf-8", newline="")
             self._serial_file.write(
-                "# per-session serial capture (sensors + central port + the "
-                "PONG session-start fiducial) - see docs/decisions/0049, 0124\n")
+                "# per-session serial capture: the COMPLETE verbatim stream "
+                "received between Start and Stop - see docs/decisions/0178, 0124\n")
             self._serial_file.write(f"# session_id={self._session_id}\n")
             self._serial_file.write(
                 "# wall_clock_iso = host wall clock at line RECEIPT (time.time() on "

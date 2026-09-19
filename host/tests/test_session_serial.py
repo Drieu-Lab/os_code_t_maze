@@ -1,18 +1,22 @@
 """
-test_session_serial.py - headless tests for the per-session serial-capture filter.
+test_session_serial.py - headless tests for the per-session serial helpers.
 
-Checks that the SENSOR + CENTRAL-PORT subset is captured and everything else is
-left to the full logger (see session_serial / docs/decisions/0049). Pure stdlib;
-no hardware/Tk.
+Since docs/decisions/0178 the capture is the full stream (``serial_<id>.csv``);
+``is_sensor_or_central`` is kept as a READER helper that reproduces the pre-0178
+SENSOR + CENTRAL-PORT view, and ``resolve_capture_path`` prefers the full file
+and falls back to the legacy ``sensors_<id>.csv``. Pure stdlib; no hardware/Tk.
 
 Run from host/:  python -m unittest test_session_serial
 """
 
 from __future__ import annotations
 
+import os
+import tempfile
 import unittest
 
 from tmaze.core import protocol
+from tmaze.core.session import session_serial
 from tmaze.core.session.session_serial import is_sensor_or_central, is_sensor_or_central_line
 
 # Verified central-well mapping (docs/decisions/0022): center lick = L2; the
@@ -92,6 +96,33 @@ class TestInfoAndLineParity(unittest.TestCase):
                 protocol.classify(line), center_lick_index=CENTER_LICK,
                 center_sol_port=CENTER_PORT)
             self.assertEqual(info_based, _keep(line), line)
+
+
+class TestResolveCapturePath(unittest.TestCase):
+    """resolve_capture_path prefers the full-stream serial_<id>.csv (0178) and
+    falls back to the legacy filtered sensors_<id>.csv for older bundles."""
+
+    def test_prefers_full_when_present(self):
+        with tempfile.TemporaryDirectory() as d:
+            full = os.path.join(d, "serial_abc.csv")
+            open(full, "w").close()
+            open(os.path.join(d, "sensors_abc.csv"), "w").close()
+            self.assertEqual(session_serial.resolve_capture_path(d, "abc"), full)
+
+    def test_falls_back_to_legacy_when_only_it_exists(self):
+        with tempfile.TemporaryDirectory() as d:
+            legacy = os.path.join(d, "sensors_abc.csv")
+            open(legacy, "w").close()
+            self.assertEqual(session_serial.resolve_capture_path(d, "abc"), legacy)
+
+    def test_returns_full_name_when_neither_exists(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertEqual(
+                session_serial.resolve_capture_path(d, "abc"),
+                os.path.join(d, "serial_abc.csv"))
+
+    def test_capture_filename_is_the_full_stream_name(self):
+        self.assertEqual(session_serial.capture_filename("600_x"), "serial_600_x.csv")
 
 
 if __name__ == "__main__":

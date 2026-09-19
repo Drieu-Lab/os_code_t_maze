@@ -31,12 +31,13 @@ Phase 2 **cue LEDs** are installed, which this first map cannot include.
   gives the cleanest, most isolated firings.
 - **Isolated firings** — leave a gap between events of the same channel so the
   matcher pairs them unambiguously.
-- **The FULL serial log, not the bundle capture.** The bundle's per-session
-  `serial/` capture keeps only body beams + the **central** well's
-  lick/reward/solenoid (by design, see `core/session/session_serial.py`). It
-  **drops the left/right-reward and rinse/drain valve acks** — exactly the LEDs a
-  mapping session exists to capture. So point `sync_fit --map` at the **full
-  `rig_logger` CSV** with `--serial`, which keeps every port.
+- **The bundle now captures the FULL stream.** Since ADR-0178 the bundle's own
+  per-session `serial/serial_<id>.csv` holds the COMPLETE verbatim stream —
+  including the left/right-reward and rinse/drain valve acks that a mapping
+  session exists to capture — so `sync_fit --map` reads the bundle directly and
+  **no `--serial` override is needed** for a new bundle. Pass `--serial <full
+  rig_logger CSV>` only for a **pre-0178 (filtered) bundle**, whose `serial/`
+  capture kept only body beams + the central well's lick/reward/solenoid.
 
 ## What you need running
 
@@ -44,8 +45,10 @@ Four programs (each in its own terminal; conda env `drieu_t_maze`; see
 [`PROGRAMS.md`](../PROGRAMS.md)):
 
 1. `python -m tmaze.io.rig_broker --port COM3` — owns the Due, fans serial out.
-2. `python -m tmaze.io.rig_logger` — **the full log**; note the path it prints
-   (`host/data/<animal>_<YYYYMMDD_HHMMSS>.csv`). This is the `--serial` file.
+2. `python -m tmaze.io.rig_logger` — an independent full-stream backup log; note
+   the path it prints (`host/data/<animal>_<YYYYMMDD_HHMMSS>.csv`). Since ADR-0178
+   the bundle self-captures the full stream, so this is now optional for the map
+   (use it as the `--serial` file only if you need to fall back to it).
 3. `python -m tmaze.ui.maze_gui` — the Solenoids button grid (rows Left/Right/
    Center, columns `R1 R2 R3 DRAIN RINSE`; each button sends `R<port><sol>` and
    the Due acks `SOL,<port>,<sol>`).
@@ -93,9 +96,11 @@ under `…/phase3_recordings/`) and the **full-log path** from step 1.
 **4. Build the map.**
 
 ```
-python -m tmaze.tools.sync_fit <recordings>/phase3_recordings/000_<stamp> \
-    --map --serial host/data/000_<stamp>.csv
+python -m tmaze.tools.sync_fit <recordings>/phase3_recordings/000_<stamp> --map
 ```
+
+The bundle's own `serial/serial_<id>.csv` carries every port now (ADR-0178). Add
+`--serial host/data/000_<stamp>.csv` only for a pre-0178 (filtered) bundle.
 
 - **No `--board-rect` needed** — the tool finds the persistent red/green fiducial
   LEDs and uses their convex hull as the board region automatically. Pass
@@ -118,8 +123,9 @@ as a bound LED with a plausible lag (start lag ~ +30 ms for lit-on-event LEDs,
   (red/green rings) and the located LEDs (white crosses) where you expect. This
   is the manual marker check — the markers are a reference, not detected
   (ADR-0153; a repeatable marker scheme is FW-0059).
-- **left/right reward + rinse/drain** now bind (they could not from a rat
-  session — that is the whole point of `--serial`);
+- **left/right reward + rinse/drain** bind, because the bundle's full capture
+  (ADR-0178) now carries every port's ack — a rat session's filtered capture
+  used to drop these, which was the whole point of the old `--serial` override;
 - **ENTRY/EXIT beams `S0`/`S1`** — the open question from design §3.7: if they
   stay *silent/unbound*, their channel LEDs are hidden by wiring or face away.
   Record which; a wider board or a `--board-rect` re-run can rule out that they
@@ -143,7 +149,7 @@ want the QA PNG for a with-rat run too.
 
 | Channel | How to fire | Serial line | Notes |
 |---|---|---|---|
-| Reward/wash valves | `maze_gui` Solenoids grid, `R<port><sol>` | `SOL,<port>,<sol>` | port 0 L / 1 R / 2 C; sol 0–2 = R1–R3, 3 DRAIN, 4 RINSE; **needs `--serial` full log** for L/R + drain/rinse |
+| Reward/wash valves | `maze_gui` Solenoids grid, `R<port><sol>` | `SOL,<port>,<sol>` | port 0 L / 1 R / 2 C; sol 0–2 = R1–R3, 3 DRAIN, 4 RINSE; the bundle's full capture (ADR-0178) carries L/R + drain/rinse — `--serial` only for a pre-0178 bundle |
 | Body beams | break by hand | `S,<i>,0` (broken) | i: 0 ENTRY,1 EXIT,2 LCHOICE,3 RCHOICE,4 LRETURN,5 RRETURN |
 | Lick ports | touch (damp swab) | `L,<i>,0` (contact) | i: 0 left, 1 right, 2 center |
 | Cues | — | — | no LED until Phase 2; re-map afterwards |

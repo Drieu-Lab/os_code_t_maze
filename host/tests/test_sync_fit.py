@@ -164,7 +164,9 @@ def _make_bundle(root: str) -> str:
     shutil.copyfile(CLIP_CSV, os.path.join(bundle, "video", f"{SID}.csv"))
     with open(FX_JSON, encoding="utf-8") as f:
         rows = json.load(f)["serial_rows"]
-    with open(os.path.join(bundle, "serial", f"sensors_{SID}.csv"), "w", encoding="utf-8") as f:
+    # New bundles carry the full stream as serial_<id>.csv (docs/decisions/0178);
+    # the reader also falls back to the legacy sensors_<id>.csv (see test_session_serial).
+    with open(os.path.join(bundle, "serial", f"serial_{SID}.csv"), "w", encoding="utf-8") as f:
         f.write("# wall_clock_iso,firmware_line\n")
         for r in rows:
             f.write(r + "\n")
