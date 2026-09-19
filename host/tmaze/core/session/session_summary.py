@@ -82,8 +82,10 @@ if TYPE_CHECKING:  # type-only imports - no runtime coupling to the stats cores
 # mid-run pulse-width change: when the Phase 3 stats carry the per-width pulse tally
 # (``reward_pulses_by_ms``) the block sums volume PER WIDTH and gains a ``by_ms``
 # breakdown (``pulse_ms`` then lists the widths); a pre-magnitude session still uses
-# the single configured width (docs/decisions/0110).
-SCHEMA_VERSION = 6
+# the single configured width (docs/decisions/0110). v7 adds ``pre_start_trials`` -
+# the count of trials whose ``trial_start_iso`` precedes ``session_t0`` because
+# Phase 3 was armed and run before Session Start (the arm-before-Start scope; L7).
+SCHEMA_VERSION = 7
 
 # Both inputs are measured from the Phase 3 arm edge, not Session Start (see the
 # module docstring + docs/future-work.md FW-0028); recorded so a reader knows what
@@ -123,6 +125,10 @@ class SessionSummary:
     # fires echo identically as REWARD,MANUAL - and this core totals them into the
     # ``manual_water`` figure. [] when none occurred.
     manual_pulses_ms: List[float] = field(default_factory=list)
+    # Count of trials whose start stamp precedes session_t0 - i.e. run while Phase
+    # 3 was armed BEFORE Session Start (docs/decisions/0066; review finding L7).
+    # None when unknown (no rows / no anchor); 0 in the normal arm-then-Start flow.
+    pre_start_trials: Optional[int] = None
     generated_iso: Optional[str] = None
     schema_version: int = SCHEMA_VERSION
     scope: str = SCOPE
@@ -255,6 +261,7 @@ class SessionSummary:
             "cued_task": _stats_dict(self.cued),
             "estimated_water": self.estimated_water,
             "manual_water": self.manual_water,
+            "pre_start_trials": self.pre_start_trials,
             "locomotion": _stats_dict(self.locomotor),
             "notes": self.notes,
         }
@@ -282,6 +289,13 @@ class SessionSummary:
         lines.append(f"End:      {_iso_of(self.t_end)}")
         lines.append(f"Duration: {_duration(self.duration_s)}")
         lines.append(f"Scope:    {self.scope}")
+        # Flag the arm-before-Start case explicitly (L7): these trials' start
+        # stamps precede session_t0, which an offline reader diffing against t0
+        # would otherwise see as impossible negative offsets.
+        if self.pre_start_trials:
+            lines.append(
+                f"          ({self.pre_start_trials} trial(s) started before "
+                "Session Start; stamps precede session_t0)")
 
         lines.append("")
         lines.append("Task params")
@@ -319,6 +333,7 @@ def build_summary(*, session_id: str, animal: str,
                   params: Optional[Dict[str, Any]] = None,
                   notes: Optional[List[Dict[str, Any]]] = None,
                   manual_pulses_ms: Optional[List[float]] = None,
+                  pre_start_trials: Optional[int] = None,
                   generated_iso: Optional[str] = None) -> SessionSummary:
     """Build a :class:`SessionSummary` from the session metadata + the two frozen
     stat readouts, plus the folded task ``params``, the operator ``notes``
@@ -336,8 +351,40 @@ def build_summary(*, session_id: str, animal: str,
         params=dict(params) if params else {},
         notes=list(notes) if notes else [],
         manual_pulses_ms=list(manual_pulses_ms) if manual_pulses_ms else [],
+        pre_start_trials=pre_start_trials,
         generated_iso=generated_iso or datetime.now().isoformat(
             timespec="seconds"))
+
+
+def count_trials_started_before(start_isos, t0_iso: Optional[str]) -> int:
+    """How many trial start stamps in ``start_isos`` precede the session anchor
+    ``t0_iso`` (review finding L7).
+
+    Phase 3 can be armed and run trials BEFORE Session Start stamps ``session_t0``
+    (docs/decisions/0066), so early rows legitimately carry a ``trial_start_iso``
+    earlier than t0; this counts them so the summary can flag the arm-before-Start
+    scope. A missing/unparseable anchor counts nothing; blank/unparseable start
+    stamps are skipped. Naive-local today (both stamps share the same convention;
+    an offset-aware bump would move them together)."""
+    t0 = _parse_iso_opt(t0_iso)
+    if t0 is None:
+        return 0
+    n = 0
+    for iso in start_isos:
+        d = _parse_iso_opt(iso)
+        if d is not None and d < t0:
+            n += 1
+    return n
+
+
+def _parse_iso_opt(iso: Optional[str]):
+    """``datetime`` from an ISO stamp, or None if blank/unparseable."""
+    if not iso:
+        return None
+    try:
+        return datetime.fromisoformat(iso)
+    except (TypeError, ValueError):
+        return None
 
 
 # ------------------------------------------------------------------ helpers

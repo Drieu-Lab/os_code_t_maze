@@ -1660,7 +1660,8 @@ class SessionControlView:
                 t0=self._manifest.t0, t_end=self._manifest.t_end,
                 cued=cued, locomotor=locomotor, seed=seed, tones=tones,
                 params=params, notes=notes,
-                manual_pulses_ms=self._operator_pulses_ms)
+                manual_pulses_ms=self._operator_pulses_ms,
+                pre_start_trials=self._pre_start_trial_count())
             summary_dir = os.path.join(self._session_dir, SUMMARY_SUBDIR)
             json_path = os.path.join(
                 summary_dir, f"session_summary_{self._session_id}.json")
@@ -1699,6 +1700,25 @@ class SessionControlView:
             "low_tone_hz": snap.low_tone_hz,
         }
         return phase3_stats.compute(snap), snap.seed, tones
+
+    def _pre_start_trial_count(self):
+        """How many Phase 3 trials started BEFORE session_t0 (review finding L7):
+        Phase 3 can be armed and run trials before Session Start stamps the anchor
+        (docs/decisions/0066), so early rows' ``trial_start_iso`` legitimately
+        precede ``t0``. Counted for the summary so an offline reader isn't
+        surprised by negative offsets. None when no Phase 3 / snapshot / anchor."""
+        if (self._phase3 is None or self._manifest is None
+                or not hasattr(self._phase3, "published_state")):
+            return None
+        try:
+            snap = self._phase3.published_state()
+        except Exception:
+            snap = None
+        if snap is None:
+            return None
+        t0_iso = (self._manifest.t0 or {}).get("iso")
+        starts = [getattr(r, "trial_start_iso", None) for r in snap.rows]
+        return session_summary.count_trials_started_before(starts, t0_iso)
 
     def _task_params(self) -> dict:
         """The Phase 3 shaping params to fold into the summary, read as a COPY from

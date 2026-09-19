@@ -138,7 +138,7 @@ class TestRenderJson(unittest.TestCase):
         self.assertIsNone(data["cued_task"])
         self.assertIsNone(data["locomotion"])
         # Later additions default to empty / None when nothing was provided.
-        self.assertEqual(data["schema_version"], 6)
+        self.assertEqual(data["schema_version"], session_summary.SCHEMA_VERSION)
         self.assertEqual(data["task_params"], {})
         self.assertIsNone(data["estimated_water"])
         # manual_water is always a definite figure (0 when no manual dispenses).
@@ -328,7 +328,7 @@ class TestNotes(unittest.TestCase):
         summ = session_summary.build_summary(
             session_id="s", animal="a", t0=_T0, t_end=_T_END, notes=entries)
         data = json.loads(summ.render_json())
-        self.assertEqual(data["schema_version"], 6)
+        self.assertEqual(data["schema_version"], session_summary.SCHEMA_VERSION)
         self.assertEqual(data["notes"], entries)          # verbatim list
 
     def test_notes_render_timestamped_list(self):
@@ -376,6 +376,34 @@ class TestRenderText(unittest.TestCase):
         self.assertIn("(no cued-task data)", text)
         self.assertIn("(no locomotor data)", text)
         self.assertIn("Duration: --", text)
+
+
+class TestPreStartTrials(unittest.TestCase):
+    def test_counts_starts_before_t0(self):
+        # t0 is 12:00:00; two trials started before it (arm-before-Start).
+        starts = ["2026-07-31T11:59:40.000", "2026-07-31T11:59:58.000",
+                  "2026-07-31T12:00:05.000", None, "bad-stamp"]
+        self.assertEqual(
+            session_summary.count_trials_started_before(starts, _T0["iso"]), 2)
+
+    def test_no_anchor_counts_nothing(self):
+        self.assertEqual(
+            session_summary.count_trials_started_before(
+                ["2026-07-31T11:00:00.000"], None), 0)
+
+    def test_json_and_text_flag_pre_start(self):
+        summ = session_summary.build_summary(
+            session_id="s", animal="a", t0=_T0, t_end=_T_END, pre_start_trials=2)
+        self.assertEqual(summ.as_dict()["pre_start_trials"], 2)
+        self.assertEqual(summ.schema_version, 7)
+        self.assertIn("started before Session Start", summ.render_text())
+
+    def test_text_silent_when_zero_or_none(self):
+        for val in (0, None):
+            summ = session_summary.build_summary(
+                session_id="s", animal="a", t0=_T0, t_end=_T_END,
+                pre_start_trials=val)
+            self.assertNotIn("before Session Start", summ.render_text())
 
 
 if __name__ == "__main__":
