@@ -118,6 +118,7 @@ criteria).
 | [FW-0064](#fw-0064-push-policy-for-the-records-commits) | Push policy for the records commits made by the "Commit records" button (when, where, who) | Records Manager, resources repo remote | Deferred |
 | [FW-0065](#fw-0065-show-age-where-it-matters-and-decide-the-remaining-biographical-fields) | Show the ADR-0161 age on the Sessions tab / dashboard; add sex/strain/vendor to `animals.json` only when a reader exists | `core/session/session_detail.py`, `core/records/{dashboard,animals}.py`, Records Manager | Proposed |
 | [FW-0066](#fw-0066-record-the-measured-db-and-meter-placement-with-the-cue-volume-calibration) | Record the measured dB (+ meter / mic placement notes) alongside the per-cue gains, mirroring the measured-frequency fields | `host/cue_calibration.json` schema, the cue-calibration UI/tool, `bundle_format` | Proposed |
+| [FW-0067](#fw-0067-live-central-well-lick-trace-in-the-gui) | Live central-well lick trace in the GUI (replaces eyeballing the retired `rig_logger` console) | Phase 3 live traces / Session panel / Rig View (`ui/`, `core/phase3/`) | Proposed |
 
 ## Entries
 
@@ -3371,6 +3372,47 @@ analysis repo if the latter). Whether to structure the placement (distance_cm /
 angle_deg) or keep it free text.
 
 **ADR needed?** Small - extends ADR-0125 when implemented.
+
+### FW-0067: Live central-well lick trace in the GUI
+
+- **Status:** Proposed
+- **Date added:** 2026-09-19
+- **Author / Agent:** Agent (Cursor) on behalf of Ravi
+- **Area / modules:** `host/tmaze/ui/` (Session panel / Rig View / Behavior tab), `host/tmaze/core/phase3/phase3_traces.py`, the shared `RigClient` fan-out (`io/rig_io.py`)
+- **Related ADRs:** [ADR-0179](decisions/0179-retire-rig-logger-from-the-session-launch.md) (retired `rig_logger` from the launch, which this replaces), [ADR-0178](decisions/0178-full-verbatim-per-session-serial-capture.md) (bundle self-captures the full stream), [ADR-0056](decisions/0056-single-parse-fanout-and-mode-reset-seam.md) (single-parse fan-out the trace would subscribe to)
+
+**Motivation / context.** Until ADR-0179, the operator watched the `rig_logger`
+console scroll to confirm the animal was licking the central well (drinking) in
+real time. `rig_logger` is no longer part of the session launch (the bundle now
+captures the full serial stream itself, ADR-0178), so that live view is gone.
+`lick_tuner` shows lick edges for amplifier tuning but is not the at-a-glance
+"is the rat drinking now?" readout the operator wants during a session. A small
+live trace in the main control GUI would restore that view without a second
+process, and be visible next to the rest of the session state.
+
+**Sketch of approach.** Subscribe to the already-parsed serial fan-out
+(`RigClient` / the single-parse dispatch, ADR-0056) for central-well lick edges
+(`L,<center>`), keep a short rolling window in memory, and render a thin
+live strip (recent lick ticks + a rate). Reuse the Phase 3 live-trace machinery
+(`phase3_traces.py` / the Metrics tab plumbing) rather than a bespoke widget.
+Candidate placements (decide at implementation): (a) a thin strip under the
+Session panel's status line; (b) a subplot/row in the Behavior/Metrics tab that
+already plots Phase 3 traces; (c) a collapsible row in Rig View.
+
+**Evaluation / acceptance.** During a live session the operator can see central
+licks appear in the GUI within a frame or two of contact, with no `rig_logger`
+window open; the trace adds no measurable load to the hot path.
+
+**Effort / risk.** Small-to-moderate (mostly a UI placement + a rolling buffer).
+Risk: another live consumer on the Tk thread - keep it change-gated / cheap, as
+with the other live traces.
+
+**Open questions.** Placement (a/b/c above). Whether to show only the central
+well or all three ports. Whether a numeric lick-rate is wanted alongside the
+ticks.
+
+**ADR needed?** Small - a UI-placement note, or fold into an existing live-trace
+ADR when built.
 
 ## Completed
 

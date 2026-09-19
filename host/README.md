@@ -69,7 +69,14 @@ python -m tmaze.io.rig_broker --port COM3    # terminal 1
 python -m tmaze.ui.maze_gui                  # terminal 2
 python -m tmaze.ui.lick_tuner                # terminal 3
 python -m tmaze.ui.experiment_control        # terminal 4 (maze illustration)
+python -m tmaze.io.rig_logger                # optional: standalone full-stream backup log
 ```
+
+`rig_logger` is no longer launched by `start_rig.bat` (the session bundle now
+captures the full serial stream itself; see
+[ADR-0178](../docs/decisions/0178-full-verbatim-per-session-serial-capture.md) /
+[ADR-0179](../docs/decisions/0179-retire-rig-logger-from-the-session-launch.md)).
+Run it by hand only if you want the separate backup file.
 
 `experiment_control` is a broker client like the GUIs above, so the broker must
 be running first. It is built to grow: additional modules (reward control, trial
