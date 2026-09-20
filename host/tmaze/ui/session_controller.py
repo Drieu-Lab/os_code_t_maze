@@ -1308,8 +1308,15 @@ class SessionControlView:
         # host, firmware proto (declared in rig_config.h + last seen on the wire).
         # P1/P6, docs/decisions/0180. Guarded inside collect(), so it never blocks
         # Start; firmware_proto_seen is "unknown" until a handshake was observed.
-        self._manifest.set_provenance(
-            provenance.collect(firmware_proto_seen=self._firmware_proto))
+        prov = provenance.collect(firmware_proto_seen=self._firmware_proto)
+        # Fold in the resolved per-animal cue->side mapping + its source (ADR-0186),
+        # so the manifest is the single top-level provenance home for it too.
+        if self._phase3 is not None and hasattr(self._phase3, "resolved_cue_mapping"):
+            try:
+                prov["cue_mapping"] = self._phase3.resolved_cue_mapping()
+            except Exception:
+                pass
+        self._manifest.set_provenance(prov)
 
         # Bind the note log to this session's on-disk file and flush whatever the
         # operator jotted before Start (footgun fix: do NOT wipe pre-Start notes;
@@ -1717,6 +1724,8 @@ class SessionControlView:
             return None, None, {}
         tones = {
             "high_tone_is_left": snap.high_tone_is_left,
+            "high_tone_is_left_source": getattr(
+                snap, "high_tone_is_left_source", "config"),
             "high_tone_hz": snap.high_tone_hz,
             "low_tone_hz": snap.low_tone_hz,
         }

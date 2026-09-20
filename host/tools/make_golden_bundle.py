@@ -74,6 +74,9 @@ PROVENANCE: Dict[str, Any] = {
     "packages": {"tmaze": "0.0.0", "numpy": "0.0.0"},
     "firmware_proto_source": FIRMWARE_PROTO,
     "firmware_proto_seen": FIRMWARE_PROTO,
+    # Resolved per-animal cue->side mapping + its source (ADR-0186); "config"
+    # here matches the phase3 header's default source for this fixture.
+    "cue_mapping": {"high_tone_is_left": True, "source": "config"},
 }
 
 # A small but realistic zone map (normalised polygons). Stands in for the live

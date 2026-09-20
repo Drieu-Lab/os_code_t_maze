@@ -31,6 +31,7 @@ from tmaze.core.session.session_notes import (
     AUTO_FIRMWARE_RESET, AUTO_SEND_FAILED, AUTO_WRITE_FAILED)
 from tmaze.core.maze_state import (
     CENTRAL_STEM, HUB, IN_WELL, LEFT_CHOICE, RIGHT_CHOICE, UP_STEM, RatState)
+from tmaze.core.records.animals import AnimalRegistry
 from tmaze.core.phase3.trial_sequence import TrialConfig
 from tmaze.ui.phase3_controller import Phase3ControlView
 from tmaze.ui.session_controller import SessionControlView
@@ -723,6 +724,59 @@ class SessionPhase3WiringTest(unittest.TestCase):
             any(e.tag == AUTO_FIRMWARE_RESET and e.is_auto()
                 for e in self.session._notelog.entries()),
             "expected an auto:firmware_reset note in the log")
+
+    # -------------------------------- per-animal cue->side mapping (ADR-0186)
+    def _config_high_left(self):
+        """The phase3.json cue->side default this test's tab loaded."""
+        return bool(self.phase3._config["sequence"].get("high_tone_is_left", True))
+
+    def test_per_animal_cue_mapping_overrides_config_and_is_recorded(self):
+        """animals.json (schema v3) is authoritative: a per-animal high_tone_is_left
+        overrides phase3.json, the arm builds the sequence with it, and the source
+        is stamped into the trial log header + snapshot (docs/decisions/0186)."""
+        per_animal = not self._config_high_left()      # opposite of the file default
+        self.phase3._animal_registry = AnimalRegistry(
+            [{"id": "600", "high_tone_is_left": per_animal}])
+
+        value, source, overrides = self.phase3._resolve_cue_mapping()
+        self.assertEqual(value, per_animal)
+        self.assertEqual(source, "animals.json")
+        self.assertTrue(overrides)                      # disagreed with phase3.json
+        self.assertEqual(self.phase3._current_trial_config().high_tone_is_left,
+                         per_animal)
+        self.assertEqual(self.phase3.resolved_cue_mapping(),
+                         {"high_tone_is_left": per_animal, "source": "animals.json"})
+
+        self._open_gate()
+        self._run_a_trial()                             # arms -> builds the log
+        self.assertEqual(self.phase3._log.high_tone_is_left_source, "animals.json")
+        self.assertEqual(self.phase3._log.cfg.high_tone_is_left, per_animal)
+        snap = self.phase3._log.snapshot(0, armed=True)
+        self.assertEqual(snap.high_tone_is_left_source, "animals.json")
+        self.assertIn("high_tone_is_left_source=animals.json",
+                      self.phase3._log.render_csv())
+
+    def test_cue_mapping_falls_back_to_config_when_unset(self):
+        """An animal with no per-animal mapping (unset) uses phase3.json - and None
+        is NOT read as False (docs/decisions/0186)."""
+        self.phase3._animal_registry = AnimalRegistry([{"id": "600"}])  # unset
+        value, source, overrides = self.phase3._resolve_cue_mapping()
+        self.assertEqual(value, self._config_high_left())
+        self.assertEqual(source, "config")
+        self.assertFalse(overrides)
+
+    def test_cue_mapping_is_recorded_in_the_manifest_provenance(self):
+        """Start folds the resolved mapping + source into the manifest provenance
+        block, the single top-level provenance home (docs/decisions/0186/0180)."""
+        per_animal = not self._config_high_left()
+        self.phase3._animal_registry = AnimalRegistry(
+            [{"id": "600", "high_tone_is_left": per_animal}])
+        self._open_gate()
+        self._run_a_trial()
+        self._start_session()
+        self.assertEqual(
+            self.session._manifest.provenance.get("cue_mapping"),
+            {"high_tone_is_left": per_animal, "source": "animals.json"})
 
     def test_manifest_never_records_a_file_outside_the_session(self):
         """The backstop, independent of the rebind: a reported path from outside

@@ -369,6 +369,25 @@ class TestRenderText(unittest.TestCase):
         # Tone mapping line rendered.
         self.assertIn("HIGH 8000 Hz -> LEFT", text)
 
+    def test_text_flags_a_per_animal_cue_mapping(self):
+        """When the mapping came from animals.json (ADR-0186), the tone line notes
+        it so the summary shows the per-animal override, not just the value."""
+        cued, _ = _cued_stats()
+        summ = session_summary.build_summary(
+            session_id="s1", animal="RAT600", t0=_T0, t_end=_T_END,
+            cued=cued, locomotor=_locomotor_snapshot(), seed=7,
+            tones={"high_tone_is_left": True, "high_tone_hz": 8000,
+                   "low_tone_hz": 2000, "high_tone_is_left_source": "animals.json"})
+        text = summ.render_text()
+        self.assertIn("per-animal: animals.json", text)
+        # The default (config) source adds no such note.
+        plain = session_summary.build_summary(
+            session_id="s2", animal="RAT600", t0=_T0, t_end=_T_END,
+            cued=cued, locomotor=_locomotor_snapshot(), seed=7,
+            tones={"high_tone_is_left": True, "high_tone_hz": 8000,
+                   "low_tone_hz": 2000, "high_tone_is_left_source": "config"})
+        self.assertNotIn("per-animal", plain.render_text())
+
     def test_text_placeholders_when_empty(self):
         summ = session_summary.build_summary(
             session_id="s", animal="a", t0=_T0, t_end=None)

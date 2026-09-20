@@ -62,6 +62,7 @@ from typing import Callable, Optional
 
 from tmaze.core import protocol
 from tmaze.core import cue_calibration
+from tmaze.core.records import animals
 from tmaze.core.timeutil import now_iso
 from tmaze.core.cue_gate import CHOICE, RETURN, CueGate, CueParams
 from tmaze.core.phase3.alternation import AlternationBlockConfig
@@ -170,6 +171,11 @@ class _Phase3Snapshot:
     # Resolved schedule/tone config from phase3.json (FW-0024/ADR-0070); the
     # sequence is built from this on arm instead of the hardcoded default.
     trial_config: TrialConfig = field(default_factory=TrialConfig)
+    # Where the resolved cue->side mapping came from (ADR-0186): "config"
+    # (phase3.json) or "animals.json"; ``cue_mapping_overrides`` is True when a
+    # per-animal value disagreed with phase3.json (surfaced to the operator).
+    cue_mapping_source: str = "config"
+    cue_mapping_overrides: bool = False
     animal: str = ""
     session_id: str = ""
     session_out_dir: str = ""
@@ -194,7 +200,8 @@ class Phase3ControlView(VisionActuator):
 
     def __init__(self, parent: tk.Misc, camera=None, pipeline=None, send=None,
                  dispatcher=None,
-                 animal_id: Optional[Callable[[], str]] = None):
+                 animal_id: Optional[Callable[[], str]] = None,
+                 animal_registry=None):
         self._parent = parent
         self._camera = camera
         self._pipeline = pipeline
@@ -208,6 +215,11 @@ class Phase3ControlView(VisionActuator):
         # The single host-side animal-id source (the Task tab's shared field;
         # docs/decisions/0053). None -> no id (manual arms fall back to "unknown").
         self._animal_id = animal_id
+        # Canonical animal registry, for the per-animal cue->side mapping (schema
+        # v3, ADR-0186). Loaded lazily+cached on first resolve (best-effort: an
+        # absent resources repo yields an empty registry, so the rig falls back to
+        # phase3.json). A test may inject one; None means "load the real one".
+        self._animal_registry = animal_registry
         # Auto-event sink (docs/decisions/0111): a thread-safe callable(event: dict)
         # the Session controller attaches (set_intervention_sink) to receive an
         # operator-intervention record whenever a trial-control override fires on
@@ -715,7 +727,8 @@ class Phase3ControlView(VisionActuator):
                               session_id=snap.session_id,
                               session_t0=snap.session_t0,
                               return_enabled=snap.params.return_enabled,
-                              cue_calibration=self._resolve_cue_calibration())
+                              cue_calibration=self._resolve_cue_calibration(),
+                              high_tone_is_left_source=snap.cue_mapping_source)
         # Bind + write into the session's task/ folder ONLY when armed via a
         # session (docs/decisions/0049). When armed WITHOUT one (the ADR-0060
         # arm-before-Start order, or a standalone tab), keep the planned matrix IN
@@ -1569,6 +1582,13 @@ class Phase3ControlView(VisionActuator):
         # auto:firmware_reset notes + manifest carry the detail).
         if self._fw_resets:
             extra += f"  fw_reset:{self._fw_resets}"
+        # Per-animal cue->side mapping (ADR-0186): when animals.json set this
+        # animal's mapping, show it - with a "!" when it DISAGREED with phase3.json
+        # - so the operator sees which convention the rig is actually running under.
+        if snap.cue_mapping_source == "animals.json":
+            side = "L" if snap.trial_config.high_tone_is_left else "R"
+            flag = "!" if snap.cue_mapping_overrides else ""
+            extra += f"  cue:H->{side}(animals.json{flag})"
         # Conditional probe segment: only after the first scored probe BLOCK trial
         # (so a normal session's status line is unchanged), plus a live PROBE tag
         # while a probe block is running and a [PROBE OFF] tag when the operator has
@@ -1752,6 +1772,11 @@ class Phase3ControlView(VisionActuator):
                                 **self._current_debias_dict()}
         seq["alternation_blocks"] = {**seq.get("alternation_blocks", {}),
                                      **self._current_alternation_dict()}
+        # Per-animal cue->side mapping (ADR-0186): animals.json wins over the
+        # phase3.json default when it sets one for this animal; otherwise this is
+        # a no-op (resolved == the config value).
+        resolved, _source, _overrides = self._resolve_cue_mapping()
+        seq["high_tone_is_left"] = resolved
         try:
             tc = to_trial_config({"sequence": seq})
             self._debias_error = ""
@@ -2319,6 +2344,7 @@ class Phase3ControlView(VisionActuator):
     def _publish_snapshot(self) -> None:
         """Tk poll: snapshot the gate + tunables the actuation thread needs, so
         the thread never reads Tk state (ADR-0043)."""
+        _cue_value, cue_source, cue_overrides = self._resolve_cue_mapping()
         self._act_snapshot = _Phase3Snapshot(
             gate_open=self._gate_open(),
             params=self._current_params(),
@@ -2328,6 +2354,8 @@ class Phase3ControlView(VisionActuator):
             max_topups=self._current_max_topups(),
             reward_port=int(self._config["reward"]["port"]),
             trial_config=self._current_trial_config(),
+            cue_mapping_source=cue_source,
+            cue_mapping_overrides=cue_overrides,
             animal=self._current_animal(),
             session_id=self._session_id,
             session_out_dir=self._session_out_dir,
@@ -2343,6 +2371,41 @@ class Phase3ControlView(VisionActuator):
             return self._animal_id().strip()
         except Exception:
             return ""
+
+    def _cue_registry(self):
+        """The canonical animal registry, loaded once and cached (best-effort;
+        an absent/malformed resources repo yields an empty registry, ADR-0075).
+        A registry injected at construction is used as-is (tests)."""
+        if self._animal_registry is None:
+            try:
+                self._animal_registry = animals.load_registry()
+            except Exception:
+                self._animal_registry = animals.AnimalRegistry()
+        return self._animal_registry
+
+    def _resolve_cue_mapping(self):
+        """Resolve the cue->side mapping for the CURRENT animal (ADR-0186).
+
+        ``animals.json`` (schema v3) is authoritative when it records a per-animal
+        ``high_tone_is_left``; otherwise the rig falls back to ``phase3.json``'s
+        value. Returns ``(resolved_value, source, overrides_config)`` where
+        ``source`` is ``"animals.json"`` or ``"config"`` and ``overrides_config``
+        is True when a per-animal value DISAGREED with phase3.json (so the operator
+        can be shown the override). None (unset) is NOT the same as False - only a
+        real per-animal bool overrides the config default."""
+        config_default = bool(self._config["sequence"].get("high_tone_is_left", True))
+        reg = self._cue_registry()
+        per_animal = (reg.high_tone_is_left(self._current_animal())
+                      if reg is not None else None)
+        if per_animal is None:
+            return config_default, "config", False
+        return per_animal, "animals.json", (per_animal != config_default)
+
+    def resolved_cue_mapping(self) -> dict:
+        """The resolved cue->side mapping + its source, for the session manifest's
+        provenance block (ADR-0186/0180). Read on the Tk thread at Session Start."""
+        value, source, _overrides = self._resolve_cue_mapping()
+        return {"high_tone_is_left": value, "source": source}
 
     # -------------------------------------------------- progress visualization
     def _refresh_progress(self) -> None:

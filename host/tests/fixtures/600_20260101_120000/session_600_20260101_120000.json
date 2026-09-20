@@ -25,7 +25,11 @@
       "numpy": "0.0.0"
     },
     "firmware_proto_source": 8,
-    "firmware_proto_seen": 8
+    "firmware_proto_seen": 8,
+    "cue_mapping": {
+      "high_tone_is_left": true,
+      "source": "config"
+    }
   },
   "post_hoc": [],
   "firmware_resets": [],

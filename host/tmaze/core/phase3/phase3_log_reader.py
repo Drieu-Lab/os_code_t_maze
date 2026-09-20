@@ -153,6 +153,9 @@ def parse_csv_text(text: str) -> Tuple[Phase3StateSnapshot, SessionConfig]:
         seed=_to_int(header.get("seed")) or 0,
         # build_traces treats a missing mapping as high=left (its own default).
         high_tone_is_left=True if high_left is None else high_left,
+        # Provenance of that mapping (ADR-0186); an older file lacks it -> "config".
+        high_tone_is_left_source=(header.get("high_tone_is_left_source")
+                                  or "config"),
         high_tone_hz=_to_int(header.get("high_tone_hz")) or 0,
         low_tone_hz=_to_int(header.get("low_tone_hz")) or 0,
         generator=header.get("generator", "") or "",

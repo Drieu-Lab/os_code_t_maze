@@ -240,6 +240,10 @@ class Phase3StateSnapshot:
     high_tone_is_left: bool
     high_tone_hz: int
     low_tone_hz: int
+    # Where the cue->side mapping was resolved from (ADR-0186): "config"
+    # (phase3.json) or "animals.json" (a per-animal override). Defaulted so an
+    # older snapshot / a manual arm reads as the config default.
+    high_tone_is_left_source: str = "config"
     # Trial-sequence generator + closed-loop debias context, so panels/stats can
     # render the debias state without re-reading the live sequence. For the
     # balanced generator: generator="balanced", state="NORMAL", bias 0.0, and the
@@ -349,10 +353,16 @@ class Phase3Log:
                  session_id: str = "",
                  session_t0: Optional[Dict[str, Any]] = None,
                  return_enabled: bool = True,
-                 cue_calibration: Optional[Dict[str, Any]] = None) -> None:
+                 cue_calibration: Optional[Dict[str, Any]] = None,
+                 high_tone_is_left_source: str = "config") -> None:
         self.animal = animal
         self.seed = sequence.seed
         self.cfg = sequence.cfg
+        # Where the cue->side mapping (``cfg.high_tone_is_left``) came from this run
+        # (ADR-0186): "animals.json" (a per-animal override) or "config"
+        # (phase3.json's default). Recorded in the header + snapshot so a bundle
+        # self-certifies the mapping provenance, not just the value.
+        self.high_tone_is_left_source = str(high_tone_is_left_source or "config")
         # Resolved cue playback calibration for THIS run (P3, docs/decisions/0182):
         # the commanded Hz + gain % actually sent for the HIGH and LOW tones (from
         # cue_calibration.json via the shell), rendered into the header so the file
@@ -726,6 +736,7 @@ class Phase3Log:
             rows=rows, current_index=current_index, total=len(self._rows),
             armed=armed, seed=self.seed, high_tone_is_left=c.high_tone_is_left,
             high_tone_hz=c.high_tone_hz, low_tone_hz=c.low_tone_hz,
+            high_tone_is_left_source=self.high_tone_is_left_source,
             generator=c.generator, debias_state=seq.debias_state(),
             debias_bias=seq.debias_bias(),
             trigger_bias=(db.trigger_bias if db is not None else 0.0),
@@ -755,6 +766,7 @@ class Phase3Log:
             f"# phase3_session animal={self.animal} session_id={self.session_id} "
             f"seed={self.seed} proto={PROTO_VERSION}",
             f"# high_tone_is_left={c.high_tone_is_left} "
+            f"high_tone_is_left_source={self.high_tone_is_left_source} "
             f"high_tone_hz={c.high_tone_hz} low_tone_hz={c.low_tone_hz}",
         ]
         # The tones AS PLAYED this run (commanded Hz + gain %, resolved from

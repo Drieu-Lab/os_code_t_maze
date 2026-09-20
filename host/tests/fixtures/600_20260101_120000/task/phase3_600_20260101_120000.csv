@@ -1,5 +1,5 @@
 # phase3_session animal=600 session_id=600_20260101_120000 seed=20260830 proto=12
-# high_tone_is_left=True high_tone_hz=8000 low_tone_hz=4000
+# high_tone_is_left=True high_tone_is_left_source=config high_tone_hz=8000 low_tone_hz=4000
 # cue_calibration high_cmd_hz=8000 high_gain_pct=46 low_cmd_hz=4000 low_gain_pct=10
 # block_size=6 max_same_run=3 max_alt_run=0 max_trials=6 planned_trials=6 reward_incorrect=False reward_pulse_ms=500 max_topups=0
 # generator=balanced

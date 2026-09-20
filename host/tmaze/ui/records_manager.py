@@ -12,9 +12,10 @@ One window to keep the lab's *records* without hand-editing CSVs or workbooks:
   read each one's metrics + rendered summary, and type the qualitative "common
   procedures" + notes for it; saving upserts ``session_annotations.csv`` by
   ``session_id`` (ADR-0089).
-- **Roster** - add/remove rats and edit their aliases and date of birth
-  (ADR-0161); saving validates and writes ``animals.json`` (the identity
-  source of truth).
+- **Roster** - add/remove rats and edit their aliases, date of birth
+  (ADR-0161), and per-animal cue->side mapping (``high_tone_is_left``, a
+  tri-state left/right/default; ADR-0186); saving validates and writes
+  ``animals.json`` (the identity source of truth).
 - **Dashboard** - a read-only welfare view: a compact per-rat status strip
   (% baseline today + <90% flag + grams-to-90% deficit; a not-logged/not-weighed
   alarm; water intake by source) above a single combined 14-day % baseline trend
@@ -228,6 +229,30 @@ def _read_csv_skip_comments(path: str) -> List[Dict[str, str]]:
 # unchanged.
 _StepResult = records_edits.StepResult
 _ChainOutcome = records_edits.GenerateResult
+
+# Human labels for the tri-state per-animal cue->side mapping (animals.json v3,
+# ADR-0186). "(default)" == unset (None) -> the rig uses phase3.json's value.
+_CUE_DEFAULT = "(default)"
+_CUE_HIGH_LEFT = "high -> left"
+_CUE_HIGH_RIGHT = "high -> right"
+
+
+def _cue_label(value) -> str:
+    """Tri-state ``high_tone_is_left`` (True/False/None) -> its dropdown label."""
+    if value is True:
+        return _CUE_HIGH_LEFT
+    if value is False:
+        return _CUE_HIGH_RIGHT
+    return _CUE_DEFAULT
+
+
+def _cue_value(label: str):
+    """A dropdown label -> the tri-state stored in animals.json (None = unset)."""
+    if label == _CUE_HIGH_LEFT:
+        return True
+    if label == _CUE_HIGH_RIGHT:
+        return False
+    return None
 
 
 class RecordsManager:
@@ -1825,16 +1850,19 @@ class RecordsManager:
             side="top", anchor="w")
         rwrap = ttk.Frame(left)
         rwrap.pack(side="top", fill="both", expand=True)
-        self.r_tree = ttk.Treeview(rwrap, columns=("id", "aliases", "dob", "age"),
-                                   show="headings", height=14)
+        self.r_tree = ttk.Treeview(
+            rwrap, columns=("id", "aliases", "dob", "age", "cue"),
+            show="headings", height=14)
         self.r_tree.heading("id", text="id")
         self.r_tree.heading("aliases", text="aliases (comma-separated)")
         self.r_tree.heading("dob", text="date of birth")
         self.r_tree.heading("age", text="age today")
+        self.r_tree.heading("cue", text="cue (high tone)")
         self.r_tree.column("id", width=70, anchor="center")
         self.r_tree.column("aliases", width=200, anchor="w")
         self.r_tree.column("dob", width=100, anchor="center")
         self.r_tree.column("age", width=90, anchor="center")
+        self.r_tree.column("cue", width=100, anchor="center")
         self._grid_tree_with_scrollbars(rwrap, self.r_tree)
         self.r_tree.bind("<<TreeviewSelect>>", self._load_selected_roster)
 
@@ -1855,20 +1883,31 @@ class RecordsManager:
                                                                   sticky="w")
         ttk.Label(right, text="YYYY-MM-DD, blank if unknown",
                   foreground="#555").grid(row=3, column=1, sticky="w")
+        # Per-animal cue->side mapping (animals.json v3, ADR-0186): a tri-state
+        # dropdown. "(default)" leaves it unset so the rig uses phase3.json; the
+        # two explicit options pin HIGH tone to a side for THIS animal.
+        ttk.Label(right, text="cue mapping").grid(row=4, column=0, sticky="e",
+                                                  pady=3)
+        self.r_cue = tk.StringVar(value=_CUE_DEFAULT)
+        ttk.Combobox(right, textvariable=self.r_cue, width=16, state="readonly",
+                     values=[_CUE_DEFAULT, _CUE_HIGH_LEFT, _CUE_HIGH_RIGHT]).grid(
+            row=4, column=1, sticky="w")
+        ttk.Label(right, text="high tone -> which arm (blank = rig default)",
+                  foreground="#555").grid(row=5, column=1, sticky="w")
         ttk.Button(right, text="Add / update",
-                   command=self._roster_add).grid(row=4, column=0, columnspan=2,
+                   command=self._roster_add).grid(row=6, column=0, columnspan=2,
                                                    sticky="we", pady=(6, 2))
         ttk.Button(right, text="Remove selected",
-                   command=self._roster_remove).grid(row=5, column=0, columnspan=2,
+                   command=self._roster_remove).grid(row=7, column=0, columnspan=2,
                                                       sticky="we")
-        ttk.Separator(right).grid(row=6, column=0, columnspan=2, sticky="we", pady=8)
+        ttk.Separator(right).grid(row=8, column=0, columnspan=2, sticky="we", pady=8)
         ttk.Button(right, text="Save roster -> animals.json",
-                   command=self._roster_save).grid(row=7, column=0, columnspan=2,
+                   command=self._roster_save).grid(row=9, column=0, columnspan=2,
                                                     sticky="we")
         ttk.Label(right, foreground="#555", wraplength=180,
                   text=("Edits stay in this window until you Save. Save validates "
                         "ids/aliases/dates before writing.")).grid(
-            row=8, column=0, columnspan=2, sticky="we", pady=(8, 0))
+            row=10, column=0, columnspan=2, sticky="we", pady=(8, 0))
 
     def _refresh_roster(self) -> None:
         self.r_tree.delete(*self.r_tree.get_children())
@@ -1879,16 +1918,18 @@ class RecordsManager:
             age = "" if days is None else f"{days} d ({days / 7:.1f} wk)"
             self.r_tree.insert("", "end", values=(
                 rec["id"], ", ".join(rec.get("aliases", [])),
-                str(rec.get("date_of_birth", "") or ""), age))
+                str(rec.get("date_of_birth", "") or ""), age,
+                _cue_label(rec.get("high_tone_is_left"))))
 
     def _load_selected_roster(self, _event=None) -> None:
         sel = self.r_tree.selection()
         if not sel:
             return
-        rid, aliases, dob, _age = self.r_tree.item(sel[0], "values")
+        rid, aliases, dob, _age, cue = self.r_tree.item(sel[0], "values")
         self.r_id.set(rid)
         self.r_aliases.set(aliases)
         self.r_dob.set(dob)
+        self.r_cue.set(cue or _CUE_DEFAULT)
 
     def _roster_add(self) -> None:
         rid = self.r_id.get().strip()
@@ -1905,7 +1946,8 @@ class RecordsManager:
                                    "\n".join(dob_errors))
             return
         self.roster = [r for r in self.roster if r["id"] != rid]
-        self.roster.append({"id": rid, "aliases": aliases, "date_of_birth": dob})
+        self.roster.append({"id": rid, "aliases": aliases, "date_of_birth": dob,
+                            "high_tone_is_left": _cue_value(self.r_cue.get())})
         self.roster.sort(key=lambda r: r["id"])
         self._refresh_roster()
         self._set_status(f"{rid} staged - Save roster to write animals.json.")

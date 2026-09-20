@@ -562,7 +562,12 @@ def _tone_line(tones: Dict[str, Any]) -> str:
         return ""
     high_side = "LEFT" if high_is_left else "RIGHT"
     low_side = "RIGHT" if high_is_left else "LEFT"
-    return f"HIGH {high_hz} Hz -> {high_side}   LOW {low_hz} Hz -> {low_side}"
+    line = f"HIGH {high_hz} Hz -> {high_side}   LOW {low_hz} Hz -> {low_side}"
+    # Note a per-animal override so the summary shows the mapping came from
+    # animals.json, not just phase3.json (ADR-0186).
+    if str(tones.get("high_tone_is_left_source") or "config") == "animals.json":
+        line += "   [per-animal: animals.json]"
+    return line
 
 
 def _signed(x: Optional[float]) -> str:
