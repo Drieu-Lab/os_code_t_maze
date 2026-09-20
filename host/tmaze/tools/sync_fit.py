@@ -64,6 +64,7 @@ from tmaze.core.session import session_registry, session_serial
 from tmaze.core.session.session_log import SessionManifest
 from tmaze.core.sync import clockfit, led_map as LM, matching, pipeline
 from tmaze.core.sync import spans as S
+from tmaze.core.timeutil import now_iso
 
 TOOL_VERSION = 1
 FIDUCIAL_METHOD = "led-fit"
@@ -457,9 +458,18 @@ def register_sync_in_manifest(bundle: str, run: SyncRun,
     leaves ``fiducial.method`` as ``host-t0`` - the manifest must not claim a
     clock fit the numbers don't support. The fit numbers themselves stay in
     ``sync/clock_fit_<id>.json`` - the manifest only points at them (ADR-0154).
+
+    Every edit leaves a breadcrumb: one append-only ``post_hoc`` entry recording
+    this tool + version, when, WHICH fields it wrote (``fields_changed``), and a
+    small ``result`` summary (method / verdict / residual MAD ms). A re-fit
+    appends ANOTHER entry - the list is a faithful edit history, never rewritten -
+    and this is the ONLY thing an offline tool may add to a rig-written manifest
+    (the post-Stop manifest edit contract; docs/decisions/0189, extends 0180).
+
     Atomic read-modify-write so the file the rig wrote is never clobbered
-    mid-write; idempotent. Returns the manifest path on success, or None if there
-    is no manifest to update."""
+    mid-write; the stream/fiducial writes are idempotent (a fresh ``post_hoc``
+    entry is appended each run). Returns the manifest path on success, or None if
+    there is no manifest to update."""
     path = os.path.join(bundle, f"session_{run.sid}.json")
     if not os.path.isfile(path):
         return None
@@ -467,8 +477,24 @@ def register_sync_in_manifest(bundle: str, run: SyncRun,
         m = SessionManifest.from_dict(json.load(fh))
     m.set_stream("sync_led_events", f"sync/led_events_{run.sid}.csv")
     m.set_stream("sync_clock_fit", f"sync/clock_fit_{run.sid}.json")
+    fields = ["streams.sync_led_events", "streams.sync_clock_fit"]
     if good:
         m.fiducial["method"] = FIDUCIAL_METHOD  # host-t0 -> led-fit; pending note kept
+        fields.append("fiducial.method")
+    fit = run.result.fit
+    m.add_post_hoc({
+        "tool": "sync_fit",
+        "tool_version": TOOL_VERSION,
+        "at": now_iso(),                       # offset-aware (docs/decisions/0182)
+        "fields_changed": fields,
+        "result": {
+            # what this edit MADE the anchor, not what it was before
+            "method": FIDUCIAL_METHOD if good else "host-t0",
+            "verdict": run.result.verdict,
+            "residual_mad_ms": (round(fit.residuals.mad_ms, 3)
+                                if good and fit is not None else None),
+        },
+    })
     _atomic_write(path, m.render())
     return path
 
@@ -861,10 +887,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if a.dry_run:
         print("  (dry run: the bundle + its manifest were not modified)")
     else:
-        manifest_path = register_sync_in_manifest(a.bundle, run,
-                                                  good=_fit_is_good(run))
+        good = _fit_is_good(run)
+        manifest_path = register_sync_in_manifest(a.bundle, run, good=good)
         if manifest_path:
-            print(f"  registered sync streams + fiducial.method=led-fit in {manifest_path}")
+            anchor = "fiducial.method=led-fit" if good else "fiducial.method left host-t0 (fit not usable)"
+            print(f"  registered sync streams ({anchor}) + logged a post_hoc edit in {manifest_path}")
         else:
             print("  (no session manifest found - sync/ written but not registered)")
     return 0

@@ -164,9 +164,19 @@ class SessionManifest:
         self.provenance = dict(provenance)
 
     def add_post_hoc(self, entry: Dict[str, Any]) -> None:
-        """Append one post-Stop edit record (``{tool, tool_version, at,
-        fields_changed}``) - used by offline tools like ``sync_fit`` when they
-        write back into the manifest (docs/decisions/0180)."""
+        """Append one post-Stop edit record - used by offline tools like
+        ``sync_fit`` when they write back into the manifest (docs/decisions/0180).
+
+        This is the *only* sanctioned way an offline tool changes a rig-written
+        manifest, per the post-Stop **edit contract** (docs/decisions/0189): after
+        Stop a tool may register the ``sync_*`` stream pointers and flip
+        ``fiducial.method`` to ``led-fit`` on a genuine fit, and it MUST leave a
+        breadcrumb here; the session identity / ``t0`` / ``provenance`` / task
+        streams are immutable. The entry carries at least ``{tool, tool_version,
+        at, fields_changed}`` (a tool may add its own keys, e.g. ``sync_fit``'s
+        ``result`` summary). The list is APPEND-ONLY - a re-run adds another entry
+        rather than rewriting - so it is a faithful edit history; a reader must
+        tolerate zero-or-more entries."""
         self.post_hoc.append(dict(entry))
 
     def add_firmware_reset(self, host_iso: str, last_fw_ms: Optional[int]) -> None:

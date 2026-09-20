@@ -169,6 +169,58 @@ def _bare_bundle(root: str, sid: str, *, streams=None) -> str:
     return bundle
 
 
+class TestPostHocLog(unittest.TestCase):
+    """Every non-dry-run manifest edit appends one append-only post_hoc entry
+    (the post-Stop edit contract; docs/decisions/0189). No video needed - drives
+    register_sync_in_manifest on a fabricated manifest with a synthetic run."""
+
+    def setUp(self):
+        self.run = _synthetic_run()   # SID, a clean good fit
+
+    def _register(self, root, good):
+        b = _bare_bundle(root, SID)
+        sync_fit.register_sync_in_manifest(b, self.run, good=good)
+        with open(os.path.join(b, f"session_{SID}.json"), encoding="utf-8") as f:
+            return b, json.load(f)
+
+    def test_good_fit_logs_entry_and_flips_fiducial(self):
+        with tempfile.TemporaryDirectory() as root:
+            _b, man = self._register(root, True)
+        self.assertEqual(len(man["post_hoc"]), 1)
+        e = man["post_hoc"][0]
+        self.assertEqual(e["tool"], "sync_fit")
+        self.assertEqual(e["tool_version"], sync_fit.TOOL_VERSION)
+        self.assertTrue(e["at"])                                  # timestamped
+        self.assertIn("streams.sync_led_events", e["fields_changed"])
+        self.assertIn("streams.sync_clock_fit", e["fields_changed"])
+        self.assertIn("fiducial.method", e["fields_changed"])     # good -> flips
+        self.assertEqual(e["result"]["method"], "led-fit")
+        self.assertEqual(e["result"]["verdict"], clockfit.VERDICT_OK)
+        self.assertIsNotNone(e["result"]["residual_mad_ms"])
+        self.assertEqual(man["fiducial"]["method"], "led-fit")
+
+    def test_failed_fit_records_streams_only_and_stays_host_t0(self):
+        # Force the "failed" branch: a run whose verdict isn't OK.
+        self.run.result.verdict = "too_few_events"
+        self.run.result.fit = None
+        with tempfile.TemporaryDirectory() as root:
+            _b, man = self._register(root, False)
+        e = man["post_hoc"][0]
+        self.assertNotIn("fiducial.method", e["fields_changed"])
+        self.assertEqual(e["result"]["method"], "host-t0")
+        self.assertIsNone(e["result"]["residual_mad_ms"])
+        self.assertEqual(man["fiducial"]["method"], "host-t0")    # not over-claimed
+
+    def test_refit_appends_a_second_entry(self):
+        with tempfile.TemporaryDirectory() as root:
+            b = _bare_bundle(root, SID)
+            sync_fit.register_sync_in_manifest(b, self.run, good=True)
+            sync_fit.register_sync_in_manifest(b, self.run, good=True)  # a --refit
+            with open(os.path.join(b, f"session_{SID}.json"), encoding="utf-8") as f:
+                man = json.load(f)
+        self.assertEqual(len(man["post_hoc"]), 2)  # append-only history, not rewritten
+
+
 class TestBatchHelpers(unittest.TestCase):
     """The pure --all orchestration (no video): needs_fit / summarize / the
     skip paths of fit_one_bundle + run_all's exit code + log."""
