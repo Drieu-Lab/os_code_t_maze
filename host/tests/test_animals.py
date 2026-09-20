@@ -125,8 +125,10 @@ class TestRosterEditing(unittest.TestCase):
             {"id": "601"},                                     # no aliases key
         ])
         self.assertEqual(recs, [
-            {"id": "600", "aliases": ["Rat 600", "R600"], "date_of_birth": ""},
-            {"id": "601", "aliases": [], "date_of_birth": ""},
+            {"id": "600", "aliases": ["Rat 600", "R600"], "date_of_birth": "",
+             "high_tone_is_left": None},
+            {"id": "601", "aliases": [], "date_of_birth": "",
+             "high_tone_is_left": None},
         ])
 
     def test_validate_ok(self):
@@ -268,6 +270,68 @@ class TestDateOfBirth(unittest.TestCase):
             self.assertEqual(doc["animals"][1]["date_of_birth"], "")
             self.assertEqual(load_registry(path).date_of_birth("Rat 600"),
                              "2026-01-15")
+
+
+class TestHighToneMapping(unittest.TestCase):
+    """Schema v3 (ADR-0186): an optional tri-state per-animal high_tone_is_left."""
+
+    def setUp(self):
+        self.reg = AnimalRegistry([
+            {"id": "600", "aliases": ["Rat 600"], "high_tone_is_left": True},
+            {"id": "601", "high_tone_is_left": False},
+            {"id": "602", "high_tone_is_left": None},          # explicit unset
+            {"id": "603"},                                     # v2-style: no field
+        ])
+
+    def test_lookup_by_id_or_alias(self):
+        self.assertIs(self.reg.high_tone_is_left("600"), True)
+        self.assertIs(self.reg.high_tone_is_left("Rat 600"), True)
+        self.assertIs(self.reg.high_tone_is_left("601"), False)
+
+    def test_unset_and_unknown_are_none(self):
+        # None (unset) must be distinguishable from False (HIGH means RIGHT).
+        self.assertIsNone(self.reg.high_tone_is_left("602"))
+        self.assertIsNone(self.reg.high_tone_is_left("603"))
+        self.assertIsNone(self.reg.high_tone_is_left("999"))
+
+    def test_normalize_coerces_tri_state(self):
+        recs = normalize_records([
+            {"id": "600", "high_tone_is_left": True},
+            {"id": "601", "high_tone_is_left": False},
+            {"id": "602", "high_tone_is_left": ""},            # blank -> unset
+            {"id": "603"},                                     # missing -> unset
+        ])
+        self.assertEqual([r["high_tone_is_left"] for r in recs],
+                         [True, False, None, None])
+
+    def test_validate_rejects_non_bool_mapping(self):
+        # A hand-edit typo like the string "true" survives normalize and must be
+        # flagged rather than silently dropped.
+        errs = validate_records([{"id": "600", "high_tone_is_left": "true"}])
+        self.assertTrue(any("high_tone_is_left" in e for e in errs))
+        # true / false / blank are all accepted.
+        self.assertEqual(validate_records([
+            {"id": "600", "high_tone_is_left": True},
+            {"id": "601", "high_tone_is_left": False},
+            {"id": "602"}]), [])
+
+    def test_roundtrip_keeps_mapping_and_older_file_loads(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "animals.json")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(_SAMPLE)                               # v1: no field
+            recs = load_records(path)
+            self.assertIsNone(recs[0]["high_tone_is_left"])
+            recs[0]["high_tone_is_left"] = True
+            recs[1]["high_tone_is_left"] = False
+            write_records(recs, path)
+            with open(path, "r", encoding="utf-8") as fh:
+                doc = json.load(fh)
+            self.assertIs(doc["animals"][0]["high_tone_is_left"], True)
+            self.assertIs(doc["animals"][1]["high_tone_is_left"], False)
+            self.assertIsNone(doc["animals"][2]["high_tone_is_left"])
+            self.assertEqual(doc["schema_version"], ANIMALS_SCHEMA_VERSION)
+            self.assertIs(load_registry(path).high_tone_is_left("Rat 600"), True)
 
 
 class TestLoadRecordsForWrite(unittest.TestCase):

@@ -80,6 +80,9 @@ class AnimalRegistry:
         self._ids: List[str] = []
         self._by_key: Dict[str, str] = {}
         self._dob: Dict[str, str] = {}
+        # Per-animal cue->side mapping, only stored for animals that set it as a
+        # real bool; an unset / non-bool cell is simply absent here (v3, ADR-0186).
+        self._high_tone: Dict[str, bool] = {}
         for rec in (animals or []):
             aid = str(rec.get("id", "")).strip()
             if not aid or aid in self._ids:
@@ -88,6 +91,9 @@ class AnimalRegistry:
             dob = str(rec.get(DOB_FIELD, "") or "").strip()
             if dob:
                 self._dob[aid] = dob
+            htl = rec.get(HIGH_TONE_FIELD, None)
+            if isinstance(htl, bool):
+                self._high_tone[aid] = htl
             # The canonical id always maps to itself; aliases fill in only if they
             # don't collide with an already-claimed key (first entry wins).
             self._by_key[_key(aid)] = aid
@@ -127,6 +133,16 @@ class AnimalRegistry:
             return None
         return self._dob.get(aid)
 
+    def high_tone_is_left(self, raw: str) -> Optional[bool]:
+        """The animal's cue->side mapping (schema v3, ADR-0186): True = HIGH tone
+        means LEFT, False = HIGH means RIGHT, or None when unset / the id isn't
+        recognised. None is the signal to fall back to the rig default in
+        phase3.json - it is NOT the same as False."""
+        aid = self.normalize(raw)
+        if aid is None:
+            return None
+        return self._high_tone.get(aid)
+
     def age_days(self, raw: str, on_date) -> Optional[int]:
         """Whole days from the animal's date of birth to ``on_date`` (a
         ``datetime.date`` or ISO string), or None when either is unusable.
@@ -152,8 +168,9 @@ def _parse_iso(value) -> Optional[_dt.date]:
 
 def parse_registry(text: str) -> AnimalRegistry:
     """Build a registry from ``animals.json`` text, tolerating a malformed file
-    (anything unparseable yields an empty, unavailable registry). v1 and v2
-    files both load; a v1 entry simply has no date of birth."""
+    (anything unparseable yields an empty, unavailable registry). v1/v2/v3
+    files all load; an older entry simply has no date of birth / no cue
+    mapping (both unset)."""
     try:
         raw = json.loads(text)
     except ValueError:
@@ -190,10 +207,29 @@ def load_registry(path: Optional[str] = None) -> AnimalRegistry:
 # Kept in step with animals.json's own ``schema_version``. v1 (ADR-0075):
 # {id, aliases}. v2 (ADR-0161): adds an optional ``date_of_birth``
 # (``YYYY-MM-DD`` or "") per animal so age can be derived for every session and
-# welfare row instead of living only in the paper protocol records. A v1 file
-# still loads (missing field == unknown); a write stamps the current version.
-ANIMALS_SCHEMA_VERSION = 2
+# welfare row instead of living only in the paper protocol records. v3 (ADR-0186):
+# adds an optional per-animal ``high_tone_is_left`` (the cue->side mapping), a
+# TRI-STATE - true / false / null (unset = use the rig default in phase3.json), so
+# a bundle self-certifies the mapping that animal ran under and a future mixed
+# cohort can be expressed. An older file still loads (missing field == unset); a
+# write stamps the current version.
+ANIMALS_SCHEMA_VERSION = 3
 DOB_FIELD = "date_of_birth"
+# The per-animal cue->side mapping (v3, ADR-0186): True = HIGH tone means LEFT,
+# False = HIGH means RIGHT, None = unset (fall back to phase3.json's value).
+HIGH_TONE_FIELD = "high_tone_is_left"
+
+
+def coerce_high_tone(value: object) -> Optional[bool]:
+    """Normalise a raw ``high_tone_is_left`` cell to the tri-state (ADR-0186):
+    a real bool stays, ``None``/``""`` (unset) -> ``None``, and anything else is
+    passed through UNCHANGED so :func:`validate_records` can reject it before a
+    write (rather than silently swallowing a typo like the string ``"true"``)."""
+    if isinstance(value, bool):
+        return value
+    if value is None or value == "":
+        return None
+    return value  # not a bool: kept for validate_records to flag
 
 # The v1 note verbatim, so a write can recognise and refresh it rather than
 # leaving a stale description in an upgraded file (a hand-edited note is kept).
@@ -210,25 +246,28 @@ _V1_NOTE = (
 # stays self-documenting.
 _DEFAULT_SCHEMA = {
     "note": (
-        "Canonical animal identity (ADR-0075, ADR-0161). Each entry is "
-        "{id, aliases, date_of_birth}; the id is the lab's rat number used to "
-        "key session recordings to husbandry records. Aliases match loosely "
-        "(case-, space- and punctuation-insensitive), so 'Rat 600' resolves to "
-        "'600'. date_of_birth is YYYY-MM-DD or \"\" when not yet recorded (the "
-        "records audit lists those). This is the single source of truth for "
-        "animal identity, read by the rig at Session Start and by the records "
-        "builders."
+        "Canonical animal identity (ADR-0075, ADR-0161, ADR-0186). Each entry is "
+        "{id, aliases, date_of_birth, high_tone_is_left}; the id is the lab's rat "
+        "number used to key session recordings to husbandry records. Aliases "
+        "match loosely (case-, space- and punctuation-insensitive), so 'Rat 600' "
+        "resolves to '600'. date_of_birth is YYYY-MM-DD or \"\" when not yet "
+        "recorded (the records audit lists those). high_tone_is_left is the "
+        "cue->side mapping: true = HIGH tone means LEFT, false = HIGH means "
+        "RIGHT, null = unset (the rig uses phase3.json's value). This is the "
+        "single source of truth for animal identity, read by the rig at Session "
+        "Start and by the records builders."
     )
 }
 
 
 def load_records(path: Optional[str] = None) -> List[Dict[str, object]]:
-    """The raw ``[{id, aliases, date_of_birth}]`` roster (best-effort; [] if
-    missing/malformed).
+    """The raw ``[{id, aliases, date_of_birth, high_tone_is_left}]`` roster
+    (best-effort; [] if missing/malformed).
 
     Unlike :func:`load_registry`, this keeps each animal's aliases so the GUI can
     show and edit them. Each entry is normalised to ``{"id": str,
-    "aliases": [str, ...], "date_of_birth": str}`` ("" when not recorded).
+    "aliases": [str, ...], "date_of_birth": str, "high_tone_is_left":
+    bool|None}`` ("" / None when not recorded).
     """
     p = path or animals_json_path()
     try:
@@ -274,11 +313,12 @@ def load_records_for_write(path: Optional[str] = None) -> List[Dict[str, object]
 def normalize_records(
         records: List[Dict[str, object]]) -> List[Dict[str, object]]:
     """Trim ids, drop blank/duplicate aliases, coerce to
-    ``{id, aliases, date_of_birth}``.
+    ``{id, aliases, date_of_birth, high_tone_is_left}``.
 
     Blank ids are dropped. Alias order is preserved (first occurrence wins).
-    A missing ``date_of_birth`` (v1 file) becomes ``""``; its VALUE is not
-    checked here - :func:`validate_records` does that.
+    A missing ``date_of_birth`` (v1 file) becomes ``""``; a missing/blank
+    ``high_tone_is_left`` (v1/v2 file) becomes ``None`` (unset). Neither VALUE
+    is checked here - :func:`validate_records` does that.
     """
     out: List[Dict[str, object]] = []
     for rec in records or []:
@@ -297,7 +337,8 @@ def normalize_records(
                     seen.add(a)
                     aliases.append(a)
         out.append({"id": aid, "aliases": aliases,
-                    DOB_FIELD: str(rec.get(DOB_FIELD, "") or "").strip()})
+                    DOB_FIELD: str(rec.get(DOB_FIELD, "") or "").strip(),
+                    HIGH_TONE_FIELD: coerce_high_tone(rec.get(HIGH_TONE_FIELD))})
     return out
 
 
@@ -309,9 +350,11 @@ def validate_records(records: List[Dict[str, object]],
     as two separate animals), an alias that would resolve to a *different*
     animal than its owner (which would make normalization ambiguous), and a
     non-blank ``date_of_birth`` that isn't a real ``YYYY-MM-DD`` date or lies
-    in the future (``today`` defaults to the current date). A BLANK date of
-    birth is allowed - "not yet recorded" is legitimate and the records audit
-    lists it - so a roster can be saved before every birth date is looked up.
+    in the future (``today`` defaults to the current date), and a
+    ``high_tone_is_left`` that isn't true / false / blank (schema v3, ADR-0186;
+    blank == unset, the legitimate default). A BLANK date of birth is allowed -
+    "not yet recorded" is legitimate and the records audit lists it - so a roster
+    can be saved before every birth date is looked up.
     """
     errors: List[str] = []
     id_keys: Dict[str, str] = {}
@@ -330,6 +373,13 @@ def validate_records(records: List[Dict[str, object]],
             elif dob > today_d:
                 errors.append(
                     f"'{aid}': date of birth {dob_raw} is in the future")
+        # Cue->side mapping is tri-state: only true / false / blank(unset). A
+        # coerced non-bool (e.g. the string "true") survives normalize so it is
+        # flagged HERE rather than silently dropped (ADR-0186).
+        htl = rec.get(HIGH_TONE_FIELD, None)
+        if htl is not None and not isinstance(htl, bool):
+            errors.append(
+                f"'{aid}': high_tone_is_left must be true, false, or blank")
         k = _key(aid)
         if k in id_keys:
             other = id_keys[k]
