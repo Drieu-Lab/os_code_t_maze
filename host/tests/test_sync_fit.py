@@ -154,6 +154,81 @@ class TestSelftest(unittest.TestCase):
             sync_fit.main([])
 
 
+def _bare_bundle(root: str, sid: str, *, streams=None) -> str:
+    """A minimal bundle dir: just the rig-written manifest (no video), enough for
+    the batch skip-path tests + registry discovery (is_bundle checks the manifest
+    exists)."""
+    bundle = os.path.join(root, sid)
+    os.makedirs(bundle, exist_ok=True)
+    m = sync_fit.SessionManifest(
+        session_id=sid, animal="600",
+        t0={"wall": 1.0, "mono": 2.0, "iso": "2026-09-03T13:53:00.000"},
+        streams=streams or {"phase3_task": f"task/phase3_{sid}.csv"})
+    with open(os.path.join(bundle, f"session_{sid}.json"), "w", encoding="utf-8") as f:
+        f.write(m.render())
+    return bundle
+
+
+class TestBatchHelpers(unittest.TestCase):
+    """The pure --all orchestration (no video): needs_fit / summarize / the
+    skip paths of fit_one_bundle + run_all's exit code + log."""
+
+    def test_needs_fit_refit_always_true(self):
+        self.assertTrue(sync_fit.needs_fit({"streams": {"sync_clock_fit": "x"}}, True))
+
+    def test_needs_fit_false_when_already_fit(self):
+        self.assertFalse(sync_fit.needs_fit(
+            {"streams": {"sync_clock_fit": "sync/clock_fit_x.json"}}, False))
+
+    def test_needs_fit_true_when_unfit_or_missing(self):
+        self.assertTrue(sync_fit.needs_fit({"streams": {"phase3_task": "x"}}, False))
+        self.assertTrue(sync_fit.needs_fit(None, False))  # unreadable manifest -> fit
+
+    def test_summarize_exit_zero_without_failures(self):
+        results = [sync_fit.BundleFitResult("a", sync_fit.FIT_OK, "rate=1"),
+                   sync_fit.BundleFitResult("b", sync_fit.FIT_SKIPPED, "no fiducials")]
+        text, code = sync_fit.summarize(results)
+        self.assertEqual(code, 0)
+        self.assertIn("1 fit, 0 failed, 1 skipped", text)
+
+    def test_summarize_exit_nonzero_only_on_failed(self):
+        results = [sync_fit.BundleFitResult("a", sync_fit.FIT_OK, "ok"),
+                   sync_fit.BundleFitResult("b", sync_fit.FIT_FAILED, "too_few_events"),
+                   sync_fit.BundleFitResult("c", sync_fit.FIT_SKIPPED, "no fiducials")]
+        text, code = sync_fit.summarize(results)
+        self.assertEqual(code, 1)
+        self.assertIn("FAILED: b", text)
+
+    def test_fit_one_bundle_skips_already_fit(self):
+        with tempfile.TemporaryDirectory() as root:
+            b = _bare_bundle(root, "600_20260101_120000",
+                             streams={"sync_clock_fit": "sync/clock_fit_x.json"})
+            r = sync_fit.fit_one_bundle(b, refit=False)
+            self.assertEqual(r.bucket, sync_fit.FIT_SKIPPED)
+            self.assertIn("already fit", r.detail)
+
+    def test_fit_one_bundle_skips_when_no_video(self):
+        with tempfile.TemporaryDirectory() as root:
+            b = _bare_bundle(root, "600_20260101_120000")
+            r = sync_fit.fit_one_bundle(b, refit=False)
+            self.assertEqual(r.bucket, sync_fit.FIT_SKIPPED)
+            self.assertIn("no video", r.detail)
+
+    def test_run_all_over_videoless_root_skips_all_exit_zero(self):
+        with tempfile.TemporaryDirectory() as root:
+            _bare_bundle(root, "600_20260101_120000")
+            _bare_bundle(root, "601_20260102_120000",
+                         streams={"sync_clock_fit": "sync/clock_fit_y.json"})
+            log = os.path.join(root, "run.log")
+            code = sync_fit.run_all([root], log_path=log)
+            self.assertEqual(code, 0)                 # skips are not failures
+            self.assertTrue(os.path.isfile(log))
+            with open(log, encoding="utf-8") as f:
+                text = f.read()
+            self.assertIn("2 bundle(s)", text)
+            self.assertIn("0 fit, 0 failed, 2 skipped", text)
+
+
 def _make_bundle(root: str) -> str:
     """A throwaway bundle from the clip fixture: video/<id>.mp4 + sidecar +
     serial capture, laid out the way analyze_bundle expects."""

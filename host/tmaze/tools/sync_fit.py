@@ -58,9 +58,9 @@ import os
 import sys
 from dataclasses import asdict
 from datetime import datetime
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
 
-from tmaze.core.session import session_serial
+from tmaze.core.session import session_registry, session_serial
 from tmaze.core.session.session_log import SessionManifest
 from tmaze.core.sync import clockfit, led_map as LM, matching, pipeline
 from tmaze.core.sync import spans as S
@@ -444,17 +444,22 @@ def _atomic_write(path: str, text: str) -> None:
     os.replace(tmp, path)
 
 
-def register_sync_in_manifest(bundle: str, run: SyncRun) -> Optional[str]:
+def register_sync_in_manifest(bundle: str, run: SyncRun,
+                               *, good: bool = True) -> Optional[str]:
     """Announce the two ``sync/`` files in the bundle's session manifest.
 
     Reads ``session_<id>.json``, registers the ``sync_led_events`` /
-    ``sync_clock_fit`` streams (bundle-relative paths), and flips the time-anchor
+    ``sync_clock_fit`` streams (bundle-relative paths), and - only when ``good``
+    (a usable fit was produced; docs/decisions/0188) - flips the time-anchor
     ``fiducial.method`` to ``led-fit`` while KEEPING the ``pending`` note (led-fit
     is a ~9.5 ms software fit, not the sub-ms hardware sync FW-0018 still points
-    at). The fit numbers themselves stay in ``sync/clock_fit_<id>.json`` - the
-    manifest only points at them (ADR-0154). Atomic read-modify-write so the file
-    the rig wrote is never clobbered mid-write; idempotent. Returns the manifest
-    path on success, or None if there is no manifest to update."""
+    at). A FAILED fit still records the two files (so they are discoverable) but
+    leaves ``fiducial.method`` as ``host-t0`` - the manifest must not claim a
+    clock fit the numbers don't support. The fit numbers themselves stay in
+    ``sync/clock_fit_<id>.json`` - the manifest only points at them (ADR-0154).
+    Atomic read-modify-write so the file the rig wrote is never clobbered
+    mid-write; idempotent. Returns the manifest path on success, or None if there
+    is no manifest to update."""
     path = os.path.join(bundle, f"session_{run.sid}.json")
     if not os.path.isfile(path):
         return None
@@ -462,7 +467,8 @@ def register_sync_in_manifest(bundle: str, run: SyncRun) -> Optional[str]:
         m = SessionManifest.from_dict(json.load(fh))
     m.set_stream("sync_led_events", f"sync/led_events_{run.sid}.csv")
     m.set_stream("sync_clock_fit", f"sync/clock_fit_{run.sid}.json")
-    m.fiducial["method"] = FIDUCIAL_METHOD  # host-t0 -> led-fit; pending note kept
+    if good:
+        m.fiducial["method"] = FIDUCIAL_METHOD  # host-t0 -> led-fit; pending note kept
     _atomic_write(path, m.render())
     return path
 
@@ -621,6 +627,124 @@ def _selftest() -> int:
     return 0 if ok else 1
 
 
+# ------------------------------------------------------------ batch (--all)
+
+# The three buckets a bundle falls into in --all mode (docs/decisions/0188).
+FIT_OK = "fit"          # fiducials seen and a usable clock fit was produced
+FIT_FAILED = "failed"   # fiducials seen but no usable fit (poor/too-few/step)
+FIT_SKIPPED = "skipped"  # not attempted: no video/data, no fiducials, or already fit
+
+
+class BundleFitResult(NamedTuple):
+    """One bundle's outcome in a batch run: its id, which bucket, and a one-line
+    human detail (the fit numbers, the failure verdict, or why it was skipped)."""
+    sid: str
+    bucket: str
+    detail: str
+
+
+def _fit_is_good(run: SyncRun) -> bool:
+    """A usable clock fit: a fit exists AND the pipeline verdict is OK (a
+    host-clock step or too-few-events verdict is not usable)."""
+    return run.result.fit is not None and run.result.verdict == clockfit.VERDICT_OK
+
+
+def _manifest_dict(bundle: str, sid: str) -> Optional[dict]:
+    """Parse a bundle's ``session_<id>.json`` best-effort; None if absent/bad."""
+    path = os.path.join(bundle, f"session_{sid}.json")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return None
+
+
+def needs_fit(manifest: Optional[dict], refit: bool) -> bool:
+    """Whether a bundle should be (re)fit: always when ``refit``; otherwise only
+    when its manifest has no ``sync_clock_fit`` stream yet. A missing/unreadable
+    manifest counts as needing a fit (nothing recorded to skip on)."""
+    if refit:
+        return True
+    streams = (manifest or {}).get("streams") or {}
+    return "sync_clock_fit" not in streams
+
+
+def summarize(results: Sequence[BundleFitResult]) -> Tuple[str, int]:
+    """A human summary table + the process exit code. Exit is non-zero IFF a
+    bundle was ATTEMPTED but failed (fiducials seen, no usable fit) - a bundle
+    that could not be attempted (no video / no fiducials / already fit) is
+    SKIPPED and never fails the run (docs/decisions/0188)."""
+    fit = [r for r in results if r.bucket == FIT_OK]
+    failed = [r for r in results if r.bucket == FIT_FAILED]
+    skipped = [r for r in results if r.bucket == FIT_SKIPPED]
+    lines = [f"  {r.sid:>28}  {r.bucket:>7}  {r.detail}" for r in results]
+    if results:
+        lines.append("")
+    lines.append(f"  {len(fit)} fit, {len(failed)} failed, {len(skipped)} skipped "
+                 f"({len(results)} bundle(s))")
+    if failed:
+        lines.append("  FAILED: " + ", ".join(r.sid for r in failed))
+    return "\n".join(lines), (1 if failed else 0)
+
+
+def fit_one_bundle(bundle: str, *, refit: bool, **fit_kwargs) -> BundleFitResult:
+    """Fit a single bundle for batch mode and return its bucket + detail.
+
+    Skips a bundle that already carries a clock fit (unless ``refit``), that has
+    no video/serial data, or where no fiducials were detected (nothing to fit -
+    left ``host-t0`` with no orphan clock-fit written). Otherwise writes the two
+    ``sync/`` artifacts and registers the manifest (a good fit flips
+    ``fiducial.method`` to led-fit; a failed one records the files but stays
+    host-t0). Never raises for an expected missing input - those become SKIPPED."""
+    sid = bundle_id(bundle)
+    if not needs_fit(_manifest_dict(bundle, sid), refit):
+        return BundleFitResult(sid, FIT_SKIPPED, "already fit (use --refit)")
+    try:
+        run = analyze_bundle(bundle, **fit_kwargs)
+    except (FileNotFoundError, RuntimeError) as e:
+        return BundleFitResult(sid, FIT_SKIPPED, f"no video/data ({e})")
+    if not run.fiducials:
+        return BundleFitResult(sid, FIT_SKIPPED, "no fiducials in frame")
+    out_dir = os.path.join(bundle, "sync")
+    os.makedirs(out_dir, exist_ok=True)
+    write_led_events(os.path.join(out_dir, f"led_events_{sid}.csv"),
+                     led_event_rows(run), sid)
+    write_clock_fit(os.path.join(out_dir, f"clock_fit_{sid}.json"), run)
+    good = _fit_is_good(run)
+    register_sync_in_manifest(bundle, run, good=good)
+    if good:
+        fit = run.result.fit
+        return BundleFitResult(
+            sid, FIT_OK,
+            f"rate={fit.rate:.4f} MAD={fit.residuals.mad_ms:.1f}ms "
+            f"{fit.n_pairs} pairs")
+    return BundleFitResult(sid, FIT_FAILED, run.result.verdict)
+
+
+def run_all(roots: Sequence[str], *, refit: bool = False,
+            log_path: Optional[str] = None, **fit_kwargs) -> int:
+    """Fit every bundle under ``roots`` (batch mode). Scans the roots the same
+    way the registry does (``session_registry.scan_roots_with_root``,
+    de-duplicated by session id), fits each via :func:`fit_one_bundle`, prints a
+    per-bundle table + summary (also written to ``log_path`` when given), and
+    returns the process exit code (non-zero iff any bundle FAILED; see
+    :func:`summarize`)."""
+    pairs = session_registry.scan_roots_with_root([str(r) for r in roots])
+    results = [fit_one_bundle(bundle, refit=refit, **fit_kwargs)
+               for _root, bundle in pairs]
+    text, code = summarize(results)
+    report = f"sync_fit --all: scanned {len(pairs)} bundle(s)\n{text}\n"
+    print(report)
+    if log_path:
+        try:
+            with open(log_path, "w", encoding="utf-8") as fh:
+                fh.write(report)
+            print(f"  wrote {log_path}")
+        except OSError as e:
+            print(f"  (could not write log {log_path}: {e})")
+    return code
+
+
 # ------------------------------------------------------------------- main
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -653,13 +777,38 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--overlay", action="store_true",
                     help="also write a debug PNG (ROI + fiducials + LEDs on a still) to eyeball "
                          "against the physical marker corners; --map writes one automatically")
+    ap.add_argument("--all", action="store_true",
+                    help="batch mode: fit EVERY bundle under the given root "
+                         "(or the tracked recordings roots when none is given); "
+                         "skips already-fit bundles unless --refit")
+    ap.add_argument("--refit", action="store_true",
+                    help="with --all, re-fit bundles that already carry a clock fit")
     ap.add_argument("--selftest", action="store_true", help="run the synthetic self-check and exit")
     a = ap.parse_args(argv)
 
     if a.selftest:
         return _selftest()
+
+    if a.all:
+        from tmaze import paths
+        if a.bundle:
+            roots: List[str] = [a.bundle]
+        else:
+            roots = [str(p) for p in paths.phase3_recordings_roots()]
+        minutes = None if a.minutes <= 0 else a.minutes
+        log_dir = roots[0] if roots and os.path.isdir(roots[0]) else None
+        log_path = (os.path.join(log_dir,
+                    f"sync_fit_all_{datetime.now():%Y%m%d_%H%M%S}.log")
+                    if log_dir else None)
+        return run_all(roots, refit=a.refit, log_path=log_path,
+                       start_min=a.start_min, minutes=minutes,
+                       tol_s=a.tol_ms / 1000.0,
+                       min_visible_s=a.min_visible_ms / 1000.0,
+                       min_matched=a.min_matched, min_pairs=a.min_pairs,
+                       serial_path=a.serial)
+
     if not a.bundle:
-        ap.error("a bundle folder is required (or use --selftest)")
+        ap.error("a bundle folder is required (or use --all / --selftest)")
     if not os.path.isdir(a.bundle):
         ap.error(f"not a folder: {a.bundle}")
 
@@ -712,7 +861,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if a.dry_run:
         print("  (dry run: the bundle + its manifest were not modified)")
     else:
-        manifest_path = register_sync_in_manifest(a.bundle, run)
+        manifest_path = register_sync_in_manifest(a.bundle, run,
+                                                  good=_fit_is_good(run))
         if manifest_path:
             print(f"  registered sync streams + fiducial.method=led-fit in {manifest_path}")
         else:
