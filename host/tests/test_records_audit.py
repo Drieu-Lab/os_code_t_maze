@@ -242,6 +242,50 @@ class TestWeightMismatches(unittest.TestCase):
         self.assertEqual(records_audit.weight_mismatches(rows, None), [])
 
 
+class TestUnfittedSessions(unittest.TestCase):
+    """The v4 sync gate (docs/decisions/0188): flag only `failed` fits older than
+    the grace window; never `led-fit`, `host-t0`, or a blank sync_method."""
+
+    def setUp(self):
+        import datetime as dt
+        self.now = dt.datetime(2026, 9, 20, 12, 0, 0)   # fixed 'today'
+
+    def test_flags_only_old_failed_fits(self):
+        rows = [
+            # failed + old (35 days) -> flagged
+            {"session_id": "600_20260816_100000", "animal": "600",
+             "date": "2026-08-16", "sync_method": "failed"},
+            # failed but recent (within 14-day grace) -> not flagged
+            {"session_id": "600_20260918_100000", "animal": "600",
+             "date": "2026-09-18", "sync_method": "failed"},
+            # a usable fit -> never flagged
+            {"session_id": "600_20260801_100000", "animal": "600",
+             "date": "2026-08-01", "sync_method": "led-fit"},
+            # host-t0 (no fiducials / never run) -> gated out, never flagged
+            {"session_id": "600_20260701_100000", "animal": "600",
+             "date": "2026-07-01", "sync_method": "host-t0"},
+            # pre-v4 registry (no column) -> nothing to judge
+            {"session_id": "600_20260601_100000", "animal": "600",
+             "date": "2026-06-01"},
+        ]
+        out = records_audit.unfitted_sessions(rows, now=self.now)
+        self.assertEqual(out, [("600_20260816_100000", "600", "2026-08-16")])
+
+    def test_grace_window_is_configurable(self):
+        rows = [{"session_id": "600_20260918_100000", "animal": "600",
+                 "date": "2026-09-18", "sync_method": "failed"}]  # 2 days old
+        self.assertEqual(records_audit.unfitted_sessions(rows, now=self.now), [])
+        self.assertEqual(
+            len(records_audit.unfitted_sessions(rows, now=self.now, age_days=1)), 1)
+
+    def test_wired_into_build_report(self):
+        rows = [{"session_id": "600_20260816_100000", "animal": "600",
+                 "date": "2026-08-16", "sync_method": "failed"}]
+        sections = records_audit.build_report([], [], rows, None, None)
+        sec = next(s for s in sections if s.id == "unfitted_sync")
+        self.assertEqual(sec.count, 1)
+
+
 class TestSessionTriples(unittest.TestCase):
     def test_registry_first_then_annot_only_skip_ignored_and_dups(self):
         registry = [{"session_id": "a", "animal": "600", "date": "2026-08-07"},

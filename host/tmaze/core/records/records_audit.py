@@ -64,6 +64,15 @@ CHURN_WINDOW_S = 300.0
 # (scales read whole grams). See docs/decisions/0159.
 WEIGHT_MISMATCH_G = 1.0
 
+# How long a session's clock fit may stay FAILED before the audit flags it - a
+# grace period so a just-recorded session the operator hasn't fit yet isn't
+# nagged. 14 days: a fit that hasn't taken in two weeks needs attention (re-run
+# sync_fit, or acknowledge if it's genuinely unfittable). Only `failed` sessions
+# are gated this way; `host-t0` (no LED fiducials in frame / never attempted) is
+# never flagged, so the check stays noise-free while LED-in-FOV coverage is
+# incomplete. See docs/decisions/0188.
+UNFITTED_AGE_DAYS = 14.0
+
 # A clock-time cell looks like "4:30pm", "16:04", "3:15PM", "5:30", or a bare
 # "6pm"/"1 PM" (hour with minutes, or hour with am/pm - a lone number isn't a
 # time). Anything else non-blank in a time column (e.g. "8.46ml rig; No suppl",
@@ -333,6 +342,38 @@ def weight_mismatches(rows: Sequence[dict], daily: Optional[Any],
     return out
 
 
+def unfitted_sessions(rows: Sequence[dict],
+                      now: Optional[_dt.datetime] = None,
+                      age_days: float = UNFITTED_AGE_DAYS
+                      ) -> List[Tuple[str, str, str]]:
+    """``(session_id, animal, date)`` for sessions whose video<->firmware clock
+    fit was ATTEMPTED but did not take (registry ``sync_method == 'failed'``) and
+    whose start is more than ``age_days`` old.
+
+    GATED on evidence a fit is possible (docs/decisions/0188): a bundle is only
+    ``failed`` when LED fiducials were detected in-frame but no usable fit came
+    out - genuinely actionable. ``host-t0`` (no fiducials seen, or never run
+    through ``sync_fit``) is NOT flagged, so the check produces no noise while
+    LED-in-FOV coverage across the rig history is still incomplete. The age gate
+    is a grace period; a session with no parseable start is included (can't
+    grace-gate it). Empty when no row carries a ``sync_method`` (a pre-v4
+    registry) - nothing to judge."""
+    now = now or _dt.datetime.now()
+    cutoff = now - _dt.timedelta(days=age_days)
+    out: List[Tuple[str, str, str]] = []
+    for row in rows or []:
+        if str(row.get("sync_method", "") or "").strip() != "failed":
+            continue
+        t = _start_time(row)
+        if t is not None and t > cutoff:
+            continue                       # too recent - within the grace period
+        sid = str(row.get("session_id", "") or "").strip()
+        if sid:
+            out.append((sid, str(row.get("animal", "") or "").strip(),
+                        str(row.get("date", "") or "").strip()))
+    return out
+
+
 # --------------------------------------------------------------- aggregation
 # The detectors above each find one KIND of drift. The pieces below assemble
 # them into a single structured report so every caller - the CLI shell
@@ -527,6 +568,16 @@ def build_report(triples: Sequence[Tuple[str, str, str]],
         "the session ended without Stop (crash/kill) or predates the summary "
         "file; behaviour is unknown for it - acknowledge, or ignore-list it if "
         "it wasn't a real session.", acked))
+
+    sid = "unfitted_sync"
+    findings = [Finding(f"{sid}:{s}", f"{s}  ({a} {d})")
+                for s, a, d in unfitted_sessions(kept_registry)]
+    sections.append(_section(
+        sid, f"Sessions with a failed video<->firmware clock fit "
+        f"(> {UNFITTED_AGE_DAYS:.0f} days old)", findings,
+        "re-run 'python -m tmaze.tools.sync_fit <bundle> --refit' (or the "
+        "Records Manager 'Fit pending sessions' button); acknowledge if the fit "
+        "genuinely can't converge for that session.", acked))
 
     sid = "weight_mismatch"
     if daily is not None and getattr(daily, "available", False):
