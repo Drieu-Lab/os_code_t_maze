@@ -152,7 +152,7 @@ class TestJoinPrefersBundleState(unittest.TestCase):
             self.assertEqual(r["supp_water_ml"], "2.5")
             self.assertEqual(r["supp_access_min"], "2")
             self.assertIn("supp_water_ml", session_registry.REGISTRY_COLUMNS)
-            self.assertEqual(session_registry.SCHEMA_VERSION, 3)
+            self.assertEqual(session_registry.SCHEMA_VERSION, 4)
             self.assertEqual(r["water_on"], "5:30pm")
             self.assertEqual(r["water_off"], "6pm")
 
@@ -191,6 +191,9 @@ class TestGracefulDegradation(unittest.TestCase):
             self.assertIsNone(r["weight_g"])
             self.assertIsNone(r["accuracy_cum"])
             self.assertIsNone(r["task_reward_ml"])
+            # No sync/ artifact -> host-t0, blank residual (docs/decisions/0188).
+            self.assertEqual(r["sync_method"], session_registry.SYNC_HOST_T0)
+            self.assertIsNone(r["sync_residual_ms"])
             self.assertEqual(tag_rows, [])
 
     def test_non_bundle_dirs_skipped(self):
@@ -200,6 +203,49 @@ class TestGracefulDegradation(unittest.TestCase):
             rows, _ = session_registry.build(root)
             self.assertEqual([r["session_id"] for r in rows],
                              ["600_20260806_120000"])
+
+
+def _write_clock_fit(bundle: str, sid: str, doc: dict) -> None:
+    """Drop a ``sync/clock_fit_<id>.json`` into an existing bundle (docs/decisions/0188)."""
+    os.makedirs(os.path.join(bundle, "sync"), exist_ok=True)
+    with open(os.path.join(bundle, "sync", f"clock_fit_{sid}.json"), "w",
+              encoding="utf-8") as fh:
+        json.dump(doc, fh)
+
+
+class TestSyncColumns(unittest.TestCase):
+    """The v4 sync columns read the bundle's clock-fit artifact, not the manifest
+    (docs/decisions/0188): a usable OK fit is led-fit + its MAD; an unusable fit
+    is failed; no artifact is host-t0."""
+
+    def test_good_fit_is_led_fit_with_residual(self):
+        with tempfile.TemporaryDirectory() as root:
+            sid = "600_20260903_120000"
+            b = _make_bundle(root, sid, summary=_summary())
+            _write_clock_fit(b, sid, {"verdict": "ok",
+                                      "fit": {"rate": 1e6,
+                                              "residual_ms": {"mad_ms": 9.4}}})
+            r = _row_by_id(session_registry.build(root)[0], sid)
+            self.assertEqual(r["sync_method"], session_registry.SYNC_LED_FIT)
+            self.assertEqual(r["sync_residual_ms"], 9.4)
+
+    def test_unusable_fit_is_failed_blank_residual(self):
+        with tempfile.TemporaryDirectory() as root:
+            sid = "601_20260903_120000"
+            b = _make_bundle(root, sid, summary=_summary(animal="601"))
+            # fiducials were seen but the fit didn't take (null fit / bad verdict).
+            _write_clock_fit(b, sid, {"verdict": "too_few_events", "fit": None})
+            r = _row_by_id(session_registry.build(root)[0], sid)
+            self.assertEqual(r["sync_method"], session_registry.SYNC_FAILED)
+            self.assertIsNone(r["sync_residual_ms"])
+
+    def test_ok_verdict_but_null_fit_is_failed(self):
+        with tempfile.TemporaryDirectory() as root:
+            sid = "602_20260903_120000"
+            b = _make_bundle(root, sid, summary=_summary(animal="602"))
+            _write_clock_fit(b, sid, {"verdict": "ok", "fit": None})
+            r = _row_by_id(session_registry.build(root)[0], sid)
+            self.assertEqual(r["sync_method"], session_registry.SYNC_FAILED)
 
 
 class TestTagOutputs(unittest.TestCase):

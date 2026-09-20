@@ -91,7 +91,9 @@ from tmaze.core.session import session_notes
 # and a `root` column is appended.
 # v3 (docs/decisions/0160): `supp_water_ml` + `supp_access_min` inserted after
 # the legacy free-text `supp_water` (the daily table's v4 split cells).
-SCHEMA_VERSION = 3
+# v4 (docs/decisions/0188): `sync_method` + `sync_residual_ms` appended (each
+# session's video<->firmware clock-fit status, from the LED-fit pipeline).
+SCHEMA_VERSION = 4
 
 # The fixed (non-tag) columns of session_registry.csv, in output order. The
 # per-tag wide columns (tag_<name>) are appended from the current vocabulary at
@@ -116,10 +118,21 @@ REGISTRY_COLUMNS: Tuple[str, ...] = (
     "total_excursions", "stem_choices", "nonstem_choices", "stem_compliance",
     # sticky session metadata (ADR-0079)
     "trainer", "stage", "stage_source", "reward_type",
+    # cross-stream clock sync (v4; docs/decisions/0188). `sync_method` is
+    # `led-fit` (a usable video<->firmware fit was produced), `failed` (fiducials
+    # seen but no usable fit - actionable, flagged by records_check), or `host-t0`
+    # (never fit / no LED fiducials in frame). `sync_residual_ms` is the fit's
+    # residual spread (MAD, ms) when `led-fit`, else blank.
+    "sync_method", "sync_residual_ms",
     # provenance: the bundle folder RELATIVE to its recordings root (v2; was an
     # absolute path in v1) + the root it was found under
     "bundle", "root",
 )
+
+# sync_method values (docs/decisions/0188).
+SYNC_LED_FIT = "led-fit"
+SYNC_FAILED = "failed"
+SYNC_HOST_T0 = "host-t0"
 
 TAGS_COLUMNS: Tuple[str, ...] = ("session_id", "tag", "count")
 
@@ -408,6 +421,7 @@ def bundle_row(bundle_dir: str, daily: Optional[Any] = None,
 
     _fill_cued(row, summary)
     _fill_locomotion(row, summary.get("locomotion") or {})
+    _fill_sync(row, bundle_dir)
 
     row["trainer"] = meta.get("trainer")
     row["stage"] = meta.get("stage")
@@ -474,6 +488,27 @@ def _fill_locomotion(row: Dict[str, Any], loco: Dict[str, Any]) -> None:
     row["stem_choices"] = loco.get("stem_choices")
     row["nonstem_choices"] = loco.get("nonstem_choices")
     row["stem_compliance"] = loco.get("compliance_cum")
+
+
+def _fill_sync(row: Dict[str, Any], bundle_dir: str) -> None:
+    """Cross-stream clock-sync columns from the bundle's LED clock-fit artifact
+    (``sync/clock_fit_<id>.json``; docs/decisions/0188). Derived from the fit's
+    OWN numbers (not the manifest's ``fiducial.method``, which older bundles
+    flipped to led-fit even on a failed fit): a present fit with the OK verdict is
+    ``led-fit`` (residual = its MAD in ms); a present-but-unusable fit is
+    ``failed``; no clock-fit file at all is ``host-t0``. All reads best-effort."""
+    row["sync_method"] = SYNC_HOST_T0
+    fit_doc = _read_json(_find_one(bundle_dir, "sync", "clock_fit_*.json"))
+    if not fit_doc:
+        return
+    fit = fit_doc.get("fit")
+    if isinstance(fit, dict) and fit_doc.get("verdict") == "ok":
+        row["sync_method"] = SYNC_LED_FIT
+        resid = fit.get("residual_ms")
+        if isinstance(resid, dict):
+            row["sync_residual_ms"] = resid.get("mad_ms")
+    else:
+        row["sync_method"] = SYNC_FAILED
 
 
 def _tally_tags(notes_text: str) -> Dict[str, int]:

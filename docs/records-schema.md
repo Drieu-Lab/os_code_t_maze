@@ -22,8 +22,8 @@ provenance-labelled channels**, never summed (see the registry below).
 | `records_changes.csv` | resources · `records/animal/` | appended by every records write path (Records Manager saves; builders' `--export` / `--import-annotations`) | 1 (comment line) | 0155 |
 | `animal_state.json` | code · per-bundle `config/` | `session_controller` at Start (core `animal_state.py`) | 2 | 0077, 0101 |
 | `session_meta.json` | code · per-bundle `config/` | `session_controller` at Start (core `session_meta.py`) | 1 | 0079 |
-| `session_registry.csv` | code · `host/data/phase3_recordings/` (git-ignored) | `build_session_registry.py` (core `session_registry.py`) | 3 (comment line + provenance header) | 0081, 0157, 0160 |
-| `session_registry_tags.csv` | code · `host/data/phase3_recordings/` (git-ignored) | `build_session_registry.py` | 3 (comment line; tracks the registry's number) | 0081, 0157 |
+| `session_registry.csv` | code · `host/data/phase3_recordings/` (git-ignored) | `build_session_registry.py` (core `session_registry.py`) | 4 (comment line + provenance header) | 0081, 0157, 0160, 0188 |
+| `session_registry_tags.csv` | code · `host/data/phase3_recordings/` (git-ignored) | `build_session_registry.py` | 4 (comment line; tracks the registry's number) | 0081, 0157 |
 
 Related per-bundle streams these join (not re-defined here): the session manifest
 `session_<id>.json` (ADR-0048), the behavioural summary `summary/session_summary_<id>.json`
@@ -175,11 +175,11 @@ Sticky human bookkeeping frozen into the bundle at Start (one per bundle):
 typed a sub-stage), so a reader can tell a derived stage from a typed one
 (ADR-0079).
 
-## `session_registry.csv` (v3)
+## `session_registry.csv` (v4)
 
 The cross-session index — one row per bundle, a full [idempotent
 rebuild](glossary.md#idempotent-rebuild) of everything under the recordings roots
-(ADR-0081, 0113). The file opens with a `# schema_version=3` comment line followed
+(ADR-0081, 0113). The file opens with a `# schema_version=4` comment line followed
 by the build's **provenance header** (ADR-0157) — `# built_at=<local ISO time>`,
 `# code_commit=<short sha, "+dirty" if uncommitted changes, or unknown>`,
 `# roots=<JSON list of the folders scanned, in scan order>`, and one
@@ -211,6 +211,13 @@ back). Then these columns:
   `stem_choices`, `nonstem_choices`, `stem_compliance` (= `compliance_cum`).
 - **Session metadata** (from `session_meta.json`): `trainer, stage, stage_source,
   reward_type`.
+- **Cross-stream clock sync** (v4; from the bundle's `sync/clock_fit_<id>.json`,
+  written by `sync_fit`; ADR-0188): `sync_method` ∈ `led-fit` (a usable
+  video↔firmware clock fit exists) | `failed` (LED fiducials were seen but no
+  usable fit — actionable, flagged by `records_check`) | `host-t0` (never fit, or
+  no LED fiducials in frame), and `sync_residual_ms` (the fit's residual spread,
+  MAD in ms, when `led-fit`; blank otherwise). Derived from the fit's own numbers,
+  not the manifest's `fiducial.method`.
 - **Provenance:** `bundle` (the session folder **relative to its root** — for a
   bundle directly under a root, just the session id) and `root` (the absolute
   recordings root it was found under; with duplicates across roots, the
@@ -220,10 +227,10 @@ back). Then these columns:
   vocabulary (0 when the session has none) — a convenience projection of the tidy
   file below; the column set follows the vocabulary and so is not fixed.
 
-## `session_registry_tags.csv` (v3)
+## `session_registry_tags.csv` (v4)
 
 The [tidy](glossary.md#tidy-long-format), churn-proof form of the tag tallies —
-stable across vocabulary edits. Leading `# schema_version=3` comment line (the
+stable across vocabulary edits. Leading `# schema_version=4` comment line (the
 number tracks the registry's; the columns are unchanged since v1), then:
 
 `session_id, tag, count` — one row per `(session, tag)`, `count` summing that
