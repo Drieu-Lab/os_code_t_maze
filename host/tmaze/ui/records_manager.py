@@ -109,6 +109,11 @@ _ENTRY_LABELS = {
 
 _BUILDER_TIMEOUT_S = 180
 
+# Fitting every un-fit bundle's video<->firmware clocks (sync_fit --all) decodes
+# LEDs out of each session's video, so a whole-history pass can be minutes; give
+# it a generous ceiling before we call the subprocess hung (docs/decisions/0188).
+_FIT_ALL_TIMEOUT_S = 3600
+
 # How often the UI thread checks the background-result queue (ms). 100 ms is
 # imperceptible to the operator but keeps the poll loop cheap (docs/decisions/0163).
 _ASYNC_POLL_MS = 100
@@ -304,6 +309,10 @@ class RecordsManager:
         # pattern (docs/decisions/0163) - safer than calling root.after from the
         # worker, which Tk does not officially guarantee across threads.
         self._async_queue: "queue.Queue" = queue.Queue()
+        # Separate queue for the "Fit pending sessions" run (sync_fit --all): it
+        # touches bundle files, NOT the records CSVs, so it reports on its own
+        # path rather than the Generate/Import chain's (docs/decisions/0188).
+        self._fit_queue: "queue.Queue" = queue.Queue()
         # Sessions tab selection state (session_id of the selected row + the
         # per-Treeview-item registry rows behind it).
         self.current_session_id = ""
@@ -403,8 +412,13 @@ class RecordsManager:
         b_integrity = ttk.Button(bar, text="Integrity check",
                                  command=self._integrity_check)
         b_integrity.pack(side="left", padx=(6, 0))
+        # Fit pending sessions: run sync_fit --all to line up each un-fit
+        # session's video<->firmware clocks from the board LEDs (docs/decisions/0188).
+        b_fit = ttk.Button(bar, text="Fit pending sessions",
+                           command=self._on_fit_pending)
+        b_fit.pack(side="left", padx=(6, 0))
         # These are the buttons locked while a build runs (Reload stays live).
-        self._toolbar_buttons = [b_generate, b_import, b_integrity]
+        self._toolbar_buttons = [b_generate, b_import, b_integrity, b_fit]
         # Operator: WHO is editing. Required before any save/import; every
         # change is logged under this name (ADR-0155). Fed by the tracked
         # host/operators.json; the last choice is remembered per machine.
@@ -2858,6 +2872,57 @@ class RecordsManager:
             return
         self._run_async("Importing from Excel...",
                         lambda: self._do_import(operator))
+
+    def _on_fit_pending(self) -> None:
+        """Fit every un-fit session's video<->firmware clocks (``sync_fit --all``)
+        off the UI thread.
+
+        Unlike Generate/Import this touches BUNDLE files (each session's ``sync/``
+        artifacts + manifest), not the records CSVs, so it reports on its own path
+        (``_drain_fit_queue``) rather than the Generate/Import chain's
+        ``_async_done`` - which would wrongly reload records data and re-mark the
+        Excel workbook in-sync. Already-fit bundles are skipped; run 'Generate
+        files' afterwards to refresh the registry's sync columns
+        (docs/decisions/0188)."""
+        if self._busy:
+            return
+        self._busy = True
+        self._set_toolbar_enabled(False)
+        self._set_status("Fitting pending sessions (video<->firmware clocks)...")
+
+        def worker():
+            try:
+                proc = subprocess.run(
+                    [sys.executable, "-m", "tmaze.tools.sync_fit", "--all"],
+                    capture_output=True, text=True, timeout=_FIT_ALL_TIMEOUT_S)
+                ok = proc.returncode == 0
+                text = (proc.stdout or "").strip() or "(no output)"
+                if (proc.stderr or "").strip():
+                    text += "\n\nERR:\n" + proc.stderr.strip()
+            except (OSError, subprocess.SubprocessError) as e:
+                ok, text = False, f"{type(e).__name__}: {e}"
+            self._fit_queue.put((ok, text))
+
+        threading.Thread(target=worker, daemon=True).start()
+        self.root.after(_ASYNC_POLL_MS, self._drain_fit_queue)
+
+    def _drain_fit_queue(self) -> None:
+        """Poll the fit-run queue on the UI thread; report when the run finishes.
+
+        A non-zero exit means at least one bundle was ATTEMPTED but its fit failed
+        (not a crash) - so it's a "some failed" result, not an error dialog."""
+        try:
+            ok, text = self._fit_queue.get_nowait()
+        except queue.Empty:
+            self.root.after(_ASYNC_POLL_MS, self._drain_fit_queue)
+            return
+        self._busy = False
+        self._set_toolbar_enabled(True)
+        self._set_status("Fit complete." if ok
+                         else "Fit finished - some sessions could not be fit.")
+        self._show_result_dialog(
+            text + "\n\nRun 'Generate files' to refresh the registry's sync "
+            "columns.", ok)
 
     def _on_close(self) -> None:
         """Window-close guard: warn on a running build or unsaved edits (#3)."""
