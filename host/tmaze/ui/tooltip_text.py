@@ -380,9 +380,13 @@ TIPS: Dict[str, Entry] = {
                    "sounds once the rat is back at the hub and heads up the stem.",
     "phase3.repeat": "Re-run the CURRENT trial: cut the cues and clear this trial's "
                      "recorded fields so it starts clean, WITHOUT advancing. The "
-                     "cue re-arms on the next up-the-stem run from the hub.",
+                     "cue re-arms on the next up-the-stem run from the hub. Disabled "
+                     "while an intervention or probe block is running (a re-scored "
+                     "trial would change the block's length; see docs/decisions/0187).",
     "phase3.back": "Step back one trial (undo an accidental advance) and clear that "
-                   "trial's recorded fields so it can be re-run cleanly.",
+                   "trial's recorded fields so it can be re-run cleanly. Disabled "
+                   "while an intervention or probe block is running (a re-scored "
+                   "trial would change the block's length; see docs/decisions/0187).",
     "phase3.extend": "Append one more balanced block of trials to the plan, for "
                      "when the rat runs past the planned count. Append-only: the "
                      "trials already run are untouched (docs/decisions/0059).",

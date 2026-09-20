@@ -2216,7 +2216,17 @@ the chosen thresholds/defaults.
 
 ### FW-0044: Closed-loop scheduler rollback on a manual scored re-run
 
-- **Status:** Deferred
+- **Status:** Deferred — NARROWED by [ADR-0187](decisions/0187-disable-hand-edits-during-active-blocks.md)
+  (Increment 6c). The *sensitive* case is now prevented rather than reconciled:
+  hand Repeat/Back are DISABLED while an intervention or probe block is actually
+  running, so a re-scored trial can no longer double-count into a block's
+  3-correct exit counter and change its LENGTH. What remains for a rollback is the
+  minor `NORMAL`-state case (a scored edit nudges the bias/alternation window by
+  ~1/window, changing *when* the next block fires), still surfaced by the ADR-0119
+  note and not corrected. A future revisit should also weigh whether hand scored
+  edits should exist at all during closed-loop learning (the operator's stance:
+  the tracker is reliable, mis-scores aren't observed, and ideally the animal sees
+  no manual interventions) — which may retire this item rather than implement it.
 - **Date added:** 2026-08-26
 - **Author / Agent:** Agent (Cursor) on behalf of Celine
 - **Area / modules:** `host/tmaze/core/phase3/` (`debias.py`, `alternation.py`,
@@ -2224,7 +2234,8 @@ the chosen thresholds/defaults.
   `phase3_task.py`/`phase3_controller.py`
 - **Related ADRs:** [ADR-0119](decisions/0119-trial-edit-append-only-history.md),
   [ADR-0086](decisions/0086-phase3-debias-blocks.md),
-  [ADR-0107](decisions/0107-phase3-alternation-blocks.md)
+  [ADR-0107](decisions/0107-phase3-alternation-blocks.md),
+  [ADR-0187](decisions/0187-disable-hand-edits-during-active-blocks.md)
 
 **Motivation / context.** ADR-0119 made trial edits (Repeat/Back) preserve the
 animal's real behavior append-only, and un-counts the accuracy tallies for a

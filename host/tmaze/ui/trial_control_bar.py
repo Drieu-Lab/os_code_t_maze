@@ -139,6 +139,9 @@ class TrialControlBar:
         Pause label. Skip/Repeat/Back/Extend/Pause need a live (armed) session;
         Back additionally needs a trial to go back to; Restart only needs a
         session to have been armed at least once (its rows persist while disarmed).
+        Repeat/Back are additionally DISABLED while an intervention or probe block
+        is running, so a re-scored trial can't change the block's length
+        (docs/decisions/0187).
         """
         try:
             state = self._state_getter() if self._state_getter else None
@@ -162,10 +165,22 @@ class TrialControlBar:
         # probe fires (docs/decisions/0137). See probe_blocks.py.
         probe_enabled = bool(has_state and getattr(state, "probe_enabled", False))
         probe_armed = bool(getattr(state, "probe_armed", True)) if has_state else True
+        probe_active = bool(has_state
+                            and getattr(state, "probe_state", "NORMAL") == "ACTIVE")
+        # Hand Repeat/Back are DISABLED while a closed-loop scheduler block is
+        # actually running - an intervention block (side-bias / de-alternation) or a
+        # probe block. Re-running a SCORED trial would feed the scheduler a second
+        # outcome for that index, and inside a block that also perturbs the
+        # 3-correct exit counter, changing the block's LENGTH (the sensitive case).
+        # We only guard the ACTIVE-block window: in NORMAL the edit is still allowed
+        # and any bias-window drift is surfaced by the ADR-0119 note in
+        # _supersede_trial. See docs/decisions/0187 (and FW-0044 for a fuller
+        # rollback, deferred). Steer an active block with the block overrides / Skip.
+        editing_locked = in_block or probe_active
         enabled = {
             "skip": armed,
-            "repeat": armed,
-            "back": armed and current > 0,
+            "repeat": armed and not editing_locked,
+            "back": armed and current > 0 and not editing_locked,
             "extend": armed,
             "restart": has_state,
             "pause": armed,
