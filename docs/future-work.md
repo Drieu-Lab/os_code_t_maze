@@ -119,6 +119,8 @@ criteria).
 | [FW-0065](#fw-0065-show-age-where-it-matters-and-decide-the-remaining-biographical-fields) | Show the ADR-0161 age on the Sessions tab / dashboard; add sex/strain/vendor to `animals.json` only when a reader exists | `core/session/session_detail.py`, `core/records/{dashboard,animals}.py`, Records Manager | Proposed |
 | [FW-0066](#fw-0066-record-the-measured-db-and-meter-placement-with-the-cue-volume-calibration) | Record the measured dB (+ meter / mic placement notes) alongside the per-cue gains, mirroring the measured-frequency fields | `host/cue_calibration.json` schema, the cue-calibration UI/tool, `bundle_format` | Proposed |
 | [FW-0067](#fw-0067-live-central-well-lick-trace-in-the-gui) | Live central-well lick trace in the GUI (replaces eyeballing the retired `rig_logger` console) | Phase 3 live traces / Session panel / Rig View (`ui/`, `core/phase3/`) | Proposed |
+| [FW-0068](#fw-0068-remove-the-deprecated-firmware-full-task) | Remove the deprecated firmware Full task (unused since vision-driven Phase 3; polarity-sensitive FSM) at the next reflash | `firmware/cue-guided-task` (`task_core.h` FSM, `SESSION_SUMMARY`, `MODE,FULL`, handshake), `PROTOCOL.md`, host `protocol.classify` | Deprecated (docs 6f); removal deferred to a reflash |
+| [FW-0069](#fw-0069-phase-3-absorbs-phases-12-as-stages) | Phase 3 absorbs Phases 1-2 as configurable stages (one engine, one trial CSV from day one for the longitudinal analysis) | `core/phase3/{phase3_task,phase3_config}.py`, `core/rules/rules_engine.py`, `ui/rules_view.py` | Proposed (design before the next cohort) |
 
 ## Entries
 
@@ -3424,6 +3426,121 @@ ticks.
 
 **ADR needed?** Small - a UI-placement note, or fold into an existing live-trace
 ADR when built.
+
+### FW-0068: Remove the deprecated firmware Full task
+
+- **Status:** Deprecated (marked in the docs; removal deferred to a reflash)
+- **Date added:** 2026-09-20
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** `firmware/cue-guided-task/` (`task_core.h` trial FSM,
+  `SESSION_SUMMARY`, the `MODE,FULL` command, the `SEED`/`SEQ_*`/`MODE,FULLTASK`
+  handshake block), `firmware/PROTOCOL.md`, `firmware/README.md`, and the host
+  `protocol.classify` tokens that recognise those lines
+- **Related ADRs:** [ADR-0046](decisions/0046-host-owned-phase3-free-roam.md)
+  (host-owned Phase 3 over Free Roam - what replaced the firmware FSM),
+  [ADR-0164](decisions/0164-beam-lick-state-polarity.md) (the S/L polarity flip
+  the FSM edges depend on), [ADR-0007](decisions/0007-central-reward.md)
+
+**Motivation / context.** The firmware once ran the whole cued task itself
+(`Mode::FullTask`: it built the trial sequence, drove the choice/return FSM,
+scored, rewarded, and emitted `SESSION_SUMMARY`). Since ADR-0046 the task is
+**host-owned Phase 3** running over firmware **Free Roam** - the vision pipeline
+decides trials/cues/rewards and the firmware just actuates. The Full-task FSM has
+been unused in every real session since, is not exercised by tests, and its
+beam-driven trial edges are **polarity-sensitive** (they depend on the S/L
+convention ADR-0164 just corrected), so leaving dead, convention-fragile code in
+the hot loop is a comprehension-and-safety liability. This is the review's T4
+finding: rather than *fix* the Full-task FSM for the new polarity, we **retire**
+it. Marked deprecated now (docs-only, 6f); the actual code removal rides the next
+firmware reflash so it lands with a single `PROTO_VERSION` bump + ADR.
+
+**Sketch of approach (at the reflash).** Remove the `Mode::FullTask` branch and
+its trial FSM from `task_core.h`; drop the `MODE,FULL`/`MODE,FULLTASK` command +
+handshake and the `SEED`/`SEQ_START`/`SEQ`/`SEQ_END` sequence dump and
+`SESSION_SUMMARY` line; keep Free Roam + the host cue/TTL/reward actuation path
+(everything host-owned Phase 3 uses). Bump `PROTO_VERSION`, update `PROTOCOL.md`
+(delete the Full-task rows) and the host `protocol.classify` (drop the now-dead
+`SEQ_*`/`SESSION_SUMMARY`/`MODE,FULLTASK` tokens, or keep them as
+tolerated-legacy for reading old logs). One ADR records the removal.
+
+**Removal checklist.**
+- [ ] `task_core.h`: delete the Full-task FSM (trial start/choice/return/score
+  states) and any `Mode::FullTask` dispatch.
+- [ ] Command parser: remove `MODE,FULL`; keep `MODE,FREE` (or make Free Roam the
+  only mode and drop the `MODE` command).
+- [ ] Handshake/emit: remove the `SEED` + `SEQ_START`/`SEQ`/`SEQ_END` dump,
+  `MODE,FULLTASK` marker, and `SESSION_SUMMARY`.
+- [ ] `PROTOCOL.md`: delete the Full-task session block + the `SEQ_*` /
+  `SESSION_SUMMARY` / `MODE,FULLTASK` rows and the `MODE,FULL` command row.
+- [ ] Host `protocol.classify`: drop or mark legacy-only the tokens above; keep a
+  reader path for pre-removal logs if any are still analysed.
+- [ ] `PROTO_VERSION` bump + ADR + `firmware/README.md` update.
+
+**Evaluation / acceptance.** A Free-Roam-only firmware builds and a host-owned
+Phase 3 session runs end-to-end (cues, TTLs, rewards, bundle) unchanged; no host
+code path references the removed tokens; `PROTOCOL.md` <-> `protocol.classify`
+drift test (Increment 8b) passes with the reduced vocabulary.
+
+**Effort / risk.** Low-moderate: the FSM is self-contained and already dormant,
+but removal is a reflash (hardware in the loop) so it batches with Reflash A
+(Increment 7e). Risk: a forgotten host consumer of a removed token - the 8b drift
+test guards this.
+
+**Open questions.** Keep `MODE`/Free-Roam as a concept or make the firmware
+single-mode? Retain the legacy tokens in `classify` for old-log reading, or drop
+them and rely on a pinned old host? Both decided at the reflash ADR.
+
+### FW-0069: Phase 3 absorbs Phases 1-2 as stages
+
+- **Status:** Proposed (design before the next cohort)
+- **Date added:** 2026-09-20
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** `host/tmaze/core/phase3/{phase3_task,phase3_config}.py`,
+  `host/tmaze/core/rules/rules_engine.py`, `host/tmaze/ui/rules_view.py`
+- **Related ADRs:** [ADR-0046](decisions/0046-host-owned-phase3-free-roam.md),
+  [ADR-0023](decisions/0023-position-based-rules-engine.md) (the Rules engine that
+  runs the earlier shaping phases), the bundle-format ADRs 0124/0182
+
+**Motivation / context.** Early shaping (Phase 1 = habituation / free reward at a
+port; Phase 2 = a single cued approach) runs on the **Rules engine**
+(`rules_view` + `rules.json`), while the full cued task runs on the **Phase 3**
+engine, and the two write **different** on-disk records. So an animal's history
+is split across two formats, and the longitudinal analysis notebook (the
+`drieu_lab_analysis` repo) only reads Phase 3 bundles cleanly - the shaping days
+either don't produce a comparable trial CSV or need a separate reader. If Phase 3
+could express the earlier phases as **stages**, every training day from day one
+would emit the same trial-CSV + bundle the analysis already reads, giving one
+continuous longitudinal record per animal.
+
+**Sketch of approach.** Model a **stage** as a small config record, e.g.
+`{cue: none | planned, credential: choice | trial_trip | clean_loop,
+reward: prime + topups}`, and let `phase3_config` select a stage the way it
+selects a generator today. Phase 1 = `{cue: none, credential: clean_loop,
+reward: prime}` (reward any clean central-well visit); Phase 2 =
+`{cue: planned, credential: choice, reward: prime+topups}` (one cued arm); Phase 3
+= today's full cued task. `phase3_task` gates cue/scoring/reward on the stage's
+fields; the trial CSV keeps its columns (a stage with `cue: none` just leaves the
+cue columns blank). The Rules engine stays for genuinely free-form shaping, but
+the standard shaping ladder moves onto Phase 3 stages.
+
+**Evaluation / acceptance.** A next-cohort Phase 1 session run under a
+`{cue:none, ...}` stage yields a trial CSV + bundle that the analysis notebook
+loads with **no** new reader branch, and the per-animal longitudinal view spans
+shaping -> full task continuously.
+
+**Effort / risk.** Moderate: touches the live task engine + config + a UI, so it
+is a before-a-cohort design task, not a mid-cohort change (changing the training
+ladder mid-animal would confound the learning curve). Risk: over-generalising the
+stage model - keep it to the three concrete stages the protocol actually uses.
+
+**Open questions.** Exact stage schema + where it lives (a `stages` list in
+`phase3.json`, or named presets)? Does the Rules engine get retired for shaping
+or kept alongside? How to mark the stage in the bundle so analysis can split the
+learning curve by stage (a `stage` column / manifest field)?
+
+**ADR needed?** Yes, at design time - a stage model touches the task-data
+contract (a new column / manifest field) and would coordinate a `format_version`
+bump with the analysis mirror.
 
 ## Completed
 

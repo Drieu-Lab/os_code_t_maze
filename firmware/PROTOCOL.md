@@ -102,7 +102,14 @@ log can contain several of them.
 |------|---------|
 | `0,MODE,FREEROAM` | session is in Free Roam (no cues/trials; reward is manual) |
 
-**Full task**: the trial sequence is generated, dumped, then the mode marker.
+**Full task** _(DEPRECATED — scheduled for removal at the next reflash, see
+[`docs/future-work.md` FW-0068](../docs/future-work.md#fw-0068-remove-the-deprecated-firmware-full-task))_:
+the firmware's own trial FSM. **Unused since the vision-driven, host-owned Phase 3
+(ADR-0046)**, which runs the task over Free Roam and only actuates via the
+firmware; the Full-task FSM is not maintained and its beam-driven trial edges are
+polarity-sensitive (they depend on the S/L convention corrected in ADR-0164). Do
+not build new work on it. The trial sequence is generated, dumped, then the mode
+marker.
 
 | Line | Meaning |
 |------|---------|
@@ -162,7 +169,7 @@ Commands are newline-terminated and are NOT part of the `ms,TYPE` line schema.
 | Command | Target | Meaning |
 |---------|--------|---------|
 | `ABORT` / `STOP` | cue-guided-task | end the session now |
-| `MODE,FREE` / `MODE,FULL` | cue-guided-task | switch training mode and (re)start the session (Free Roam / Full task) |
+| `MODE,FREE` / `MODE,FULL` | cue-guided-task | switch training mode and (re)start the session (Free Roam / Full task). **`MODE,FULL` is DEPRECATED** (the Full-task FSM is unused since host-owned Phase 3, ADR-0046; scheduled for removal, FW-0068). Real sessions run in Free Roam with the host driving Phase 3. |
 | `R<port><sol>[,<ms>]` | cue-guided-task, tmaze_test | pulse solenoid `[port][sol]` (port 0=left,1=right,2=center; sol 0-2 reward, 3 drain, 4 rinse); optional `<ms>` overrides `REWARD_PULSE_MS` (clamped <=5000). Both sketches ack with `SOL,<port>,<sol>` (`cue-guided-task` appends the pulse `<dur_ms>`: `SOL,<port>,<sol>,<dur_ms>`; `tmaze_test` does not). In `cue-guided-task` the pulse is non-blocking, works in any mode (independent of an active session), and a reward-spout fire (`<sol>` omitted or `=1`) also logs `REWARD,<port>,MANUAL,<dur_ms>`. A bare `R<port>` fires that port's reward spout. |
 | `PING` | cue-guided-task | -> `PONG`. Answered in ANY session state, including after a session has completed, so the broker's liveness probe keeps working post-session (see docs/decisions/0123). |
 | `STATUS` | cue-guided-task | -> `STATUS,<count>,<index>,<active>`. Answered in any session state; after completion `<active>` reports `0` (see docs/decisions/0123). |
