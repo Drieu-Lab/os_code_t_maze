@@ -20,7 +20,8 @@ class TestCollect(unittest.TestCase):
     def test_block_has_all_expected_keys(self):
         block = provenance.collect()
         for key in ("code_commit", "python_version", "host_name", "packages",
-                    "firmware_proto_source", "firmware_proto_seen"):
+                    "firmware_proto_source", "firmware_proto_seen",
+                    "firmware_git_sha", "firmware_build"):
             self.assertIn(key, block, key)
 
     def test_code_commit_and_python_version_are_nonempty_strings(self):
@@ -35,6 +36,18 @@ class TestCollect(unittest.TestCase):
 
     def test_firmware_proto_seen_defaults_to_unknown(self):
         self.assertEqual(provenance.collect()["firmware_proto_seen"], "unknown")
+
+    def test_firmware_build_identity_passthrough(self):
+        # From the VERSION reply (proto v9, docs/decisions/0193).
+        block = provenance.collect(firmware_git_sha="abc1234",
+                                   firmware_build="Sep 21 2026 16:40:00")
+        self.assertEqual(block["firmware_git_sha"], "abc1234")
+        self.assertEqual(block["firmware_build"], "Sep 21 2026 16:40:00")
+
+    def test_firmware_build_identity_defaults_to_unknown(self):
+        block = provenance.collect()
+        self.assertEqual(block["firmware_git_sha"], "unknown")
+        self.assertEqual(block["firmware_build"], "unknown")
 
 
 class TestPackageVersions(unittest.TestCase):

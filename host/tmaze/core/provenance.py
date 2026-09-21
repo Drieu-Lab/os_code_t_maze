@@ -87,13 +87,19 @@ def firmware_proto_source() -> Optional[int]:
         return None
 
 
-def collect(firmware_proto_seen: Optional[int] = None) -> Dict[str, object]:
+def collect(firmware_proto_seen: Optional[int] = None,
+            firmware_git_sha: Optional[str] = None,
+            firmware_build: Optional[str] = None) -> Dict[str, object]:
     """The full provenance block for a session manifest / registry header.
 
     ``firmware_proto_seen`` is the last handshake ``PROTO`` the client actually
     saw this session (``None`` -> ``"unknown"``); ``firmware_proto_source`` is
-    read from ``rig_config.h`` here. Every field degrades gracefully so this
-    never raises.
+    read from ``rig_config.h`` here. ``firmware_git_sha`` / ``firmware_build`` come
+    from the VERSION reply (protocol v9, docs/decisions/0193) the host requests at
+    Session Start - the git short SHA compiled into the firmware and its build
+    timestamp - so a bundle self-certifies which firmware BUILD (not just protocol
+    version) produced it; both ``"unknown"`` until a VERSION reply is seen (pre-v9
+    firmware never sends one). Every field degrades gracefully so this never raises.
     """
     return {
         "code_commit": code_commit(),
@@ -103,4 +109,6 @@ def collect(firmware_proto_seen: Optional[int] = None) -> Dict[str, object]:
         "firmware_proto_source": firmware_proto_source(),
         "firmware_proto_seen": (firmware_proto_seen
                                 if firmware_proto_seen is not None else "unknown"),
+        "firmware_git_sha": firmware_git_sha if firmware_git_sha else "unknown",
+        "firmware_build": firmware_build if firmware_build else "unknown",
     }

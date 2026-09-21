@@ -262,6 +262,13 @@ class SessionControlView:
         # Recorded into the bundle as provenance - it fixes the S/L state
         # polarity convention (proto >= 8 corrected; see docs/decisions/0164).
         self._firmware_proto: Optional[int] = None
+        # Firmware build identity from the VERSION reply (protocol v9,
+        # docs/decisions/0193): the git short SHA compiled in + the build stamp,
+        # so the bundle records which firmware BUILD produced it. The host requests
+        # VERSION at Session Start (after PING); both stay None until a reply is
+        # seen (pre-v9 firmware never sends one).
+        self._firmware_git_sha: Optional[str] = None
+        self._firmware_build: Optional[str] = None
         # Canonical animal-id list (resources repo), loaded best-effort once so
         # Session Start can normalize/validate the entered id (docs/decisions/0075).
         # An empty (unavailable) registry when the resources repo is absent.
@@ -367,6 +374,18 @@ class SessionControlView:
         proto = protocol.proto_version_from(info.parsed)
         if proto is not None:
             self._firmware_proto = proto
+        # VERSION reply (proto v9): record the firmware build identity for provenance.
+        ver = protocol.version_info_from(info.parsed)
+        if ver is not None:
+            vproto, vsha, vbuild = ver
+            if self._firmware_proto is None:
+                self._firmware_proto = vproto
+            self._firmware_git_sha = vsha
+            self._firmware_build = vbuild
+            # The reply lands a few ms after the VERSION we send at Start, i.e.
+            # after the manifest's provenance was already collected/written; fold
+            # it in and rewrite so the persisted manifest carries the build id.
+            self._backfill_firmware_provenance()
         # Capture the COMPLETE verbatim stream between Start and Stop into the
         # bundle (docs/decisions/0178): every line the session sees, not the old
         # sensor + central-port subset. The full stream keeps the cue echoes,
@@ -1376,7 +1395,9 @@ class SessionControlView:
         # host, firmware proto (declared in rig_config.h + last seen on the wire).
         # P1/P6, docs/decisions/0180. Guarded inside collect(), so it never blocks
         # Start; firmware_proto_seen is "unknown" until a handshake was observed.
-        prov = provenance.collect(firmware_proto_seen=self._firmware_proto)
+        prov = provenance.collect(firmware_proto_seen=self._firmware_proto,
+                                  firmware_git_sha=self._firmware_git_sha,
+                                  firmware_build=self._firmware_build)
         # Fold in the resolved per-animal cue->side mapping + its source (ADR-0186),
         # so the manifest is the single top-level provenance home for it too.
         if self._phase3 is not None and hasattr(self._phase3, "resolved_cue_mapping"):
@@ -1544,6 +1565,46 @@ class SessionControlView:
                 self._send("PING")
             except Exception:
                 pass
+            # Ask the firmware to identify its build (proto v9, docs/decisions/0193);
+            # the reply lands on the stream a few ms later and is folded into the
+            # manifest provenance by _backfill_firmware_provenance. Harmless no-op on
+            # pre-v9 firmware (unknown command -> no reply).
+            try:
+                self._send("VERSION")
+            except Exception:
+                pass
+
+    def _backfill_firmware_provenance(self) -> None:
+        """Fold the firmware build identity (git SHA + build stamp from the VERSION
+        reply) into the manifest provenance and rewrite it.
+
+        The host sends ``VERSION`` at Session Start (in ``_mark_session_start``),
+        but the reply arrives on the serial stream a few ms later - after the
+        manifest's ``provenance`` block was already collected and first written. So
+        when the reply is captured we patch the persisted manifest. No-op before a
+        manifest/provenance exists, or when nothing changed (pre-v9 firmware never
+        replies, so the fields stay ``"unknown"``). see docs/decisions/0193
+        """
+        m = self._manifest
+        if m is None or not getattr(m, "provenance", None):
+            return
+        prov = dict(m.provenance)
+        sha = self._firmware_git_sha or "unknown"
+        build = self._firmware_build or "unknown"
+        changed = False
+        if prov.get("firmware_git_sha") != sha:
+            prov["firmware_git_sha"] = sha
+            changed = True
+        if prov.get("firmware_build") != build:
+            prov["firmware_build"] = build
+            changed = True
+        if (prov.get("firmware_proto_seen") in (None, "unknown")
+                and self._firmware_proto is not None):
+            prov["firmware_proto_seen"] = self._firmware_proto
+            changed = True
+        if changed:
+            m.set_provenance(prov)
+            self._write_manifest()
 
     # ------------------------------------------------------- path resolution
     def _resolve_paths(self, reschedule: bool = True) -> None:

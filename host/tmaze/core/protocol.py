@@ -260,8 +260,85 @@ def cue_info(line: str) -> Optional[Tuple[str, Optional[str], Optional[int]]]:
 
     The TONE_ON/TONE_OFF TTLs (not serial) carry the hardware-synchronous onset
     mark; this line is the behavioral-record companion (which cue, what tone).
+    As of protocol v9 those TTLs also emit a serial TTL twin (see ttl_edge).
     """
     return cue_info_from(parse(line))
+
+
+# --------------------------------- TTL lines ---------------------------------
+
+_TTL_NAMES = ("CHOICE", "RETURN", "TONE_ON", "TONE_OFF")
+
+
+def ttl_edge_from(p: Optional[ParsedLine]) -> Optional[Tuple[str, bool]]:
+    """(name, active) for a pre-parsed "<ms>,TTL,<name>,<state>" line, else None
+    (see ttl_edge)."""
+    if p is None or p.type != "TTL" or len(p.fields) != 2:
+        return None
+    name = p.fields[0].strip().upper()
+    state_s = p.fields[1].strip()
+    if name not in _TTL_NAMES or state_s not in ("0", "1"):
+        return None
+    return name, state_s == "1"
+
+
+def ttl_edge(line: str) -> Optional[Tuple[str, bool]]:
+    """(name, active) for an Open Ephys TTL twin "<ms>,TTL,<name>,<state>", else None.
+
+    Protocol v9 (docs/decisions/0193): the firmware emits a serial twin of every
+    TTL mark on its RISING edge, so each ephys pulse has a firmware-clock companion
+    in the bundle (``state`` is 1 on the rising edge; there is no falling-edge line
+    today). ``name`` is one of CHOICE / RETURN / TONE_ON / TONE_OFF; the line's
+    ``<ms>`` equals the pulse onset (shared millis()).
+    """
+    return ttl_edge_from(parse(line))
+
+
+# ------------------------------- VERSION / TXDROP -------------------------------
+
+def version_info_from(p: Optional[ParsedLine]) -> Optional[Tuple[int, Optional[str], Optional[str]]]:
+    """(proto, git_sha, build) for a pre-parsed "<ms>,VERSION,..." line, else None
+    (see version_info)."""
+    if p is None or p.type != "VERSION" or not p.fields:
+        return None
+    proto_s = p.fields[0].strip()
+    if not proto_s.isdigit():
+        return None
+    sha = p.fields[1].strip() if len(p.fields) >= 2 else ""
+    # The build stamp (__DATE__ __TIME__) has spaces but no commas; rejoin in case
+    # a future build id ever introduces one, so it survives the comma split.
+    build = ",".join(p.fields[2:]).strip() if len(p.fields) >= 3 else ""
+    return int(proto_s), (sha or None), (build or None)
+
+
+def version_info(line: str) -> Optional[Tuple[int, Optional[str], Optional[str]]]:
+    """(proto, git_sha, build) for a "<ms>,VERSION,<proto>,<sha>,<build>" line, else None.
+
+    Reply to the VERSION command (protocol v9, docs/decisions/0193): the firmware's
+    serial protocol version, the git short SHA compiled in (``None`` when the build
+    left it "unknown"), and the compile timestamp. Recorded in the bundle
+    provenance so a session self-certifies which firmware build produced it.
+    """
+    return version_info_from(parse(line))
+
+
+def tx_dropped_from(p: Optional[ParsedLine]) -> Optional[int]:
+    """The dropped-line count of a pre-parsed "<ms>,TXDROP,<n>" line, else None."""
+    if p is None or p.type != "TXDROP" or not p.fields:
+        return None
+    n = p.fields[0].strip()
+    return int(n) if n.isdigit() else None
+
+
+def tx_dropped(line: str) -> Optional[int]:
+    """The cumulative dropped-line count from a "<ms>,TXDROP,<n>" line, else None.
+
+    Protocol v9 (docs/decisions/0193): emitted right after a STATUS reply. A rising
+    count means the firmware's non-blocking-write guard is dropping hot-path log
+    lines because the host link isn't draining fast enough (physical timing is
+    still preserved; some S/L/event lines are simply absent from the log).
+    """
+    return tx_dropped_from(parse(line))
 
 
 # ----------------------------- single-parse fan-out -----------------------------
@@ -287,6 +364,12 @@ class LineInfo:
     reward: Optional[Tuple[bool, Optional[int]]]
     animal: Optional[str]
     cue: Optional[Tuple[str, Optional[str], Optional[int]]]
+    # Protocol v9 additions (docs/decisions/0193): the Open Ephys TTL serial twin
+    # ((name, active)), the VERSION reply ((proto, git_sha, build)), and the
+    # TXDROP dropped-line count. Each None when the line is not that type.
+    ttl: Optional[Tuple[str, bool]]
+    version: Optional[Tuple[int, Optional[str], Optional[str]]]
+    tx_dropped: Optional[int]
     # Host-side receipt stamps (docs/decisions/0175), attached at the GUI fan-out
     # point via dataclasses.replace when the line arrived through the stamped
     # reader callback (RigClient.on_line_stamped). ``recv_wall`` is time.time()
@@ -316,4 +399,7 @@ def classify(line: str) -> LineInfo:
         reward=reward_info_from(p),
         animal=animal_id_from(p),
         cue=cue_info_from(p),
+        ttl=ttl_edge_from(p),
+        version=version_info_from(p),
+        tx_dropped=tx_dropped_from(p),
     )

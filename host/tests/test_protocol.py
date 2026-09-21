@@ -15,7 +15,7 @@ import dataclasses
 from tmaze.core import protocol
 from tmaze.core.protocol import (animal_id, classify, cue_info, leading_ms, lick_edge,
                       mode_name, parse, reward_info, sanitize_animal_id,
-                      sensor_edge, sol_pulse)
+                      sensor_edge, sol_pulse, ttl_edge, tx_dropped, version_info)
 
 
 class TestParse(unittest.TestCase):
@@ -37,7 +37,8 @@ class TestParse(unittest.TestCase):
 
     def test_never_raises(self):
         for helper in (parse, leading_ms, lick_edge, sensor_edge, sol_pulse,
-                       mode_name, animal_id, reward_info, cue_info):
+                       mode_name, animal_id, reward_info, cue_info,
+                       ttl_edge, version_info, tx_dropped):
             for bad in ("", ",,,,", "garbage", "1,2,3", "\x00,\x00"):
                 helper(bad)  # must not raise
 
@@ -189,6 +190,62 @@ class TestCue(unittest.TestCase):
             cue_info(bad)  # must not raise
 
 
+class TestTtl(unittest.TestCase):
+    """Protocol v9 TTL serial twins (docs/decisions/0193)."""
+
+    def test_all_four_names_rising(self):
+        for name in ("CHOICE", "RETURN", "TONE_ON", "TONE_OFF"):
+            self.assertEqual(ttl_edge(f"250,TTL,{name},1"), (name, True))
+
+    def test_tolerates_whitespace_and_case(self):
+        self.assertEqual(ttl_edge("1,TTL, choice , 1 "), ("CHOICE", True))
+
+    def test_falling_edge_shape_accepted(self):
+        # state 0 is decoded even though today's firmware only emits rising (1).
+        self.assertEqual(ttl_edge("9,TTL,CHOICE,0"), ("CHOICE", False))
+
+    def test_malformed(self):
+        self.assertIsNone(ttl_edge("1,TTL,CHOICE"))        # missing state
+        self.assertIsNone(ttl_edge("1,TTL,BOGUS,1"))       # unknown name
+        self.assertIsNone(ttl_edge("1,TTL,CHOICE,2"))      # state not 0/1
+        self.assertIsNone(ttl_edge("1,TTL,CHOICE,1,x"))    # too many fields
+        self.assertIsNone(ttl_edge("120,CUE,OFF"))         # not a TTL line
+
+
+class TestVersion(unittest.TestCase):
+    """Protocol v9 VERSION reply (docs/decisions/0193)."""
+
+    def test_full_reply(self):
+        self.assertEqual(version_info("42,VERSION,9,abc1234,Sep 21 2026 16:40:00"),
+                         (9, "abc1234", "Sep 21 2026 16:40:00"))
+
+    def test_unknown_sha(self):
+        self.assertEqual(version_info("0,VERSION,9,unknown,Jan 1 2026 00:00:00"),
+                         (9, "unknown", "Jan 1 2026 00:00:00"))
+
+    def test_missing_optional_fields(self):
+        self.assertEqual(version_info("0,VERSION,9,abc1234"), (9, "abc1234", None))
+        self.assertEqual(version_info("0,VERSION,9"), (9, None, None))
+
+    def test_malformed(self):
+        self.assertIsNone(version_info("0,VERSION"))          # no proto
+        self.assertIsNone(version_info("0,VERSION,x,sha"))    # non-numeric proto
+        self.assertIsNone(version_info("0,PROTO,9"))          # not a VERSION line
+
+
+class TestTxDropped(unittest.TestCase):
+    """Protocol v9 TXDROP line (docs/decisions/0193)."""
+
+    def test_count(self):
+        self.assertEqual(tx_dropped("777,TXDROP,0"), 0)
+        self.assertEqual(tx_dropped("777,TXDROP,12345"), 12345)
+
+    def test_malformed(self):
+        self.assertIsNone(tx_dropped("777,TXDROP"))       # no count
+        self.assertIsNone(tx_dropped("777,TXDROP,x"))     # non-numeric
+        self.assertIsNone(tx_dropped("777,STATUS,0,0,0")) # not a TXDROP line
+
+
 class TestClassify(unittest.TestCase):
     """classify() parses ONCE and pre-computes every typed field, matching the
     individual helpers on the same line (see docs/decisions/0056)."""
@@ -202,6 +259,9 @@ class TestClassify(unittest.TestCase):
         "500,REWARD,CENTER,150",
         "0,ANIMAL,RAT001",
         "120,CUE,ON,CHOICE,8000",
+        "250,TTL,CHOICE,1",
+        "42,VERSION,9,abc1234,Sep 21 2026 16:40:00",
+        "777,TXDROP,3",
         "123,TRIAL,4,LEFT",   # a line no per-type helper claims
     )
 
@@ -217,6 +277,9 @@ class TestClassify(unittest.TestCase):
             self.assertEqual(info.reward, reward_info(line), line)
             self.assertEqual(info.animal, animal_id(line), line)
             self.assertEqual(info.cue, cue_info(line), line)
+            self.assertEqual(info.ttl, ttl_edge(line), line)
+            self.assertEqual(info.version, version_info(line), line)
+            self.assertEqual(info.tx_dropped, tx_dropped(line), line)
 
     def test_malformed_all_none_but_raw_preserved(self):
         for bad in ("", "garbage", "hello,world", "\x00,\x00"):
@@ -224,7 +287,7 @@ class TestClassify(unittest.TestCase):
             self.assertEqual(info.raw, bad, bad)
             self.assertIsNone(info.parsed, bad)
             for field in ("mode", "lick", "sensor", "sol", "reward",
-                          "animal", "cue"):
+                          "animal", "cue", "ttl", "version", "tx_dropped"):
                 self.assertIsNone(getattr(info, field), f"{bad}:{field}")
 
     def test_frozen(self):
