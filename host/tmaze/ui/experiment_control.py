@@ -643,7 +643,11 @@ def main() -> int:
     # Tab registry: (tab title, [factory(parent) -> module, ...]). Modules listed
     # together share one tab, packed left-to-right. The first tab puts the live
     # maze schematic (RigView) beside the camera preview/recording (CameraView).
-    tabs = [("Rig view", [RigView, make_camera])]
+    # RigView gets the Phase 3 snapshot getter so it can raise the session-cap
+    # banner on the view the operator actually watches (docs/decisions/0190).
+    tabs = [("Rig view",
+             [lambda parent: RigView(parent, state_getter=phase3_state),
+              make_camera])]
     # Setup tab (ADR-0053 phase 3): the calibration/definition surface done
     # before a run. Tracking (tracker tuning + ROI/landmark editors) and Maze
     # state (zone editor + discrete-state readout) are nested as sub-tabs of one

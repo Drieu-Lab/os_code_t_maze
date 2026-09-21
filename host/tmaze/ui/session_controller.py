@@ -163,6 +163,10 @@ RESOLVE_INTERVAL_MS = 500
 # low-space warning before pressing Start (docs/decisions/0151). The warning
 # threshold itself is operator-configurable and persisted (paths.low_disk_warn_gb).
 DISK_POLL_INTERVAL_MS = 30000
+# Fast poll that mirrors the ADR-0190 session cap onto the Start/Stop button
+# (docs/decisions/0190): the operator watching the Rig view is told WHERE to
+# click. Cheap - it only reconfigures the button on a state change.
+CAP_ALERT_POLL_MS = 500
 
 # Foreground colors for the disk readout: red when at/below the warning threshold,
 # muted grey otherwise - matching the Records Manager welfare-flag palette.
@@ -248,6 +252,11 @@ class SessionControlView:
         self._disk_var = tk.StringVar(value="Disk: ...")
         self._disk_label: Optional[ttk.Label] = None
         self._disk_after: Optional[str] = None
+        # Session-cap alert on the Start/Stop button (docs/decisions/0190): the
+        # after() id for the fast poll, and whether the button is currently in its
+        # red "cap reached" state (so the poll only reconfigures on a change).
+        self._cap_after: Optional[str] = None
+        self._cap_btn_alert = False
         self._learned_animal = ""         # last animal id seen on the serial stream
         # Last firmware serial protocol version seen on the 0,PROTO handshake.
         # Recorded into the bundle as provenance - it fixes the S/L state
@@ -322,6 +331,9 @@ class SessionControlView:
         # Standalone slow poll of the recordings drive's free space; runs whether
         # or not a session is active (docs/decisions/0151).
         self._schedule_disk_poll()
+        # Fast poll mirroring the ADR-0190 session cap onto the Stop button so an
+        # operator watching the Rig view is told to Stop (docs/decisions/0190).
+        self._schedule_cap_poll()
 
     # ------------------------------------------------------------ module API
     def widget(self) -> tk.Widget:
@@ -412,6 +424,12 @@ class SessionControlView:
             except tk.TclError:
                 pass
             self._disk_after = None
+        if self._cap_after is not None:
+            try:
+                self.frame.after_cancel(self._cap_after)
+            except tk.TclError:
+                pass
+            self._cap_after = None
         if self._active:
             self._stop_session()
         self._close_serial()
@@ -460,6 +478,46 @@ class SessionControlView:
                     DISK_POLL_INTERVAL_MS, self._schedule_disk_poll)
             except tk.TclError:
                 self._disk_after = None
+
+    def _schedule_cap_poll(self) -> None:
+        """Self-rescheduling fast poll that mirrors the ADR-0190 session cap onto
+        the Start/Stop button (docs/decisions/0190). Runs until the panel closes."""
+        if self._closed:
+            return
+        try:
+            self._update_cap_alert()
+        finally:
+            try:
+                self._cap_after = self.frame.after(
+                    CAP_ALERT_POLL_MS, self._schedule_cap_poll)
+            except tk.TclError:
+                self._cap_after = None
+
+    def _update_cap_alert(self) -> None:
+        """Turn the Start/Stop button red + loud while a session is active AND the
+        Phase 3 cap has fired (docs/decisions/0190); restore it otherwise. Only
+        reconfigures on a state change (idempotent per tick). The Rig-view banner
+        does the same off the published snapshot; this points at the button to
+        click. Reads the controller's cap_reached() directly - the panel already
+        holds the controller ref - and is null-safe when Phase 3 is absent."""
+        capped = bool(
+            self._active and self._phase3 is not None
+            and hasattr(self._phase3, "cap_reached")
+            and self._phase3.cap_reached())
+        if capped == self._cap_btn_alert:
+            return
+        self._cap_btn_alert = capped
+        try:
+            if capped:
+                self._start_btn.configure(
+                    text="STOP SESSION - cap reached", style="Cap.TButton")
+            else:
+                # Back to the normal label for the current phase + default style.
+                self._start_btn.configure(
+                    text="Stop session" if self._active else "Start session",
+                    style="TButton")
+        except tk.TclError:
+            pass
 
     def _open_storage_dialog(self) -> None:
         """Popup to view/change the recordings base folder AND the low-disk
@@ -572,6 +630,16 @@ class SessionControlView:
         self._start_btn = ttk.Button(root, text="Start session",
                                      command=self._on_toggle)
         self._start_btn.grid(row=0, column=0, sticky="w", padx=6, pady=4)
+        # A red, bold button variant used only while the ADR-0190 session cap has
+        # fired (docs/decisions/0190). The reliable signal is the button TEXT; the
+        # colour is best-effort (some Windows ttk themes ignore button fill), so
+        # both are set together in _update_cap_alert.
+        try:
+            ttk.Style(root).configure(
+                "Cap.TButton", foreground="#b00020",
+                font=("TkDefaultFont", 9, "bold"))
+        except tk.TclError:
+            pass
         ttk.Label(root, text="(animal id from the Task tab)",
                   font=("TkDefaultFont", 8)).grid(
             row=0, column=1, sticky="w", padx=(4, 6), pady=4)

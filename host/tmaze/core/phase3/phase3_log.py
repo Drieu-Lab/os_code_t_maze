@@ -321,6 +321,12 @@ class Phase3StateSnapshot:
     # 0172). A row's ``rewarded``/``prime_ms``/``topups`` are what matter here, so an
     # unrewarded superseded attempt (ABANDONED/UNCUED/empty) contributes nothing.
     superseded_rows: Tuple[Phase3RowView, ...] = ()
+    # Whether the ADR-0190 session cap has fired this session (docs/decisions/0190):
+    # the controller's cap-reached record ({reason, completed, elapsed_s,
+    # max_trials, max_minutes, iso, trial_index}) so cross-tab readers - the
+    # Rig-view banner + the Session Stop button - can alert without reaching into
+    # the controller. None while the cap has not been hit (or is disabled).
+    cap_reached: Optional[Dict[str, Any]] = None
 
 
 @dataclass(frozen=True)
@@ -715,12 +721,14 @@ class Phase3Log:
         return True
 
     # ----------------------------------------------------------- snapshot
-    def snapshot(self, current_index: int, *, armed: bool) -> Phase3StateSnapshot:
+    def snapshot(self, current_index: int, *, armed: bool,
+                 cap_reached: Optional[Dict[str, Any]] = None) -> Phase3StateSnapshot:
         """Immutable freeze of the whole table for cross-thread publishing
         (docs/decisions/0050). Copies each row by value, so the returned snapshot
         is decoupled from later mutation of the live rows. ``current_index`` is
         the 0-based trial in progress; ``armed`` records whether a session's gate
-        is still open."""
+        is still open. ``cap_reached`` is the controller's ADR-0190 cap record (or
+        None), passed through so cross-tab readers can alert (docs/decisions/0190)."""
         names = [f.name for f in fields(_Row)]
         rows = tuple(
             Phase3RowView(trial=i + 1, **{n: getattr(r, n) for n in names})
@@ -769,7 +777,8 @@ class Phase3Log:
             return_enabled=self.return_enabled,
             intervention_next=seq.intervention_will_continue(),
             probe_upcoming=seq.probe_upcoming(),
-            uncued=uncued, superseded_rows=superseded_rows)
+            uncued=uncued, superseded_rows=superseded_rows,
+            cap_reached=cap_reached)
 
     # ------------------------------------------------------------- render
     def _header_comment(self) -> List[str]:

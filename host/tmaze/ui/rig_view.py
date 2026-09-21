@@ -17,6 +17,11 @@ Design (functional core + thin Tk shell):
     sensor/lick markers when the state changes, and flashes solenoid markers
     (which are momentary, so they live in the view, not in RigState).
 
+When given a Phase 3 snapshot getter (state_getter), RigView also self-polls it
+and paints a loud red "CAP REACHED" bar across the top of the canvas while the
+ADR-0190 session cap is in effect (docs/decisions/0190) - drawn over the empty
+top margin, so it adds no height to the already-full-height Rig view.
+
 Marker positions are best-effort from the rig photos/sketch
 (os_code_t_maze_resources/rig-hardware/circuit_pictures_small: IMG_1136,
 IMG_1302_annotated, IMG_1303_annotated) and are isolated in the layout block
@@ -43,6 +48,7 @@ from dataclasses import dataclass, replace
 from typing import Optional, Tuple, Union
 
 from tmaze.core import protocol
+from tmaze.core.phase3 import session_cap
 from tmaze.core.rig_config import load_rig_config
 from tmaze.ui.tooltips import canvas_tip
 
@@ -181,6 +187,18 @@ COLOR_FLOOR = "#f2f2f2"
 COLOR_WEDGE = "#4a4a4a"
 COLOR_WALL = "#333333"
 
+# Session-cap alert banner (docs/decisions/0190). When the ADR-0190 cap fires the
+# operator is usually watching the Rig view, not the Task tab, so paint a loud,
+# full-width red bar across the TOP of the maze canvas (only while capped). It is
+# a canvas item drawn over the schematic's top margin, so it adds NO height - the
+# Rig view is already at the monitor's full vertical span (FW-0070). It blinks
+# between two reds to catch the eye; the Session Stop button turns red in step.
+CAP_BANNER_H = 40           # bar height in px (over the empty top margin)
+CAP_POLL_MS = 500           # blink / re-check cadence
+COLOR_CAP_A = "#c62828"     # blink phase A (deep red)
+COLOR_CAP_B = "#ff5252"     # blink phase B (bright red)
+COLOR_CAP_TEXT = "#ffffff"
+
 # Maze footprint polygon (the walkable floor): a funnel - a wide top (the T-arm
 # spanning the two reward ports), outer return walls slanting down to a narrow
 # start box at the bottom.
@@ -302,7 +320,12 @@ class RigView:
     Module contract used by experiment_control.py: widget() and apply(line).
     """
 
-    def __init__(self, parent: tk.Misc):
+    def __init__(self, parent: tk.Misc, state_getter=None):
+        # ``state_getter`` (optional) returns the latest published
+        # Phase3StateSnapshot (or None); when given, the view self-polls it to
+        # raise the session-cap banner (docs/decisions/0190), mirroring how the
+        # trial ribbon pulls the same snapshot on the Rig view (ADR-0057/0135).
+        self._state_getter = state_getter
         self.state = initial_state()
         self.canvas = tk.Canvas(
             parent, width=CANVAS_W, height=CANVAS_H,
@@ -318,7 +341,14 @@ class RigView:
         }
         self._sol_jobs: dict = {}
         self._draw_legend()
+        # Cap banner (hidden until the cap fires) + its blink/poll state. Created
+        # last so it draws ON TOP of the schematic (docs/decisions/0190).
+        self._cap_rect, self._cap_text = self._make_cap_banner()
+        self._cap_blink = False
+        self._cap_after: Optional[str] = None
         self._add_marker_tooltips()
+        if self._state_getter is not None:
+            self._poll_cap()
 
     def _add_marker_tooltips(self) -> None:
         """Attach hover tooltips (text from tooltip_text.py) to every marker."""
@@ -342,6 +372,73 @@ class RigView:
             self._render()
         if isinstance(event, SolenoidPulse):
             self._flash_solenoid(event.port, event.sol)
+
+    def close(self) -> None:
+        """Cancel the cap-banner poll on app exit (docs/decisions/0190). Called by
+        experiment_control's module close() sweep."""
+        if self._cap_after is not None:
+            try:
+                self.canvas.after_cancel(self._cap_after)
+            except tk.TclError:
+                pass
+            self._cap_after = None
+
+    # ---- session-cap banner (docs/decisions/0190) ----
+    def _make_cap_banner(self) -> Tuple[int, int]:
+        """Build the (hidden) full-width red bar + centred text at the very top."""
+        rect = self.canvas.create_rectangle(
+            0, 0, CANVAS_W, CAP_BANNER_H, fill=COLOR_CAP_A, outline="",
+            state="hidden")
+        text = self.canvas.create_text(
+            CANVAS_W / 2, CAP_BANNER_H / 2, text="", fill=COLOR_CAP_TEXT,
+            font=("TkDefaultFont", 11, "bold"), state="hidden")
+        return rect, text
+
+    @staticmethod
+    def _cap_banner_text(hit: dict) -> str:
+        """One loud line from the controller's cap record: which limit bound, and
+        the action to take. Pure (no Tk), so it is unit-testable headless."""
+        if hit.get("reason") == session_cap.REASON_TRIALS:
+            limit = f"{hit.get('max_trials')} trials"
+        else:
+            limit = f"{session_cap.mmss((hit.get('max_minutes') or 0.0) * 60.0)} min"
+        return f"CAP REACHED ({limit}) - remove rat, Stop session"
+
+    def _cap_hit(self):
+        """The published snapshot's cap record, or None. Never raises."""
+        if self._state_getter is None:
+            return None
+        try:
+            snap = self._state_getter()
+        except Exception:
+            return None
+        return getattr(snap, "cap_reached", None) if snap is not None else None
+
+    def _poll_cap(self) -> None:
+        try:
+            self._refresh_cap()
+        finally:
+            try:
+                self._cap_after = self.canvas.after(CAP_POLL_MS, self._poll_cap)
+            except tk.TclError:
+                self._cap_after = None
+
+    def _refresh_cap(self) -> None:
+        hit = self._cap_hit()
+        if not hit:
+            if self.canvas.itemcget(self._cap_rect, "state") != "hidden":
+                self.canvas.itemconfig(self._cap_rect, state="hidden")
+                self.canvas.itemconfig(self._cap_text, state="hidden")
+            return
+        # Shown + blinking: alternate the two reds so the bar pulses.
+        self._cap_blink = not self._cap_blink
+        self.canvas.itemconfig(
+            self._cap_rect, state="normal",
+            fill=COLOR_CAP_A if self._cap_blink else COLOR_CAP_B)
+        self.canvas.itemconfig(self._cap_text, state="normal",
+                               text=self._cap_banner_text(hit))
+        self.canvas.tag_raise(self._cap_rect)
+        self.canvas.tag_raise(self._cap_text)
 
     # ---- drawing ----
     def _draw_maze(self) -> None:

@@ -1505,7 +1505,11 @@ class Phase3ControlView(VisionActuator):
             self._state = None
             return
         idx = self._task.index if self._task is not None else 0
-        self._state = log.snapshot(idx, armed=armed)
+        # Pass the ADR-0190 cap record (a plain dict, copied) so the Rig-view
+        # banner + the Session Stop button can alert off the published snapshot
+        # without reaching into the controller (docs/decisions/0190).
+        cap = dict(self._cap_reached) if self._cap_reached else None
+        self._state = log.snapshot(idx, armed=armed, cap_reached=cap)
 
     def _record_write_result(self, slot: str, path: Optional[str],
                              exc: Optional[OSError]) -> None:

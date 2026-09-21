@@ -407,6 +407,16 @@ class TestSnapshot(unittest.TestCase):
         disarmed = log.snapshot(3, armed=False)
         self.assertFalse(disarmed.armed)
 
+    def test_snapshot_carries_cap_reached(self):
+        # The controller's ADR-0190 cap record rides on the published snapshot so
+        # the Rig-view banner / Stop button can alert (docs/decisions/0190).
+        log = _log()
+        self.assertIsNone(log.snapshot(0, armed=True).cap_reached)  # default
+        hit = {"reason": "trials", "completed": 120, "max_trials": 120,
+               "max_minutes": 45.0, "elapsed_s": 1830.0}
+        self.assertEqual(log.snapshot(0, armed=True, cap_reached=hit).cap_reached,
+                         hit)
+
 
 def _debias_seq(n=40, seed=3):
     cfg = TrialConfig(max_trials=n, block_size=20, max_same_run=4,
