@@ -83,6 +83,13 @@ class AnimalRegistry:
         # Per-animal cue->side mapping, only stored for animals that set it as a
         # real bool; an unset / non-bool cell is simply absent here (v3, ADR-0186).
         self._high_tone: Dict[str, bool] = {}
+        # Per-animal water budget (v4, ADR-0191): an explicit per-reward volume
+        # (uL) that wins when set, and the daily water target (mL) the reward is
+        # derived from otherwise (and the supplement readout measured against
+        # either way). Stored only when a real positive number; blank / null /
+        # non-numeric == unset.
+        self._daily_water: Dict[str, float] = {}
+        self._reward_ul: Dict[str, float] = {}
         for rec in (animals or []):
             aid = str(rec.get("id", "")).strip()
             if not aid or aid in self._ids:
@@ -94,6 +101,12 @@ class AnimalRegistry:
             htl = rec.get(HIGH_TONE_FIELD, None)
             if isinstance(htl, bool):
                 self._high_tone[aid] = htl
+            dw = _positive_number(rec.get(DAILY_WATER_FIELD))
+            if dw is not None:
+                self._daily_water[aid] = dw
+            ru = _positive_number(rec.get(REWARD_UL_FIELD))
+            if ru is not None:
+                self._reward_ul[aid] = ru
             # The canonical id always maps to itself; aliases fill in only if they
             # don't collide with an already-claimed key (first entry wins).
             self._by_key[_key(aid)] = aid
@@ -143,6 +156,25 @@ class AnimalRegistry:
             return None
         return self._high_tone.get(aid)
 
+    def daily_water_ml(self, raw: str) -> Optional[float]:
+        """The animal's daily water target (mL; schema v4, ADR-0191): what the
+        earned-water / supplement readout is measured against, and what the rig
+        derives the reward from when no explicit ``reward_ul`` is set. None when
+        unset / the id isn't recognised."""
+        aid = self.normalize(raw)
+        if aid is None:
+            return None
+        return self._daily_water.get(aid)
+
+    def reward_ul(self, raw: str) -> Optional[float]:
+        """The animal's explicit per-correct-trial reward volume (uL; schema v4,
+        ADR-0191); when set it overrides the volume derived from
+        ``daily_water_ml``. None when unset / the id isn't recognised."""
+        aid = self.normalize(raw)
+        if aid is None:
+            return None
+        return self._reward_ul.get(aid)
+
     def age_days(self, raw: str, on_date) -> Optional[int]:
         """Whole days from the animal's date of birth to ``on_date`` (a
         ``datetime.date`` or ISO string), or None when either is unusable.
@@ -166,11 +198,24 @@ def _parse_iso(value) -> Optional[_dt.date]:
         return None
 
 
+def _positive_number(value) -> Optional[float]:
+    """A strictly positive float from a JSON/GUI cell, else None (blank, null,
+    zero, negative, or non-numeric - the registry reads all of those as unset;
+    :func:`validate_records` is what flags a bad hand edit before a write)."""
+    if value is None or value == "" or isinstance(value, bool):
+        return None
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return None
+    return v if v > 0.0 else None
+
+
 def parse_registry(text: str) -> AnimalRegistry:
     """Build a registry from ``animals.json`` text, tolerating a malformed file
-    (anything unparseable yields an empty, unavailable registry). v1/v2/v3
-    files all load; an older entry simply has no date of birth / no cue
-    mapping (both unset)."""
+    (anything unparseable yields an empty, unavailable registry). v1..v4 files
+    all load; an older entry simply has no date of birth / cue mapping / water
+    numbers (all unset)."""
     try:
         raw = json.loads(text)
     except ValueError:
@@ -211,13 +256,42 @@ def load_registry(path: Optional[str] = None) -> AnimalRegistry:
 # adds an optional per-animal ``high_tone_is_left`` (the cue->side mapping), a
 # TRI-STATE - true / false / null (unset = use the rig default in phase3.json), so
 # a bundle self-certifies the mapping that animal ran under and a future mixed
-# cohort can be expressed. An older file still loads (missing field == unset); a
-# write stamps the current version.
-ANIMALS_SCHEMA_VERSION = 3
+# cohort can be expressed. v4 (ADR-0191): adds two optional per-animal water
+# numbers - ``reward_ul`` (an explicit per-reward volume; when set it wins) and
+# ``daily_water_ml`` (the daily target: the rig derives the reward from it under
+# the session cap, ADR-0190, when ``reward_ul`` is unset, and reports earned /
+# supplement against it either way); each a positive number or ``null`` (unset
+# = fall back to the next source, ending at phase3.json). An older file still
+# loads (missing field == unset); a write stamps the current version.
+ANIMALS_SCHEMA_VERSION = 4
 DOB_FIELD = "date_of_birth"
 # The per-animal cue->side mapping (v3, ADR-0186): True = HIGH tone means LEFT,
 # False = HIGH means RIGHT, None = unset (fall back to phase3.json's value).
 HIGH_TONE_FIELD = "high_tone_is_left"
+# The per-animal water budget (v4, ADR-0191). Priority at arm: reward_ul
+# (explicit) -> daily_water_ml (derived volume) -> phase3.json / GUI pulse width.
+DAILY_WATER_FIELD = "daily_water_ml"
+REWARD_UL_FIELD = "reward_ul"
+# The ordered, human-facing set of optional per-animal fields (for the Roster
+# editor + the writer); ``id`` and ``aliases`` are always present.
+OPTIONAL_FIELDS = (DOB_FIELD, HIGH_TONE_FIELD, DAILY_WATER_FIELD, REWARD_UL_FIELD)
+
+
+def coerce_number(value: object) -> object:
+    """Normalise a raw numeric cell (``daily_water_ml`` / ``reward_ul``): a
+    number stays a float, ``None``/``""`` (unset) -> ``None``, and anything else
+    (a bool, a non-numeric string) is passed through UNCHANGED so
+    :func:`validate_records` rejects it before a write."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        return value  # not a number: kept for validate_records to flag
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        return float(str(value).strip())
+    except (TypeError, ValueError):
+        return value  # not a number: kept for validate_records to flag
 
 
 def coerce_high_tone(value: object) -> Optional[bool]:
@@ -246,14 +320,21 @@ _V1_NOTE = (
 # stays self-documenting.
 _DEFAULT_SCHEMA = {
     "note": (
-        "Canonical animal identity (ADR-0075, ADR-0161, ADR-0186). Each entry is "
-        "{id, aliases, date_of_birth, high_tone_is_left}; the id is the lab's rat "
-        "number used to key session recordings to husbandry records. Aliases "
-        "match loosely (case-, space- and punctuation-insensitive), so 'Rat 600' "
-        "resolves to '600'. date_of_birth is YYYY-MM-DD or \"\" when not yet "
-        "recorded (the records audit lists those). high_tone_is_left is the "
-        "cue->side mapping: true = HIGH tone means LEFT, false = HIGH means "
-        "RIGHT, null = unset (the rig uses phase3.json's value). This is the "
+        "Canonical animal identity (ADR-0075, ADR-0161, ADR-0186, ADR-0191). Each "
+        "entry is {id, aliases, date_of_birth, high_tone_is_left, daily_water_ml, "
+        "reward_ul}; the id is the lab's rat number used to key session recordings "
+        "to husbandry records. Aliases match loosely (case-, space- and "
+        "punctuation-insensitive), so 'Rat 600' resolves to '600'. date_of_birth "
+        "is YYYY-MM-DD or \"\" when not yet recorded (the records audit lists "
+        "those). high_tone_is_left is the cue->side mapping: true = HIGH tone "
+        "means LEFT, false = HIGH means RIGHT, null = unset (the rig uses "
+        "phase3.json's value). reward_ul is an explicit per-correct-trial reward "
+        "volume (uL) - when set it is what the rig arms. daily_water_ml is the "
+        "animal's daily water target (mL): when reward_ul is null the rig derives "
+        "the reward from it under the Phase 3 session cap (uL = daily_water_ml*"
+        "1000*water_at_chance_fraction/(max_trials*0.5)), and either way the "
+        "Stop summary reports the water earned against it plus the supplement "
+        "still owed. Both null = the rig uses phase3.json's pulse_ms. This is the "
         "single source of truth for animal identity, read by the rig at Session "
         "Start and by the records builders."
     )
@@ -267,7 +348,8 @@ def load_records(path: Optional[str] = None) -> List[Dict[str, object]]:
     Unlike :func:`load_registry`, this keeps each animal's aliases so the GUI can
     show and edit them. Each entry is normalised to ``{"id": str,
     "aliases": [str, ...], "date_of_birth": str, "high_tone_is_left":
-    bool|None}`` ("" / None when not recorded).
+    bool|None, "daily_water_ml": float|None, "reward_ul": float|None}``
+    ("" / None when not recorded).
     """
     p = path or animals_json_path()
     try:
@@ -338,7 +420,9 @@ def normalize_records(
                     aliases.append(a)
         out.append({"id": aid, "aliases": aliases,
                     DOB_FIELD: str(rec.get(DOB_FIELD, "") or "").strip(),
-                    HIGH_TONE_FIELD: coerce_high_tone(rec.get(HIGH_TONE_FIELD))})
+                    HIGH_TONE_FIELD: coerce_high_tone(rec.get(HIGH_TONE_FIELD)),
+                    DAILY_WATER_FIELD: coerce_number(rec.get(DAILY_WATER_FIELD)),
+                    REWARD_UL_FIELD: coerce_number(rec.get(REWARD_UL_FIELD))})
     return out
 
 
@@ -380,6 +464,17 @@ def validate_records(records: List[Dict[str, object]],
         if htl is not None and not isinstance(htl, bool):
             errors.append(
                 f"'{aid}': high_tone_is_left must be true, false, or blank")
+        # Water budget numbers (v4, ADR-0191): a positive number or blank. A
+        # coerced non-number (a typo string, a bool) survives normalize so it is
+        # flagged HERE; zero / negative make no sense as a target or a volume.
+        for fld, unit in ((DAILY_WATER_FIELD, "mL"), (REWARD_UL_FIELD, "uL")):
+            val = rec.get(fld, None)
+            if val is None:
+                continue
+            if isinstance(val, bool) or not isinstance(val, (int, float)):
+                errors.append(f"'{aid}': {fld} must be a number ({unit}) or blank")
+            elif not val > 0:
+                errors.append(f"'{aid}': {fld} must be > 0 {unit} (or blank)")
         k = _key(aid)
         if k in id_keys:
             other = id_keys[k]

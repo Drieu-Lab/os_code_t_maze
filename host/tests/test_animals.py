@@ -126,9 +126,9 @@ class TestRosterEditing(unittest.TestCase):
         ])
         self.assertEqual(recs, [
             {"id": "600", "aliases": ["Rat 600", "R600"], "date_of_birth": "",
-             "high_tone_is_left": None},
+             "high_tone_is_left": None, "daily_water_ml": None, "reward_ul": None},
             {"id": "601", "aliases": [], "date_of_birth": "",
-             "high_tone_is_left": None},
+             "high_tone_is_left": None, "daily_water_ml": None, "reward_ul": None},
         ])
 
     def test_validate_ok(self):
@@ -332,6 +332,79 @@ class TestHighToneMapping(unittest.TestCase):
             self.assertIsNone(doc["animals"][2]["high_tone_is_left"])
             self.assertEqual(doc["schema_version"], ANIMALS_SCHEMA_VERSION)
             self.assertIs(load_registry(path).high_tone_is_left("Rat 600"), True)
+
+
+class TestWaterBudget(unittest.TestCase):
+    """Schema v4 (ADR-0191): optional per-animal daily_water_ml + reward_ul."""
+
+    def setUp(self):
+        self.reg = AnimalRegistry([
+            {"id": "600", "aliases": ["Rat 600"], "daily_water_ml": 8,
+             "reward_ul": 70},
+            {"id": "601", "daily_water_ml": None, "reward_ul": 65.5},
+            {"id": "602", "daily_water_ml": "", "reward_ul": 0},   # both unset
+            {"id": "603"},                                          # v3-style
+        ])
+
+    def test_lookup_by_id_or_alias(self):
+        self.assertEqual(self.reg.daily_water_ml("Rat 600"), 8.0)
+        self.assertEqual(self.reg.reward_ul("600"), 70.0)
+        self.assertIsNone(self.reg.daily_water_ml("601"))
+        self.assertEqual(self.reg.reward_ul("601"), 65.5)
+
+    def test_unset_zero_and_unknown_are_none(self):
+        self.assertIsNone(self.reg.daily_water_ml("602"))
+        self.assertIsNone(self.reg.reward_ul("602"))       # 0 is not a volume
+        self.assertIsNone(self.reg.daily_water_ml("603"))
+        self.assertIsNone(self.reg.reward_ul("603"))
+        self.assertIsNone(self.reg.daily_water_ml("999"))
+
+    def test_normalize_coerces_numbers(self):
+        recs = normalize_records([
+            {"id": "600", "daily_water_ml": 8, "reward_ul": "70"},
+            {"id": "601", "daily_water_ml": "", "reward_ul": None},
+            {"id": "602"},
+        ])
+        self.assertEqual((recs[0]["daily_water_ml"], recs[0]["reward_ul"]), (8.0, 70.0))
+        self.assertEqual((recs[1]["daily_water_ml"], recs[1]["reward_ul"]), (None, None))
+        self.assertEqual((recs[2]["daily_water_ml"], recs[2]["reward_ul"]), (None, None))
+
+    def test_validate_rejects_bad_numbers(self):
+        errs = validate_records(normalize_records(
+            [{"id": "600", "daily_water_ml": "eight"}]))
+        self.assertTrue(any("daily_water_ml" in e for e in errs))
+        errs = validate_records(normalize_records([{"id": "600", "reward_ul": -5}]))
+        self.assertTrue(any("reward_ul" in e for e in errs))
+        errs = validate_records(normalize_records([{"id": "600", "daily_water_ml": 0}]))
+        self.assertTrue(any("daily_water_ml" in e for e in errs))
+        errs = validate_records(normalize_records([{"id": "600", "reward_ul": True}]))
+        self.assertTrue(any("reward_ul" in e for e in errs))
+        # Positive numbers / blank are accepted.
+        self.assertEqual(validate_records(normalize_records([
+            {"id": "600", "daily_water_ml": 8.0, "reward_ul": 70},
+            {"id": "601"}])), [])
+
+    def test_roundtrip_and_older_file_loads(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "animals.json")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(_SAMPLE)                               # v1: no field
+            recs = load_records(path)
+            self.assertIsNone(recs[0]["daily_water_ml"])
+            self.assertIsNone(recs[0]["reward_ul"])
+            recs[0]["daily_water_ml"] = 8
+            recs[1]["reward_ul"] = 70
+            write_records(recs, path)
+            with open(path, "r", encoding="utf-8") as fh:
+                doc = json.load(fh)
+            self.assertEqual(doc["animals"][0]["daily_water_ml"], 8.0)
+            self.assertIsNone(doc["animals"][0]["reward_ul"])
+            self.assertEqual(doc["animals"][1]["reward_ul"], 70.0)
+            self.assertEqual(doc["schema_version"], ANIMALS_SCHEMA_VERSION)
+            self.assertEqual(load_registry(path).daily_water_ml("Rat 600"), 8.0)
+            with self.assertRaises(ValueError):
+                recs[0]["daily_water_ml"] = "eight"
+                write_records(recs, path)
 
 
 class TestLoadRecordsForWrite(unittest.TestCase):
