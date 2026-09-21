@@ -4,7 +4,7 @@
   },
   "reward": {
     "port": 2,
-    "pulse_ms": 470,
+    "pulse_ms": 365,
     "max_topups": 0,
     "reward_incorrect": false
   },
