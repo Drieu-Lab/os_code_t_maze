@@ -33,9 +33,16 @@ from tmaze.core.reward.reward_calibration import (
 
 # Re-exported so existing callers can keep importing it from here.
 __all__ = [
-    "DEFAULT_REWARD_LIQUID", "DEFAULT_REWARD_PULSE_MS",
-    "reward_volume_ul", "reload_calibration", "format_volume",
+    "DEFAULT_REWARD_LIQUID", "DEFAULT_REWARD_PULSE_MS", "PULSE_MS_STEP",
+    "reward_volume_ul", "pulse_ms_for_volume", "round_pulse_ms",
+    "reload_calibration", "format_volume",
 ]
+
+# Pulse widths derived from a target volume are rounded to this step (ms) so a
+# per-animal reward reads as a round, re-typeable number (e.g. 350 ms rather than
+# 351.4) and matches the granularity the calibration tool measures at
+# (docs/decisions/0191).
+PULSE_MS_STEP = 5
 
 # In-code fallback used only when no measured curve applies (missing file / an
 # un-characterized port+liquid). The 300 ms -> 60 uL point is the original bench
@@ -142,6 +149,64 @@ def reward_volume_ul(dur_ms: float | int | None, port: str = "center",
         return 0.0
     curve = _curve_for(normalize_port(port), normalize_liquid(liquid))
     return _interp(curve, x)
+
+
+def _inverse_interp(curve: Dict[int, float], target_ul: float) -> float:
+    """Pulse width (ms) that :func:`_interp` maps to ``target_ul`` - the inverse
+    of the same piecewise-linear curve, so ``_interp(curve, x) == target``.
+
+    A single point inverts the proportional line; several points find the
+    segment whose volume range brackets the target (extrapolating along the
+    first/last segment outside the measured range). Measured curves increase
+    monotonically with pulse width, which is what makes the inverse unique; a
+    flat segment (equal volumes) returns its left end.
+    """
+    points = sorted(curve.items())
+    if not points:
+        return 0.0
+    if len(points) == 1:
+        ms0, ul0 = points[0]
+        return ms0 * target_ul / ul0 if ul0 else 0.0
+    if target_ul <= points[0][1]:
+        (x0, y0), (x1, y1) = points[0], points[1]
+    elif target_ul >= points[-1][1]:
+        (x0, y0), (x1, y1) = points[-2], points[-1]
+    else:
+        (x0, y0), (x1, y1) = points[0], points[-1]
+        for i in range(len(points) - 1):
+            if points[i][1] <= target_ul <= points[i + 1][1]:
+                (x0, y0), (x1, y1) = points[i], points[i + 1]
+                break
+    if y1 == y0:
+        return float(x0)
+    return x0 + (x1 - x0) * (target_ul - y0) / (y1 - y0)
+
+
+def pulse_ms_for_volume(target_ul: float, port: str = "center",
+                        liquid: str = DEFAULT_REWARD_LIQUID) -> float:
+    """Pulse width (ms, un-rounded) that dispenses ``target_ul`` at ``port``.
+
+    The inverse of :func:`reward_volume_ul` over the same measured curve and
+    fallback chain, so the two round-trip. Returns ``0.0`` for a non-positive
+    target and never a negative width. Callers that need a typeable value apply
+    :func:`round_pulse_ms` (docs/decisions/0191).
+    """
+    try:
+        ul = float(target_ul)
+    except (TypeError, ValueError):
+        return 0.0
+    if ul <= 0.0:
+        return 0.0
+    curve = _curve_for(normalize_port(port), normalize_liquid(liquid))
+    return max(0.0, _inverse_interp(curve, ul))
+
+
+def round_pulse_ms(ms: float, step: int = PULSE_MS_STEP) -> int:
+    """``ms`` rounded to the nearest ``step`` (floored at ``step`` so a derived
+    width is never 0 ms, which the firmware would treat as no reward)."""
+    if step <= 0:
+        return max(1, int(round(ms)))
+    return max(step, int(round(float(ms) / step)) * step)
 
 
 def format_volume(ul: float) -> str:

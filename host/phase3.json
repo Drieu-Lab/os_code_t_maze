@@ -1,10 +1,10 @@
 {
   "_schema": {
-    "note": "Host-owned Phase 3 config (FW-0024, ADR-0070). Delete this file to reset to built-in defaults. 'reward' + 'cue' + the sequence 'generator'/'debias_blocks'/'alternation_blocks' are editable from the Phase 3 tab (Save settings); the rest of 'sequence' holds scientific schedule params - hand-edit here only. seed: null = fresh random each launch, an integer pins the schedule. generator: 'balanced' (counterbalanced, default), 'debias_blocks' (counterbalanced + closed-loop side-bias corrective blocks; params in 'debias_blocks'), or 'intervention_blocks' (counterbalanced + the 'enabled' interventions in 'debias_blocks' and/or 'alternation_blocks' run concurrently, one active at a time)."
+    "note": "Host-owned Phase 3 config (FW-0024, ADR-0070). Delete this file to reset to built-in defaults. 'reward' + 'cue' + the sequence 'generator'/'debias_blocks'/'alternation_blocks' are editable from the Phase 3 tab (Save settings); the rest of 'sequence' holds scientific schedule params - hand-edit here only. seed: null = fresh random each launch, an integer pins the schedule. generator: 'balanced' (counterbalanced, default), 'debias_blocks' (counterbalanced + closed-loop side-bias corrective blocks; params in 'debias_blocks'), or 'intervention_blocks' (counterbalanced + the 'enabled' interventions in 'debias_blocks' and/or 'alternation_blocks' run concurrently, one active at a time). 'session_cap' ends cueing/reward after max_trials SCORED trials or max_minutes since Session Start, whichever comes first (soft stop: the operator still clicks Stop; ADR-0190); water_at_chance_fraction sizes the per-animal reward from animals.json daily_water_ml (ADR-0191). Hand-edit here only."
   },
   "reward": {
     "port": 2,
-    "pulse_ms": 465,
+    "pulse_ms": 470,
     "max_topups": 0,
     "reward_incorrect": false
   },
@@ -53,5 +53,11 @@
         ]
       ]
     }
+  },
+  "session_cap": {
+    "enabled": true,
+    "max_trials": 120,
+    "max_minutes": 45,
+    "water_at_chance_fraction": 0.5
   }
 }

@@ -20,7 +20,8 @@ from tmaze.core.cue_gate import CueParams
 from tmaze.core.phase3.phase3_config import (
     DEFAULT_MAX_TOPUPS, default_config, load_phase3_config, resolve_seed,
     reward_max_topups, save_phase3_config, to_cue_params, to_phase3_config,
-    to_trial_config, validate_phase3_config)
+    to_session_cap_config, to_trial_config, validate_phase3_config)
+from tmaze.core.phase3.session_cap import SessionCapConfig
 from tmaze.core.phase3.phase3_task import Phase3Config
 from tmaze.core.phase3.trial_sequence import TrialConfig
 
@@ -52,6 +53,24 @@ class TestDefaults(unittest.TestCase):
         self.assertEqual(cfg["sequence"]["max_alt_run"], TrialConfig().max_alt_run)
         cfg["sequence"]["max_alt_run"] = 4
         self.assertEqual(to_trial_config(cfg).max_alt_run, 4)
+
+    def test_session_cap_defaults_and_resolve(self):
+        """The session_cap section (ADR-0190) mirrors SessionCapConfig and a file
+        without it (pre-cap phase3.json) resolves to the defaults."""
+        cfg = default_config()
+        sc = SessionCapConfig()
+        self.assertEqual(cfg["session_cap"],
+                         {"enabled": sc.enabled, "max_trials": sc.max_trials,
+                          "max_minutes": sc.max_minutes,
+                          "water_at_chance_fraction": sc.water_at_chance_fraction})
+        self.assertEqual(to_session_cap_config(cfg), sc)
+        self.assertEqual(to_session_cap_config({}), sc)
+        cfg["session_cap"].update({"enabled": False, "max_trials": 80,
+                                   "max_minutes": 30, "water_at_chance_fraction": 0.6})
+        got = to_session_cap_config(cfg)
+        self.assertEqual(got, SessionCapConfig(enabled=False, max_trials=80,
+                                               max_minutes=30.0,
+                                               water_at_chance_fraction=0.6))
 
 
 class TestLoadMerge(unittest.TestCase):
@@ -151,6 +170,19 @@ class TestValidation(unittest.TestCase):
 
     def test_non_numeric_pulse_raises(self):
         self._bad("reward", "pulse_ms", "abc")
+
+    def test_bad_session_cap(self):
+        # Validated even when disabled (ADR-0190), so a bad value is caught on
+        # Save rather than the day the cap is switched on.
+        self._bad("session_cap", "max_trials", 0)
+        self._bad("session_cap", "max_minutes", 0)
+        self._bad("session_cap", "water_at_chance_fraction", 0)
+        self._bad("session_cap", "water_at_chance_fraction", 1.5)
+        cfg = default_config()
+        cfg["session_cap"]["enabled"] = False
+        cfg["session_cap"]["max_trials"] = -1
+        with self.assertRaises(ValueError):
+            validate_phase3_config(cfg)
 
 
 if __name__ == "__main__":

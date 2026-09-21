@@ -25,6 +25,10 @@ Division of the sections (see docs/decisions/0070):
     identities are deliberate, not fat-fingered mid-session. ``seed`` is optional:
     null/absent -> a fresh random seed each launch (reproducible only within a
     session); an integer pins the schedule across launches.
+  - ``session_cap`` (enabled, max_trials, max_minutes, water_at_chance_fraction)
+    ends cueing/reward after N scored trials or M minutes since Session Start
+    (docs/decisions/0190) and sizes the per-animal reward (docs/decisions/0191).
+    Scientific like ``sequence``: hand-edited, shown read-only.
 
 Defaults are DERIVED from the dataclass defaults below, so the config can never
 silently drift from the code's built-in behavior. Missing keys fall back to those
@@ -43,6 +47,7 @@ from tmaze.core.phase3.alternation import AlternationBlockConfig
 from tmaze.core.phase3.debias import DebiasBlockConfig
 from tmaze.core.phase3.probe_blocks import ProbeBlockConfig
 from tmaze.core.phase3.phase3_task import Phase3Config
+from tmaze.core.phase3.session_cap import SessionCapConfig
 from tmaze.core.phase3.trial_sequence import (
     GEN_BALANCED, GEN_DEBIAS_BLOCKS, GEN_INTERVENTION_BLOCKS, TrialConfig,
 )
@@ -58,9 +63,11 @@ DEFAULT_MAX_TOPUPS = 3
 # accepts any int, so this mask is just a config-surface convention now.
 _SEED_MASK = 0xFFFFFFFF
 
-# The three config sections; any other top-level key (``_schema``, ...) is left
+# The config sections; any other top-level key (``_schema``, ...) is left
 # untouched on load/merge/save so the file can carry its own documentation.
-_SECTIONS = ("reward", "cue", "sequence")
+# ``session_cap`` (docs/decisions/0190) joined the original three; like
+# ``sequence`` it is a scientific setting: hand-edited, shown read-only.
+_SECTIONS = ("reward", "cue", "sequence", "session_cap")
 
 # A short, self-describing block written into a fresh phase3.json so the file
 # explains itself (mirrors rules.json's ``_schema``). Preserved on round-trip.
@@ -79,7 +86,12 @@ _SCHEMA = {
              "unrewarded, internally-counterbalanced probe blocks (block_len trials) "
              "AUTO-triggered by a correct choice inside a 'windows' trial-number "
              "range; they work under ANY generator and read out latent cue->side "
-             "knowledge (docs/decisions/0115-probe, 0134)."),
+             "knowledge (docs/decisions/0115-probe, 0134). 'session_cap' ends "
+             "cueing/reward after max_trials SCORED trials or max_minutes since "
+             "Session Start, whichever comes first (soft stop: the operator still "
+             "clicks Stop; docs/decisions/0190); water_at_chance_fraction sizes the "
+             "per-animal reward from animals.json daily_water_ml "
+             "(docs/decisions/0191). Hand-edit here only."),
 }
 
 
@@ -95,6 +107,7 @@ def default_config() -> dict:
     pc, cp, tc, db = Phase3Config(), CueParams(), TrialConfig(), DebiasBlockConfig()
     al = AlternationBlockConfig()
     pb = ProbeBlockConfig()
+    sc = SessionCapConfig()
     return {
         "_schema": dict(_SCHEMA),
         "reward": {
@@ -159,6 +172,17 @@ def default_config() -> dict:
                 "block_len": pb.block_len,
                 "windows": [list(w) for w in pb.windows],
             },
+        },
+        # Session cap (docs/decisions/0190): N scored trials or M minutes since
+        # Session Start, whichever first, then a soft stop (no cue / no reward,
+        # operator clicks Stop). ``water_at_chance_fraction`` feeds the per-animal
+        # reward-volume rule (docs/decisions/0191). Derived from the dataclass
+        # default so this can't drift from session_cap.py.
+        "session_cap": {
+            "enabled": sc.enabled,
+            "max_trials": sc.max_trials,
+            "max_minutes": sc.max_minutes,
+            "water_at_chance_fraction": sc.water_at_chance_fraction,
         },
     }
 
@@ -394,6 +418,29 @@ def resolve_seed(config: dict) -> Optional[int]:
     return int(s) & _SEED_MASK
 
 
+def to_session_cap_config(config: dict) -> SessionCapConfig:
+    """Build + range-check the `SessionCapConfig` from the ``session_cap``
+    section (missing keys fall back to defaults; docs/decisions/0190).
+    ``max_trials`` > 0, ``max_minutes`` > 0, ``water_at_chance_fraction`` in
+    (0, 1]. Validated even when ``enabled`` is False so a bad value is caught on
+    Save rather than the day the cap is switched on."""
+    sc = SessionCapConfig()
+    d = config.get("session_cap", {})
+    enabled = bool(d.get("enabled", sc.enabled))
+    max_trials = int(d.get("max_trials", sc.max_trials))
+    max_minutes = float(d.get("max_minutes", sc.max_minutes))
+    fraction = float(d.get("water_at_chance_fraction", sc.water_at_chance_fraction))
+    if max_trials <= 0:
+        raise ValueError("session_cap.max_trials must be > 0")
+    if max_minutes <= 0.0:
+        raise ValueError("session_cap.max_minutes must be > 0")
+    if not 0.0 < fraction <= 1.0:
+        raise ValueError("session_cap.water_at_chance_fraction must be in (0, 1]")
+    return SessionCapConfig(enabled=enabled, max_trials=max_trials,
+                            max_minutes=max_minutes,
+                            water_at_chance_fraction=fraction)
+
+
 def validate_phase3_config(config: dict) -> None:
     """Raise if any value is malformed, by resolving every section (a clean
     return means the config will build). The Save button calls this to guard a
@@ -403,3 +450,4 @@ def validate_phase3_config(config: dict) -> None:
     to_cue_params(config)
     to_trial_config(config)
     resolve_seed(config)
+    to_session_cap_config(config)
