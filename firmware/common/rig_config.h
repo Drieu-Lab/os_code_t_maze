@@ -209,7 +209,21 @@
 #define DAC_SAMPLE_RATE      80000.0f    /* Hz */
 
 /* ================================ Protocol ============================== */
-/* v8 corrects the body-beam and lick STATE polarity. The Due-pin sense was
+/* v9 (Reflash A) hardens the serial link and adds firmware-clock provenance,
+ * all append-only / behavioural (no existing field changes meaning):
+ *  - Hot-path console writes are NON-BLOCKING: each log line is written only if
+ *    it fits the UART TX ring right now, else it is dropped and counted, so a
+ *    slow/stalled host link can never block loop() and delay a valve or TTL.
+ *    A STATUS query now also yields <ms>,TXDROP,<n> (dropped-line count).
+ *    updateValves()/updateTTLPulse() also run at the TOP of loop().
+ *  - Every Open Ephys TTL mark gets a firmware-clock serial TWIN:
+ *    <ms>,TTL,<CHOICE|RETURN|TONE_ON|TONE_OFF>,1 on the pulse rising edge,
+ *    sharing the same millis() used to start the pulse (offline alignment
+ *    becomes "match TTL lines to TTL pulses", S7).
+ *  - New VERSION command -> <ms>,VERSION,<proto>,<fw_git_sha>,<build>, so a
+ *    bundle records exactly which firmware produced it (FW_GIT_SHA below +
+ *    the compile timestamp). see docs/decisions/0193
+ * v8 corrects the body-beam and lick STATE polarity. The Due-pin sense was
  * inverted relative to the physical event (the NOYIYO opto is "Normal Low /
  * Actuated High" for beams; the lick pin idles HIGH and is pulled LOW on
  * contact), so pre-v8 firmware printed S,<i>,1 / L,<i>,1 for the RESTING state
@@ -244,6 +258,16 @@
  * logging (REWARD,<port>,MANUAL), and SESSION_SUMMARY (see docs/decisions/0009);
  * plus full manual solenoid control in cue-guided-task (R<port><sol>[,<ms>] ->
  * SOL ack) and auto well-clean SOL lines at trial start (docs/decisions/0010). */
-#define PROTO_VERSION        8
+#define PROTO_VERSION        9
+
+/* Firmware build identity, reported by the VERSION command (proto v9). The
+ * Arduino GUI build can't inject a git SHA automatically, so PASTE the short
+ * commit SHA here before flashing when you want it recorded; "unknown" is fine
+ * otherwise. The compile timestamp (__DATE__ " " __TIME__) is appended
+ * automatically by the sketch, so a bundle always records *something* even when
+ * the SHA is left unknown. see docs/decisions/0193 */
+#ifndef FW_GIT_SHA
+#define FW_GIT_SHA           "unknown"
+#endif
 
 #endif /* RIG_CONFIG_H */

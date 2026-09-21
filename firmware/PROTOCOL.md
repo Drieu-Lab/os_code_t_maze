@@ -1,7 +1,29 @@
-# Rig serial protocol v8
+# Rig serial protocol v9
 
 Both firmware sketches (`cue-guided-task`, `tmaze_test`) and the host tools
 (`maze_gui.py`, `lick_tuner.py`, `rig_logger.py`) speak this protocol.
+
+v9 (Reflash A) hardens the serial link and adds firmware-clock provenance, all
+**append-only / behavioural** (no existing field changes meaning), so a
+type-dispatching parser is unaffected:
+
+- **Non-blocking console writes.** A stalled host TCP client can back-pressure the
+  broker's serial reader, fill the Due UART TX ring (128 B), and make a plain
+  `CONSOLE.print` BLOCK inside the firmware loop - delaying valves/TTLs. v9 writes
+  each hot-path log line only if it fits the TX ring right now, else DROPS the
+  whole line (never a half-line) and counts it. A `STATUS` query now also yields a
+  trailing `<ms>,TXDROP,<n>` line (the cumulative dropped-line count). Actuation
+  (`updateValves`/`updateTTLPulse`) also runs at the top of the loop. Consequence:
+  under a saturated link some `S`/`L`/event lines may be absent from the log by
+  design; `TXDROP` tells you how many, and physical timing is preserved.
+- **TTL serial twins.** Every Open Ephys TTL mark now has a firmware-clock twin
+  line `<ms>,TTL,<CHOICE|RETURN|TONE_ON|TONE_OFF>,1`, emitted on the pulse RISING
+  edge using the same `millis()` that started the pulse. Offline alignment becomes
+  "match `TTL` lines to TTL pulses" instead of inferring onset through beams.
+- **`VERSION` command.** `VERSION` -> `<ms>,VERSION,<proto>,<fw_git_sha>,<build>`
+  so a bundle records exactly which firmware produced it (`<build>` is the compile
+  timestamp; `<fw_git_sha>` is pasted into `rig_config.h` when known, else
+  `unknown`). see docs/decisions/0193
 
 v8 CORRECTS the body-beam (`S`) and lick (`L`) state polarity. The firmware's
 Due-pin read was inverted relative to the physical event - the beams reach the
@@ -88,7 +110,7 @@ Emitted at boot, in order, before the session begins:
 
 | Line | Meaning |
 |------|---------|
-| `0,PROTO,7` | protocol version (assert this on the client) |
+| `0,PROTO,9` | protocol version (assert this on the client) |
 | `0,ANIMAL,<id>` | configured animal id |
 
 The firmware then starts in its default **training mode** (Free Roam unless
@@ -137,6 +159,9 @@ marker.
 | `CUE` | `OFF` | a host-driven cue tone stopped (v5). Emitted only when a tone was actually playing. The `TONE_OFF` TTL marks the acoustic offset. |
 | `SESSION_SUMMARY` | `<trials>,<correct>,<incorrect>` | emitted before `SESSION_COMPLETE` for a Full task session |
 | `STATUS` | `<count>,<index>,<active>` | reply to `STATUS` command |
+| `TXDROP` | `<n>` | (v9) emitted right after a `STATUS` reply: cumulative count of hot-path log lines DROPPED because the UART TX ring was full (non-blocking-write guard). A rising `<n>` means the host link is not draining fast enough and some `S`/`L`/event lines were skipped to keep actuation on time. see docs/decisions/0193 |
+| `TTL` | `<CHOICE\|RETURN\|TONE_ON\|TONE_OFF>,1` | (v9) firmware-clock TWIN of an Open Ephys TTL mark, emitted on the pulse RISING edge (the `1` is the rising edge; there is no falling-edge line). Shares the `millis()` used to start the pulse, so the line's `<ms>` equals the TTL onset. `CHOICE`/`RETURN` fire on the choice / return-arm beam edges (FSM in Full task, autonomously in Free Roam); `TONE_ON`/`TONE_OFF` fire with the tone TTLs on cue start/stop. see docs/decisions/0193 |
+| `VERSION` | `<proto>,<fw_git_sha>,<build>` | (v9) reply to the `VERSION` command: firmware serial protocol version, the git short SHA pasted into `rig_config.h` (`unknown` when not set), and the compile timestamp (`__DATE__ __TIME__`, contains spaces but no commas). Recorded in the bundle provenance. see docs/decisions/0193 |
 | `PONG` | (none) | reply to `PING` |
 | `SESSION_COMPLETE` | (none) | session ended (max trials, timeout, or abort) |
 | `FX_OVERFLOW` | (none) | diagnostic: per-tick effect buffer saturated (should never occur) |
@@ -147,10 +172,21 @@ central well; the drain energizes after the rinse finishes (non-blocking).
 see docs/decisions/0010
 
 TTL pulses to Open Ephys (choice, return-arm, tone on/off) are hardware
-signals, not serial lines. In Full task the choice / return-arm TTLs fire from
-the trial FSM; in Free Roam (v6) they fire autonomously on the choice / return
-beam edges so the host-owned Phase 3 keeps those event marks while the FSM is
-off (see docs/decisions/0046). The tone TTLs always follow `CUE_ON`/`CUE_OFF`.
+signals; as of v9 each also has a serial `TTL` twin line (above) sharing the
+pulse's `millis()`. In Full task the choice / return-arm TTLs fire from the
+trial FSM; in Free Roam (v6) they fire autonomously on the choice / return beam
+edges so the host-owned Phase 3 keeps those event marks while the FSM is off
+(see docs/decisions/0046). The `TONE_ON`/`TONE_OFF` TTLs fire whenever the tone
+starts/stops - via `CUE_ON`/`CUE_OFF` under `CUE,VISION`, but ALSO from the
+firmware's own beam-driven auto-tone under `CUE,BEAM` (so they do NOT "always
+follow `CUE_ON`/`CUE_OFF`"; that earlier claim was wrong).
+
+**Debounce lag on `S`/`L`.** A beam/lick edge is reported only after the raw
+level holds for `SENSOR_DEBOUNCE_MS` (5 ms), and the check runs once per loop
+pass, so the `<ms>` on an `S`/`L` line trails the true physical edge by ~5 ms
+plus up to one loop iteration. The `TTL` twins (choice/return) are driven from
+the same debounced beam edge, so they carry the same offset; correct for it
+offline if sub-5-ms alignment matters.
 
 ## Events emitted by tmaze_test
 
@@ -172,7 +208,8 @@ Commands are newline-terminated and are NOT part of the `ms,TYPE` line schema.
 | `MODE,FREE` / `MODE,FULL` | cue-guided-task | switch training mode and (re)start the session (Free Roam / Full task). **`MODE,FULL` is DEPRECATED** (the Full-task FSM is unused since host-owned Phase 3, ADR-0046; scheduled for removal, FW-0068). Real sessions run in Free Roam with the host driving Phase 3. |
 | `R<port><sol>[,<ms>]` | cue-guided-task, tmaze_test | pulse solenoid `[port][sol]` (port 0=left,1=right,2=center; sol 0-2 reward, 3 drain, 4 rinse); optional `<ms>` overrides `REWARD_PULSE_MS` (clamped <=5000). Both sketches ack with `SOL,<port>,<sol>` (`cue-guided-task` appends the pulse `<dur_ms>`: `SOL,<port>,<sol>,<dur_ms>`; `tmaze_test` does not). In `cue-guided-task` the pulse is non-blocking, works in any mode (independent of an active session), and a reward-spout fire (`<sol>` omitted or `=1`) also logs `REWARD,<port>,MANUAL,<dur_ms>`. A bare `R<port>` fires that port's reward spout. |
 | `PING` | cue-guided-task | -> `PONG`. Answered in ANY session state, including after a session has completed, so the broker's liveness probe keeps working post-session (see docs/decisions/0123). |
-| `STATUS` | cue-guided-task | -> `STATUS,<count>,<index>,<active>`. Answered in any session state; after completion `<active>` reports `0` (see docs/decisions/0123). |
+| `STATUS` | cue-guided-task | -> `STATUS,<count>,<index>,<active>` followed by `<ms>,TXDROP,<n>` (v9, the dropped-line count). Answered in any session state; after completion `<active>` reports `0` (see docs/decisions/0123). |
+| `VERSION` | cue-guided-task | (v9) -> `<ms>,VERSION,<proto>,<fw_git_sha>,<build>`. Firmware build identity for the bundle provenance; answered in any session state. The host sends it at session start (right after `PING`). see docs/decisions/0193 |
 | `CUE_ON,CHOICE[,<hz>[,<gain>]]` / `CUE_ON,RETURN[,<hz>[,<gain>]]` | cue-guided-task | start the host-driven cue tone. Without `<hz>` (v5) the frequency is chosen in firmware: `CHOICE` from the current trial's `correctArm` (`cueFor`), `RETURN` a random hi/lo from the session PRNG. With an explicit `<hz>` (v6) the host supplies identity directly, clamped to `[CUE_HZ_MIN, CUE_HZ_MAX]` - used by the host-owned Phase 3 (Free Roam, no firmware trial), see docs/decisions/0046. A trailing `<gain>` (v7) sets the playback volume as a percent 0-100 of full amplitude (clamped to `[CUE_GAIN_PCT_MIN, CUE_GAIN_PCT_MAX]`; absent == 100), applied by scaling the wavetable in the ISR - used to equalize HIGH/LOW on a non-flat speaker, see docs/decisions/0125. Session-independent (works in any mode; in Free Roam `CHOICE` without `<hz>` falls back to the low tone). Fires the `TONE_ON` TTL and emits `CUE,ON,<type>,<freq>,<gain>` (the tone actually played). No-op if a tone is already playing. see docs/decisions/0044 |
 | `CUE_OFF` | cue-guided-task | stop the host-driven cue tone (v5). Fires the `TONE_OFF` TTL and emits `CUE,OFF`. No-op if no tone is playing. |
 | `CUE,VISION` / `CUE,BEAM` | cue-guided-task | select the cue source (v5). `VISION`: the host drives the tone via `CUE_ON`/`CUE_OFF` and the firmware suppresses its `CueRunning` beam auto-tone (single DAC authority). `BEAM` (default): the v4 beam-driven auto-tone. All other trial FSM / scoring / reward / TTL behavior is unchanged. |

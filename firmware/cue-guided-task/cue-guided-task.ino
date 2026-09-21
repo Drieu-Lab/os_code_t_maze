@@ -8,7 +8,7 @@
  *
  * Pin map and tunables live in rig_config.h, a symlink to the canonical
  * ../common/rig_config.h (see docs/decisions/0006). Serial output follows
- * protocol v4: every line is "<ms>,<TYPE>,<payload...>". See ../PROTOCOL.md.
+ * protocol v9: every line is "<ms>,<TYPE>,<payload...>". See ../PROTOCOL.md.
  */
 
 #include "rig_config.h"
@@ -16,6 +16,7 @@
 #include "task_core.h"    // pure core
 
 #include <string.h>
+#include <stdio.h>        // snprintf for the non-blocking line builders (proto v9)
 
 // Arduino Due console: the Programming port (Serial -> UART0 -> ATmega16U2).
 // CONSOLE replaces Serial throughout. Set DUE_USE_NATIVE_USB 1 for the Native USB
@@ -35,6 +36,11 @@
 #else
 #define CONSOLE Serial
 #endif
+
+// Compile timestamp, reported by the VERSION command alongside FW_GIT_SHA so a
+// bundle records which firmware built it even when the SHA is left "unknown".
+// see docs/decisions/0193
+#define FW_BUILD (__DATE__ " " __TIME__)
 
 // ---------------- Pin tables (from rig_config.h) ----------------
 const int sensorPins[BEAM_COUNT] = SENSOR_PINS;   // order matches Beam enum
@@ -74,22 +80,71 @@ unsigned long lickLastChange[3];
 char    cmdBuf[32];
 uint8_t cmdLen = 0;
 
-// ---------------- Serial output (protocol v4) ----------------
+// ---------------- Serial output (protocol v9) ----------------
+// A stalled host TCP client can back-pressure the broker's serial reader, which
+// fills the Due UART TX ring (SERIAL_BUFFER_SIZE, 128 B); a plain CONSOLE.print
+// then BLOCKS inside readInputs() and delays loop() - and with it valves/TTLs.
+// v9 makes every hot-path log line NON-BLOCKING: it is built into a local buffer
+// and written only if it fits the TX ring right now (availableForWrite); on a
+// shortfall the WHOLE line is dropped and counted (never a half-written line).
+// txDropped is reported by STATUS (as a trailing <ms>,TXDROP,<n> line). Boot /
+// handshake / SEQ-dump lines below deliberately stay blocking: they run at setup
+// with an empty buffer and are provenance we must not drop. see docs/decisions/0193 (R2)
+unsigned long txDropped = 0;
+
+// Write a freshly snprintf'd line if it fits the TX ring, else drop + count.
+// `n` is snprintf()'s return; a (never-expected) truncation is clamped so we
+// still emit a bounded prefix rather than read past the buffer. Never blocks.
+static void writeLineOrDrop(char* buf, int cap, int n) {
+  if (n < 0) return;
+  if (n >= cap) n = cap - 1;                       // truncated: emit the prefix
+  if (n <= CONSOLE.availableForWrite()) {
+    CONSOLE.write((const uint8_t*)buf, (size_t)n);
+  } else {
+    txDropped++;
+  }
+}
+
 void printSL(unsigned long ms, const char* type, int idx, int state) {
-  CONSOLE.print(ms); CONSOLE.print(','); CONSOLE.print(type);
-  CONSOLE.print(','); CONSOLE.print(idx);
-  CONSOLE.print(','); CONSOLE.println(state);
+  char buf[24];
+  writeLineOrDrop(buf, sizeof(buf),
+                  snprintf(buf, sizeof(buf), "%lu,%s,%d,%d\n", ms, type, idx, state));
 }
 
 void printLog(unsigned long ms, const Effect& e) {
-  CONSOLE.print(ms); CONSOLE.print(','); CONSOLE.print(e.type);
-  if (e.a != FX_NONE) { CONSOLE.print(','); CONSOLE.print(e.a); }
-  if (e.b != FX_NONE) { CONSOLE.print(','); CONSOLE.print(e.b); }
-  if (e.c != FX_NONE) { CONSOLE.print(','); CONSOLE.print(e.c); }
-  if (e.detail && e.detail[0]) { CONSOLE.print(','); CONSOLE.print(e.detail); }
+  char buf[64];
+  int n = snprintf(buf, sizeof(buf), "%lu,%s", ms, e.type);
+  if (n < 0) return;
+  if (e.a != FX_NONE && n < (int)sizeof(buf)) n += snprintf(buf + n, sizeof(buf) - n, ",%ld", (long)e.a);
+  if (e.b != FX_NONE && n < (int)sizeof(buf)) n += snprintf(buf + n, sizeof(buf) - n, ",%ld", (long)e.b);
+  if (e.c != FX_NONE && n < (int)sizeof(buf)) n += snprintf(buf + n, sizeof(buf) - n, ",%ld", (long)e.c);
+  if (e.detail && e.detail[0] && n < (int)sizeof(buf)) n += snprintf(buf + n, sizeof(buf) - n, ",%s", e.detail);
   // Trailing numeric field after the detail (e.g. REWARD,CENTER,<dur_ms>). see docs/decisions/0019
-  if (e.tail != FX_NONE) { CONSOLE.print(','); CONSOLE.print(e.tail); }
-  CONSOLE.println();
+  if (e.tail != FX_NONE && n < (int)sizeof(buf)) n += snprintf(buf + n, sizeof(buf) - n, ",%ld", (long)e.tail);
+  if (n < (int)sizeof(buf)) n += snprintf(buf + n, sizeof(buf) - n, "\n");
+  writeLineOrDrop(buf, sizeof(buf), n);
+}
+
+// Firmware-clock TWIN of an Open Ephys TTL mark: <ms>,TTL,<name>,1 emitted on the
+// pulse RISING edge, using the same millis() that started the pulse (converted to
+// the session clock). Only the rising edge is logged - that is the ephys-relevant
+// mark; the pulse width is TTL_PULSE_MS. Lets offline alignment match TTL lines to
+// TTL pulses without inferring through beams. see docs/decisions/0193 (S7)
+void logTTL(unsigned long ms, const char* name) {
+  char buf[24];
+  writeLineOrDrop(buf, sizeof(buf),
+                  snprintf(buf, sizeof(buf), "%lu,TTL,%s,1\n", ms, name));
+}
+
+// VERSION command reply: proto version + firmware build identity (git SHA pasted
+// into rig_config.h when known, else "unknown") + compile timestamp, so a bundle
+// records exactly which firmware produced it. see docs/decisions/0193
+void handleVersion() {
+  unsigned long t = millis() - session.startMs;
+  char buf[64];
+  writeLineOrDrop(buf, sizeof(buf),
+                  snprintf(buf, sizeof(buf), "%lu,VERSION,%d,%s,%s\n",
+                           t, PROTO_VERSION, FW_GIT_SHA, FW_BUILD));
 }
 
 // ---------------- Solenoids (non-blocking) ----------------
@@ -148,13 +203,13 @@ void handleManualSolenoid(const char* b) {
   }
   openSolenoid(port, sol, dur);
   unsigned long t = millis() - session.startMs;
+  char buf[40];
   // Trailing <dur_ms> lets the host map the pulse to a calibrated volume. see docs/decisions/0019
-  CONSOLE.print(t); CONSOLE.print(",SOL,"); CONSOLE.print(port);
-  CONSOLE.print(','); CONSOLE.print(sol);
-  CONSOLE.print(','); CONSOLE.println(dur);
+  writeLineOrDrop(buf, sizeof(buf),
+                  snprintf(buf, sizeof(buf), "%lu,SOL,%d,%d,%lu\n", t, port, sol, dur));
   if (sol == REWARD_SOLENOID_INDEX) {
-    CONSOLE.print(t); CONSOLE.print(",REWARD,"); CONSOLE.print(port);
-    CONSOLE.print(",MANUAL,"); CONSOLE.println(dur);
+    writeLineOrDrop(buf, sizeof(buf),
+                    snprintf(buf, sizeof(buf), "%lu,REWARD,%d,MANUAL,%lu\n", t, port, dur));
   }
 }
 
@@ -216,18 +271,23 @@ void handleCueOn(const char* arg) {
   if (gainPct > CUE_GAIN_PCT_MAX) gainPct = CUE_GAIN_PCT_MAX;
   uint16_t gainQ8 = (uint16_t)((gainPct * TONE_GAIN_UNITY + 50) / 100);
   if (tonePlaying) return;                           // already sounding: don't relog / retrigger
+  unsigned long raw = millis();
   startToneAsync((float)freq, gainQ8);               // also raises the TONE_ON TTL
-  unsigned long t = millis() - session.startMs;
-  CONSOLE.print(t); CONSOLE.print(",CUE,ON,");
-  CONSOLE.print(type); CONSOLE.print(','); CONSOLE.print(freq);
-  CONSOLE.print(','); CONSOLE.println(gainPct);
+  unsigned long t = raw - session.startMs;
+  char buf[40];
+  writeLineOrDrop(buf, sizeof(buf),
+                  snprintf(buf, sizeof(buf), "%lu,CUE,ON,%s,%d,%ld\n", t, type, (int)freq, (long)gainPct));
+  logTTL(t, "TONE_ON");                              // firmware-clock twin of the TONE_ON TTL
 }
 
 void handleCueOff() {
   if (!tonePlaying) return;                          // nothing playing: don't pulse a spurious TTL
+  unsigned long raw = millis();
   stopToneAsync();                                   // also raises the TONE_OFF TTL
-  unsigned long t = millis() - session.startMs;
-  CONSOLE.print(t); CONSOLE.println(",CUE,OFF");
+  unsigned long t = raw - session.startMs;
+  char buf[24];
+  writeLineOrDrop(buf, sizeof(buf), snprintf(buf, sizeof(buf), "%lu,CUE,OFF\n", t));
+  logTTL(t, "TONE_OFF");                             // firmware-clock twin of the TONE_OFF TTL
 }
 
 // ---------------- Serial command channel ----------------
@@ -263,6 +323,8 @@ Command drainSerial() {
           cfg.cueSourceVision = true;              // host drives the cue; suppress beam auto-tone
         } else if (!strcmp(cmdBuf, "CUE,BEAM")) {
           cfg.cueSourceVision = false;             // firmware beam-driven auto-tone (v4 behavior)
+        } else if (!strcmp(cmdBuf, "VERSION")) {
+          handleVersion();                         // proto + fw build identity (v9)
         } else {
           Command k = parseCommand(cmdBuf);
           if (k.kind != Command::None) last = k;
@@ -326,20 +388,33 @@ void applyEffects(const Effects& fx) {
   for (uint8_t i = 0; i < fx.n; i++) {
     const Effect& e = fx.items[i];
     switch (e.tag) {
-      case FxTag::StartTone:
-        startToneAsync((float)e.a);
+      case FxTag::StartTone: {
+        unsigned long raw = millis();
+        startToneAsync((float)e.a);                // also raises the TONE_ON TTL
+        logTTL(raw - session.startMs, "TONE_ON");  // firmware-clock twin
         break;
-      case FxTag::StopTone:
-        stopToneAsync();
+      }
+      case FxTag::StopTone: {
+        unsigned long raw = millis();
+        stopToneAsync();                           // also raises the TONE_OFF TTL
+        logTTL(raw - session.startMs, "TONE_OFF"); // firmware-clock twin
         break;
-      case FxTag::PulseChoice:
-        ttlChoice.startTime = millis(); ttlChoice.active = true;
+      }
+      case FxTag::PulseChoice: {
+        // One millis() for BOTH the pulse start and its serial twin (shared t, S7).
+        unsigned long raw = millis();
+        ttlChoice.startTime = raw; ttlChoice.active = true;
         digitalWrite(ttlChoice.pin, HIGH);
+        logTTL(raw - session.startMs, "CHOICE");
         break;
-      case FxTag::PulseReturn:
-        ttlReturnArm.startTime = millis(); ttlReturnArm.active = true;
+      }
+      case FxTag::PulseReturn: {
+        unsigned long raw = millis();
+        ttlReturnArm.startTime = raw; ttlReturnArm.active = true;
         digitalWrite(ttlReturnArm.pin, HIGH);
+        logTTL(raw - session.startMs, "RETURN");
         break;
+      }
       case FxTag::OpenValve:
         // Automatic task reward: the configured reward spout (R2) of the port.
         // Drive from cfg.rewardPulseMs so the fired duration matches the value the
@@ -354,12 +429,13 @@ void applyEffects(const Effects& fx) {
         openSolenoid(port, RINSE_SOLENOID_INDEX, (unsigned long)e.a, 0);
         openSolenoid(port, DRAIN_SOLENOID_INDEX, (unsigned long)e.b, (unsigned long)e.a);
         // Trailing <dur_ms> on each SOL line (rinse=e.a, drain=e.b). see docs/decisions/0019
-        CONSOLE.print(t); CONSOLE.print(",SOL,"); CONSOLE.print(port);
-        CONSOLE.print(','); CONSOLE.print(RINSE_SOLENOID_INDEX);
-        CONSOLE.print(','); CONSOLE.println((unsigned long)e.a);
-        CONSOLE.print(t); CONSOLE.print(",SOL,"); CONSOLE.print(port);
-        CONSOLE.print(','); CONSOLE.print(DRAIN_SOLENOID_INDEX);
-        CONSOLE.print(','); CONSOLE.println((unsigned long)e.b);
+        char buf[40];
+        writeLineOrDrop(buf, sizeof(buf),
+                        snprintf(buf, sizeof(buf), "%lu,SOL,%d,%d,%lu\n",
+                                 t, port, RINSE_SOLENOID_INDEX, (unsigned long)e.a));
+        writeLineOrDrop(buf, sizeof(buf),
+                        snprintf(buf, sizeof(buf), "%lu,SOL,%d,%d,%lu\n",
+                                 t, port, DRAIN_SOLENOID_INDEX, (unsigned long)e.b));
         break;
       }
       case FxTag::Log:
@@ -423,6 +499,11 @@ void startFreeRoam() {
   session.startMs = millis();
 }
 
+// DEPRECATED (proto v9): the firmware's own trial FSM. Unused since the
+// vision-driven, host-owned Phase 3 (ADR-0046) runs the task over Free Roam and
+// only actuates through the firmware; the Full-task edges are beam-driven and
+// polarity-sensitive (ADR-0164). Kept so old MODE,FULL commands don't break;
+// scheduled for removal - see docs/future-work.md FW-0068. Do not build on it.
 void startFullTask() {
   cfg.mode = Mode::FullTask;
   uint32_t seed = makeSeed();
@@ -484,6 +565,18 @@ void setup() {
 
 // ---------------- Loop ----------------
 void loop() {
+  // Actuation FIRST: service pending valve-offs and TTL pulse-ends at the TOP of
+  // every pass, before readInputs() (which drains serial and may write log lines).
+  // A slow/blocked host link can back up those writes; doing the timers first means
+  // a physical valve or an Open Ephys TTL edge is never delayed by more than one
+  // loop pass. Repeated at the bottom so pulses started THIS pass are serviced too.
+  // see docs/decisions/0193 (R2)
+  updateTTLPulse(ttlToneOn);
+  updateTTLPulse(ttlToneOff);
+  updateTTLPulse(ttlChoice);
+  updateTTLPulse(ttlReturnArm);
+  updateValves();
+
   Inputs in = readInputs();   // also drains serial + prints S,/L, edges
 
   // Mode switch is a shell concern (it re-seeds, regenerates the sequence, and
@@ -506,6 +599,15 @@ void loop() {
     applyEffects(fx);
   }
 
+  // A STATUS query also reports the non-blocking-write drop count as a trailing
+  // shell line (kept separate from the pure core's STATUS effect). see docs/decisions/0193
+  if (in.cmd.kind == Command::Status) {
+    char buf[24];
+    writeLineOrDrop(buf, sizeof(buf),
+                    snprintf(buf, sizeof(buf), "%lu,TXDROP,%lu\n",
+                             millis() - session.startMs, txDropped));
+  }
+
   // Host-owned Phase 3 (docs/decisions/0046): with the trial FSM off (Free Roam)
   // the HOST owns the choice/return decisions, but the hardware event marks for
   // Open Ephys must still fire in real time. Pulse the choice / return-arm TTLs
@@ -514,12 +616,16 @@ void loop() {
   // in Free Roam the FSM never reaches AwaitChoice/AwaitReturn.
   if (cfg.mode == Mode::FreeRoam) {
     if (in.beam[B_LCHOICE] || in.beam[B_RCHOICE]) {
-      ttlChoice.startTime = millis(); ttlChoice.active = true;
+      unsigned long raw = millis();               // shared t for the pulse + its twin (S7)
+      ttlChoice.startTime = raw; ttlChoice.active = true;
       digitalWrite(ttlChoice.pin, HIGH);
+      logTTL(raw - session.startMs, "CHOICE");
     }
     if (in.beam[B_LRETURN] || in.beam[B_RRETURN]) {
-      ttlReturnArm.startTime = millis(); ttlReturnArm.active = true;
+      unsigned long raw = millis();
+      ttlReturnArm.startTime = raw; ttlReturnArm.active = true;
       digitalWrite(ttlReturnArm.pin, HIGH);
+      logTTL(raw - session.startMs, "RETURN");
     }
   }
 
