@@ -197,6 +197,13 @@ class Phase3Task:
         return self._index
 
     @property
+    def awaiting_return(self) -> bool:
+        """A choice has been scored this trial and the return lap has not yet
+        advanced it - i.e. a trial is IN FLIGHT. The controller's session cap
+        (docs/decisions/0190) only fires at a boundary, when this is False."""
+        return self._awaiting_return
+
+    @property
     def complete(self) -> bool:
         return self._index >= len(self.seq)
 

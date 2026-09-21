@@ -87,7 +87,11 @@ if TYPE_CHECKING:  # type-only imports - no runtime coupling to the stats cores
 # the single configured width (docs/decisions/0110). v7 adds ``pre_start_trials`` -
 # the count of trials whose ``trial_start_iso`` precedes ``session_t0`` because
 # Phase 3 was armed and run before Session Start (the arm-before-Start scope; L7).
-SCHEMA_VERSION = 7
+# v8 adds ``session_cap`` - the trial/minute cap the session ran under and, when
+# it fired, which limit ended the session and when (docs/decisions/0190) - and
+# ``water_target`` - the earned water against the animal's daily target and the
+# supplement still owed (docs/decisions/0191); both None when not applicable.
+SCHEMA_VERSION = 8
 
 # Both inputs are measured from the Phase 3 arm edge, not Session Start (see the
 # module docstring + docs/future-work.md FW-0028); recorded so a reader knows what
@@ -131,6 +135,16 @@ class SessionSummary:
     # 3 was armed BEFORE Session Start (docs/decisions/0066; review finding L7).
     # None when unknown (no rows / no anchor); 0 in the normal arm-then-Start flow.
     pre_start_trials: Optional[int] = None
+    # The session cap this session ran under (docs/decisions/0190):
+    # ``{enabled, max_trials, max_minutes, reached}`` where ``reached`` is None
+    # (the operator stopped first) or ``{reason, iso, trial_index, completed,
+    # elapsed_s}`` naming the limit that fired. None for a pre-cap session.
+    session_cap: Optional[Dict[str, Any]] = None
+    # Earned task water against the animal's daily target (docs/decisions/0191):
+    # ``{daily_water_ml, earned_ml, fraction, supplement_ml}`` (see
+    # ``session_cap.water_target_summary``); None when the animal has no recorded
+    # daily target. ``supplement_ml`` is target - earned, zero on a perfect day.
+    water_target: Optional[Dict[str, Any]] = None
     generated_iso: Optional[str] = None
     schema_version: int = SCHEMA_VERSION
     scope: str = SCOPE
@@ -263,6 +277,8 @@ class SessionSummary:
             "cued_task": _stats_dict(self.cued),
             "estimated_water": self.estimated_water,
             "manual_water": self.manual_water,
+            "water_target": self.water_target,
+            "session_cap": self.session_cap,
             "pre_start_trials": self.pre_start_trials,
             "locomotion": _stats_dict(self.locomotor),
             "notes": self.notes,
@@ -291,6 +307,9 @@ class SessionSummary:
         lines.append(f"End:      {_iso_of(self.t_end)}")
         lines.append(f"Duration: {_duration(self.duration_s)}")
         lines.append(f"Scope:    {self.scope}")
+        cap_line = _cap_line(self.session_cap)
+        if cap_line:
+            lines.append(f"Cap:      {cap_line}")
         # Flag the arm-before-Start case explicitly (L7): these trials' start
         # stamps precede session_t0, which an offline reader diffing against t0
         # would otherwise see as impossible negative offsets.
@@ -312,6 +331,8 @@ class SessionSummary:
         manual = self.manual_water
         if manual["pulses"]:
             lines.append(f"  Water (man): {_manual_water_str(manual)}")
+        if self.water_target:
+            lines.append(f"  Water target: {_water_target_str(self.water_target)}")
 
         lines.append("")
         lines.append("Excursions / locomotion")
@@ -336,6 +357,8 @@ def build_summary(*, session_id: str, animal: str,
                   notes: Optional[List[Dict[str, Any]]] = None,
                   manual_pulses_ms: Optional[List[float]] = None,
                   pre_start_trials: Optional[int] = None,
+                  session_cap: Optional[Dict[str, Any]] = None,
+                  water_target: Optional[Dict[str, Any]] = None,
                   generated_iso: Optional[str] = None) -> SessionSummary:
     """Build a :class:`SessionSummary` from the session metadata + the two frozen
     stat readouts, plus the folded task ``params``, the operator ``notes``
@@ -354,6 +377,8 @@ def build_summary(*, session_id: str, animal: str,
         notes=list(notes) if notes else [],
         manual_pulses_ms=list(manual_pulses_ms) if manual_pulses_ms else [],
         pre_start_trials=pre_start_trials,
+        session_cap=dict(session_cap) if session_cap else None,
+        water_target=dict(water_target) if water_target else None,
         generated_iso=generated_iso or now_iso(timespec="seconds"))
 
 
@@ -444,6 +469,43 @@ def _manual_water_str(water: Dict[str, Any]) -> str:
     (docs/decisions/0084)."""
     return (f"{reward_volume.format_volume(water['ul'])}   "
             f"[{water['pulses']} manual pulses]")
+
+
+def _water_target_str(target: Dict[str, Any]) -> str:
+    """``earned X mL = Y% of Z mL target, supplement W mL`` (docs/decisions/0191).
+    Formats the ``water_target`` dict (see ``session_cap.water_target_summary``)."""
+    try:
+        return (f"earned {float(target['earned_ml']):.2f} mL = "
+                f"{100.0 * float(target['fraction']):.0f}% of "
+                f"{float(target['daily_water_ml']):.1f} mL target, "
+                f"supplement {float(target['supplement_ml']):.2f} mL")
+    except (KeyError, TypeError, ValueError):
+        return "--"
+
+
+def _mmss(sec: Any) -> str:
+    try:
+        s = max(0, int(float(sec)))
+    except (TypeError, ValueError):
+        return "--"
+    return f"{s // 60:d}:{s % 60:02d}"
+
+
+def _cap_line(cap: Optional[Dict[str, Any]]) -> str:
+    """The session cap as one line (docs/decisions/0190): the limits, then
+    whether/which one fired. "" when the summary has no cap block (pre-cap
+    session)."""
+    if not cap:
+        return ""
+    if not cap.get("enabled", False):
+        return "off"
+    limits = (f"{cap.get('max_trials', '--')} trials / "
+              f"{_mmss(float(cap.get('max_minutes') or 0) * 60.0)} min")
+    hit = cap.get("reached")
+    if not hit:
+        return f"{limits}   not reached (operator stopped first)"
+    return (f"{limits}   REACHED on {hit.get('reason', '?')}: "
+            f"{hit.get('completed', '--')} trials in {_mmss(hit.get('elapsed_s'))}")
 
 
 def _notes_lines(notes: List[Dict[str, Any]]) -> list:

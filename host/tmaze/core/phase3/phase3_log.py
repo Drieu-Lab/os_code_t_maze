@@ -354,10 +354,22 @@ class Phase3Log:
                  session_t0: Optional[Dict[str, Any]] = None,
                  return_enabled: bool = True,
                  cue_calibration: Optional[Dict[str, Any]] = None,
-                 high_tone_is_left_source: str = "config") -> None:
+                 high_tone_is_left_source: str = "config",
+                 session_cap=None, reward_pulse_source: str = "config",
+                 daily_water_ml: Optional[float] = None) -> None:
         self.animal = animal
         self.seed = sequence.seed
         self.cfg = sequence.cfg
+        # Where ``reward_pulse_ms`` came from (docs/decisions/0191): "config" or
+        # an ``animals.json:<field>`` token, plus the animal's daily water target
+        # (mL) when it has one - so the file says how the reward was sized.
+        self.reward_pulse_source = str(reward_pulse_source or "config")
+        self.daily_water_ml = daily_water_ml
+        # The session cap this run was armed under (docs/decisions/0190): a
+        # SessionCapConfig-like object (enabled / max_trials / max_minutes), or
+        # None for an older caller -> no header line. Recorded so the file says
+        # how many opportunities the rat had, independent of the archived config.
+        self.session_cap = session_cap
         # Where the cue->side mapping (``cfg.high_tone_is_left``) came from this run
         # (ADR-0186): "animals.json" (a per-animal override) or "config"
         # (phase3.json's default). Recorded in the header + snapshot so a bundle
@@ -762,6 +774,8 @@ class Phase3Log:
     # ------------------------------------------------------------- render
     def _header_comment(self) -> List[str]:
         c = self.cfg
+        daily = ("" if self.daily_water_ml is None
+                 else f"{float(self.daily_water_ml):g}")
         lines = [
             f"# phase3_session animal={self.animal} session_id={self.session_id} "
             f"seed={self.seed} proto={PROTO_VERSION}",
@@ -785,8 +799,20 @@ class Phase3Log:
             f"max_trials={c.max_trials} planned_trials={len(self._rows)} "
             f"reward_incorrect={self.reward_incorrect} "
             f"reward_pulse_ms={self.reward_pulse_ms} max_topups={self.max_topups}",
+            # Reward-volume provenance (docs/decisions/0191): where the width came
+            # from + the daily target it was derived from ("" when none).
+            f"# reward_pulse_source={self.reward_pulse_source} daily_water_ml={daily}",
             f"# generator={c.generator}",
         ]
+        # Session cap (docs/decisions/0190): keys are ``session_cap_``-prefixed so
+        # the offline header parser reads them unambiguously (``max_trials`` above
+        # is the initial PLAN size, a different thing).
+        sc = self.session_cap
+        if sc is not None:
+            lines.append(
+                f"# session_cap session_cap_enabled={bool(sc.enabled)} "
+                f"session_cap_trials={int(sc.max_trials)} "
+                f"session_cap_minutes={float(sc.max_minutes):g}")
         # For a closed-loop debias session, record its params and the caveat that
         # the seed ALONE no longer reproduces the schedule (it also depends on the
         # animal's realized choices + any operator overrides). See debias.py.

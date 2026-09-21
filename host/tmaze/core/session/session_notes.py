@@ -95,6 +95,11 @@ AUTO_RESUME = "auto:resume"
 # the reset (docs/decisions/0184). Recorded so a reboot - which restarts the
 # firmware clock at 0 - is visible on the session timeline.
 AUTO_FIRMWARE_RESET = "auto:firmware_reset"
+# The session cap fired (docs/decisions/0190): N scored trials or M minutes since
+# Session Start, whichever first. From this point the task cues and rewards
+# nothing more (a soft stop); the note carries which limit fired, the trial /
+# time reached, and the water earned so the operator can supplement the rest.
+AUTO_CAP_REACHED = "auto:cap_reached"
 
 
 def is_auto_tag(tag: Optional[str]) -> bool:

@@ -121,6 +121,9 @@ criteria).
 | [FW-0067](#fw-0067-live-central-well-lick-trace-in-the-gui) | Live central-well lick trace in the GUI (replaces eyeballing the retired `rig_logger` console) | Phase 3 live traces / Session panel / Rig View (`ui/`, `core/phase3/`) | Proposed |
 | [FW-0068](#fw-0068-remove-the-deprecated-firmware-full-task) | Remove the deprecated firmware Full task (unused since vision-driven Phase 3; polarity-sensitive FSM) at the next reflash | `firmware/cue-guided-task` (`task_core.h` FSM, `SESSION_SUMMARY`, `MODE,FULL`, handshake), `PROTOCOL.md`, host `protocol.classify` | Deprecated (docs 6f); removal deferred to a reflash |
 | [FW-0069](#fw-0069-phase-3-absorbs-phases-12-as-stages) | Phase 3 absorbs Phases 1-2 as configurable stages (one engine, one trial CSV from day one for the longitudinal analysis) | `core/phase3/{phase3_task,phase3_config}.py`, `core/rules/rules_engine.py`, `ui/rules_view.py` | Proposed (design before the next cohort) |
+| [FW-0070](#fw-0070-session-cap-fields-in-the-phase-3-tab) | Editable session-cap fields (trials / minutes / enabled) in the Phase 3 tab, saved like the reward knobs | `ui/phase3_controller.py`, `core/phase3/phase3_config.py` | Deferred (hand-edited per ADR-0190) |
+| [FW-0071](#fw-0071-per-day-daily-water-target-override) | Per-day daily-water target override (e.g. from `daily_log.csv`) on top of the per-animal `daily_water_ml` | `core/records/{animals,daily_log}.py`, `ui/phase3_controller.py` | Proposed |
+| [FW-0072](#fw-0072-per-animal-session-cap-overrides) | Per-animal `max_trials` / `max_minutes` overrides in `animals.json` (the ADR-0186 pattern) for slow rats the clock ends early | `core/records/animals.py`, `core/phase3/session_cap.py`, `ui/phase3_controller.py` | Proposed |
 
 ## Entries
 
@@ -3541,6 +3544,110 @@ learning curve by stage (a `stage` column / manifest field)?
 **ADR needed?** Yes, at design time - a stage model touches the task-data
 contract (a new column / manifest field) and would coordinate a `format_version`
 bump with the analysis mirror.
+
+### FW-0070: Session-cap fields in the Phase 3 tab
+
+- **Status:** Deferred (hand-edited per ADR-0190)
+- **Date added:** 2026-09-21
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** `host/tmaze/ui/phase3_controller.py` (reward/sequence UI +
+  `_persist_live_config`), `host/tmaze/core/phase3/phase3_config.py`
+- **Related ADRs:** [ADR-0190](decisions/0190-phase3-session-cap.md),
+  [ADR-0070](decisions/0070-config-driven-phase3-parameters.md) (which sections are editable)
+
+**Motivation / context.** The session cap (`enabled` / `max_trials` /
+`max_minutes`) is a per-protocol setting and was deliberately put with the
+hand-edited `sequence` params, shown read-only in the tab. If the cap starts
+being tuned between sessions (e.g. a shorter clock for a slow rat, or switched
+off for a probe day) the JSON round-trip becomes friction.
+
+**Sketch of approach.** Add three fields to the tab (like Pulse / Max top-ups),
+overlay them in `_publish_snapshot` -> `_current_session_cap()`, and include the
+section in the save-on-arm persist (ADR-0167) so the per-session
+`config/phase3.json` snapshot still reflects what the session ran under.
+
+**Evaluation / acceptance.** A cap edited in the tab is what the next Start
+arms with, is validated on Save, and lands in the header / manifest / summary
+exactly as the file-edited value does today.
+
+**Effort / risk.** Small. Risk: making a scientific parameter fat-fingerable
+mid-session - the reason it is read-only now; consider gating the fields behind
+the same "hand-edit" posture as the tones unless the cohort protocol calls for
+per-session changes.
+
+**Open questions.** Should `water_at_chance_fraction` be editable too (it
+changes every rat's reward volume)? Probably not.
+
+**ADR needed?** Yes - it moves a parameter across the ADR-0070 editable /
+file-only line.
+
+### FW-0071: Per-day daily-water target override
+
+- **Status:** Proposed
+- **Date added:** 2026-09-21
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** `host/tmaze/core/records/animals.py`,
+  `host/tmaze/core/records/daily_log.py`, `host/tmaze/ui/phase3_controller.py`
+  (`_resolve_reward_pulse`)
+- **Related ADRs:** [ADR-0191](decisions/0191-per-animal-reward-volume-from-daily-water.md),
+  [ADR-0076](decisions/0076-daily-husbandry-table-source-of-truth.md)
+
+**Motivation / context.** ADR-0191 stores one stable `daily_water_ml` per animal
+in `animals.json`. A rat's need can change with weight trajectory (a rat under
+90 % baseline may be given more), and the daily husbandry row is where that
+day's decision is already recorded. A per-day override would let the reward
+volume follow the day's target without editing the roster.
+
+**Sketch of approach.** An optional `water_target_ml` column in `daily_log.csv`
+(schema v5); `_resolve_reward_pulse` consults today's row for the animal first,
+then falls back to `animals.json`. Record the source token
+(`daily_log.csv:water_target_ml`) in the header / manifest like the others.
+
+**Evaluation / acceptance.** With a row set for today the armed width follows
+it; without one the ADR-0191 behaviour is unchanged; the provenance names the
+source.
+
+**Effort / risk.** Small-moderate (a records schema bump + the Excel builder in
+the resources repo). Risk: two places to look for "the target" - keep the
+priority explicit and visible in the tab readout.
+
+**Open questions.** Is a per-day target a husbandry decision (daily log) or a
+protocol decision (roster)? Decide with the PI before adding the column.
+
+**ADR needed?** Yes (records schema + priority order).
+
+### FW-0072: Per-animal session-cap overrides
+
+- **Status:** Proposed
+- **Date added:** 2026-09-21
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** `host/tmaze/core/records/animals.py`,
+  `host/tmaze/core/phase3/session_cap.py`, `host/tmaze/ui/phase3_controller.py`
+- **Related ADRs:** [ADR-0190](decisions/0190-phase3-session-cap.md),
+  [ADR-0186](decisions/0186-per-animal-cue-side-mapping.md) (the override pattern)
+
+**Motivation / context.** The cap is global (120 trials / 45 min). Rat 602 runs
+at ~2 trials/min, so its sessions are ended by the clock near 90 trials while
+600/601 reach the trial limit in 25-45 min - the same cap gives 602 fewer
+opportunities (and, under ADR-0191, less earned water even on a perfect day).
+Accepted knowingly for now; if it matters, the fix is per-animal.
+
+**Sketch of approach.** Optional `session_cap` overrides per animal in
+`animals.json` (`max_trials`, `max_minutes`; null = use `phase3.json`),
+resolved at arm like the cue mapping; the reward rule keeps using the animal's
+own `max_trials` so the 50 %-of-day property holds per animal. Header / manifest
+/ summary already record the resolved cap.
+
+**Evaluation / acceptance.** A per-animal cap is what the session runs under and
+is what the provenance says; unset animals are unchanged.
+
+**Effort / risk.** Small. Risk: divergent session lengths across animals
+complicate cross-animal comparison of within-session effects (sated/fatigue).
+
+**Open questions.** Cap on trials only, or both? Should a longer clock for 602
+come with the same 120 trials (more time) or fewer trials (same time)?
+
+**ADR needed?** Yes.
 
 ## Completed
 

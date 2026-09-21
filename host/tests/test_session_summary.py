@@ -414,7 +414,7 @@ class TestPreStartTrials(unittest.TestCase):
         summ = session_summary.build_summary(
             session_id="s", animal="a", t0=_T0, t_end=_T_END, pre_start_trials=2)
         self.assertEqual(summ.as_dict()["pre_start_trials"], 2)
-        self.assertEqual(summ.schema_version, 7)
+        self.assertGreaterEqual(summ.schema_version, 7)   # v7 introduced the field
         self.assertIn("started before Session Start", summ.render_text())
 
     def test_text_silent_when_zero_or_none(self):
@@ -423,6 +423,54 @@ class TestPreStartTrials(unittest.TestCase):
                 session_id="s", animal="a", t0=_T0, t_end=_T_END,
                 pre_start_trials=val)
             self.assertNotIn("before Session Start", summ.render_text())
+
+
+class TestSessionCapAndWaterTarget(unittest.TestCase):
+    """v8 (docs/decisions/0190/0191): the cap block + the daily-water target."""
+
+    def test_absent_blocks_are_none_and_silent(self):
+        summ = session_summary.build_summary(
+            session_id="s", animal="a", t0=_T0, t_end=_T_END)
+        d = summ.as_dict()
+        self.assertEqual(d["schema_version"], 8)
+        self.assertIsNone(d["session_cap"])
+        self.assertIsNone(d["water_target"])
+        text = summ.render_text()
+        self.assertNotIn("Cap:", text)
+        self.assertNotIn("Water target", text)
+
+    def test_cap_not_reached(self):
+        cap = {"enabled": True, "max_trials": 120, "max_minutes": 45.0,
+               "reached": None}
+        summ = session_summary.build_summary(
+            session_id="s", animal="a", t0=_T0, t_end=_T_END, session_cap=cap)
+        self.assertEqual(summ.as_dict()["session_cap"], cap)
+        text = summ.render_text()
+        self.assertIn("Cap:      120 trials / 45:00 min   not reached", text)
+
+    def test_cap_reached_names_the_limit(self):
+        cap = {"enabled": True, "max_trials": 120, "max_minutes": 45.0,
+               "reached": {"reason": "time", "iso": "x", "trial_index": 90,
+                           "completed": 90, "elapsed_s": 2700.0}}
+        summ = session_summary.build_summary(
+            session_id="s", animal="a", t0=_T0, t_end=_T_END, session_cap=cap)
+        self.assertIn("REACHED on time: 90 trials in 45:00", summ.render_text())
+
+    def test_cap_off(self):
+        summ = session_summary.build_summary(
+            session_id="s", animal="a", t0=_T0, t_end=_T_END,
+            session_cap={"enabled": False, "max_trials": 120,
+                         "max_minutes": 45.0, "reached": None})
+        self.assertIn("Cap:      off", summ.render_text())
+
+    def test_water_target_line(self):
+        target = {"daily_water_ml": 8.0, "earned_ml": 5.5, "fraction": 0.688,
+                  "supplement_ml": 2.5}
+        summ = session_summary.build_summary(
+            session_id="s", animal="a", t0=_T0, t_end=_T_END, water_target=target)
+        self.assertEqual(summ.as_dict()["water_target"], target)
+        self.assertIn("Water target: earned 5.50 mL = 69% of 8.0 mL target, "
+                      "supplement 2.50 mL", summ.render_text())
 
 
 if __name__ == "__main__":

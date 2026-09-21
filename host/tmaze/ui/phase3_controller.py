@@ -69,21 +69,25 @@ from tmaze.core.phase3.alternation import AlternationBlockConfig
 from tmaze.core.phase3.debias import DebiasBlockConfig
 from tmaze.core.phase3.phase3_config import (
     DEFAULT_MAX_TOPUPS, default_config, load_phase3_config, resolve_seed,
-    save_phase3_config, to_trial_config, validate_phase3_config)
+    save_phase3_config, to_session_cap_config, to_trial_config,
+    validate_phase3_config)
+from tmaze.core.phase3 import session_cap
+from tmaze.core.phase3.session_cap import SessionCapConfig
 from tmaze.core.phase3.trial_sequence import (
     GEN_BALANCED, GEN_DEBIAS_BLOCKS, GEN_INTERVENTION_BLOCKS)
 from tmaze.core.phase3.excursion_log import (
     ExcursionLog, OUTCOME_DENIED, OUTCOME_SCORED, TYPE_NON_STEM, TYPE_UP_STEM)
 from tmaze.core.phase3.phase3_log import Phase3Log, Phase3StateSnapshot
 from tmaze.core.session.session_notes import (
-    AUTO_ALT_END, AUTO_ALT_START, AUTO_BACK, AUTO_DEBIAS_END,
+    AUTO_ALT_END, AUTO_ALT_START, AUTO_BACK, AUTO_CAP_REACHED, AUTO_DEBIAS_END,
     AUTO_DEBIAS_START, AUTO_FIRMWARE_RESET, AUTO_PROBE_DISABLED,
     AUTO_PROBE_ENABLED, AUTO_PROBE_END, AUTO_PROBE_START, AUTO_REPEAT,
     AUTO_RESUME, AUTO_SEND_FAILED, AUTO_SKIP, AUTO_UNCUED)
 from tmaze.core.phase3.phase3_task import (
     ABANDONED, CORRECT, INCORRECT, UNCUED, Phase3Config, Phase3Task)
 from tmaze.core.reward.reward_dispenser import WellDispenser
-from tmaze.core.reward.reward_volume import format_volume, reward_volume_ul
+from tmaze.core.reward.reward_volume import (
+    format_volume, pulse_ms_for_volume, reward_volume_ul, round_pulse_ms)
 from tmaze.core.rig_config import load_rig_config
 from tmaze.paths import host_dir
 from tmaze.ui.trial_ribbon_view import (
@@ -168,6 +172,14 @@ class _Phase3Snapshot:
     reward_pulse_ms: int = 500
     max_topups: int = DEFAULT_MAX_TOPUPS
     reward_port: int = 2
+    # Where ``reward_pulse_ms`` came from (docs/decisions/0191): "config" (the
+    # tab field / phase3.json), "animals.json:reward_ul" (an explicit per-animal
+    # volume, which wins) or "animals.json:daily_water_ml" (derived from the
+    # animal's daily target under the session cap). ``daily_water_ml`` is the
+    # target itself (None when the animal has none) for the water-target readout,
+    # whichever source sized the reward.
+    reward_pulse_source: str = session_cap.SOURCE_CONFIG
+    daily_water_ml: Optional[float] = None
     # Resolved schedule/tone config from phase3.json (FW-0024/ADR-0070); the
     # sequence is built from this on arm instead of the hardcoded default.
     trial_config: TrialConfig = field(default_factory=TrialConfig)
@@ -188,6 +200,10 @@ class _Phase3Snapshot:
     # set, the actuation thread silences any tone and freezes trial progress
     # without disarming (the gate stays open).
     paused: bool = False
+    # Session cap (docs/decisions/0190): N scored trials or M minutes since
+    # Session Start, whichever first, then a soft stop. Resolved from phase3.json
+    # on the Tk poll like the other tunables.
+    session_cap: SessionCapConfig = field(default_factory=SessionCapConfig)
 
 
 class Phase3ControlView(VisionActuator):
@@ -285,6 +301,17 @@ class Phase3ControlView(VisionActuator):
         # tags each restart's data file so a restart never clobbers the prior run.
         self._paused = False
         self._restart_count = 0
+        # Session cap state (docs/decisions/0190). ``_cap_reached`` is None while
+        # running; once a limit is met it holds ``{reason, iso, trial_index,
+        # completed, elapsed_s}`` and the actuation thread behaves as if paused
+        # (no cue, no reward) until a fresh arm / Restart / Session Start clears
+        # it - it deliberately SURVIVES Stop, so a capped rat still in the maze is
+        # not cued again by the still-armed task. ``_cap_base_done`` is the scored
+        # count at Session Start, so the trial limit counts from Start (like the
+        # clock), not from arm. Written on the actuation thread (set_session_context
+        # publishes before the rebind), read by the Tk status poll.
+        self._cap_reached: Optional[dict] = None
+        self._cap_base_done = 0
         # How many times a mid-session gate REOPEN was resumed rather than treated
         # as a fresh arm (docs/decisions/0120). Surfaced in the status line so the
         # operator knows a tracking flicker did not restart / overwrite the run;
@@ -482,6 +509,12 @@ class Phase3ControlView(VisionActuator):
         self._session_id = session_id or ""
         self._session_out_dir = out_dir or ""
         self._session_t0 = session_t0
+        if session_id:
+            # A new recording: the cap counts trials + minutes from THIS Start
+            # (docs/decisions/0190). Trials run between arm and Start don't count.
+            # Stop (no session_id) leaves ``_cap_reached`` as is - see __init__.
+            self._cap_base_done = self._correct + self._incorrect
+            self._cap_reached = None
         # Publish the new context BEFORE asking for the rebind: the Tk poll would
         # otherwise be up to POLL_INTERVAL_MS behind, and the thread would rebind
         # using the PREVIOUS session's snapshot.
@@ -575,6 +608,14 @@ class Phase3ControlView(VisionActuator):
 
     def is_paused(self) -> bool:
         return self._paused
+
+    def cap_reached(self) -> Optional[dict]:
+        """The session-cap hit for the current run (docs/decisions/0190) as
+        ``{reason, iso, trial_index, completed, elapsed_s}``, or None while the
+        cap has not fired. Read on the Tk thread by the Session controller at Stop
+        so the summary records WHICH limit ended the session."""
+        hit = self._cap_reached
+        return dict(hit) if hit else None
 
     # The debias corrective-block override (Rig-view / control-bar button). These
     # only do anything under the "debias_blocks" generator; they enqueue a command
@@ -707,6 +748,9 @@ class Phase3ControlView(VisionActuator):
         self._pending_cue_ack_index = None
         self._pending_return_cue_ack_index = None
         self._pending_reward_ack_index = None
+        # A fresh run starts uncapped; the trial count base is re-taken at Start.
+        self._cap_reached = None
+        self._cap_base_done = 0
         # Start a fresh session data file: the planned matrix is written now, then
         # each trial's outcome is filled in as it resolves (ADR-0047). When armed
         # via the Session controller the shared session_id names the file (so the
@@ -728,7 +772,10 @@ class Phase3ControlView(VisionActuator):
                               session_t0=snap.session_t0,
                               return_enabled=snap.params.return_enabled,
                               cue_calibration=self._resolve_cue_calibration(),
-                              high_tone_is_left_source=snap.cue_mapping_source)
+                              high_tone_is_left_source=snap.cue_mapping_source,
+                              session_cap=snap.session_cap,
+                              reward_pulse_source=snap.reward_pulse_source,
+                              daily_water_ml=snap.daily_water_ml)
         # Bind + write into the session's task/ folder ONLY when armed via a
         # session (docs/decisions/0049). When armed WITHOUT one (the ADR-0060
         # arm-before-Start order, or a standalone tab), keep the planned matrix IN
@@ -1078,7 +1125,11 @@ class Phase3ControlView(VisionActuator):
         # into task_events, so the next trial-start edge (departed_hub_via_stem)
         # and cue only fire from a fresh hub->stem run after resume; resetting the
         # gate keeps the cue re-arm consistent with that.
-        if snap.paused:
+        # The session cap has fired (docs/decisions/0190): a SOFT stop - same
+        # silence/freeze as pause, but not operator-clearable; it lifts only on a
+        # fresh arm / Restart / the next Session Start. The operator removes the rat
+        # and clicks Stop as usual (the recording is not auto-closed, ADR-0060).
+        if snap.paused or self._cap_reached is not None:
             if self._active_cue is not None:
                 self._send_cmd("CUE_OFF")
                 self._active_cue = None
@@ -1283,6 +1334,25 @@ class Phase3ControlView(VisionActuator):
             # available for the relative cue-zone dwell.
             self._append_excursion(task_frame, idx, iso)
 
+        # Session cap (docs/decisions/0190): evaluated only at a TRIAL BOUNDARY -
+        # no cue sounding, no scored choice awaiting its return lap, and the rat
+        # not out on a genuine trial trip - so a trial in flight when the clock
+        # runs out always finishes (the rat heard the cue; withholding its reward
+        # would be an unearned punishment). The trial limit is naturally met on the
+        # advance that completes the Nth trial. Only counts while a session is
+        # recording (needs the Start anchor); a manual/unrecorded arm is uncapped.
+        if self._cap_reached is None and snap.session_cap.enabled \
+                and snap.session_t0 and task_frame is not None \
+                and self._active_cue is None \
+                and not self._task.awaiting_return \
+                and not task_frame.trial_trip:
+            completed = (self._correct + self._incorrect) - self._cap_base_done
+            elapsed_s = self._session_elapsed_s(snap)
+            status = session_cap.evaluate(completed, elapsed_s, snap.session_cap)
+            if status.reached:
+                self._on_cap_reached(status, completed, elapsed_s, idx, iso, snap)
+                changed = True
+
         # Auto-extend the plan one balanced block AHEAD so a rat that outpaces the
         # planned trial count keeps running with correct cue identity / calibrated
         # volume / scoring / reward, instead of hitting a degenerate "complete"
@@ -1292,7 +1362,9 @@ class Phase3ControlView(VisionActuator):
         # whole block later. Keeping the plan exactly one step ahead also caps the
         # trailing empty planned rows in the CSV at block_size - 1 (same footprint
         # as today's fixed plan).
-        if self._seq is not None and self._task.index >= len(self._seq) - 1:
+        # Skipped once the cap has fired: no further trial will be cued.
+        if self._seq is not None and self._cap_reached is None \
+                and self._task.index >= len(self._seq) - 1:
             self._extend_trials(snap)
 
         if changed:
@@ -1316,6 +1388,46 @@ class Phase3ControlView(VisionActuator):
             self._write_log()
             self._publish_state(armed=True)
         self._publish_status(snap)
+
+    @staticmethod
+    def _session_elapsed_s(snap: _Phase3Snapshot) -> float:
+        """Seconds since Session Start, from the manifest anchor's monotonic clock
+        (docs/decisions/0124); 0.0 with no anchor (unrecorded arm)."""
+        t0 = snap.session_t0 or {}
+        mono = t0.get("mono")
+        if mono is None:
+            return 0.0
+        try:
+            return max(0.0, time.monotonic() - float(mono))
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _on_cap_reached(self, status, completed: int, elapsed_s: float,
+                        trial_index: int, iso: str, snap: _Phase3Snapshot) -> None:
+        """The session cap just fired (docs/decisions/0190): record it, silence
+        the rig, and post the auto-note that tells the operator what the rat
+        earned. From the next tick ``_process_frame`` takes the frozen branch."""
+        cap = snap.session_cap
+        self._cap_reached = {
+            "reason": status.reason, "iso": iso, "trial_index": trial_index,
+            "completed": int(completed), "elapsed_s": round(float(elapsed_s), 1),
+            "max_trials": cap.max_trials, "max_minutes": cap.max_minutes,
+        }
+        if self._active_cue is not None:
+            self._send_cmd("CUE_OFF")
+            self._active_cue = None
+        self._gate.reset()
+        limit = (f"{cap.max_trials} trials" if status.reason == session_cap.REASON_TRIALS
+                 else f"{session_cap.mmss(cap.max_minutes * 60.0)} min")
+        text = (f"session cap reached ({limit}): {completed} trials in "
+                f"{session_cap.mmss(elapsed_s)} - earned "
+                f"{format_volume(self._reward_ul)} - remove rat, Stop session")
+        target = session_cap.water_target_summary(snap.daily_water_ml, self._reward_ul)
+        if target:
+            text += f" - {session_cap.format_water_target(target)}"
+        self._emit_intervention(AUTO_CAP_REACHED, text, trial_index, iso,
+                                extra={"cap": dict(self._cap_reached),
+                                       "water_target": target})
 
     def _process_lick(self, iso: str, fw_ms, mono: float) -> None:
         """A center-well lick from the serial thread: record its time in the data
@@ -1562,7 +1674,28 @@ class Phase3ControlView(VisionActuator):
         idx = self._task.index if self._task is not None else 0
         done = self._correct + self._incorrect
         acc = (100.0 * self._correct / done) if done else 0.0
+        # Session cap hit (docs/decisions/0190): say so loudly and stop here - the
+        # rat is no longer being cued; the operator removes it and clicks Stop.
+        hit = self._cap_reached
+        if hit is not None:
+            limit = (f"{hit['max_trials']} trials"
+                     if hit["reason"] == session_cap.REASON_TRIALS
+                     else f"{session_cap.mmss(hit['max_minutes'] * 60.0)} min")
+            self._status_text = (
+                warn + rec +
+                f"CAP REACHED ({limit}) - {hit['completed']} trials in "
+                f"{session_cap.mmss(hit['elapsed_s'])}  "
+                f"correct:{self._correct}/{done} ({acc:.0f}%)  "
+                f"rewards:{self._reward_count} ({format_volume(self._reward_ul)})  "
+                "- remove rat, Stop session")
+            return
         extra = f"  drops:{self._act_drops}" if self._act_drops else ""
+        # Live cap countdown while a session is recording (docs/decisions/0190):
+        # scored trials since Start / limit, elapsed / limit.
+        if snap.session_cap.enabled and snap.session_t0:
+            extra += "  " + session_cap.format_countdown(
+                snap.session_cap, done - self._cap_base_done,
+                self._session_elapsed_s(snap))
         # UNCUED trips (a commit with no cue this trip; docs/decisions/0171) never
         # scored/rewarded - show the count when any occurred so the operator sees
         # the rig failing to cue the animal (the trial re-runs, not advances).
@@ -1589,6 +1722,10 @@ class Phase3ControlView(VisionActuator):
             side = "L" if snap.trial_config.high_tone_is_left else "R"
             flag = "!" if snap.cue_mapping_overrides else ""
             extra += f"  cue:H->{side}(animals.json{flag})"
+        # Per-animal reward volume (ADR-0191): show the width the run armed with
+        # and that it came from animals.json, not the Pulse field.
+        if snap.reward_pulse_source != session_cap.SOURCE_CONFIG:
+            extra += f"  reward:{snap.reward_pulse_ms}ms(animals.json)"
         # Conditional probe segment: only after the first scored probe BLOCK trial
         # (so a normal session's status line is unchanged), plus a live PROBE tag
         # while a probe block is running and a [PROBE OFF] tag when the operator has
@@ -1964,10 +2101,18 @@ class Phase3ControlView(VisionActuator):
             probe_txt = f" \u00b7 probe {int(pb.get('block_len', 10))} @ {win_txt}"
         else:
             probe_txt = " \u00b7 probe off"
+        # Read-only session cap (file-only like the schedule params; ADR-0190).
+        cap = self._current_session_cap()
+        if cap.enabled:
+            cap_txt = (f" \u00b7 cap {cap.max_trials} trials / "
+                       f"{cap.max_minutes:g} min")
+        else:
+            cap_txt = " \u00b7 cap off"
         self._seq_info_var.set(
             f"trials {s['max_trials']} \u00b7 block {s['block_size']} \u00b7 "
             f"max-run {s['max_same_run']} \u00b7 tones {s['high_tone_hz']}/"
-            f"{s['low_tone_hz']} Hz (HIGH={left}) \u00b7 seed {seed_txt}{probe_txt}")
+            f"{s['low_tone_hz']} Hz (HIGH={left}) \u00b7 seed {seed_txt}{probe_txt}"
+            f"{cap_txt}")
 
     def _sync_debias_enabled(self) -> None:
         """Enable each intervention's controls to match the generator + its enable
@@ -2292,11 +2437,19 @@ class Phase3ControlView(VisionActuator):
         """Update the calibrated per-trial reward-volume estimate from the pulse +
         top-up fields (ADR-0019/0069). Runs on the Tk thread (spinbox command +
         poll), so it never touches the actuation thread's tallies."""
-        per = reward_volume_ul(self._current_pulse_ms())
+        pulse_ms, source, daily = self._resolve_reward_pulse()
+        per = reward_volume_ul(pulse_ms)
         pulses = 1 + self._current_max_topups()
-        self._reward_vol_var.set(
-            f"\u2248 {format_volume(per)}/pulse  \u00b7  up to {pulses} pulses/trial "
-            f"= {format_volume(per * pulses)}")
+        text = (f"\u2248 {format_volume(per)}/pulse  \u00b7  up to {pulses} pulses/trial "
+                f"= {format_volume(per * pulses)}")
+        # A per-animal volume (docs/decisions/0191) overrides the field: say so,
+        # with the width the rig will actually arm with.
+        if source != session_cap.SOURCE_CONFIG:
+            what = (f"daily {daily:g} mL" if source == session_cap.SOURCE_DAILY_WATER
+                    else f"reward_ul {reward_volume_ul(pulse_ms):.0f} uL")
+            text += (f"   [per-animal: {what} in animals.json -> {pulse_ms} ms; "
+                     f"the Pulse field is ignored]")
+        self._reward_vol_var.set(text)
 
     def _build_progress_ui(self, root: ttk.Frame, *, row: int) -> None:
         """Build the trial ribbon + scrollable planned-trial list (ADR-0051).
@@ -2345,12 +2498,15 @@ class Phase3ControlView(VisionActuator):
         """Tk poll: snapshot the gate + tunables the actuation thread needs, so
         the thread never reads Tk state (ADR-0043)."""
         _cue_value, cue_source, cue_overrides = self._resolve_cue_mapping()
+        pulse_ms, pulse_source, daily_water_ml = self._resolve_reward_pulse()
         self._act_snapshot = _Phase3Snapshot(
             gate_open=self._gate_open(),
             params=self._current_params(),
             seed=self._current_seed(),
             reward_incorrect=bool(self._reward_incorrect_var.get()),
-            reward_pulse_ms=self._current_pulse_ms(),
+            reward_pulse_ms=pulse_ms,
+            reward_pulse_source=pulse_source,
+            daily_water_ml=daily_water_ml,
             max_topups=self._current_max_topups(),
             reward_port=int(self._config["reward"]["port"]),
             trial_config=self._current_trial_config(),
@@ -2360,7 +2516,17 @@ class Phase3ControlView(VisionActuator):
             session_id=self._session_id,
             session_out_dir=self._session_out_dir,
             session_t0=self._session_t0,
-            paused=self._paused)
+            paused=self._paused,
+            session_cap=self._current_session_cap())
+
+    def _current_session_cap(self) -> SessionCapConfig:
+        """The session cap from the loaded phase3.json (docs/decisions/0190);
+        the built-in default if the section is malformed (load already surfaced
+        the error), so the poll never crashes."""
+        try:
+            return to_session_cap_config(self._config)
+        except Exception:
+            return SessionCapConfig()
 
     def _current_animal(self) -> str:
         """Current animal id from the Task tab's shared field (docs/decisions/
@@ -2406,6 +2572,63 @@ class Phase3ControlView(VisionActuator):
         provenance block (ADR-0186/0180). Read on the Tk thread at Session Start."""
         value, source, _overrides = self._resolve_cue_mapping()
         return {"high_tone_is_left": value, "source": source}
+
+    def resolved_session_cap(self) -> dict:
+        """The session cap the run is armed under (docs/decisions/0190), for the
+        manifest provenance + summary: ``{enabled, max_trials, max_minutes}``.
+        Read on the Tk thread at Start / Stop."""
+        cap = self._current_session_cap()
+        return {"enabled": bool(cap.enabled), "max_trials": int(cap.max_trials),
+                "max_minutes": float(cap.max_minutes)}
+
+    def _resolve_reward_pulse(self):
+        """Resolve the correct-choice prime pulse width for the CURRENT animal
+        (docs/decisions/0191) -> ``(pulse_ms, source, daily_water_ml)``.
+
+        Priority: the animal's explicit ``reward_ul`` in animals.json (v4),
+        inverted through the calibration curve and rounded to ``PULSE_MS_STEP``;
+        else its ``daily_water_ml`` -> a per-reward volume via
+        ``session_cap.reward_ul_for_target`` under the session cap, likewise
+        inverted; else the tab's Pulse field (phase3.json's value). The daily
+        target is returned whichever branch sized the reward, for the water-target
+        readout. A volume the curve can't invert (no calibration) falls back to
+        the field too, so the rig always has a positive width. Runs on the Tk poll
+        like the cue mapping."""
+        field_ms = self._current_pulse_ms()
+        reg = self._cue_registry()
+        animal = self._current_animal()
+        daily = reg.daily_water_ml(animal) if reg is not None else None
+        explicit = reg.reward_ul(animal) if reg is not None else None
+        try:
+            ul, source = session_cap.resolve_reward_ul(
+                daily, explicit, self._current_session_cap())
+        except ValueError:
+            return field_ms, session_cap.SOURCE_CONFIG, daily
+        if ul is None:
+            return field_ms, session_cap.SOURCE_CONFIG, daily
+        ms = pulse_ms_for_volume(ul, port=int(self._config["reward"]["port"]))
+        if ms <= 0.0:
+            return field_ms, session_cap.SOURCE_CONFIG, daily
+        return round_pulse_ms(ms), source, daily
+
+    def resolved_reward_policy(self) -> dict:
+        """The reward volume policy the run is armed under (docs/decisions/0191),
+        for the manifest provenance: ``{pulse_ms, source, daily_water_ml,
+        reward_ul}`` (the last two None when unset). Read on the Tk thread."""
+        pulse_ms, source, daily = self._resolve_reward_pulse()
+        reg = self._cue_registry()
+        explicit = reg.reward_ul(self._current_animal()) if reg is not None else None
+        return {"pulse_ms": int(pulse_ms), "source": source,
+                "daily_water_ml": daily, "reward_ul": explicit}
+
+    def water_target(self) -> Optional[dict]:
+        """Earned task water (this run's prime + top-up pulses, since arm) vs the
+        current animal's daily target (docs/decisions/0191), or None when it has
+        no recorded target. Read on the Tk thread at Stop for the summary; the
+        target is resolved fresh (not from the last snapshot) so it follows the
+        animal id the way the reward width does."""
+        _ms, _source, daily = self._resolve_reward_pulse()
+        return session_cap.water_target_summary(daily, self._reward_ul)
 
     # -------------------------------------------------- progress visualization
     def _refresh_progress(self) -> None:

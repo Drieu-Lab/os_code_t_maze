@@ -1316,6 +1316,21 @@ class SessionControlView:
                 prov["cue_mapping"] = self._phase3.resolved_cue_mapping()
             except Exception:
                 pass
+        # ...and the session cap the run is armed under (docs/decisions/0190), so
+        # a bundle says how many opportunities the rat had without opening the
+        # archived config.
+        if self._phase3 is not None and hasattr(self._phase3, "resolved_session_cap"):
+            try:
+                prov["session_cap"] = self._phase3.resolved_session_cap()
+            except Exception:
+                pass
+        # ...and how the reward volume was sized for this animal
+        # (docs/decisions/0191): the armed pulse width + its source.
+        if self._phase3 is not None and hasattr(self._phase3, "resolved_reward_policy"):
+            try:
+                prov["reward_policy"] = self._phase3.resolved_reward_policy()
+            except Exception:
+                pass
         self._manifest.set_provenance(prov)
 
         # Bind the note log to this session's on-disk file and flush whatever the
@@ -1689,7 +1704,9 @@ class SessionControlView:
                 cued=cued, locomotor=locomotor, seed=seed, tones=tones,
                 params=params, notes=notes,
                 manual_pulses_ms=self._operator_pulses_ms,
-                pre_start_trials=self._pre_start_trial_count())
+                pre_start_trials=self._pre_start_trial_count(),
+                session_cap=self._session_cap_block(),
+                water_target=self._water_target_block())
             summary_dir = os.path.join(self._session_dir, SUMMARY_SUBDIR)
             json_path = os.path.join(
                 summary_dir, f"session_summary_{self._session_id}.json")
@@ -1730,6 +1747,32 @@ class SessionControlView:
             "low_tone_hz": snap.low_tone_hz,
         }
         return phase3_stats.compute(snap), snap.seed, tones
+
+    def _session_cap_block(self):
+        """The summary's ``session_cap`` block (docs/decisions/0190): the cap the
+        run was armed under (from the Phase 3 controller) plus ``reached`` - the
+        limit that fired, or None when the operator stopped first. None when no
+        Phase 3 controller exposes it (pre-cap / headless)."""
+        if self._phase3 is None or not hasattr(self._phase3, "resolved_session_cap"):
+            return None
+        try:
+            block = dict(self._phase3.resolved_session_cap())
+            block["reached"] = (self._phase3.cap_reached()
+                                if hasattr(self._phase3, "cap_reached") else None)
+        except Exception:
+            return None
+        return block
+
+    def _water_target_block(self):
+        """The summary's ``water_target`` block (docs/decisions/0191): earned task
+        water vs the animal's daily target, from the Phase 3 controller; None when
+        unavailable or the animal has no recorded target."""
+        if self._phase3 is None or not hasattr(self._phase3, "water_target"):
+            return None
+        try:
+            return self._phase3.water_target()
+        except Exception:
+            return None
 
     def _pre_start_trial_count(self):
         """How many Phase 3 trials started BEFORE session_t0 (review finding L7):
@@ -1783,6 +1826,9 @@ class SessionControlView:
             "max_topups": reward.get("max_topups"),
             "require_up_stem": cue.get("require_up_stem"),
             "min_confidence": cue.get("min_confidence"),
+            # The session cap (docs/decisions/0190) as archived; the top-level
+            # ``session_cap`` block adds whether it fired.
+            "session_cap": cfg.get("session_cap"),
         }
 
     def _load_notes_entries(self) -> list:

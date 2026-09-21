@@ -443,6 +443,18 @@ stops waiting for the PC to open the port, and **restarts on a MODE switch**. Th
 board's true uptime is never sent. Worth remembering when comparing timestamps
 across a reconnect or a mode change. See ADR-0064.
 
+### Session cap (soft cap)
+The Phase 3 rule that ends the *task* after a fixed number of scored trials or a
+fixed number of minutes since Session Start, whichever comes first (120 trials /
+45 min by default, in `phase3.json`'s `session_cap`). It is **soft**: the rig
+stops cueing and rewarding and shows a `CAP REACHED` banner, but the recording
+keeps running until the operator removes the rat and clicks Stop — nothing is
+closed automatically. Fixing the number of *opportunities* per session is what
+makes the water a rat earns depend on its strategy (an alternating rat is right
+half the time, so it earns half of what a cue-following rat does). Checked only
+at a **trial boundary**, so a trial already under way finishes normally. See
+ADR-0190 and [water target](#water-target).
+
 ### Session registry
 One table that folds *every* recording into rows so sessions can be compared and
 filtered at a glance — one row per session with its husbandry context (weight,
@@ -511,3 +523,17 @@ alarm. The [broker](#broker)'s watchdog uses a
 where previously a dead rig looked identical to a quiet one and went unnoticed for
 17 minutes. It reports; it cannot revive the board (only the RESET button does
 that). See ADR-0062.
+
+### Water target (daily water)
+Each rat's daily water need in millilitres (`daily_water_ml` in `animals.json`,
+e.g. 8 mL for rat 600). It is the yardstick the Stop-time summary measures a
+session against: whatever is not earned (`target − earned`) is the
+**supplement** given in the home cage later. It can also size the reward: when
+the rat has no explicit `reward_ul` in `animals.json`, the rig sets the volume of
+one correct-trial reward under the [session cap](#session-cap-soft-cap) so that a
+rat at chance over the full cap earns a set fraction of the day's water (half, by
+default) and a perfect rat earns exactly all of it:
+`uL per reward = daily_water_ml × 1000 × water_at_chance_fraction ÷ (max_trials × 0.5)`.
+An explicit `reward_ul` (70 µL for every rat today) overrides that derived
+volume so the reward is the same size across rats. Either way the pulse width is
+read backwards off the reward calibration curve. See ADR-0191.

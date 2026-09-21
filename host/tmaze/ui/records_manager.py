@@ -13,9 +13,12 @@ One window to keep the lab's *records* without hand-editing CSVs or workbooks:
   procedures" + notes for it; saving upserts ``session_annotations.csv`` by
   ``session_id`` (ADR-0089).
 - **Roster** - add/remove rats and edit their aliases, date of birth
-  (ADR-0161), and per-animal cue->side mapping (``high_tone_is_left``, a
-  tri-state left/right/default; ADR-0186); saving validates and writes
-  ``animals.json`` (the identity source of truth).
+  (ADR-0161), per-animal cue->side mapping (``high_tone_is_left``, a
+  tri-state left/right/default; ADR-0186), and water budget (an explicit
+  ``reward_ul`` that pins the reward magnitude, plus ``daily_water_ml`` - the
+  target the Stop summary measures earned water against and the rig derives
+  the reward from when no explicit uL is set; ADR-0191); saving validates and
+  writes ``animals.json`` (the identity source of truth).
 - **Dashboard** - a read-only welfare view: a compact per-rat status strip
   (% baseline today + <90% flag + grams-to-90% deficit; a not-logged/not-weighed
   alarm; water intake by source) above a single combined 14-day % baseline trend
@@ -258,6 +261,25 @@ def _cue_value(label: str):
     if label == _CUE_HIGH_RIGHT:
         return False
     return None
+
+
+def _num_label(value) -> str:
+    """An optional number (``daily_water_ml`` / ``reward_ul``, animals.json v4,
+    ADR-0191) -> its cell text: "" for unset, else a short decimal."""
+    if value is None or value == "":
+        return ""
+    try:
+        return f"{float(value):g}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _num_value(text: str):
+    """A Roster entry field -> the value staged for animals.json: blank -> None
+    (unset); otherwise the raw text, which ``animals.validate_records`` checks
+    (a non-number or a value <= 0 is refused at Add)."""
+    text = (text or "").strip()
+    return None if not text else text
 
 
 class RecordsManager:
@@ -856,7 +878,10 @@ class RecordsManager:
         """Flatten roster records to string rows for the change-log diff."""
         return [{"id": str(r.get("id", "")),
                  "aliases": "; ".join(str(a) for a in (r.get("aliases") or [])),
-                 "date_of_birth": str(r.get("date_of_birth", "") or "")}
+                 "date_of_birth": str(r.get("date_of_birth", "") or ""),
+                 # Water budget (animals.json v4, ADR-0191); blank = unset.
+                 "daily_water_ml": _num_label(r.get("daily_water_ml")),
+                 "reward_ul": _num_label(r.get("reward_ul"))}
                 for r in records]
 
     # ---- guarded writes (ADR-0155) ---------------------------------------
@@ -1860,23 +1885,27 @@ class RecordsManager:
 
         left = ttk.Frame(tab)
         left.pack(side="left", fill="both", expand=True)
-        ttk.Label(left, text="Rats (id  |  aliases  |  date of birth)").pack(
-            side="top", anchor="w")
+        ttk.Label(left, text="Rats (id  |  aliases  |  date of birth  |  cue  |  "
+                             "water budget)").pack(side="top", anchor="w")
         rwrap = ttk.Frame(left)
         rwrap.pack(side="top", fill="both", expand=True)
         self.r_tree = ttk.Treeview(
-            rwrap, columns=("id", "aliases", "dob", "age", "cue"),
+            rwrap, columns=("id", "aliases", "dob", "age", "cue", "water", "reward"),
             show="headings", height=14)
         self.r_tree.heading("id", text="id")
         self.r_tree.heading("aliases", text="aliases (comma-separated)")
         self.r_tree.heading("dob", text="date of birth")
         self.r_tree.heading("age", text="age today")
         self.r_tree.heading("cue", text="cue (high tone)")
+        self.r_tree.heading("water", text="daily water (mL)")
+        self.r_tree.heading("reward", text="reward (uL)")
         self.r_tree.column("id", width=70, anchor="center")
         self.r_tree.column("aliases", width=200, anchor="w")
         self.r_tree.column("dob", width=100, anchor="center")
         self.r_tree.column("age", width=90, anchor="center")
         self.r_tree.column("cue", width=100, anchor="center")
+        self.r_tree.column("water", width=100, anchor="center")
+        self.r_tree.column("reward", width=80, anchor="center")
         self._grid_tree_with_scrollbars(rwrap, self.r_tree)
         self.r_tree.bind("<<TreeviewSelect>>", self._load_selected_roster)
 
@@ -1908,20 +1937,40 @@ class RecordsManager:
             row=4, column=1, sticky="w")
         ttk.Label(right, text="high tone -> which arm (blank = rig default)",
                   foreground="#555").grid(row=5, column=1, sticky="w")
+        # Water budget (animals.json v4, ADR-0191). The daily target is what the
+        # Stop summary measures earned water + supplement against, and what the
+        # rig derives the per-correct-trial reward from under the session cap
+        # (ADR-0190) when no explicit uL is set; an explicit uL pins the reward
+        # magnitude; both blank = the rig keeps phase3.json's pulse width.
+        ttk.Label(right, text="daily water (mL)").grid(row=6, column=0, sticky="e",
+                                                       pady=3)
+        self.r_water = tk.StringVar()
+        ttk.Entry(right, textvariable=self.r_water, width=14).grid(
+            row=6, column=1, sticky="w")
+        ttk.Label(right, text="daily target for the supplement readout "
+                              "(and uL/reward if none below)",
+                  foreground="#555").grid(row=7, column=1, sticky="w")
+        ttk.Label(right, text="reward (uL)").grid(row=8, column=0, sticky="e",
+                                                  pady=3)
+        self.r_reward = tk.StringVar()
+        ttk.Entry(right, textvariable=self.r_reward, width=14).grid(
+            row=8, column=1, sticky="w")
+        ttk.Label(right, text="explicit per-reward volume; overrides the derived one",
+                  foreground="#555").grid(row=9, column=1, sticky="w")
         ttk.Button(right, text="Add / update",
-                   command=self._roster_add).grid(row=6, column=0, columnspan=2,
+                   command=self._roster_add).grid(row=10, column=0, columnspan=2,
                                                    sticky="we", pady=(6, 2))
         ttk.Button(right, text="Remove selected",
-                   command=self._roster_remove).grid(row=7, column=0, columnspan=2,
+                   command=self._roster_remove).grid(row=11, column=0, columnspan=2,
                                                       sticky="we")
-        ttk.Separator(right).grid(row=8, column=0, columnspan=2, sticky="we", pady=8)
+        ttk.Separator(right).grid(row=12, column=0, columnspan=2, sticky="we", pady=8)
         ttk.Button(right, text="Save roster -> animals.json",
-                   command=self._roster_save).grid(row=9, column=0, columnspan=2,
+                   command=self._roster_save).grid(row=13, column=0, columnspan=2,
                                                     sticky="we")
         ttk.Label(right, foreground="#555", wraplength=180,
                   text=("Edits stay in this window until you Save. Save validates "
-                        "ids/aliases/dates before writing.")).grid(
-            row=10, column=0, columnspan=2, sticky="we", pady=(8, 0))
+                        "ids/aliases/dates/numbers before writing.")).grid(
+            row=14, column=0, columnspan=2, sticky="we", pady=(8, 0))
 
     def _refresh_roster(self) -> None:
         self.r_tree.delete(*self.r_tree.get_children())
@@ -1933,17 +1982,22 @@ class RecordsManager:
             self.r_tree.insert("", "end", values=(
                 rec["id"], ", ".join(rec.get("aliases", [])),
                 str(rec.get("date_of_birth", "") or ""), age,
-                _cue_label(rec.get("high_tone_is_left"))))
+                _cue_label(rec.get("high_tone_is_left")),
+                _num_label(rec.get("daily_water_ml")),
+                _num_label(rec.get("reward_ul"))))
 
     def _load_selected_roster(self, _event=None) -> None:
         sel = self.r_tree.selection()
         if not sel:
             return
-        rid, aliases, dob, _age, cue = self.r_tree.item(sel[0], "values")
+        rid, aliases, dob, _age, cue, water, reward = self.r_tree.item(
+            sel[0], "values")
         self.r_id.set(rid)
         self.r_aliases.set(aliases)
         self.r_dob.set(dob)
         self.r_cue.set(cue or _CUE_DEFAULT)
+        self.r_water.set(water)
+        self.r_reward.set(reward)
 
     def _roster_add(self) -> None:
         rid = self.r_id.get().strip()
@@ -1952,16 +2006,19 @@ class RecordsManager:
             return
         aliases = [a.strip() for a in self.r_aliases.get().split(",") if a.strip()]
         dob = self.r_dob.get().strip()
-        # Check the date here too so a typo is caught at Add rather than at
-        # Save, when several staged edits would be refused together.
-        dob_errors = animals.validate_records([{"id": rid, "date_of_birth": dob}])
-        if dob_errors:
-            messagebox.showwarning("Check the date of birth",
-                                   "\n".join(dob_errors))
+        staged = animals.normalize_records([{
+            "id": rid, "aliases": aliases, "date_of_birth": dob,
+            "high_tone_is_left": _cue_value(self.r_cue.get()),
+            "daily_water_ml": _num_value(self.r_water.get()),
+            "reward_ul": _num_value(self.r_reward.get())}])
+        # Check the date + numbers here too so a typo is caught at Add rather
+        # than at Save, when several staged edits would be refused together.
+        errors = animals.validate_records(staged)
+        if errors:
+            messagebox.showwarning("Check the entry", "\n".join(errors))
             return
         self.roster = [r for r in self.roster if r["id"] != rid]
-        self.roster.append({"id": rid, "aliases": aliases, "date_of_birth": dob,
-                            "high_tone_is_left": _cue_value(self.r_cue.get())})
+        self.roster.append(staged[0])
         self.roster.sort(key=lambda r: r["id"])
         self._refresh_roster()
         self._set_status(f"{rid} staged - Save roster to write animals.json.")

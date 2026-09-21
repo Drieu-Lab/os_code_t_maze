@@ -28,7 +28,8 @@ import unittest
 
 from tmaze.core import protocol
 from tmaze.core.session.session_notes import (
-    AUTO_FIRMWARE_RESET, AUTO_SEND_FAILED, AUTO_WRITE_FAILED)
+    AUTO_CAP_REACHED, AUTO_FIRMWARE_RESET, AUTO_SEND_FAILED, AUTO_WRITE_FAILED)
+from tmaze.core.phase3.session_cap import SessionCapConfig
 from tmaze.core.maze_state import (
     CENTRAL_STEM, HUB, IN_WELL, LEFT_CHOICE, RIGHT_CHOICE, UP_STEM, RatState)
 from tmaze.core.records.animals import AnimalRegistry
@@ -611,6 +612,237 @@ class SessionPhase3WiringTest(unittest.TestCase):
                         "expected at least one identity-carrying choice cue")
         self.assertNotIn("CUE_ON,CHOICE", sends)
         self.assertNotIn("CUE_ON,RETURN", sends)
+
+    # ---------------------------------------------- session cap (ADR-0190)
+    def _cap(self, **kw):
+        """Pin the session cap the controller resolves (bypassing phase3.json)."""
+        cfg = SessionCapConfig(**kw)
+        self.phase3._current_session_cap = lambda: cfg
+        return cfg
+
+    def _record_sends(self):
+        sends = []
+
+        def _send(cmd):                        # send -> bool (docs/decisions/0173)
+            sends.append(cmd)
+            return True
+        self.phase3._send = _send
+        return sends
+
+    def test_trial_cap_stops_cueing_and_scoring_and_is_recorded(self):
+        """docs/decisions/0190: after ``max_trials`` SCORED trials since Session
+        Start the task cues and scores nothing more (a soft stop), the auto-note
+        fires once, the banner says CAP REACHED, and the cap is stamped into the
+        trial-CSV header, the manifest provenance and the summary."""
+        self._cap(enabled=True, max_trials=2, max_minutes=45.0)
+        events = []
+        self.phase3._on_intervention = events.append
+        sends = self._record_sends()
+
+        self._open_gate()
+        self._start_session()
+        for _ in range(4):                     # 4 attempts > the 2-trial cap
+            self._run_full_trial("left")
+
+        # Exactly two trials scored; the third and fourth trips were silent.
+        self.assertEqual(self.phase3._correct + self.phase3._incorrect, 2)
+        self.assertEqual(sum(1 for s in sends if s.startswith("CUE_ON,CHOICE")), 2)
+        hit = self.phase3.cap_reached()
+        self.assertIsNotNone(hit)
+        self.assertEqual(hit["reason"], "trials")
+        self.assertEqual(hit["completed"], 2)
+        # One auto-note, carrying the cap detail.
+        caps = [e for e in events if e["tag"] == AUTO_CAP_REACHED]
+        self.assertEqual(len(caps), 1)
+        self.assertIn("2 trials", caps[0]["text"])
+        self.assertEqual(caps[0]["cap"]["reason"], "trials")
+        # The banner is unmistakable.
+        self.phase3._publish_status(self.phase3._act_snapshot)
+        self.assertIn("CAP REACHED", self.phase3._status_text)
+        # Provenance: header line, manifest, summary block.
+        self.assertIn("session_cap_trials=2", self.phase3._log.render_csv())
+        self.assertEqual(self.session._manifest.provenance.get("session_cap"),
+                         {"enabled": True, "max_trials": 2, "max_minutes": 45.0})
+        self.session._write_session_summary()
+        path = os.path.join(self.session._session_dir, "summary",
+                            f"session_summary_{self.session._session_id}.json")
+        with open(path, encoding="utf-8") as fh:
+            summary = json.load(fh)
+        self.assertEqual(summary["session_cap"]["max_trials"], 2)
+        self.assertEqual(summary["session_cap"]["reached"]["reason"], "trials")
+        self.assertEqual(summary["task_params"]["session_cap"]["enabled"], True)
+
+    def test_time_cap_lets_the_in_flight_trial_finish(self):
+        """docs/decisions/0190: the clock cap is only evaluated at a trial
+        boundary, so a trial the rat is already running when time runs out is
+        scored + rewarded as usual; the NEXT trip is the silent one."""
+        self._cap(enabled=True, max_trials=120, max_minutes=45.0)
+        elapsed = [0.0]
+        self.phase3._session_elapsed_s = lambda snap: elapsed[0]
+        sends = self._record_sends()
+
+        self._open_gate()
+        self._start_session()
+        # Start a trial with time in hand: home, up the stem (cue), into the arm
+        # (scored, awaiting the return lap)...
+        self._feed(RatState(zone=HUB, substate=IN_WELL, valid=True, confidence=1.0))
+        self._feed(RatState(zone=CENTRAL_STEM, direction=UP_STEM, entered=CENTRAL_STEM,
+                            exited=HUB, valid=True, confidence=1.0))
+        self._feed(RatState(zone=LEFT_CHOICE, entered=LEFT_CHOICE, valid=True,
+                            confidence=1.0))
+        self.assertEqual(self.phase3._correct + self.phase3._incorrect, 1)
+        self.assertIsNone(self.phase3.cap_reached())      # mid-trial: not yet
+        # ...then the clock runs out while the rat is still out.
+        elapsed[0] = 45.0 * 60.0 + 1.0
+        self._feed(RatState(zone=HUB, substate=IN_WELL, entered=HUB, exited=LEFT_CHOICE,
+                            loop_completed=True, loop_side="left", valid=True,
+                            confidence=1.0))
+        # The in-flight trial advanced normally, and the cap fired at that boundary.
+        self.assertEqual(self.phase3._task.index, 1)
+        hit = self.phase3.cap_reached()
+        self.assertEqual(hit["reason"], "time")
+        self.assertEqual(hit["completed"], 1)
+        # A further trip is silent and unscored.
+        n_cues = sum(1 for s in sends if s.startswith("CUE_ON,CHOICE"))
+        self._run_full_trial("right")
+        self.assertEqual(sum(1 for s in sends if s.startswith("CUE_ON,CHOICE")), n_cues)
+        self.assertEqual(self.phase3._correct + self.phase3._incorrect, 1)
+
+    def test_cap_counts_from_session_start_and_needs_a_session(self):
+        """Trials run while armed but BEFORE Start don't count toward the cap,
+        and with no session at all (no Start anchor) the task is uncapped."""
+        self._cap(enabled=True, max_trials=2, max_minutes=45.0)
+        self._open_gate()
+        for _ in range(3):                     # unrecorded: no cap
+            self._run_full_trial("left")
+        self.assertEqual(self.phase3._correct + self.phase3._incorrect, 3)
+        self.assertIsNone(self.phase3.cap_reached())
+
+        self._start_session()                  # the count restarts here
+        self._run_full_trial("left")
+        self.assertIsNone(self.phase3.cap_reached())
+        self._run_full_trial("left")
+        self.assertEqual(self.phase3.cap_reached()["completed"], 2)
+        self.assertEqual(self.phase3._correct + self.phase3._incorrect, 5)
+
+    def test_cap_survives_stop_and_clears_on_the_next_start(self):
+        """A capped rat still in the maze must not be cued again after Stop (the
+        task stays armed, ADR-0060); the cap lifts on the next Session Start."""
+        self._cap(enabled=True, max_trials=1, max_minutes=45.0)
+        sends = self._record_sends()
+        self._open_gate()
+        self._start_session()
+        self._run_full_trial("left")
+        self.assertIsNotNone(self.phase3.cap_reached())
+
+        self.session._stop_session()
+        self._settle()
+        n_cues = sum(1 for s in sends if s.startswith("CUE_ON,CHOICE"))
+        self._run_full_trial("left")           # still silent after Stop
+        self.assertEqual(sum(1 for s in sends if s.startswith("CUE_ON,CHOICE")), n_cues)
+        self.assertIsNotNone(self.phase3.cap_reached())
+
+        time.sleep(STAMP_TICK_S)
+        self._start_session()                  # a new recording lifts it
+        self.assertIsNone(self.phase3.cap_reached())
+        self._run_full_trial("left")
+        self.assertEqual(sum(1 for s in sends if s.startswith("CUE_ON,CHOICE")),
+                         n_cues + 1)
+
+    # ------------------------------------ per-animal reward volume (ADR-0191)
+    def test_daily_water_target_sizes_the_reward_and_is_recorded(self):
+        """animals.json v4 ``daily_water_ml`` wins: the armed pulse width is the
+        calibration inverse of daily*1000*fraction/(max_trials*0.5), rounded to
+        5 ms; the source lands in the header, the manifest and the summary's
+        water_target block; the cap note carries the supplement."""
+        from tmaze.core.reward import reward_volume as rv
+        self._cap(enabled=True, max_trials=120, max_minutes=45.0,
+                  water_at_chance_fraction=0.5)
+        self.phase3._animal_registry = AnimalRegistry(
+            [{"id": "600", "daily_water_ml": 8.0}])     # no explicit reward_ul
+        self.phase3._pulse_var.set("470")               # the field is ignored
+
+        pulse_ms, source, daily = self.phase3._resolve_reward_pulse()
+        want = rv.round_pulse_ms(rv.pulse_ms_for_volume(8000.0 / 120.0, port=2))
+        self.assertEqual(pulse_ms, want)
+        self.assertNotEqual(pulse_ms, 470)
+        self.assertEqual(source, "animals.json:daily_water_ml")
+        self.assertEqual(daily, 8.0)
+
+        self._open_gate()
+        self._run_a_trial()                             # arms with the snapshot
+        self.assertEqual(self.phase3._task.cfg.reward_pulse_ms, want)
+        csv_text = self.phase3._log.render_csv()
+        self.assertIn(f"reward_pulse_ms={want}", csv_text)
+        self.assertIn("reward_pulse_source=animals.json:daily_water_ml "
+                      "daily_water_ml=8", csv_text)
+        self._start_session()
+        self.assertEqual(self.session._manifest.provenance.get("reward_policy"),
+                         {"pulse_ms": want, "source": "animals.json:daily_water_ml",
+                          "daily_water_ml": 8.0, "reward_ul": None})
+        # The summary's water_target reflects the run's earned volume.
+        self.phase3._reward_ul = 5500.0
+        target = self.phase3.water_target()
+        self.assertEqual(target["daily_water_ml"], 8.0)
+        self.assertEqual(target["supplement_ml"], 2.5)
+        self.session._write_session_summary()
+        path = os.path.join(self.session._session_dir, "summary",
+                            f"session_summary_{self.session._session_id}.json")
+        with open(path, encoding="utf-8") as fh:
+            summary = json.load(fh)
+        self.assertEqual(summary["water_target"]["supplement_ml"], 2.5)
+
+    def test_explicit_reward_ul_wins_and_config_is_the_last_resort(self):
+        """An explicit per-animal ``reward_ul`` overrides the derived volume (the
+        operator pinning one magnitude for every rat, ADR-0191) while the daily
+        target still feeds the water-target readout; with neither set the field
+        / phase3.json value is used."""
+        from tmaze.core.reward import reward_volume as rv
+        self._cap(enabled=True, max_trials=120, max_minutes=45.0)
+        self.phase3._pulse_var.set("470")
+        self.phase3._animal_registry = AnimalRegistry(
+            [{"id": "600", "daily_water_ml": 8.0, "reward_ul": 70.0}])
+        pulse_ms, source, daily = self.phase3._resolve_reward_pulse()
+        self.assertEqual(pulse_ms, rv.round_pulse_ms(rv.pulse_ms_for_volume(70.0, port=2)))
+        self.assertEqual(pulse_ms, 365)
+        self.assertEqual(source, "animals.json:reward_ul")
+        self.assertEqual(daily, 8.0)                    # target kept for the readout
+        self.assertEqual(self.phase3.water_target()["daily_water_ml"], 8.0)
+        # Explicit volume with no target: no water-target block.
+        self.phase3._animal_registry = AnimalRegistry(
+            [{"id": "600", "reward_ul": 60.0}])
+        pulse_ms, source, daily = self.phase3._resolve_reward_pulse()
+        self.assertEqual(pulse_ms, rv.round_pulse_ms(rv.pulse_ms_for_volume(60.0, port=2)))
+        self.assertEqual(source, "animals.json:reward_ul")
+        self.assertIsNone(daily)
+        self.assertIsNone(self.phase3.water_target())   # no target -> no block
+        # Neither set -> the field / phase3.json value, source "config".
+        self.phase3._animal_registry = AnimalRegistry([{"id": "600"}])
+        self.assertEqual(self.phase3._resolve_reward_pulse(),
+                         (470, "config", None))
+
+    def test_cap_note_carries_the_water_target(self):
+        self._cap(enabled=True, max_trials=1, max_minutes=45.0)
+        self.phase3._animal_registry = AnimalRegistry(
+            [{"id": "600", "daily_water_ml": 8.0}])
+        events = []
+        self.phase3._on_intervention = events.append
+        self._open_gate()
+        self._start_session()
+        self._run_full_trial("left")
+        caps = [e for e in events if e["tag"] == AUTO_CAP_REACHED]
+        self.assertEqual(len(caps), 1)
+        self.assertIn("of 8.0 mL target, supplement", caps[0]["text"])
+        self.assertEqual(caps[0]["water_target"]["daily_water_ml"], 8.0)
+
+    def test_disabled_cap_never_fires(self):
+        self._cap(enabled=False, max_trials=1, max_minutes=45.0)
+        self._open_gate()
+        self._start_session()
+        for _ in range(3):
+            self._run_full_trial("left")
+        self.assertEqual(self.phase3._correct + self.phase3._incorrect, 3)
+        self.assertIsNone(self.phase3.cap_reached())
 
     def test_uncued_trip_is_not_scored_and_reruns(self):
         """A genuine trip whose CHOICE cue never sounds (cue disabled) is UNCUED:

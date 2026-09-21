@@ -2,6 +2,7 @@
 # high_tone_is_left=True high_tone_is_left_source=config high_tone_hz=8000 low_tone_hz=4000
 # cue_calibration high_cmd_hz=8000 high_gain_pct=46 low_cmd_hz=4000 low_gain_pct=10
 # block_size=6 max_same_run=3 max_alt_run=0 max_trials=6 planned_trials=6 reward_incorrect=False reward_pulse_ms=500 max_topups=0
+# reward_pulse_source=config daily_water_ml=
 # generator=balanced
 # session_t0_iso=2026-01-01T12:00:00.000-05:00 session_t0_wall=1000000.0 session_t0_mono=2.0
 # session_start_iso=2026-01-01T11:59:55.000-05:00
