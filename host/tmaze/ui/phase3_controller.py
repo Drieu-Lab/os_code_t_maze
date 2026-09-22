@@ -1506,9 +1506,14 @@ class Phase3ControlView(VisionActuator):
             return
         idx = self._task.index if self._task is not None else 0
         # Pass the ADR-0190 cap record (a plain dict, copied) so the Rig-view
-        # banner + the Session Stop button can alert off the published snapshot
-        # without reaching into the controller (docs/decisions/0190).
-        cap = dict(self._cap_reached) if self._cap_reached else None
+        # banner can alert off the published snapshot (docs/decisions/0190/0192).
+        # Gated on an ACTIVE recording session (``_session_id`` set): ``_cap_reached``
+        # deliberately SURVIVES Stop to keep the still-armed task muted (ADR-0190),
+        # but the "remove rat, Stop session" banner is stale once Stop was pressed,
+        # so it is only published while the capped session is still recording. It
+        # clears on the next Start (which also resets ``_cap_reached``).
+        cap = (dict(self._cap_reached)
+               if (self._cap_reached and self._session_id) else None)
         self._state = log.snapshot(idx, armed=armed, cap_reached=cap)
 
     def _record_write_result(self, slot: str, path: Optional[str],

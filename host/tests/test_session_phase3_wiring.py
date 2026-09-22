@@ -734,13 +734,23 @@ class SessionPhase3WiringTest(unittest.TestCase):
         self._start_session()
         self._run_full_trial("left")
         self.assertIsNotNone(self.phase3.cap_reached())
+        # The Rig-view banner reads the PUBLISHED snapshot: while the capped
+        # session is still recording it carries the record (docs/decisions/0192).
+        self.phase3._publish_state(armed=True)
+        self.assertIsNotNone(self.phase3.published_state().cap_reached)
 
         self.session._stop_session()
         self._settle()
         n_cues = sum(1 for s in sends if s.startswith("CUE_ON,CHOICE"))
         self._run_full_trial("left")           # still silent after Stop
         self.assertEqual(sum(1 for s in sends if s.startswith("CUE_ON,CHOICE")), n_cues)
+        # The mute state persists past Stop (so the rat isn't re-cued)...
         self.assertIsNotNone(self.phase3.cap_reached())
+        # ...but the banner must NOT: its published field is gated on an active
+        # session, so a stale "remove rat, Stop session" banner can't keep
+        # flashing after Stop (docs/decisions/0192).
+        self.phase3._publish_state(armed=True)
+        self.assertIsNone(self.phase3.published_state().cap_reached)
 
         time.sleep(STAMP_TICK_S)
         self._start_session()                  # a new recording lifts it

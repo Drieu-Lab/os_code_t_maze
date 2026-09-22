@@ -36,7 +36,13 @@ height-neutral, driven off the published snapshot:
    `Phase3Log.snapshot()` takes it as a keyword and `_publish_state` passes a
    copy each publish. Cross-tab readers now learn the cap fired without reaching
    into the controller - the same pull-mode pattern the trial ribbon / Metrics
-   tab already use (ADR-0050).
+   tab already use (ADR-0050). The publisher gates it on an **active recording
+   session** (`_session_id` set): ADR-0190 keeps the controller's `_cap_reached`
+   past Stop so the still-armed task stays muted for a rat left in the maze, but
+   the "remove rat, Stop session" instruction is stale once Stop was pressed, so
+   the banner must clear on Stop - it reappears only if a new capped session
+   starts. (The Stop button, gated separately on the Session panel's own active
+   flag, already cleared on Stop.)
 
 2. **A (banner on the maze schematic).** `RigView` optionally takes the Phase 3
    snapshot getter (`state_getter`, injected in `experiment_control`) and

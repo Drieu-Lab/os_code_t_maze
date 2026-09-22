@@ -324,8 +324,11 @@ class Phase3StateSnapshot:
     # Whether the ADR-0190 session cap has fired this session (docs/decisions/0190):
     # the controller's cap-reached record ({reason, completed, elapsed_s,
     # max_trials, max_minutes, iso, trial_index}) so cross-tab readers - the
-    # Rig-view banner + the Session Stop button - can alert without reaching into
-    # the controller. None while the cap has not been hit (or is disabled).
+    # Rig-view banner - can alert without reaching into the controller. None while
+    # the cap has not been hit (or is disabled), AND once the recording session is
+    # Stopped: the controller keeps muting a still-armed task past Stop, but the
+    # "remove rat, Stop session" banner is stale then, so the publisher gates this
+    # on an active session (docs/decisions/0192).
     cap_reached: Optional[Dict[str, Any]] = None
 
 
