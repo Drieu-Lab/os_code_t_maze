@@ -44,6 +44,20 @@ height-neutral, driven off the published snapshot:
    starts. (The Stop button, gated separately on the Session panel's own active
    flag, already cleared on Stop.)
 
+   **Clearing on Stop needs an active push, not just the gate.** The gate only
+   bites when `_publish_state` actually runs again, and after the cap fires the
+   task is frozen: no rows change, so the actuation thread stops republishing,
+   and the Stop-time `rebind` no-ops on an empty `session_id` before it would
+   publish. So the readers' snapshot stayed frozen with `cap_reached` set (and
+   `_session_id` still truthy from before Stop) and the banner kept flashing -
+   confirmed on the rig: disarming Phase 3 (which forces a `_publish_state`) was
+   the only thing that cleared it. Fix: on the Stop release, `set_session_context()`
+   itself drops the field from the already-published snapshot
+   (`dataclasses.replace(self._state, cap_reached=None)`), so the banner clears
+   the instant Stop is pressed regardless of frame/rebind activity. The wiring
+   regression asserts this with **no** forced `_publish_state` (an earlier version
+   forced one, which masked the freeze).
+
 2. **A (banner on the maze schematic).** `RigView` optionally takes the Phase 3
    snapshot getter (`state_getter`, injected in `experiment_control`) and
    self-polls it every 500 ms. While `cap_reached` is set it paints a loud,

@@ -55,7 +55,7 @@ import os
 import random
 import time
 import tkinter as tk
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from tkinter import messagebox, ttk
 from typing import Callable, Optional
@@ -515,6 +515,20 @@ class Phase3ControlView(VisionActuator):
             # Stop (no session_id) leaves ``_cap_reached`` as is - see __init__.
             self._cap_base_done = self._correct + self._incorrect
             self._cap_reached = None
+        else:
+            # Stop released the context (docs/decisions/0060): the task stays armed
+            # and MUTED (``_cap_reached`` deliberately persists so a rat left in the
+            # maze is not re-cued, ADR-0190), but the Rig-view "remove rat, Stop
+            # session" banner is now stale. The actuation thread will NOT clear it
+            # on its own - a capped task is frozen (no rows change, so no republish)
+            # and the rebind below no-ops on an empty session_id - so drop the cap
+            # field from the already-published readers' snapshot right here. The
+            # session_id is cleared above, so any later republish also drops it; a
+            # frozen dataclasses.replace keeps every other field of the final table
+            # (docs/decisions/0192).
+            st = self._state
+            if st is not None and st.cap_reached is not None:
+                self._state = replace(st, cap_reached=None)
         # Publish the new context BEFORE asking for the rebind: the Tk poll would
         # otherwise be up to POLL_INTERVAL_MS behind, and the thread would rebind
         # using the PREVIOUS session's snapshot.
