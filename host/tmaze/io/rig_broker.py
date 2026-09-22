@@ -114,14 +114,38 @@ def log(msg: str) -> None:
 
 
 # ================= SERIAL =================
-def open_serial(port: str, baud: int) -> "serial.Serial":
+def open_serial(port: str, baud: int, reset: bool = True) -> "serial.Serial":
+    """Open the Due's serial port.
+
+    ``reset=True`` - the broker's FIRST open since it started: open the normal way,
+    which asserts DTR. On the Programming port the ATmega16U2 turns that into a
+    reset of the SAM3X, so we also wait out the reboot. That reboot re-emits the
+    ``0,PROTO`` handshake, which is what sets the bundle's ``sensor_polarity``
+    (docs/decisions/0164), and it starts the board from a known state.
+
+    ``reset=False`` - every REOPEN while the broker stays up (a cable hiccup, a
+    write-timeout recovery; the ADR-0065 reopen path): open with DTR held LOW so
+    the Due is NOT reset. A reconnect then no longer reboots a session that is
+    already running. The board keeping its clock across a DTR-low open was
+    verified on the rig 2026-09-21 (no handshake, ``millis()`` kept counting).
+    see docs/decisions/0194 (supersedes the accept-the-reset note in 0065)
+    """
     if serial is None:
         raise RuntimeError("pyserial is not installed; the broker needs it to open "
-                           "the Due's COM port (pip install pyserial)")
-    s = serial.Serial(port, baud, timeout=0.1, write_timeout=WRITE_TIMEOUT_S)
-    # Opening the Programming port asserts DTR, which the ATmega16U2 turns into a
-    # reset of the SAM3X, so this also waits out a reboot. see docs/decisions/0065
-    time.sleep(2.0)  # let the Due settle (matches existing GUIs)
+                          "the Due's COM port (pip install pyserial)")
+    if reset:
+        s = serial.Serial(port, baud, timeout=0.1, write_timeout=WRITE_TIMEOUT_S)
+        time.sleep(2.0)  # let the Due settle after the reset (matches existing GUIs)
+    else:
+        # Set DTR=False BEFORE opening: the reset is triggered by the DTR
+        # transition at open time, so deasserting it afterwards would be too late.
+        s = serial.Serial()
+        s.port = port
+        s.baudrate = baud
+        s.timeout = 0.1
+        s.write_timeout = WRITE_TIMEOUT_S
+        s.dtr = False
+        s.open()
     try:
         s.reset_input_buffer()
     except Exception:
@@ -138,19 +162,26 @@ def serial_reader_thread(port: str, baud: int) -> None:
     fail_count = 0
     fail_msg = ""
     fail_logged_at = 0.0
+    # Only the FIRST open since the broker started resets the Due (to get a clean
+    # handshake + known state); every reopen after that leaves the running board
+    # alone. see open_serial / docs/decisions/0194
+    first_open = True
     while not stop_event.is_set():
         if ser is None:
             try:
                 if not fail_count:
                     log(f"opening serial {port} @ {baud} ...")
-                ser = open_serial(port, baud)
+                reset_this_open = first_open
+                ser = open_serial(port, baud, reset=reset_this_open)
+                first_open = False
                 if fail_count:
                     log(f"serial recovered after {fail_count} failed attempts")
                     fail_count, fail_msg = 0, ""
                 reopen_request.clear()
                 liveness.reset(time.monotonic())
                 last_ms = None  # the next line reports this board's uptime
-                log("serial open")
+                log("serial open (reset the Due)" if reset_this_open
+                    else "serial open (no reset; left the running board alone)")
             except Exception as e:
                 fail_count += 1
                 changed = str(e) != fail_msg

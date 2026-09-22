@@ -17,7 +17,9 @@ from __future__ import annotations
 
 import threading
 import time
+import types
 import unittest
+from unittest import mock
 
 from tmaze.io import rig_broker
 
@@ -128,6 +130,61 @@ class RigBrokerFanoutTest(unittest.TestCase):
         with rig_broker.clients_lock:
             self.assertNotIn(client, rig_broker.clients)
         self.assertTrue(sock.closed)
+
+
+class _FakeSerial:
+    """Records how open_serial constructs and configures the port (no hardware)."""
+
+    def __init__(self, port=None, baud=None, timeout=None, write_timeout=None):
+        self.port = port
+        self.baudrate = baud
+        self.timeout = timeout
+        self.write_timeout = write_timeout
+        self.dtr = True            # pyserial default: DTR asserted (would reset)
+        self.opened = port is not None   # constructing WITH a port opens immediately
+        self.input_reset = False
+
+    def open(self):
+        self.opened = True
+
+    def reset_input_buffer(self):
+        self.input_reset = True
+
+
+class OpenSerialResetTest(unittest.TestCase):
+    """docs/decisions/0194: first open resets the Due; reopens leave it running."""
+
+    def _open(self, reset):
+        made = {}
+
+        def _factory(*a, **k):
+            s = _FakeSerial(*a, **k)
+            made["s"] = s
+            return s
+
+        fake_mod = types.SimpleNamespace(Serial=_factory)
+        with mock.patch.object(rig_broker, "serial", fake_mod), \
+             mock.patch.object(rig_broker.time, "sleep") as slept:
+            s = rig_broker.open_serial("COM3", 115200, reset=reset)
+        return s, slept
+
+    def test_first_open_resets_and_settles(self):
+        # reset=True keeps the DTR-asserting open (Due reboots) and waits it out,
+        # so the fresh 0,PROTO handshake is seen.
+        s, slept = self._open(reset=True)
+        self.assertTrue(s.dtr, "reset open must leave DTR asserted")
+        self.assertTrue(s.opened)
+        self.assertTrue(s.input_reset)
+        slept.assert_called_once_with(2.0)
+
+    def test_reopen_does_not_reset_or_settle(self):
+        # reset=False holds DTR low BEFORE opening, so a reconnect doesn't reboot
+        # a running session; and there is no reboot to wait out.
+        s, slept = self._open(reset=False)
+        self.assertFalse(s.dtr, "reopen must deassert DTR to avoid a reset")
+        self.assertTrue(s.opened)
+        self.assertTrue(s.input_reset)
+        slept.assert_not_called()
 
 
 if __name__ == "__main__":
