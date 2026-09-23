@@ -16,7 +16,9 @@
   `test_phase3_config`, `test_session_phase3_wiring`, `test_session_summary`
 - **Supersedes / Superseded by:** extends ADR-0150 (auto-extend; which
   explicitly deferred "a configurable hard cap"), ADR-0059, ADR-0060; paired
-  with ADR-0191 (per-animal reward volume)
+  with ADR-0191 (per-animal reward volume); refined by ADR-0198 (the cap anchor
+  is taken once per arm and survives a recording restart - see there for the
+  points-1-and-4 amendments)
 
 ## Context
 

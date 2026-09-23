@@ -204,6 +204,12 @@ class _Phase3Snapshot:
     # Session Start, whichever first, then a soft stop. Resolved from phase3.json
     # on the Tk poll like the other tunables.
     session_cap: SessionCapConfig = field(default_factory=SessionCapConfig)
+    # The cap's anchor (docs/decisions/0198): the manifest t0 captured at the
+    # FIRST Start after an arm and PRESERVED across a stop->restart of the
+    # recording, so an operationally-innocuous restart (e.g. a lossless->H.264
+    # switch) doesn't reset the trial/time budget. Distinct from ``session_t0``
+    # (which is per-recording); None before the first Start / on a manual arm.
+    cap_t0: Optional[dict] = None
 
 
 class Phase3ControlView(VisionActuator):
@@ -304,14 +310,20 @@ class Phase3ControlView(VisionActuator):
         # Session cap state (docs/decisions/0190). ``_cap_reached`` is None while
         # running; once a limit is met it holds ``{reason, iso, trial_index,
         # completed, elapsed_s}`` and the actuation thread behaves as if paused
-        # (no cue, no reward) until a fresh arm / Restart / Session Start clears
-        # it - it deliberately SURVIVES Stop, so a capped rat still in the maze is
-        # not cued again by the still-armed task. ``_cap_base_done`` is the scored
-        # count at Session Start, so the trial limit counts from Start (like the
-        # clock), not from arm. Written on the actuation thread (set_session_context
-        # publishes before the rebind), read by the Tk status poll.
+        # (no cue, no reward) until a fresh arm / Restart clears it - it
+        # deliberately SURVIVES Stop, so a capped rat still in the maze is not cued
+        # again by the still-armed task. ``_cap_base_done`` is the scored count when
+        # the cap anchor was taken, so the trial limit counts from the FIRST Start
+        # (like the clock), not from arm. The anchor (base + ``_cap_t0``) is taken
+        # ONCE at that first Start and PRESERVED across a stop->restart of the
+        # recording (docs/decisions/0198), so a codec-driven restart doesn't reset
+        # the budget; ``_cap_anchored`` guards it and a fresh arm / Restart clears
+        # it. Written on the actuation thread (set_session_context publishes before
+        # the rebind), read by the Tk status poll.
         self._cap_reached: Optional[dict] = None
         self._cap_base_done = 0
+        self._cap_anchored = False
+        self._cap_t0: Optional[dict] = None
         # How many times a mid-session gate REOPEN was resumed rather than treated
         # as a fresh arm (docs/decisions/0120). Surfaced in the status line so the
         # operator knows a tracking flicker did not restart / overwrite the run;
@@ -510,11 +522,19 @@ class Phase3ControlView(VisionActuator):
         self._session_out_dir = out_dir or ""
         self._session_t0 = session_t0
         if session_id:
-            # A new recording: the cap counts trials + minutes from THIS Start
-            # (docs/decisions/0190). Trials run between arm and Start don't count.
-            # Stop (no session_id) leaves ``_cap_reached`` as is - see __init__.
-            self._cap_base_done = self._correct + self._incorrect
-            self._cap_reached = None
+            # The cap anchor (trial base + clock t0) is taken ONCE, at the FIRST
+            # Start after an arm, and PRESERVED across a stop->restart of the
+            # recording so an operationally-innocuous restart (e.g. the lossless->
+            # H.264 switch that motivated this) doesn't reset the 120-trial / 45-min
+            # budget - the rat is counted continuously from the first Start
+            # (docs/decisions/0198, extends 0190). A fresh arm / Restart clears
+            # ``_cap_anchored`` so the next run re-anchors. Trials run between arm
+            # and the first Start don't count (the base is the scored count now).
+            if not self._cap_anchored:
+                self._cap_base_done = self._correct + self._incorrect
+                self._cap_t0 = session_t0
+                self._cap_anchored = True
+                self._cap_reached = None
         else:
             # Stop released the context (docs/decisions/0060): the task stays armed
             # and MUTED (``_cap_reached`` deliberately persists so a rat left in the
@@ -571,6 +591,11 @@ class Phase3ControlView(VisionActuator):
         self._session_id = ""
         self._session_out_dir = ""
         self._session_t0 = None
+        # A direct disarm ends the run: drop the cap anchor so the next arm+Start
+        # re-anchors a fresh budget (docs/decisions/0198).
+        self._cap_anchored = False
+        self._cap_t0 = None
+        self._cap_reached = None
 
     def current_log_path(self) -> Optional[str]:
         """Path of the in-progress session data file, or None until the gate
@@ -762,9 +787,13 @@ class Phase3ControlView(VisionActuator):
         self._pending_cue_ack_index = None
         self._pending_return_cue_ack_index = None
         self._pending_reward_ack_index = None
-        # A fresh run starts uncapped; the trial count base is re-taken at Start.
+        # A fresh run starts uncapped; the cap anchor (trial base + clock) is taken
+        # once at the first Session Start and preserved across a recording restart
+        # (docs/decisions/0198), so re-anchor it here on a genuine (re)arm.
         self._cap_reached = None
         self._cap_base_done = 0
+        self._cap_anchored = False
+        self._cap_t0 = None
         # Start a fresh session data file: the planned matrix is written now, then
         # each trial's outcome is filled in as it resolves (ADR-0047). When armed
         # via the Session controller the shared session_id names the file (so the
@@ -1353,10 +1382,11 @@ class Phase3ControlView(VisionActuator):
         # not out on a genuine trial trip - so a trial in flight when the clock
         # runs out always finishes (the rat heard the cue; withholding its reward
         # would be an unearned punishment). The trial limit is naturally met on the
-        # advance that completes the Nth trial. Only counts while a session is
-        # recording (needs the Start anchor); a manual/unrecorded arm is uncapped.
+        # advance that completes the Nth trial. Only counts once a session has been
+        # Started (needs the cap anchor, preserved across a recording restart;
+        # docs/decisions/0198); a manual/unrecorded arm is uncapped.
         if self._cap_reached is None and snap.session_cap.enabled \
-                and snap.session_t0 and task_frame is not None \
+                and snap.cap_t0 and task_frame is not None \
                 and self._active_cue is None \
                 and not self._task.awaiting_return \
                 and not task_frame.trial_trip:
@@ -1405,9 +1435,11 @@ class Phase3ControlView(VisionActuator):
 
     @staticmethod
     def _session_elapsed_s(snap: _Phase3Snapshot) -> float:
-        """Seconds since Session Start, from the manifest anchor's monotonic clock
-        (docs/decisions/0124); 0.0 with no anchor (unrecorded arm)."""
-        t0 = snap.session_t0 or {}
+        """Seconds since the cap anchor - the FIRST Start after an arm - from that
+        anchor's monotonic clock (docs/decisions/0124/0198); 0.0 with no anchor
+        (unrecorded arm). Uses ``cap_t0`` (preserved across a recording restart),
+        NOT the per-recording ``session_t0``, so the clock runs continuously."""
+        t0 = snap.cap_t0 or {}
         mono = t0.get("mono")
         if mono is None:
             return 0.0
@@ -1713,9 +1745,9 @@ class Phase3ControlView(VisionActuator):
                 "- remove rat, Stop session")
             return
         extra = f"  drops:{self._act_drops}" if self._act_drops else ""
-        # Live cap countdown while a session is recording (docs/decisions/0190):
-        # scored trials since Start / limit, elapsed / limit.
-        if snap.session_cap.enabled and snap.session_t0:
+        # Live cap countdown once a session has been Started (docs/decisions/0190):
+        # scored trials since the (first) Start / limit, elapsed / limit.
+        if snap.session_cap.enabled and snap.cap_t0:
             extra += "  " + session_cap.format_countdown(
                 snap.session_cap, done - self._cap_base_done,
                 self._session_elapsed_s(snap))
@@ -2539,6 +2571,7 @@ class Phase3ControlView(VisionActuator):
             session_id=self._session_id,
             session_out_dir=self._session_out_dir,
             session_t0=self._session_t0,
+            cap_t0=self._cap_t0,
             paused=self._paused,
             session_cap=self._current_session_cap())
 

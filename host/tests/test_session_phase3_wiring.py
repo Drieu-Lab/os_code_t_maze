@@ -141,6 +141,17 @@ class SessionPhase3WiringTest(unittest.TestCase):
         self.camera.tracking = True
         self.phase3._enable_var.set(True)
 
+    def _arm(self):
+        """Open the gate AND fire the arm (gate rising edge) NOW, the way real usage
+        does BEFORE Start Session: the camera streams frames continuously, so
+        ``_arm_session`` has already run by the time the operator clicks Start
+        (docs/decisions/0060). Without a frame here the harness would arm on the
+        first trial frame - AFTER Start - which wipes the session-cap anchor the
+        Start just took (docs/decisions/0198). Use this in cap tests that Start
+        immediately (no pre-Start trials to trigger the edge)."""
+        self._open_gate()
+        self._feed(RatState(zone=HUB, valid=True, confidence=1.0))
+
     def _run_a_trial(self):
         """Two frames that make the rat leave the hub up the stem, which is the
         edge that marks a trial started and so persists the table."""
@@ -639,7 +650,7 @@ class SessionPhase3WiringTest(unittest.TestCase):
         self.phase3._on_intervention = events.append
         sends = self._record_sends()
 
-        self._open_gate()
+        self._arm()
         self._start_session()
         for _ in range(4):                     # 4 attempts > the 2-trial cap
             self._run_full_trial("left")
@@ -681,7 +692,7 @@ class SessionPhase3WiringTest(unittest.TestCase):
         self.phase3._session_elapsed_s = lambda snap: elapsed[0]
         sends = self._record_sends()
 
-        self._open_gate()
+        self._arm()
         self._start_session()
         # Start a trial with time in hand: home, up the stem (cue), into the arm
         # (scored, awaiting the return lap)...
@@ -725,27 +736,23 @@ class SessionPhase3WiringTest(unittest.TestCase):
         self.assertEqual(self.phase3.cap_reached()["completed"], 2)
         self.assertEqual(self.phase3._correct + self.phase3._incorrect, 5)
 
-    def test_cap_survives_stop_and_clears_on_the_next_start(self):
-        """A capped rat still in the maze must not be cued again after Stop (the
-        task stays armed, ADR-0060); the cap lifts on the next Session Start."""
+    def test_cap_banner_clears_on_stop_but_mute_persists(self):
+        """Once the cap fires, the Rig-view banner (the PUBLISHED ``cap_reached``)
+        must clear the instant Stop is pressed, even though the mute state persists
+        so a rat still in the maze isn't re-cued (docs/decisions/0192, ADR-0060).
+        Asserted with NO forced republish: the task is frozen after the cap, so
+        Stop itself must drop the published field (a manual _publish_state would
+        mask that)."""
         self._cap(enabled=True, max_trials=1, max_minutes=45.0)
         sends = self._record_sends()
-        self._open_gate()
+        self._arm()
         self._start_session()
         self._run_full_trial("left")
         self.assertIsNotNone(self.phase3.cap_reached())
-        # The Rig-view banner reads the PUBLISHED snapshot: while the capped
-        # session is still recording it carries the record (docs/decisions/0192).
         self.assertIsNotNone(self.phase3.published_state().cap_reached)
 
         self.session._stop_session()
         self._settle()
-        # Stop RELEASES the context (ADR-0060): the mute state persists (so a rat
-        # left in the maze isn't re-cued) but the "remove rat, Stop session" banner
-        # must clear AT ONCE. The task is frozen after the cap, so nothing else
-        # republishes the snapshot - Stop itself must drop the cap field. Asserted
-        # with NO forced republish here (a manual _publish_state would mask the
-        # real bug this regresses; docs/decisions/0192).
         self.assertIsNotNone(self.phase3.cap_reached())               # mute persists
         self.assertIsNone(self.phase3.published_state().cap_reached)  # banner clears
 
@@ -754,12 +761,61 @@ class SessionPhase3WiringTest(unittest.TestCase):
         self.assertEqual(sum(1 for s in sends if s.startswith("CUE_ON,CHOICE")), n_cues)
         self.assertIsNotNone(self.phase3.cap_reached())
 
-        time.sleep(STAMP_TICK_S)
-        self._start_session()                  # a new recording lifts it
-        self.assertIsNone(self.phase3.cap_reached())
+    def test_cap_survives_a_recording_restart_and_counts_continuously(self):
+        """docs/decisions/0198: stopping and RESTARTING the recording mid-run (same
+        arm, no re-arm - e.g. the lossless->H.264 switch on 600_20260923_141558)
+        must NOT reset the cap. The trial + clock budget is anchored ONCE at the
+        first Start and counts continuously across the restart; the old per-Start
+        reset let the rat run well past the limit (the cap never fired)."""
+        self._cap(enabled=True, max_trials=3, max_minutes=45.0)
+        self._arm()
+        self._start_session()                  # Start A: anchors base=0
         self._run_full_trial("left")
-        self.assertEqual(sum(1 for s in sends if s.startswith("CUE_ON,CHOICE")),
-                         n_cues + 1)
+        self._run_full_trial("left")           # 2 scored, under the 3-trial cap
+        self.assertIsNone(self.phase3.cap_reached())
+        base_a = self.phase3._cap_base_done
+        t0_a = self.phase3._cap_t0
+        self.assertTrue(self.phase3._cap_anchored)
+
+        self.session._stop_session()           # Stop A (codec fix)...
+        self._settle()
+        time.sleep(STAMP_TICK_S)
+        self._start_session()                  # ...Start B = restart, no re-arm
+        # The anchor is PRESERVED: base + clock are the first Start's, not re-taken.
+        self.assertTrue(self.phase3._cap_anchored)
+        self.assertEqual(self.phase3._cap_base_done, base_a)
+        self.assertEqual(self.phase3._cap_t0, t0_a)
+
+        # The 3rd scored trial (counted from Start A, across the restart) trips the
+        # cap - proving continuity. The old code re-based at Start B, so it would
+        # have needed 2 + 3 = 5 scored trials and never fired here.
+        self._run_full_trial("left")
+        hit = self.phase3.cap_reached()
+        self.assertIsNotNone(hit)
+        self.assertEqual(hit["reason"], "trials")
+        self.assertEqual(hit["completed"], 3)
+
+    def test_a_fresh_rearm_re_anchors_the_cap_budget(self):
+        """The flip side of ADR-0198: a genuine re-arm (disarm then arm again, a new
+        run for the next animal) DOES reset the cap anchor, so the next Start starts
+        a fresh budget - only a recording restart WITHOUT a re-arm preserves it."""
+        self._cap(enabled=True, max_trials=2, max_minutes=45.0)
+        self._arm()
+        self._start_session()
+        self._run_full_trial("left")
+        self.assertTrue(self.phase3._cap_anchored)
+
+        self.session._stop_session()
+        self._settle()
+        self.phase3.disarm()                   # end the run for this animal
+        self.assertFalse(self.phase3._cap_anchored)
+        self.assertIsNone(self.phase3._cap_t0)
+
+        self._arm()                            # re-arm for the next run
+        time.sleep(STAMP_TICK_S)
+        self._start_session()                  # anchors a FRESH budget (base re-taken)
+        self.assertTrue(self.phase3._cap_anchored)
+        self.assertIsNone(self.phase3.cap_reached())
 
     # ------------------------------------ per-animal reward volume (ADR-0191)
     def test_daily_water_target_sizes_the_reward_and_is_recorded(self):
@@ -839,7 +895,7 @@ class SessionPhase3WiringTest(unittest.TestCase):
             [{"id": "600", "daily_water_ml": 8.0}])
         events = []
         self.phase3._on_intervention = events.append
-        self._open_gate()
+        self._arm()
         self._start_session()
         self._run_full_trial("left")
         caps = [e for e in events if e["tag"] == AUTO_CAP_REACHED]
