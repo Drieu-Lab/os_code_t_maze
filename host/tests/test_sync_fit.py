@@ -145,6 +145,45 @@ class TestPureBuilders(unittest.TestCase):
         self.assertTrue(x0 < 970 < x1 and y0 < 702 < y1)
 
 
+class TestBoardSearchPoly(unittest.TestCase):
+    """The operator-drawn board search polygon (ADR-0195): file denorm, bbox clip,
+    and baking it into the map. No video needed."""
+
+    def test_load_search_poly_denormalizes(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "led_board_search.json")
+            with open(p, "w", encoding="utf-8") as f:
+                json.dump({"polygon_norm": [[0.5, 0.25], [0.75, 0.25],
+                                            [0.75, 0.75], [0.5, 0.75]]}, f)
+            poly = sync_fit._load_search_poly_file(p, (1280, 1024))
+        self.assertEqual(poly[0], (640.0, 256.0))
+        self.assertEqual(poly[2], (960.0, 768.0))
+
+    def test_load_search_poly_needs_frame_size_and_three_points(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "s.json")
+            with open(p, "w", encoding="utf-8") as f:
+                json.dump({"polygon_norm": [[0.1, 0.1], [0.2, 0.2], [0.3, 0.3]]}, f)
+            with self.assertRaises(ValueError):
+                sync_fit._load_search_poly_file(p, None)          # can't denormalize
+            with open(p, "w", encoding="utf-8") as f:
+                json.dump({"polygon_norm": [[0.1, 0.1], [0.2, 0.2]]}, f)
+            with self.assertRaises(ValueError):
+                sync_fit._load_search_poly_file(p, (100, 100))    # <3 vertices
+
+    def test_clip_bbox_clamps_to_frame(self):
+        self.assertEqual(sync_fit._clip_bbox((-5, -5, 50, 60), (40, 40)), (0, 0, 40, 40))
+        self.assertEqual(sync_fit._clip_bbox((10, 10, 30, 30), None), (10, 10, 30, 30))
+
+    def test_build_led_map_bakes_search_poly_and_rect(self):
+        run = _synthetic_run()
+        run.search_poly = [(900.0, 650.0), (1050.0, 650.0), (1050.0, 760.0), (900.0, 760.0)]
+        m = sync_fit.build_led_map(run)
+        self.assertEqual(m.board_search_poly, run.search_poly)
+        # later runs read + mask this region: the stored rect is the polygon's bbox
+        self.assertEqual(m.board_rect, LM.poly_bbox(run.search_poly))
+
+
 class TestSelftest(unittest.TestCase):
     def test_selftest_passes(self):
         self.assertEqual(sync_fit.main(["--selftest"]), 0)

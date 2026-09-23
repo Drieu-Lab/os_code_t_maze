@@ -330,16 +330,58 @@ def iter_frames(path: str, start: int = 0, n: Optional[int] = None,
         cap.release()
 
 
+def polygon_mask(h: int, w: int, poly: Sequence[Tuple[float, float]]) -> np.ndarray:
+    """Boolean ``(h, w)`` mask, True for pixels INSIDE ``poly`` (crop coords).
+
+    Vectorised ray-casting so it needs no OpenCV (the crop is small and the
+    polygon has a handful of vertices). Mirrors ``led_map.point_in_poly`` per
+    pixel; used to blank everything outside the operator-drawn board search
+    region before detection (see docs/decisions/0195)."""
+    ys, xs = np.mgrid[0:h, 0:w]
+    inside = np.zeros((h, w), bool)
+    n = len(poly)
+    if n < 3:
+        return inside
+    j = n - 1
+    for i in range(n):
+        xi, yi = float(poly[i][0]), float(poly[i][1])
+        xj, yj = float(poly[j][0]), float(poly[j][1])
+        denom = (yj - yi) or 1e-9
+        cond = ((yi > ys) != (yj > ys)) & (xs < (xj - xi) * (ys - yi) / denom + xi)
+        inside ^= cond
+        j = i
+    return inside
+
+
+def mask_extremes(ext: Extremes, poly: Optional[Sequence[Tuple[float, float]]]) -> None:
+    """Blank every pixel OUTSIDE ``poly`` (crop coords) in the accumulated
+    max/min and the sampled frames, so the difference + persistence images AND
+    the noise floor see only what is inside the board search region. In-place;
+    a no-op when ``poly`` has fewer than 3 vertices. See docs/decisions/0195."""
+    if ext.max is None or poly is None or len(poly) < 3:
+        return
+    h, w = ext.max.shape[:2]
+    outside = ~polygon_mask(h, w, poly)
+    ext.max[outside] = 0
+    ext.min[outside] = 0
+    for s in ext._samples:
+        s[outside] = 0
+
+
 def accumulate_extremes(path: str, crop: Optional[Tuple[int, int, int, int]],
-                        start: int, n: Optional[int], p: DetectorParams) -> Extremes:
+                        start: int, n: Optional[int], p: DetectorParams,
+                        poly: Optional[Sequence[Tuple[float, float]]] = None) -> Extremes:
     """Pass 1: read the window and accumulate the running max/min/median samples.
     Shared by the blink detector, the fiducial detector, and the trace sampler so
-    one video read serves all three."""
+    one video read serves all three. ``poly`` (crop-relative vertices), when
+    given, blanks everything outside it so a rat/hand crossing a corner of the
+    crop rectangle can't inflate the noise floor or spawn blobs (ADR-0195)."""
     ext = Extremes(p.sample_every)
     for _, fr in iter_frames(path, start, n, crop):
         ext.add(fr)
     if ext.n == 0:
         raise RuntimeError("no frames read")
+    mask_extremes(ext, poly)
     return ext
 
 

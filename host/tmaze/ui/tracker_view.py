@@ -31,6 +31,7 @@ module never breaks experiment_control.py.
 from __future__ import annotations
 
 import csv
+import json
 import os
 import time
 import tkinter as tk
@@ -80,6 +81,9 @@ except Exception:  # pragma: no cover
 # ================================== CONFIG ===================================
 _HERE = str(host_dir())   # host/ - the per-rig config lives beside the package (ADR-0083)
 ROI_PATH = os.path.join(_HERE, "roi_polygon.json")   # shared with the prototype
+# Operator-drawn LED board search region (host/led_board_search.json), an INPUT to
+# `sync_fit --map` (ADR-0195). Same normalized polygon_norm schema as the tracker ROI.
+LED_BOARD_SEARCH_PATH = os.path.join(_HERE, "led_board_search.json")
 LANDMARKS_PATH = os.path.join(_HERE, "landmarks.json")  # reward-well/body-sensor points
 MODEL_DIR = os.path.join(_HERE, "ratmodels")          # appearance models (.npz)
 TRACK_LOG_SUBDIR = "track_logs"   # subfolder of the recordings dir for track CSVs
@@ -303,6 +307,20 @@ class TrackerControlView:
         tip(load_roi_btn, "tracker.load_roi")
         self._roi_status = tk.StringVar(value="ROI: none")
         ttk.Label(region, textvariable=self._roi_status).pack(side=tk.LEFT, padx=6)
+
+        # LED board search region (host/led_board_search.json): a polygon around the
+        # whole indicator board, an input to `sync_fit --map` (ADR-0195). Separate
+        # from the tracker ROI above; drawn with the same still-frame polygon editor.
+        ledboard = ttk.Frame(controls)
+        ledboard.pack(side=tk.TOP, fill=tk.X, **pad)
+        define_ledbrd_btn = ttk.Button(ledboard, text="Define LED board region...",
+                                       command=self._define_led_board_region)
+        define_ledbrd_btn.pack(side=tk.LEFT, padx=2)
+        tip(define_ledbrd_btn, "tracker.define_led_board_region")
+        self._led_board_status = tk.StringVar(
+            value=("LED board: saved" if os.path.isfile(LED_BOARD_SEARCH_PATH)
+                   else "LED board: none"))
+        ttk.Label(ledboard, textvariable=self._led_board_status).pack(side=tk.LEFT, padx=6)
 
         # Landmark annotations: reward wells + body-sensor points (and any custom
         # points) marked on a still frame, drawn back on the camera preview.
@@ -674,6 +692,32 @@ class TrackerControlView:
     def _on_roi_committed(self, norm_verts) -> None:
         self._tracker.set_roi_polygon(norm_verts)
         self._roi_status.set(f"ROI: set ({len(norm_verts)} pts)")
+
+    # ----------------------------------------------- LED board search region I/O
+    def _define_led_board_region(self) -> None:
+        """Draw the board search polygon (ADR-0195) on a still and save it to
+        host/led_board_search.json for sync_fit --map. Reuses the ROI editor."""
+        if self._camera is None:
+            messagebox.showinfo("LED board region", "Camera is unavailable.")
+            return
+        frame = self._camera.get_latest_frame()
+        if frame is None:
+            messagebox.showinfo("LED board region", "No camera frame yet.")
+            return
+        _RoiEditor(self.frame, frame, on_commit=self._on_led_board_committed)
+
+    def _on_led_board_committed(self, norm_verts) -> None:
+        if not norm_verts or len(norm_verts) < 3:
+            return
+        try:
+            with open(LED_BOARD_SEARCH_PATH, "w", encoding="utf-8") as f:
+                json.dump({"polygon_norm": [[float(x), float(y)] for x, y in norm_verts]},
+                          f, indent=2)
+        except OSError as e:
+            messagebox.showerror("LED board region", f"Could not save: {e}")
+            return
+        self._led_board_status.set(
+            f"LED board: saved ({len(norm_verts)} pts)")
 
     # --------------------------------------------------------- landmark I/O
     def _set_landmark_status(self) -> None:

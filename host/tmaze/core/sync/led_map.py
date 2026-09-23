@@ -34,15 +34,25 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 from tmaze.paths import host_dir
 
-SCHEMA_VERSION = 2
-SUPPORTED_SCHEMA_VERSIONS = (1, 2)
+SCHEMA_VERSION = 3
+SUPPORTED_SCHEMA_VERSIONS = (1, 2, 3)
 LED_MAP_FILENAME = "led_map.json"
-_SCHEMA_NOTE = ("tmaze led_map v2 - which board indicator LED mirrors which serial channel, "
+LED_BOARD_SEARCH_FILENAME = "led_board_search.json"
+_SCHEMA_NOTE = ("tmaze led_map v3 - which board indicator LED mirrors which serial channel, "
                 "and where it sits (full-frame px) in the reference session, plus the "
                 "persistently-lit red/green fiducial LEDs whose hull is the board ROI and "
-                "whose pattern gives the board pose. Written by "
+                "whose pattern gives the board pose, plus the optional operator-drawn "
+                "board_search_poly the detector is confined to (v3; excludes maze corners a "
+                "rat crosses). Written by "
                 "`python -m tmaze.tools.sync_fit --map`; see docs/design/cross-stream-sync-design.md "
                 "sections 3.1/3.4 and tmaze/core/sync/led_map.py.")
+
+
+def led_board_search_path() -> str:
+    """Default location of the operator-drawn board search polygon:
+    ``host/led_board_search.json`` (same normalized ``polygon_norm`` schema as
+    ``roi_polygon.json``); an INPUT to ``sync_fit --map`` (ADR-0195)."""
+    return os.path.join(str(host_dir()), LED_BOARD_SEARCH_FILENAME)
 
 LIT, DARK = "lit", "dark"
 # The persistent fiducial colours (see docs/glossary.md 'fiducial'). Neutral/white
@@ -129,6 +139,7 @@ class LedMap:
     created: str = ""
     fiducials: List[Fiducial] = field(default_factory=list)     # persistent red/green LEDs (v2)
     board_poly: Optional[List[Tuple[float, float]]] = None      # ROI outline = fiducial hull + margin (v2)
+    board_search_poly: Optional[List[Tuple[float, float]]] = None  # operator-drawn search region, full-frame px (v3)
 
     def constellation(self) -> List[Tuple[float, float]]:
         """Every LED's reference pixel position, bound or not - the point set
@@ -157,6 +168,8 @@ class LedMap:
                 "board_rect": list(self.board_rect),
                 "board_poly": None if self.board_poly is None
                 else [[round(x, 2), round(y, 2)] for x, y in self.board_poly],
+                "board_search_poly": None if self.board_search_poly is None
+                else [[round(x, 2), round(y, 2)] for x, y in self.board_search_poly],
                 "frame_size": list(self.frame_size) if self.frame_size else None,
                 "created": self.created,
             },
@@ -248,7 +261,8 @@ def from_dict(d: dict) -> LedMap:
     fs = ref.get("frame_size")
     return LedMap(str(ref.get("session_id") or ""), _rect(ref.get("board_rect") or []), leds, det,
                   None if not fs else (int(fs[0]), int(fs[1])), str(ref.get("created") or ""),
-                  fiducials, _poly(ref.get("board_poly")))
+                  fiducials, _poly(ref.get("board_poly")),
+                  _poly(ref.get("board_search_poly")))
 
 
 def load(path: Optional[str] = None) -> LedMap:

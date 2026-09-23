@@ -143,6 +143,7 @@ class SyncRun:
                  tol_s: float, min_visible_s: float, crop: Optional[Tuple[int, int, int, int]],
                  fiducials=(), fid_registration=None,
                  board_poly: Optional[List[Tuple[float, float]]] = None,
+                 search_poly: Optional[List[Tuple[float, float]]] = None,
                  frame_size: Optional[Tuple[int, int]] = None, median=None):
         self.sid = sid
         self.header = header
@@ -161,6 +162,7 @@ class SyncRun:
         self.fiducials = fiducials             # detected persistent LEDs (crop coords)
         self.fid_registration = fid_registration   # pose from the fiducials (v2 maps / --map)
         self.board_poly = board_poly           # ROI outline in FULL-frame pixels
+        self.search_poly = search_poly         # operator-drawn search region, FULL-frame px (v3)
         self.frame_size = frame_size
         self.median = median                   # the crop's median image, for the overlay
 
@@ -168,10 +170,37 @@ class SyncRun:
         return self.led_ids.get(blob, f"blob_{blob}")
 
 
+def _load_search_poly_file(path: str,
+                           frame_size: Optional[Tuple[int, int]]) -> List[Tuple[float, float]]:
+    """Read a normalized board-search polygon file (``polygon_norm`` in 0..1, the
+    same schema the ROI editor writes) and denormalize to full-frame px so the
+    detector can be confined to it (ADR-0195)."""
+    with open(path, encoding="utf-8") as f:
+        d = json.load(f)
+    verts = d.get("polygon_norm") or d.get("polygon") or []
+    if len(verts) < 3:
+        raise ValueError(f"{path}: a board search polygon needs >=3 vertices")
+    if not frame_size:
+        raise ValueError(f"{path}: cannot denormalize the board search polygon "
+                         "without the sidecar frame size")
+    w, h = frame_size
+    return [(float(x) * w, float(y) * h) for x, y in verts]
+
+
+def _clip_bbox(bbox: Tuple[int, int, int, int],
+               frame_size: Optional[Tuple[int, int]]) -> Tuple[int, int, int, int]:
+    x0, y0, x1, y1 = bbox
+    x0, y0 = max(0, x0), max(0, y0)
+    if frame_size:
+        x1, y1 = min(int(frame_size[0]), x1), min(int(frame_size[1]), y1)
+    return x0, y0, x1, y1
+
+
 def analyze_bundle(bundle: str, *, start_min: float = 0.0, minutes: Optional[float] = None,
                    tol_s: float = 0.20, min_visible_s: float = 0.06,
                    map_path: Optional[str] = None, whole_frame: bool = False,
                    board_rect: Optional[Tuple[int, int, int, int]] = None,
+                   search_poly_path: Optional[str] = None,
                    min_matched: int = 3, min_pairs: int = 30,
                    serial_path: Optional[str] = None) -> SyncRun:
     """Detect the LEDs, bind them, fit the clock.
@@ -204,12 +233,33 @@ def analyze_bundle(bundle: str, *, start_min: float = 0.0, minutes: Optional[flo
         if crop is None:
             crop = used_map.board_rect
 
+    # Board search polygon (operator-drawn, ADR-0195): confine detection to it so a
+    # rat/hand crossing a corner of the crop rectangle can't inflate the noise floor
+    # or spawn blobs. Precedence: an explicit --board-poly file wins; else the one
+    # baked into the map is reused every session; else, only while BUILDING a map,
+    # the default host/led_board_search.json is picked up.
+    search_poly: Optional[List[Tuple[float, float]]] = None
+    if search_poly_path:
+        search_poly = _load_search_poly_file(search_poly_path, frame_size)
+    elif used_map is not None and used_map.board_search_poly:
+        search_poly = [(float(x), float(y)) for x, y in used_map.board_search_poly]
+    elif used_map is None or whole_frame:
+        default_file = LM.led_board_search_path()
+        if os.path.isfile(default_file):
+            search_poly = _load_search_poly_file(default_file, frame_size)
+
+    poly_crop: Optional[List[Tuple[float, float]]] = None
+    if search_poly:
+        cx0, cy0, cx1, cy1 = _clip_bbox(LM.poly_bbox(search_poly), frame_size)
+        crop = (cx0, cy0, cx1, cy1)
+        poly_crop = [(x - cx0, y - cy0) for x, y in search_poly]
+
     start, n = _window(frames, start_min, minutes, fps)
     win = frames[start:start + n] if n is not None else frames[start:]
 
     from tmaze.vision import led_detector as D
     video = _video_path(bundle, sid)
-    ext = D.accumulate_extremes(video, crop, start, n, params)
+    ext = D.accumulate_extremes(video, crop, start, n, params, poly=poly_crop)
     got = ext.n
     if got != len(win):
         win = win[:got]
@@ -270,7 +320,8 @@ def analyze_bundle(bundle: str, *, start_min: float = 0.0, minutes: Optional[flo
     return SyncRun(sid, header, blobs, floor, led_ids, result, blob_spans, events,
                    registration, used_map, (start, got), tol_s, min_visible_s, crop,
                    fiducials=fiducials, fid_registration=fid_registration,
-                   board_poly=board_poly, frame_size=frame_size, median=ext.median())
+                   board_poly=board_poly, search_poly=search_poly,
+                   frame_size=frame_size, median=ext.median())
 
 
 # ------------------------------------------------------------ led_map builder
@@ -300,10 +351,14 @@ def build_led_map(run: SyncRun) -> LM.LedMap:
         entries.append(LM.LedEntry(led_id, (round(b.x + ox, 2), round(b.y + oy, 2)),
                                    channel, polarity, lag))
     det = run.used_map.detector if run.used_map else LM.DetectorParams()
-    # The board ROI comes from the fiducials' hull; its bounding box is the search
-    # rectangle. Fall back to an explicit crop, then to a box around the LEDs.
+    # The search rectangle is the operator-drawn search polygon's bounding box when
+    # one was used (so later sessions read + mask the same region, ADR-0195), else
+    # the fiducials' hull bbox, else an explicit crop, else a box around the LEDs.
     board_poly = run.board_poly
-    if board_poly:
+    search_poly = run.search_poly
+    if search_poly:
+        rect = LM.poly_bbox(search_poly)
+    elif board_poly:
         rect = LM.poly_bbox(board_poly)
     elif run.crop:
         rect = tuple(run.crop)
@@ -311,7 +366,8 @@ def build_led_map(run: SyncRun) -> LM.LedMap:
         rect = LM.board_rect_around([e.ref_px for e in entries], det.margin_px, frame_size)
     return LM.LedMap(run.sid, rect, entries, det, frame_size,
                      datetime.now().replace(microsecond=0).isoformat(),
-                     fiducials=fiducials, board_poly=board_poly)
+                     fiducials=fiducials, board_poly=board_poly,
+                     board_search_poly=search_poly)
 
 
 # --------------------------------------------------------------- artifacts
@@ -415,6 +471,8 @@ def clock_fit_dict(run: SyncRun) -> dict:
         "board_rect": list(run.crop) if run.crop else None,
         "board_poly": None if run.board_poly is None
         else [[round(x, 2), round(y, 2)] for x, y in run.board_poly],
+        "board_search_poly": None if run.search_poly is None
+        else [[round(x, 2), round(y, 2)] for x, y in run.search_poly],
         "fiducials": {
             "n": len(run.fiducials),
             "by_color": _fiducial_color_counts(run.fiducials),
@@ -548,6 +606,9 @@ def print_report(run: SyncRun, out: str) -> None:
     print(f"\nsession {run.sid}: codec={run.header.get('codec')} "
           f"fps={run.header.get('fps')} frames(window)={run.window[1]} "
           f"blobs={len(run.blobs)} noise_floor={run.floor:.1f}")
+    if run.search_poly:
+        print(f"  board search: operator polygon ({len(run.search_poly)} pts), "
+              f"crop {tuple(run.crop) if run.crop else None}")
     fc = _fiducial_color_counts(run.fiducials)
     print(f"  fiducials: {len(run.fiducials)} persistent LEDs "
           f"({fc.get('red', 0)} red, {fc.get('green', 0)} green)"
@@ -783,6 +844,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--board-rect", nargs=4, type=int, metavar=("X0", "Y0", "X1", "Y1"),
                     help="confine the LED search to this full-frame rectangle (build a map from a "
                          "session that still has a rat in it, or scan fast before a map exists)")
+    ap.add_argument("--board-poly", metavar="FILE",
+                    help="confine the LED search to this operator-drawn POLYGON (a normalized "
+                         "polygon_norm JSON like roi_polygon.json, drawn in the Tracking tab's "
+                         "'Define LED board region'); excludes maze corners a rat crosses, and is "
+                         "baked into led_map.json on --map. Overrides --board-rect. Default when "
+                         "absent while building a map: host/led_board_search.json (ADR-0195)")
     ap.add_argument("--serial", help="read serial events from this log instead of the bundle's "
                     "central-only capture; use the FULL rig_logger CSV for a mapping session "
                     "(it keeps the left/right-reward and rinse/drain valve acks the capture drops)")
@@ -844,6 +911,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         run = analyze_bundle(a.bundle, start_min=a.start_min, minutes=minutes,
                              tol_s=a.tol_ms / 1000.0, min_visible_s=a.min_visible_ms / 1000.0,
                              whole_frame=a.map and rect is None, board_rect=rect,
+                             search_poly_path=a.board_poly,
                              min_matched=a.min_matched, min_pairs=a.min_pairs,
                              serial_path=a.serial)
     except (FileNotFoundError, RuntimeError) as e:

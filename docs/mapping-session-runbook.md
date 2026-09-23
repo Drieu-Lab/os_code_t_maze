@@ -15,6 +15,16 @@ longer measure or type a board rectangle, and off-board motion (a rat in the
 maze, or your own hand while firing) is outside the region and does not flood the
 detector.
 
+**On this rig, draw the board search polygon first (ADR-0195).** The auto-hull
+alone was not enough on the first real map: the operator's arm sweeping the maze
+while firing lifted the noise floor and packed the blob list (the left lick LED
+`L0` never bound), and a few false fiducials in the noisy maze stretched the hull
+off the board. Because the board sits diagonally right beside the maze opening the
+rat crosses, no rectangle can exclude the maze without clipping the board or its
+drift margin — so we confine detection to a hand-drawn **polygon** around the whole
+board. Draw it once (step 0.5); it is baked into `led_map.json` on `--map` and
+reused by every later fit.
+
 Do this **once now** (it validates the whole offline sync pipeline on the clean
 case it was designed for and answers whether the ENTRY/EXIT beam LEDs are even
 visible), and **again** whenever the board changes — most importantly after the
@@ -66,6 +76,16 @@ enters the training logs — e.g. `000` (the same convention as the existing
 `000_…`/`123_…` test bundles). You will add the resulting id to
 `host/session_ignore.json` in step 6.
 
+**0.5. Draw the board search polygon (once).** In `experiment_control`, on the
+**Tracking** tab, click **"Define LED board region…"**, then left-click a polygon
+around the **whole indicator board** — all S/L/SOL channel LEDs *and* the green/red
+pose fiducials, with a little margin for cart drift — but staying **off the maze**
+the rat runs through. Right-click / Enter to commit; it saves to
+`host/led_board_search.json`. `sync_fit --map` picks it up automatically and bakes
+it into the map. (You can re-run `--map` later with `--board-poly <file>` to try a
+different region without redrawing.) Skip this only if the board is far from the
+maze and the auto-hull already lands cleanly.
+
 **1. Start the recorders.** Start `rig_logger` (full log), then in
 `experiment_control` enter id `000` and **Start** the Session (camera begins
 recording to a new bundle). Let it run for the whole procedure.
@@ -102,10 +122,12 @@ python -m tmaze.tools.sync_fit <recordings>/phase3_recordings/000_<stamp> --map
 The bundle's own `serial/serial_<id>.csv` carries every port now (ADR-0178). Add
 `--serial host/data/000_<stamp>.csv` only for a pre-0178 (filtered) bundle.
 
-- **No `--board-rect` needed** — the tool finds the persistent red/green fiducial
-  LEDs and uses their convex hull as the board region automatically. Pass
-  `--board-rect X0 Y0 X1 Y1` only as a fallback if the fiducials aren't found
-  (e.g. the board is off-screen or unlit).
+- **The board search polygon (step 0.5) is used automatically** — if
+  `host/led_board_search.json` exists, `--map` confines detection to it (and bakes
+  it into the map). The report prints `board search: operator polygon (…)`. Pass
+  `--board-poly <file>` to use a different polygon; `--board-rect X0 Y0 X1 Y1` for a
+  rectangle fallback. With none of these, the tool falls back to the fiducial hull
+  (ADR-0153), which needs clean fiducials and enough separation from the maze.
 - `--map` writes a QA **overlay PNG** next to the map
   (`led_map_overlay_<id>.png`) — you use it in step 5.
 - `--map-out <path>` writes elsewhere than `host/led_map.json` if you want to

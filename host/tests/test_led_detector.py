@@ -117,6 +117,57 @@ class TestBlobs(unittest.TestCase):
 
 
 @unittest.skipIf(np is None, "numpy not installed")
+class TestBoardSearchMask(unittest.TestCase):
+    """The operator-drawn board search polygon (ADR-0195): everything outside it
+    is blanked so it neither spawns blobs nor lifts the noise floor."""
+
+    def test_polygon_mask_true_inside_only(self):
+        m = D.polygon_mask(10, 10, [(2, 2), (8, 2), (8, 8), (2, 8)])
+        self.assertTrue(m[5, 5])
+        self.assertFalse(m[0, 0])
+        self.assertFalse(m[9, 9])
+        # fewer than 3 vertices -> all False (a no-op mask)
+        self.assertFalse(D.polygon_mask(10, 10, [(1, 1), (2, 2)]).any())
+
+    def test_mask_extremes_excludes_outside_blobs(self):
+        p = LM.DetectorParams(blob_thresh=30.0)
+        ext = D.Extremes(p.sample_every)
+        for fr in frames():
+            ext.add(fr)
+        # a box around the left cluster only (beam_a/b/c); sol (80,20) is outside
+        D.mask_extremes(ext, [(20, 30), (55, 30), (55, 55), (20, 55)])
+        blobs, _ = D.detect_blobs(ext, p)
+        self.assertEqual(len(blobs), 3, [(b.x, b.y) for b in blobs])
+        for b in blobs:
+            self.assertTrue(20 <= b.x <= 55 and 30 <= b.y <= 55, (b.x, b.y))
+
+    def test_mask_removes_outside_noise_and_keeps_inside_led(self):
+        # a rest-lit LED on the LEFT, and a bright smear sweeping the RIGHT (a rat):
+        # the smear inflates the floor and spawns blobs until the mask blanks it.
+        p = LM.DetectorParams(blob_thresh=30.0)
+        rng = np.random.default_rng(5)
+        yy, xx = np.mgrid[0:H, 0:W]
+        ext = D.Extremes(p.sample_every)
+        for k in range(120):
+            f = np.full((H, W, 3), BG, np.float32)
+            f += rng.normal(0, 2.0, f.shape).astype(np.float32)
+            if not (40 <= k < 46):                     # left LED blinks off briefly
+                _dot(f, 30.0, 40.0, 140.0, (0.2, 0.3, 1.0))
+            cx = 70 + (k % 40)                          # smear sweeps the right half
+            smear = np.exp(-((xx - cx) ** 2 + (yy - 50) ** 2) / (2 * 5.0 ** 2)) * 180.0
+            for c in range(3):
+                f[:, :, c] += smear
+            ext.add(np.clip(f, 0, 255).astype(np.uint8))
+        _blobs_all, floor_all = D.detect_blobs(ext, p)
+        D.mask_extremes(ext, [(15, 25), (50, 25), (50, 60), (15, 60)])
+        blobs, floor = D.detect_blobs(ext, p)
+        self.assertLessEqual(floor, floor_all)                 # right-side noise gone
+        self.assertTrue(any(abs(b.x - 30) < 1.5 and abs(b.y - 40) < 1.5 for b in blobs))
+        for b in blobs:
+            self.assertTrue(15 <= b.x <= 50 and 25 <= b.y <= 60, (b.x, b.y))
+
+
+@unittest.skipIf(np is None, "numpy not installed")
 class TestTraces(unittest.TestCase):
     def setUp(self):
         self.p = LM.DetectorParams(blob_thresh=30.0)
@@ -394,7 +445,7 @@ class TestLedMap(unittest.TestCase):
             with open(p, encoding="utf-8") as f:
                 raw = json.load(f)
             self.assertEqual(LM.load(p).to_dict(), m.to_dict())
-        self.assertEqual(raw["schema_version"], 2)
+        self.assertEqual(raw["schema_version"], 3)
         self.assertEqual(back.session_id, m.session_id)
         self.assertEqual(back.board_rect, m.board_rect)
         self.assertEqual(back.frame_size, (1280, 1024))
@@ -445,11 +496,32 @@ class TestLedMap(unittest.TestCase):
             with open(p, encoding="utf-8") as f:
                 raw = json.load(f)
             self.assertEqual(LM.load(p).to_dict(), m.to_dict())
-        self.assertEqual(raw["schema_version"], 2)
+        self.assertEqual(raw["schema_version"], 3)
         self.assertEqual([f.fid_id for f in back.fiducials], ["red_0", "green_0", "red_1", "green_1"])
         self.assertEqual(back.fiducial_colors(), [LM.RED, LM.GREEN, LM.RED, LM.GREEN])
         self.assertEqual(back.fiducial_constellation()[0], (840.0, 590.0))
         self.assertEqual(back.board_poly[0], (830.0, 585.0))
+
+    def test_board_search_poly_round_trips(self):
+        m = self._fid_map()
+        m.board_search_poly = [(820.0, 560.0), (1010.0, 575.0), (1005.0, 745.0), (835.0, 750.0)]
+        with tempfile.TemporaryDirectory() as d:
+            p = LM.save(m, os.path.join(d, "led_map.json"))
+            back = LM.load(p)
+            with open(p, encoding="utf-8") as f:
+                raw = json.load(f)
+        self.assertEqual(raw["schema_version"], 3)
+        self.assertEqual(raw["reference"]["board_search_poly"][0], [820.0, 560.0])
+        self.assertEqual(back.board_search_poly[0], (820.0, 560.0))
+        self.assertEqual(back.to_dict(), m.to_dict())
+
+    def test_v2_map_without_search_poly_still_loads(self):
+        v2 = self._fid_map().to_dict()
+        v2["schema_version"] = 2
+        v2["reference"].pop("board_search_poly", None)
+        back = LM.from_dict(v2)
+        self.assertIsNone(back.board_search_poly)
+        self.assertEqual(back.board_poly[0], (830.0, 585.0))    # v2 hull still loads
 
     def test_v1_map_still_loads_without_fiducials(self):
         v1 = self._map().to_dict()

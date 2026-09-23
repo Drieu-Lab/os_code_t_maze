@@ -200,6 +200,13 @@ TIPS: Dict[str, Entry] = {
     "tracker.clear_region": "Clear the maze ROI polygon.",
     "tracker.save_roi": "Save the maze ROI polygon to disk.",
     "tracker.load_roi": "Load a maze ROI polygon from disk.",
+    "tracker.define_led_board_region": "Draw a polygon around the WHOLE indicator "
+                                       "board (all S/L/SOL + the green/red pose "
+                                       "fiducials, with margin) on a still frame. "
+                                       "Saved to host/led_board_search.json and used "
+                                       "by 'sync_fit --map' to confine LED detection "
+                                       "to the board, excluding the maze the rat "
+                                       "crosses (ADR-0195).",
     "tracker.define_landmarks": "Mark reward wells / body-sensor points on a "
                                 "still frame.",
     "tracker.clear_landmarks": "Remove all placed landmarks.",
