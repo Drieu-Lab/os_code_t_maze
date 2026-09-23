@@ -172,7 +172,8 @@ FFV1_SLICES = 24
 # Selectable recording formats (GUI labels -> internal codec id). Lossless FFV1
 # is bit-exact but large (~250 GB/hr at 1.3 MP/42 fps); H.264 is lossy but
 # 25-100x smaller and fine for behavioral tracking. See docs/decisions/0013.
-RECORD_FORMATS = (("Lossless (FFV1)", "ffv1"), ("Compressed (H.264)", "h264"))
+# H.264 is listed first so it is the GUI default (index 0); see docs/decisions/0197.
+RECORD_FORMATS = (("Compressed (H.264)", "h264"), ("Lossless (FFV1)", "ffv1"))
 FFV1_EXT, H264_EXT = ".mkv", ".mp4"
 H264_PRESET = "superfast"   # keeps up at full res with margin; good compression
 DEFAULT_CRF = 18            # H.264 quality: lower = better/larger (~18 visually lossless)

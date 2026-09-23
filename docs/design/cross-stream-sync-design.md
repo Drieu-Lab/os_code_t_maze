@@ -88,9 +88,10 @@ nobody has measured it.
 
 ### 1.3 Camera facts that shape the design (verified in `ui/camera_view.py`)
 
-- The GUI's default format is **lossless FFV1** (`RECORD_FORMATS[0]`), but in
-  practice operators pick **H.264** (CRF 18): 43 of the 48 session videos on the
-  rig PC are `.mp4`, including every recent one. So H.264 is the case that
+- The GUI's default format is now **H.264** (`RECORD_FORMATS[0]`, CRF 18; the
+  default was lossless FFV1 before ADR-0197), matching what operators already
+  picked in practice: 43 of the 48 session videos on the rig PC are `.mp4`,
+  including every recent one. So H.264 is the case that
   matters, and the feasibility spike (§3.7) was run on it: the LEDs survive the
   compression with a contrast of 90–180 grey levels against a noise floor of ~25,
   so no lossless fallback is needed.
