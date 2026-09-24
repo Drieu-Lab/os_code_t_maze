@@ -63,12 +63,12 @@ from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
 from tmaze.core.phase3 import bundle_format as BF
 from tmaze.core.session import session_registry, session_serial
 from tmaze.core.session.session_log import SessionManifest
-from tmaze.core.sync import board_layout as BL, event_frames as EF
+from tmaze.core.sync import board_layout as BL, event_frames as EF, exclusive as EX
 from tmaze.core.sync import clockfit, led_map as LM, matching, pipeline
 from tmaze.core.sync import spans as S
 from tmaze.core.timeutil import now_iso
 
-TOOL_VERSION = 1
+TOOL_VERSION = 2       # 2: the one-active rule (ADR-0201)
 FIDUCIAL_METHOD = "led-fit"
 
 
@@ -222,7 +222,8 @@ class SyncRun:
                  board_poly: Optional[List[Tuple[float, float]]] = None,
                  search_poly: Optional[List[Tuple[float, float]]] = None,
                  frame_size: Optional[Tuple[int, int]] = None, median=None,
-                 frames: Sequence[S.Frame] = (), video: Optional[str] = None):
+                 frames: Sequence[S.Frame] = (), video: Optional[str] = None,
+                 one_active: Optional[dict] = None):
         self.sid = sid
         self.header = header
         self.blobs = blobs
@@ -246,6 +247,7 @@ class SyncRun:
         self.median = median                   # the crop's median image, for the overlay
         self.frames = list(frames)             # the analysed window's sidecar frames
         self.video = video
+        self.one_active = one_active or {"applied": False, "reason": "not run"}   # ADR-0201
 
     def led_id(self, blob: int) -> str:
         return self.led_ids.get(blob, f"blob_{blob}")
@@ -285,6 +287,8 @@ def analyze_bundle(bundle: str, *, start_min: float = 0.0, minutes: Optional[flo
                    min_matched: int = 3, min_pairs: int = 30,
                    serial_path: Optional[str] = None,
                    sensor_polarity: Optional[str] = None,
+                   layout_path: Optional[str] = None,
+                   one_active_rule: bool = True,
                    progress: bool = False) -> SyncRun:
     """Detect the LEDs, bind them, fit the clock.
 
@@ -300,6 +304,9 @@ def analyze_bundle(bundle: str, *, start_min: float = 0.0, minutes: Optional[flo
     ``sensor_polarity`` overrides the bundle's S/L polarity (resolve_sensor_polarity);
     it is resolved before the video is read, so an unresolvable bundle fails fast.
     ``progress`` prints how far each video read has got (the --map build).
+    With a v4 map, the board layout's (``layout_path``) one-active groups are
+    enforced on the traces before they become spans, unless ``one_active_rule``
+    is False (ADR-0201).
     """
     sid = bundle_id(bundle)
     header, frames = _read_frames(bundle, sid)
@@ -405,6 +412,8 @@ def analyze_bundle(bundle: str, *, start_min: float = 0.0, minutes: Optional[flo
     grey, _rmg = D.sample_traces(video, crop, start, got, blobs, shape, params,
                                  progress=progress_printer("read 2/3 (LED traces)", got)
                                  if progress else None)
+    one_active = apply_one_active(grey, blobs, led_ids, used_map,
+                                  BL.load(layout_path), enabled=one_active_rule)
     blob_spans = [D.blob_spans(b.id, grey[:, i], win, tick) for i, b in enumerate(blobs)]
 
     result = pipeline.analyze(blob_spans, events, tol_s=tol_s, min_visible_s=min_visible_s,
@@ -414,7 +423,51 @@ def analyze_bundle(bundle: str, *, start_min: float = 0.0, minutes: Optional[flo
                    registration, used_map, (start, got), tol_s, min_visible_s, crop,
                    sensor_polarity=polarity, fiducials=fiducials, fid_registration=fid_registration,
                    board_poly=board_poly, search_poly=search_poly,
-                   frame_size=frame_size, median=ext.median(), frames=win, video=video)
+                   frame_size=frame_size, median=ext.median(), frames=win, video=video,
+                   one_active=one_active)
+
+
+def apply_one_active(grey, blobs, led_ids: Dict[int, str], used_map: Optional[LM.LedMap],
+                     layout: BL.BoardLayout, *, enabled: bool = True) -> dict:
+    """Enforce the layout's one-active groups on the traces, IN PLACE (ADR-0201).
+
+    Needs a map that says which channel each located LED shows and in which
+    direction (lit/dark relative to that channel's wire state in the map's
+    reference session). Returns the record written to ``clock_fit`` under
+    ``one_active``: whether the rule ran (and why not), and per group what it did.
+    """
+    info: dict = {"applied": False, "layout": layout.source,
+                  "groups_listed": {k: list(v) for k, v in layout.exclusive_groups.items()}}
+    if not enabled:
+        info["reason"] = "turned off (--no-one-active)"
+        return info
+    if not layout.exclusive_groups:
+        info["reason"] = "no exclusive_groups in the board layout"
+        return info
+    if used_map is None or used_map.sensor_polarity not in POLARITY_CHOICES:
+        info["reason"] = "needs a v4 led_map.json (LED channels + reference sensor polarity)"
+        return info
+    ref_active = S.active_state(used_map.sensor_polarity)
+    entries = {e.led_id: e for e in used_map.leds}
+    leds = []
+    for col, b in enumerate(blobs):
+        e = entries.get(led_ids.get(b.id, ""))
+        if e is None or not e.channel or e.polarity not in (EX.LIT, EX.DARK):
+            continue
+        state = e.channel.partition("=")[2]
+        direction = e.polarity
+        if state and state != ref_active:
+            direction = EX.DARK if e.polarity == EX.LIT else EX.LIT
+        leds.append((col, e.led_id, e.channel, direction))
+    groups = EX.groups_from(layout.exclusive_groups, leds)
+    traces = {g.column: grey[:, g.column].tolist() for gl in groups.values() for g in gl}
+    params = EX.ExclusiveParams()
+    new, reports = EX.enforce(traces, groups, params)
+    for col, vals in new.items():
+        grey[:, col] = vals
+    info.update(applied=True, params=asdict(params),
+                groups={k: r.to_dict() for k, r in reports.items()})
+    return info
 
 
 # ------------------------------------------------------------ led_map builder
@@ -752,6 +805,7 @@ def clock_fit_dict(run: SyncRun) -> dict:
             "registration": run.fid_registration.to_dict() if run.fid_registration is not None else None,
         },
         "registration": run.registration.to_dict() if run.registration is not None else None,
+        "one_active": run.one_active,
         "blob_verdicts": verdicts,
         "bindings": bindings,
         "fit": res.fit.to_dict() if res.fit else None,
@@ -875,6 +929,24 @@ def write_fit_plot(path: str, run: SyncRun) -> bool:
 
 # ---------------------------------------------------------------- reporting
 
+def one_active_lines(info: dict) -> List[str]:
+    """Report lines for the one-active rule (ADR-0201); a WARNING per group in
+    which two channels were really lit at once, i.e. the rule's premise failed."""
+    if not info.get("applied"):
+        return [f"  one-active rule: not applied ({info.get('reason', '?')})"]
+    out = []
+    for name, g in info.get("groups", {}).items():
+        out.append(f"  one-active rule [{name}]: {g['n_leds']} LEDs, active on "
+                   f"{g['frames_active']} frames, spill removed on {g['frames_suppressed']}"
+                   + (f" {g['suppressed_by_channel']}" if g["suppressed_by_channel"] else ""))
+        if g["frames_conflict"]:
+            out.append(f"  WARNING: [{name}] two channels were really lit at once on "
+                       f"{g['frames_conflict']} frames (first: {g['first_conflicts']}) - "
+                       "the one-active premise failed (two animals? a stuck sensor?); "
+                       "consider --no-one-active or removing the group from the board layout")
+    return out
+
+
 def print_report(run: SyncRun, out: str) -> None:
     res = run.result
     print(f"\nsession {run.sid}: codec={run.header.get('codec')} "
@@ -914,6 +986,8 @@ def print_report(run: SyncRun, out: str) -> None:
     else:
         print(f"  led_map {run.used_map.session_id} (v2): "
               f"{len(run.led_ids)} LEDs located (detected + pose-transformed fallback)")
+    for line in one_active_lines(run.one_active):
+        print(line)
 
     print(f"\n  {'led':>10} {'channel':>8} {'pol':>4} {'match/vis':>10} {'led':>4} "
           f"{'prec':>5} {'recall':>6} {'lag_ms':>7} {'mad':>5} {'endlag':>7}")
@@ -1135,8 +1209,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                          "baked into led_map.json on --map. Overrides --board-rect. Default when "
                          "absent while building a map: host/led_board_search.json (ADR-0195)")
     ap.add_argument("--layout", metavar="FILE",
-                    help="with --map: how many LEDs each channel drives (default "
-                         "host/led_board_layout.json; without one, 1 per channel; ADR-0196)")
+                    help="the board layout (default host/led_board_layout.json): with --map, how "
+                         "many LEDs each channel drives (without one, 1 per channel; ADR-0196); "
+                         "on a fit, its one-active groups (ADR-0201)")
+    ap.add_argument("--no-one-active", action="store_true",
+                    help="do not enforce the layout's one-active groups (only the strongest "
+                         "beam / lick channel active per frame) for this run (ADR-0201)")
     ap.add_argument("--serial", help="read serial events from this log instead of the bundle's "
                     "central-only capture; use the FULL rig_logger CSV for a mapping session "
                     "(it keeps the left/right-reward and rinse/drain valve acks the capture drops)")
@@ -1189,7 +1267,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                        tol_s=a.tol_ms / 1000.0,
                        min_visible_s=a.min_visible_ms / 1000.0,
                        min_matched=a.min_matched, min_pairs=a.min_pairs,
-                       serial_path=a.serial, sensor_polarity=a.sensor_polarity)
+                       serial_path=a.serial, sensor_polarity=a.sensor_polarity,
+                       layout_path=a.layout, one_active_rule=not a.no_one_active)
 
     if not a.bundle:
         ap.error("a bundle folder is required (or use --all / --selftest)")
@@ -1205,6 +1284,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                              search_poly_path=a.board_poly,
                              min_matched=a.min_matched, min_pairs=a.min_pairs,
                              serial_path=a.serial, sensor_polarity=a.sensor_polarity,
+                             layout_path=a.layout, one_active_rule=not a.no_one_active,
                              progress=a.map)
     except (FileNotFoundError, RuntimeError) as e:
         print(f"error: {e}", file=sys.stderr)

@@ -42,10 +42,13 @@ def layout_path() -> str:
 @dataclass(frozen=True)
 class BoardLayout:
     """LEDs per channel: ``per_channel`` (``"S0": 2``) wins over ``per_kind``
-    (``"S": 2``); anything unlisted has one LED."""
+    (``"S": 2``); anything unlisted has one LED. ``exclusive_groups`` (group name
+    -> channel bases) lists the one-active groups the per-session sync enforces
+    (docs/decisions/0201); none listed = the rule is off."""
     per_kind: Dict[str, int] = field(default_factory=dict)
     per_channel: Dict[str, int] = field(default_factory=dict)
     source: str = SOURCE_DEFAULT
+    exclusive_groups: Dict[str, List[str]] = field(default_factory=dict)
 
     def expected(self, channel: str) -> int:
         base = channel_base(channel)
@@ -72,13 +75,34 @@ def _counts(d: object, what: str) -> Dict[str, int]:
     return out
 
 
+def _groups(d: object) -> Dict[str, List[str]]:
+    if d is None:
+        return {}
+    if not isinstance(d, dict):
+        raise ValueError(f"exclusive_groups must be an object of name -> channel list, got {d!r}")
+    out: Dict[str, List[str]] = {}
+    seen: Dict[str, str] = {}
+    for name, chans in d.items():
+        if not isinstance(chans, list) or not all(isinstance(c, str) and c for c in chans):
+            raise ValueError(f"exclusive_groups[{name!r}] must be a list of channel names, "
+                             f"got {chans!r}")
+        for c in chans:
+            if c in seen:
+                raise ValueError(f"channel {c!r} is in both exclusive_groups "
+                                 f"{seen[c]!r} and {name!r}")
+            seen[c] = str(name)
+        out[str(name)] = list(chans)
+    return out
+
+
 def from_dict(d: dict, source: str = "") -> BoardLayout:
     if d.get("schema_version") != SCHEMA_VERSION:
         raise ValueError(f"led_board_layout schema_version must be {SCHEMA_VERSION}, "
                          f"got {d.get('schema_version')!r}")
     return BoardLayout(_counts(d.get("leds_per_kind"), "leds_per_kind"),
                        _counts(d.get("leds_per_channel"), "leds_per_channel"),
-                       source or "led_board_layout.json")
+                       source or "led_board_layout.json",
+                       _groups(d.get("exclusive_groups")))
 
 
 def load(path: Optional[str] = None) -> BoardLayout:
