@@ -68,7 +68,8 @@ from tmaze.core.sync import clockfit, led_map as LM, matching, pipeline
 from tmaze.core.sync import spans as S
 from tmaze.core.timeutil import now_iso
 
-TOOL_VERSION = 2       # 2: the one-active rule (ADR-0201)
+TOOL_VERSION = 3       # 2: the one-active rule (ADR-0201); 3: the map check (ADR-0202)
+                       # + reward-valve group (ADR-0203)
 FIDUCIAL_METHOD = "led-fit"
 
 
@@ -223,7 +224,7 @@ class SyncRun:
                  search_poly: Optional[List[Tuple[float, float]]] = None,
                  frame_size: Optional[Tuple[int, int]] = None, median=None,
                  frames: Sequence[S.Frame] = (), video: Optional[str] = None,
-                 one_active: Optional[dict] = None):
+                 one_active: Optional[dict] = None, map_check: Optional[dict] = None):
         self.sid = sid
         self.header = header
         self.blobs = blobs
@@ -248,6 +249,7 @@ class SyncRun:
         self.frames = list(frames)             # the analysed window's sidecar frames
         self.video = video
         self.one_active = one_active or {"applied": False, "reason": "not run"}   # ADR-0201
+        self.map_check = map_check or {"applied": False, "reason": "not run"}     # ADR-0202
 
     def led_id(self, blob: int) -> str:
         return self.led_ids.get(blob, f"blob_{blob}")
@@ -289,6 +291,7 @@ def analyze_bundle(bundle: str, *, start_min: float = 0.0, minutes: Optional[flo
                    sensor_polarity: Optional[str] = None,
                    layout_path: Optional[str] = None,
                    one_active_rule: bool = True,
+                   map_check: bool = True,
                    progress: bool = False) -> SyncRun:
     """Detect the LEDs, bind them, fit the clock.
 
@@ -306,7 +309,9 @@ def analyze_bundle(bundle: str, *, start_min: float = 0.0, minutes: Optional[flo
     ``progress`` prints how far each video read has got (the --map build).
     With a v4 map, the board layout's (``layout_path``) one-active groups are
     enforced on the traces before they become spans, unless ``one_active_rule``
-    is False (ADR-0201).
+    is False (ADR-0201). With any map carrying LED channels, an LED that
+    matches another channel instead of its own is reported and kept out of the
+    fit, unless ``map_check`` is False (ADR-0202).
     """
     sid = bundle_id(bundle)
     header, frames = _read_frames(bundle, sid)
@@ -412,29 +417,102 @@ def analyze_bundle(bundle: str, *, start_min: float = 0.0, minutes: Optional[flo
     grey, _rmg = D.sample_traces(video, crop, start, got, blobs, shape, params,
                                  progress=progress_printer("read 2/3 (LED traces)", got)
                                  if progress else None)
+    fired = {ch.split("=")[0] for ch, sp in S.active_spans(events, polarity.value).items() if sp}
     one_active = apply_one_active(grey, blobs, led_ids, used_map,
-                                  BL.load(layout_path), enabled=one_active_rule)
+                                  BL.load(layout_path), enabled=one_active_rule, fired=fired)
     blob_spans = [D.blob_spans(b.id, grey[:, i], win, tick) for i, b in enumerate(blobs)]
 
+    expected, check = map_expectations(blobs, led_ids, used_map, enabled=map_check)
     result = pipeline.analyze(blob_spans, events, tol_s=tol_s, min_visible_s=min_visible_s,
                               min_matched=min_matched, min_pairs=min_pairs,
-                              sensor_polarity=polarity.value)
+                              sensor_polarity=polarity.value, expected=expected)
+    check.update(map_check_record(result, led_ids, used_map) if check["applied"] else {})
     return SyncRun(sid, header, blobs, floor, led_ids, result, blob_spans, events,
                    registration, used_map, (start, got), tol_s, min_visible_s, crop,
                    sensor_polarity=polarity, fiducials=fiducials, fid_registration=fid_registration,
                    board_poly=board_poly, search_poly=search_poly,
                    frame_size=frame_size, median=ext.median(), frames=win, video=video,
-                   one_active=one_active)
+                   one_active=one_active, map_check=check)
+
+
+def map_direction(entry: LM.LedEntry, used_map: LM.LedMap) -> Optional[str]:
+    """What a map LED does (lit/dark) while its channel is ACTIVE, or None if
+    the map can't say. The map stores the polarity against the wire state in
+    its reference session (``S3=1`` lit); when that state was the resting one
+    under the map's sensor polarity, the LED does the opposite while active."""
+    if used_map.sensor_polarity not in POLARITY_CHOICES or entry.polarity not in (EX.LIT, EX.DARK):
+        return None
+    state = (entry.channel or "").partition("=")[2]
+    if state and state != S.active_state(used_map.sensor_polarity):
+        return EX.DARK if entry.polarity == EX.LIT else EX.LIT
+    return entry.polarity
+
+
+def map_expectations(blobs, led_ids: Dict[int, str], used_map: Optional[LM.LedMap],
+                     *, enabled: bool = True
+                     ) -> Tuple[Optional[Dict[int, Tuple[str, Optional[str]]]], dict]:
+    """Per located blob, the channel base (and active direction, when the map
+    knows it) the map says it shows - the ``expected`` argument of
+    ``pipeline.analyze`` (ADR-0202) - plus the start of the ``map_check`` record."""
+    info: dict = {"applied": False}
+    if not enabled:
+        info["reason"] = "turned off (--no-map-check)"
+        return None, info
+    if used_map is None:
+        info["reason"] = "no led_map.json"
+        return None, info
+    entries = {e.led_id: e for e in used_map.leds}
+    expected: Dict[int, Tuple[str, Optional[str]]] = {}
+    for b in blobs:
+        e = entries.get(led_ids.get(b.id, ""))
+        if e is not None and e.channel:
+            expected[b.id] = (e.channel.split("=")[0], map_direction(e, used_map))
+    if not expected:
+        info["reason"] = "the map names no LED channels"
+        return None, info
+    info.update(applied=True, n_checked=len(expected),
+                direction_checked=used_map.sensor_polarity in POLARITY_CHOICES)
+    return expected, info
+
+
+def map_check_record(result: pipeline.SyncResult, led_ids: Dict[int, str],
+                     used_map: Optional[LM.LedMap]) -> dict:
+    """The map check's findings for ``clock_fit``: LEDs that matched another
+    channel instead of their own (not used), and LEDs bound to their own
+    channel although another scored higher."""
+    entries = {e.led_id: e for e in used_map.leds} if used_map else {}
+
+    def says(blob: int) -> str:
+        e = entries.get(led_ids.get(blob, ""))
+        if e is None:
+            return "?"
+        d = map_direction(e, used_map)
+        return f"{e.channel.split('=')[0]} {d}" if d else e.channel.split("=")[0]
+
+    def row(blob: int, b) -> dict:
+        return {"map": says(blob), "matched": b.channel, "polarity": b.polarity,
+                "n_matched": b.n_matched, "n_events": b.n_events, "precision": round(b.score, 3),
+                "lag_ms": round(b.lag_s * 1000, 1), "end_lag_ms": round(b.end_lag_s * 1000, 1)}
+
+    return {
+        "contradictions": {led_ids.get(k, f"blob_{k}"): row(k, b)
+                           for k, b in sorted(result.contradictions.items())},
+        "map_preferred": {led_ids.get(k, f"blob_{k}"): row(k, b)
+                          for k, b in sorted(result.map_preferred.items())},
+    }
 
 
 def apply_one_active(grey, blobs, led_ids: Dict[int, str], used_map: Optional[LM.LedMap],
-                     layout: BL.BoardLayout, *, enabled: bool = True) -> dict:
+                     layout: BL.BoardLayout, *, enabled: bool = True,
+                     fired: Optional[set] = None) -> dict:
     """Enforce the layout's one-active groups on the traces, IN PLACE (ADR-0201).
 
     Needs a map that says which channel each located LED shows and in which
     direction (lit/dark relative to that channel's wire state in the map's
-    reference session). Returns the record written to ``clock_fit`` under
-    ``one_active``: whether the rule ran (and why not), and per group what it did.
+    reference session). ``fired`` - channel bases with serial events this
+    session - picks the LEDs a row's typical change is measured on (ADR-0203).
+    Returns the record written to ``clock_fit`` under ``one_active``: whether
+    the rule ran (and why not), and per group what it did.
     """
     info: dict = {"applied": False, "layout": layout.source,
                   "groups_listed": {k: list(v) for k, v in layout.exclusive_groups.items()}}
@@ -447,25 +525,23 @@ def apply_one_active(grey, blobs, led_ids: Dict[int, str], used_map: Optional[LM
     if used_map is None or used_map.sensor_polarity not in POLARITY_CHOICES:
         info["reason"] = "needs a v4 led_map.json (LED channels + reference sensor polarity)"
         return info
-    ref_active = S.active_state(used_map.sensor_polarity)
     entries = {e.led_id: e for e in used_map.leds}
     leds = []
     for col, b in enumerate(blobs):
         e = entries.get(led_ids.get(b.id, ""))
-        if e is None or not e.channel or e.polarity not in (EX.LIT, EX.DARK):
+        if e is None or not e.channel:
             continue
-        state = e.channel.partition("=")[2]
-        direction = e.polarity
-        if state and state != ref_active:
-            direction = EX.DARK if e.polarity == EX.LIT else EX.LIT
-        leds.append((col, e.led_id, e.channel, direction))
+        direction = map_direction(e, used_map)
+        if direction is not None:
+            leds.append((col, e.led_id, e.channel, direction))
     groups = EX.groups_from(layout.exclusive_groups, leds)
     traces = {g.column: grey[:, g.column].tolist() for gl in groups.values() for g in gl}
     params = EX.ExclusiveParams()
-    new, reports = EX.enforce(traces, groups, params)
+    new, reports = EX.enforce(traces, groups, params, fired=fired)
     for col, vals in new.items():
         grey[:, col] = vals
     info.update(applied=True, params=asdict(params),
+                reference="channels that fired" if fired is not None else "all LEDs",
                 groups={k: r.to_dict() for k, r in reports.items()})
     return info
 
@@ -806,6 +882,7 @@ def clock_fit_dict(run: SyncRun) -> dict:
         },
         "registration": run.registration.to_dict() if run.registration is not None else None,
         "one_active": run.one_active,
+        "map_check": run.map_check,
         "blob_verdicts": verdicts,
         "bindings": bindings,
         "fit": res.fit.to_dict() if res.fit else None,
@@ -947,6 +1024,27 @@ def one_active_lines(info: dict) -> List[str]:
     return out
 
 
+def map_check_lines(info: dict) -> List[str]:
+    """Report lines for the map check (ADR-0202): each LED that matched a
+    channel other than the one the map gives it, and was therefore not used."""
+    if not info.get("applied"):
+        return [f"  map check: not applied ({info.get('reason', '?')})"]
+    bad = info.get("contradictions", {})
+    pref = info.get("map_preferred", {})
+    out = [f"  map check: {info['n_checked']} LEDs checked against their map channel"
+           + ("" if info.get("direction_checked") else " (channel only - map has no direction)")
+           + f", {len(bad)} contradict the map, {len(pref)} kept on their own channel "
+             "over a higher-scoring other"]
+    for led, r in bad.items():
+        out.append(f"    {led:>10}: map says {r['map']}, this session matched {r['matched']} "
+                   f"{r['polarity']} ({r['n_matched']}/{r['n_events']}, lag "
+                   f"{r['lag_ms']:+.0f}/{r['end_lag_ms']:+.0f} ms) - not used for the fit")
+    for led, r in pref.items():
+        out.append(f"    {led:>10}: kept on {r['map']} (would have matched {r['matched']} "
+                   f"{r['polarity']}, {r['n_matched']}/{r['n_events']})")
+    return out
+
+
 def print_report(run: SyncRun, out: str) -> None:
     res = run.result
     print(f"\nsession {run.sid}: codec={run.header.get('codec')} "
@@ -986,7 +1084,7 @@ def print_report(run: SyncRun, out: str) -> None:
     else:
         print(f"  led_map {run.used_map.session_id} (v2): "
               f"{len(run.led_ids)} LEDs located (detected + pose-transformed fallback)")
-    for line in one_active_lines(run.one_active):
+    for line in one_active_lines(run.one_active) + map_check_lines(run.map_check):
         print(line)
 
     print(f"\n  {'led':>10} {'channel':>8} {'pol':>4} {'match/vis':>10} {'led':>4} "
@@ -998,9 +1096,9 @@ def print_report(run: SyncRun, out: str) -> None:
               f"{b.end_lag_s * 1000:>7.1f}")
     unbound = [run.led_id(b) for b, v in res.blob_verdicts.items() if v != pipeline.MATCHED]
     if unbound:
-        print(f"  unbound/silent: {unbound}")
+        print(f"  unbound/silent/contradicts map: {unbound}")
         for blob, v in sorted(res.blob_verdicts.items()):
-            if v == pipeline.MATCHED:
+            if v in (pipeline.MATCHED, pipeline.CONTRADICTS_MAP):
                 continue
             cands = res.candidates.get(blob, [])[:1]
             for c in cands:
@@ -1214,7 +1312,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                          "on a fit, its one-active groups (ADR-0201)")
     ap.add_argument("--no-one-active", action="store_true",
                     help="do not enforce the layout's one-active groups (only the strongest "
-                         "beam / lick channel active per frame) for this run (ADR-0201)")
+                         "beam / lick / reward-valve channel active per frame) for this run "
+                         "(ADR-0201, ADR-0203)")
+    ap.add_argument("--no-map-check", action="store_true",
+                    help="let an LED bind to whatever channel it matches best, even one other "
+                         "than its led_map.json channel (default: such an LED is reported and "
+                         "kept out of the fit; never applied while building a map; ADR-0202)")
     ap.add_argument("--serial", help="read serial events from this log instead of the bundle's "
                     "central-only capture; use the FULL rig_logger CSV for a mapping session "
                     "(it keeps the left/right-reward and rinse/drain valve acks the capture drops)")
@@ -1268,7 +1371,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                        min_visible_s=a.min_visible_ms / 1000.0,
                        min_matched=a.min_matched, min_pairs=a.min_pairs,
                        serial_path=a.serial, sensor_polarity=a.sensor_polarity,
-                       layout_path=a.layout, one_active_rule=not a.no_one_active)
+                       layout_path=a.layout, one_active_rule=not a.no_one_active,
+                       map_check=not a.no_map_check)
 
     if not a.bundle:
         ap.error("a bundle folder is required (or use --all / --selftest)")
@@ -1285,6 +1389,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                              min_matched=a.min_matched, min_pairs=a.min_pairs,
                              serial_path=a.serial, sensor_polarity=a.sensor_polarity,
                              layout_path=a.layout, one_active_rule=not a.no_one_active,
+                             map_check=not (a.no_map_check or a.map),
                              progress=a.map)
     except (FileNotFoundError, RuntimeError) as e:
         print(f"error: {e}", file=sys.stderr)

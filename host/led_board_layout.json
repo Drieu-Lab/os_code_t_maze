@@ -1,10 +1,13 @@
 {
-  "_note": "How many indicator LEDs each serial channel lights on the LED board; read by `python -m tmaze.tools.sync_fit --map` to know how many to look for (see tmaze/core/sync/board_layout.py, docs/decisions/0196). Each beam (S0-S5) and lick (L0-L2) sensor lights two LEDs, one per row (named _a = bright row, _b = dim row); each reward valve (SOL..) one. leds_per_channel (e.g. \"S0\": 1) overrides leds_per_kind for a single channel. exclusive_groups: channels of which at most one can be active at a time (one rat cannot break two beams or lick two ports at once); every sync_fit run keeps only the strongest channel of a group active per frame, so LED light spilling from one channel's LEDs into its neighbours' is not read as a second event (docs/decisions/0201). Remove a group (or pass --no-one-active) when that stops being true, e.g. two animals in the rig.",
+  "_note": "How many indicator LEDs each serial channel lights on the LED board; read by `python -m tmaze.tools.sync_fit --map` to know how many to look for (see tmaze/core/sync/board_layout.py, docs/decisions/0196). Each beam (S0-S5) and lick (L0-L2) sensor lights two LEDs, one per row (named _a = bright row, _b = dim row); each reward valve (SOL..) one. leds_per_channel (e.g. \"S0\": 1) overrides leds_per_kind for a single channel. exclusive_groups: channels of which at most one can be active at a time (one rat cannot break two beams or lick two ports at once; the firmware never opens two reward valves at once - 0 overlaps in 2526 valve pulses over all sessions to 2026-09-24); every sync_fit run keeps only the strongest channel of a group active per frame, so LED light spilling from one channel's LEDs into its neighbours' is not read as a second event (docs/decisions/0201, 0203). Remove a group (or pass --no-one-active) when that stops being true, e.g. two animals in the rig or a protocol that opens two valves together.",
   "schema_version": 1,
   "leds_per_kind": {"S": 2, "L": 2, "SOL": 1},
   "leds_per_channel": {},
   "exclusive_groups": {
     "beams": ["S0", "S1", "S2", "S3", "S4", "S5"],
-    "licks": ["L0", "L1", "L2"]
+    "licks": ["L0", "L1", "L2"],
+    "rewards": ["SOL0.0", "SOL0.1", "SOL0.2", "SOL0.3", "SOL0.4",
+                "SOL1.0", "SOL1.1", "SOL1.2", "SOL1.3", "SOL1.4",
+                "SOL2.0", "SOL2.1", "SOL2.2", "SOL2.3", "SOL2.4"]
   }
 }

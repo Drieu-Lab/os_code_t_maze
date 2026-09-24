@@ -278,12 +278,13 @@ threshold, that number is the warning. See `tmaze/vision/led_detector.py`.
 
 ### One-active group (LED sync)
 A set of serial channels of which at most one can be active at a time: one rat
-cannot break two beams, or lick two ports, at the same instant. Listed under
-`exclusive_groups` in `host/led_board_layout.json`. On every frame the LED sync
-keeps only the group's strongest channel active and returns the others' LEDs to
-rest, so [bleed](#bleed-led-crosstalk) from the active channel is not read as a
+cannot break two beams, or lick two ports, at the same instant, and the firmware
+never opens two reward valves at once. Listed under `exclusive_groups` in
+`host/led_board_layout.json` (`beams`, `licks`, `rewards`). On every frame the LED
+sync keeps only the group's strongest channel active and returns the others' LEDs
+to rest, so [bleed](#bleed-led-crosstalk) from the active channel is not read as a
 second event. Remove a group when the premise stops holding (e.g. two animals).
-See ADR-0201.
+See ADR-0201, ADR-0203.
 
 ### Persistence image (video)
 The mirror of the [noise-floor](#noise-floor-video) idea used to find the *steady*

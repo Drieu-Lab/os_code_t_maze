@@ -454,19 +454,23 @@ class TestClockFit(unittest.TestCase):
 
 # ------------------------------------------------------------------ pipeline
 
+def session_blobs(led: Dict[str, List[S.Span]]) -> List[pipeline.BlobSpans]:
+    return [
+        pipeline.BlobSpans(0, lit=led["sol"], dark=[]),
+        pipeline.BlobSpans(1, lit=led["lick"], dark=[]),
+        pipeline.BlobSpans(2, lit=[], dark=led["beam2"]),
+        pipeline.BlobSpans(3, lit=[], dark=led["beam3"]),
+        pipeline.BlobSpans(4, lit=[], dark=led["beam4"]),
+        pipeline.BlobSpans(5, lit=[], dark=led["beam5"]),
+        pipeline.BlobSpans(6, lit=[], dark=[]),                  # a power LED: never blinks
+    ]
+
+
 class TestAnalyze(unittest.TestCase):
     def setUp(self):
         self.rig, led = scripted_session(minutes=10)
         self.events = S.serial_spans(self.rig.sorted_lines())
-        self.blobs = [
-            pipeline.BlobSpans(0, lit=led["sol"], dark=[]),
-            pipeline.BlobSpans(1, lit=led["lick"], dark=[]),
-            pipeline.BlobSpans(2, lit=[], dark=led["beam2"]),
-            pipeline.BlobSpans(3, lit=[], dark=led["beam3"]),
-            pipeline.BlobSpans(4, lit=[], dark=led["beam4"]),
-            pipeline.BlobSpans(5, lit=[], dark=led["beam5"]),
-            pipeline.BlobSpans(6, lit=[], dark=[]),                  # a power LED: never blinks
-        ]
+        self.blobs = session_blobs(led)
 
     def test_bindings_fit_and_verdicts(self):
         res = pipeline.analyze(self.blobs, self.events, sensor_polarity=LEGACY)
@@ -520,6 +524,65 @@ class TestAnalyze(unittest.TestCase):
         d = pipeline.analyze(self.blobs, self.events, sensor_polarity=LEGACY).to_dict()
         self.assertEqual(d["verdict"], "ok")
         self.assertEqual(d["bindings"]["2"]["channel"], "S2=0")
+
+
+class TestMapCheck(unittest.TestCase):
+    """``expected`` from a map: an LED that matches another channel instead of
+    its own is reported and kept out of the fit (docs/decisions/0202)."""
+
+    def setUp(self):
+        self.rig, self.led = scripted_session(minutes=10)
+        self.events = S.serial_spans(self.rig.sorted_lines())
+        self.blobs = session_blobs(self.led)
+
+    def test_matching_expectations_change_nothing(self):
+        want = {0: ("SOL2.1", "lit"), 1: ("L2", "lit"), 2: ("S2", "dark"),
+                3: ("S3", "dark"), 4: ("S4", "dark"), 5: ("S5", "dark")}
+        plain = pipeline.analyze(self.blobs, self.events, sensor_polarity=LEGACY)
+        res = pipeline.analyze(self.blobs, self.events, sensor_polarity=LEGACY, expected=want)
+        self.assertEqual({k: b.channel for k, b in res.bindings.items()},
+                         {k: b.channel for k, b in plain.bindings.items()})
+        self.assertEqual(res.contradictions, {})
+        self.assertEqual(res.map_preferred, {})
+        self.assertEqual(len(res.pairs), len(plain.pairs))
+
+    def test_a_neighbour_showing_the_valve_as_dips_contradicts_its_map(self):
+        """SOL2.0's LED, whose background ring catches SOL2.1's bloom: it dims on
+        every SOL2.1 pulse, so read alone it binds 'SOL2.1 dark'."""
+        spill = pipeline.BlobSpans(7, lit=[], dark=self.led["sol"])
+        plain = pipeline.analyze([spill], self.events, min_pairs=10, sensor_polarity=LEGACY)
+        self.assertEqual(plain.bindings[7].channel, "SOL2.1")
+        self.assertTrue(plain.pairs)
+        res = pipeline.analyze([spill], self.events, min_pairs=10, sensor_polarity=LEGACY,
+                               expected={7: ("SOL2.0", "lit")})
+        self.assertEqual(res.blob_verdicts[7], pipeline.CONTRADICTS_MAP)
+        self.assertNotIn(7, res.bindings)
+        self.assertEqual(res.contradictions[7].channel, "SOL2.1")
+        self.assertEqual(res.pairs, [])
+        self.assertIn("7", res.to_dict()["contradictions"])
+
+    def test_the_right_channel_in_the_wrong_direction_contradicts(self):
+        res = pipeline.analyze(self.blobs[:1], self.events, min_pairs=10, sensor_polarity=LEGACY,
+                               expected={0: ("SOL2.1", "dark")})
+        self.assertEqual(res.blob_verdicts[0], pipeline.CONTRADICTS_MAP)
+        ok = pipeline.analyze(self.blobs[:1], self.events, min_pairs=10, sensor_polarity=LEGACY,
+                              expected={0: ("SOL2.1", None)})
+        self.assertEqual(ok.blob_verdicts[0], pipeline.MATCHED, "None = direction not checked")
+
+    def test_own_channel_is_kept_over_a_higher_scoring_other(self):
+        both = pipeline.BlobSpans(8, lit=self.led["sol"], dark=self.led["beam2"])
+        plain = pipeline.analyze([both], self.events, min_pairs=10, sensor_polarity=LEGACY)
+        best = plain.bindings[8]
+        own = ("SOL2.1", "lit") if best.channel.startswith("S2") else ("S2", "dark")
+        res = pipeline.analyze([both], self.events, min_pairs=10, sensor_polarity=LEGACY,
+                               expected={8: own})
+        self.assertEqual(res.bindings[8].channel.split("=")[0], own[0])
+        self.assertEqual(res.map_preferred[8].channel, best.channel)
+
+    def test_an_led_matching_nothing_is_still_just_unbound(self):
+        res = pipeline.analyze(self.blobs[6:], self.events, sensor_polarity=LEGACY,
+                               expected={6: ("S0", "dark")})
+        self.assertEqual(res.blob_verdicts[6], pipeline.SILENT)
 
 
 if __name__ == "__main__":

@@ -11,10 +11,11 @@ active on a frame and returns the others to rest (docs/decisions/0201).
 Scoring, per frame and per LED: how far the LED has moved from its resting
 level towards its active level (``lit`` LEDs brighten, ``dark`` ones dim), as a
 fraction of the TYPICAL full change of LEDs in the same row of the same group
-this session (the median over them). A channel's score is the mean over its
-LEDs. Measuring against the row's typical change, not the LED's own, keeps a
-channel that never fired this session - whose only "change" is a neighbour's
-spill - from scoring as high as the channel really firing.
+this session (the median over them; over the LEDs of channels that have serial
+events when the caller says which - ``fired``). A channel's score is the mean
+over its LEDs. Measuring against the row's typical change, not the LED's own,
+keeps a channel that never fired this session - whose only "change" is a
+neighbour's spill - from scoring as high as the channel really firing.
 
 When the top channel scores at least ``active_min`` the others are set to their
 resting level on that frame. Two counts are reported per group: frames where a
@@ -31,7 +32,7 @@ from __future__ import annotations
 import math
 import statistics
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 LIT = "lit"
 DARK = "dark"
@@ -107,11 +108,18 @@ def _levels(trace: Sequence[float], polarity: str) -> Optional[Tuple[float, floa
 
 
 def enforce(traces: Dict[int, List[float]], groups: Dict[str, Sequence[GroupLed]],
-            params: ExclusiveParams = ExclusiveParams()
+            params: ExclusiveParams = ExclusiveParams(),
+            fired: Optional[Set[str]] = None
             ) -> Tuple[Dict[int, List[float]], Dict[str, GroupReport]]:
     """Apply the one-active rule to every group.
 
     ``traces`` maps a trace column to its per-frame values (all the same length).
+    ``fired`` - the channel bases that have serial events this session. When
+    given, a row's typical change is taken over those channels' LEDs only (a
+    row falls back to all its LEDs if none of them fired): in a group where
+    most channels never fire - 15 reward valves, 2-3 used per session - a
+    median over every LED would be a spill-sized change, and spill would then
+    score as "really lit" (docs/decisions/0203).
     Returns new traces (columns not in any group are passed through unchanged)
     and one report per group.
     """
@@ -126,10 +134,14 @@ def enforce(traces: Dict[int, List[float]], groups: Dict[str, Sequence[GroupLed]
             continue
         levels = {g.column: _levels(traces[g.column], g.polarity) for g in leds}
         by_row: Dict[str, List[float]] = {}
+        by_row_fired: Dict[str, List[float]] = {}
         for g in leds:
             lv = levels[g.column]
             if lv is not None and abs(lv[1]) >= params.min_span:
                 by_row.setdefault(g.row, []).append(abs(lv[1]))
+                if fired is not None and g.channel in fired:
+                    by_row_fired.setdefault(g.row, []).append(abs(lv[1]))
+        by_row.update(by_row_fired)
         ref = {row: statistics.median(s) for row, s in by_row.items()}
         scored = [(g, levels[g.column]) for g in leds
                   if levels[g.column] is not None and g.row in ref]

@@ -111,6 +111,40 @@ class TestEnforce(unittest.TestCase):
         self.assertEqual(out[0][5], REST + 0.3 * BRIGHT)
         self.assertEqual(rep["licks"].frames_active, 30)
 
+    def _valve_board(self):
+        """15 valve LEDs (one each, lit while open); only SOL2.1 (column 11)
+        opens. The 14 idle LEDs carry noise bumps of ~20 grey levels - two of
+        them at the same time on frames 120-124."""
+        chans = [f"SOL{p}.{v}" for p in range(3) for v in range(5)]
+        tr = {c: _flat() for c in range(15)}
+        for k in range(50, 60):
+            tr[11][k] = REST + 150.0
+        for c in range(15):
+            if c != 11:
+                tr[c][10 + 7 * c] = REST + 20.0
+        for k in range(120, 125):
+            tr[0][k] = tr[5][k] = REST + 20.0
+        leds = [EX.GroupLed(c, ch, "", EX.LIT) for c, ch in enumerate(chans)]
+        return tr, {"rewards": leds}
+
+    def test_sparse_group_reference_comes_from_the_channels_that_fired(self):
+        """Over all 15 LEDs the typical change is a noise bump, so noise reads
+        as 'really lit'; measured on SOL2.1 (the only valve in the log) it is 150."""
+        tr, groups = self._valve_board()
+        _out, every = EX.enforce(tr, groups)
+        self.assertGreater(every["rewards"].frames_conflict, 0)
+        out, rep = EX.enforce(tr, groups, fired={"SOL2.1"})
+        r = rep["rewards"]
+        self.assertEqual(r.frames_active, 10)
+        self.assertEqual(r.frames_conflict, 0)
+        self.assertEqual(out[0][120:125], tr[0][120:125], "no winner there: left alone")
+
+    def test_a_row_with_no_fired_channel_falls_back_to_all_leds(self):
+        tr, groups = _lick_board()
+        _o1, all_leds = EX.enforce(tr, groups)
+        _o2, none_fired = EX.enforce(tr, groups, fired={"S0"})
+        self.assertEqual(all_leds["licks"].to_dict(), none_fired["licks"].to_dict())
+
     def test_columns_outside_groups_and_single_channel_groups_pass_through(self):
         tr, groups = _lick_board()
         tr[9] = [float(k) for k in range(N)]
@@ -151,10 +185,12 @@ class TestLayoutGroups(unittest.TestCase):
         with self.assertRaises(ValueError):
             BL.from_dict({"schema_version": 1, "exclusive_groups": {"a": "L0"}})
 
-    def test_committed_layout_lists_beams_and_licks(self):
+    def test_committed_layout_lists_beams_licks_and_rewards(self):
         lay = BL.load()
         self.assertEqual(lay.exclusive_groups.get("licks"), ["L0", "L1", "L2"])
         self.assertEqual(lay.exclusive_groups.get("beams"), [f"S{i}" for i in range(6)])
+        self.assertEqual(lay.exclusive_groups.get("rewards"),
+                         [f"SOL{p}.{v}" for p in range(3) for v in range(5)])
 
 
 class TestApplyOneActive(unittest.TestCase):
@@ -218,6 +254,51 @@ class TestApplyOneActive(unittest.TestCase):
             "suppressed_by_channel": {"L2": 2}, "first_conflicts": [3, 4]}}}
         lines = self.sf.one_active_lines(info)
         self.assertTrue(any("WARNING" in s and "[licks]" in s for s in lines))
+
+    def test_fired_channels_are_recorded(self):
+        g = self._grey()
+        info = self.sf.apply_one_active(g, self.blobs, self.led_ids, self._map("1", "dark"),
+                                        self.layout, fired={"S0", "S1"})
+        self.assertEqual(info["reference"], "channels that fired")
+
+
+class TestMapExpectations(unittest.TestCase):
+    """sync_fit's map check glue (ADR-0202): what the map says each LED shows."""
+
+    def setUp(self):
+        from tmaze.tools import sync_fit
+        self.sf = sync_fit
+        Blob = namedtuple("Blob", "id x y")
+        self.blobs = [Blob(i, 0.0, 0.0) for i in range(3)]
+        self.led_ids = {0: "S0_a", 1: "SOL2.0", 2: "blob_x"}
+        leds = [LM.LedEntry("S0_a", (0.0, 0.0), channel="S0=0", polarity="lit"),
+                LM.LedEntry("SOL2.0", (0.0, 0.0), channel="SOL2.0", polarity="lit")]
+        self.m = LM.LedMap("ref", (0, 0, 10, 10), leds=leds, sensor_polarity="corrected")
+
+    def test_expected_channel_and_active_direction(self):
+        exp, info = self.sf.map_expectations(self.blobs, self.led_ids, self.m)
+        self.assertEqual(exp, {0: ("S0", "dark"), 1: ("SOL2.0", "lit")})
+        self.assertTrue(info["applied"])
+        self.assertTrue(info["direction_checked"])
+
+    def test_old_map_checks_channel_only(self):
+        self.m.sensor_polarity = None
+        exp, info = self.sf.map_expectations(self.blobs, self.led_ids, self.m)
+        self.assertEqual(exp, {0: ("S0", None), 1: ("SOL2.0", None)})
+        self.assertFalse(info["direction_checked"])
+
+    def test_not_applied(self):
+        self.assertIsNone(self.sf.map_expectations(self.blobs, self.led_ids, None)[0])
+        exp, info = self.sf.map_expectations(self.blobs, self.led_ids, self.m, enabled=False)
+        self.assertIsNone(exp)
+        self.assertIn("--no-map-check", info["reason"])
+
+    def test_report_lines(self):
+        row = {"map": "SOL2.0 lit", "matched": "SOL2.1", "polarity": "dark", "n_matched": 7,
+               "n_events": 33, "precision": 0.9, "lag_ms": 65.8, "end_lag_ms": 62.0}
+        lines = self.sf.map_check_lines({"applied": True, "n_checked": 33, "direction_checked": True,
+                                         "contradictions": {"SOL2.0_a": row}, "map_preferred": {}})
+        self.assertTrue(any("map says SOL2.0 lit" in s and "not used" in s for s in lines))
 
 
 if __name__ == "__main__":
