@@ -16,6 +16,7 @@ import os
 import shutil
 import tempfile
 import unittest
+from unittest import mock
 
 from tmaze.core.phase3 import bundle_format as BF
 from tmaze.core.sync import clockfit, led_map as LM, matching, pipeline
@@ -425,6 +426,16 @@ def _make_bundle(root: str) -> str:
 
 @unittest.skipUnless(_clip_readable(), "OpenCV cannot read the board clip fixture")
 class TestEndToEndOnClip(unittest.TestCase):
+    def setUp(self):
+        # The clip is a small crop, so the rig's own host/led_board_search.json and
+        # host/led_map.json (full-frame px) must never be picked up as defaults.
+        absent = os.path.join(tempfile.mkdtemp(), "absent.json")
+        self.addCleanup(shutil.rmtree, os.path.dirname(absent), True)
+        for name in ("led_board_search_path", "led_map_path"):
+            p = mock.patch.object(LM, name, return_value=absent)
+            p.start()
+            self.addCleanup(p.stop)
+
     def test_dry_run_bootstrap_binds_and_writes(self):
         with tempfile.TemporaryDirectory() as root:
             bundle = _make_bundle(root)
@@ -460,7 +471,10 @@ class TestEndToEndOnClip(unittest.TestCase):
     def test_write_mode_registers_streams_and_flips_fiducial(self):
         with tempfile.TemporaryDirectory() as root:
             bundle = _make_bundle(root)
-            rc = sync_fit.main([bundle, "--board-rect", "0", "0", "210", "184"])
+            # a 60 s clip needs the lowered thresholds to yield a USABLE fit; only
+            # a usable fit flips fiducial.method (docs/decisions/0188)
+            rc = sync_fit.main([bundle, "--board-rect", "0", "0", "210", "184",
+                                "--min-matched", "2", "--min-pairs", "10"])
             self.assertEqual(rc, 0)
             with open(os.path.join(bundle, f"session_{SID}.json"), encoding="utf-8") as f:
                 man = json.load(f)
