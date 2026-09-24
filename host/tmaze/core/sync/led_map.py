@@ -34,16 +34,20 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 from tmaze.paths import host_dir
 
-SCHEMA_VERSION = 3
-SUPPORTED_SCHEMA_VERSIONS = (1, 2, 3)
+SCHEMA_VERSION = 4
+SUPPORTED_SCHEMA_VERSIONS = (1, 2, 3, 4)
 LED_MAP_FILENAME = "led_map.json"
 LED_BOARD_SEARCH_FILENAME = "led_board_search.json"
-_SCHEMA_NOTE = ("tmaze led_map v3 - which board indicator LED mirrors which serial channel, "
+_SCHEMA_NOTE = ("tmaze led_map v4 - which board indicator LED mirrors which serial channel, "
                 "and where it sits (full-frame px) in the reference session, plus the "
                 "persistently-lit red/green fiducial LEDs whose hull is the board ROI and "
                 "whose pattern gives the board pose, plus the optional operator-drawn "
                 "board_search_poly the detector is confined to (v3; excludes maze corners a "
-                "rat crosses). Written by "
+                "rat crosses). v4 adds the reference session's sensor_polarity (which wire "
+                "state the channel names' =0/=1 mean), the event-triggered pass settings, and "
+                "'bleed': bleed[source][led_id] = how much that LED's disk-minus-ring "
+                "brightness moves when the source channel fires, as a fraction of its own "
+                "channel's change (only |fraction| >= 0.05 listed; ADR-0196). Written by "
                 "`python -m tmaze.tools.sync_fit --map`; see docs/design/cross-stream-sync-design.md "
                 "sections 3.1/3.4 and tmaze/core/sync/led_map.py.")
 
@@ -140,6 +144,9 @@ class LedMap:
     fiducials: List[Fiducial] = field(default_factory=list)     # persistent red/green LEDs (v2)
     board_poly: Optional[List[Tuple[float, float]]] = None      # ROI outline = fiducial hull + margin (v2)
     board_search_poly: Optional[List[Tuple[float, float]]] = None  # operator-drawn search region, full-frame px (v3)
+    sensor_polarity: Optional[str] = None          # the reference session's S/L polarity (v4)
+    event_map: Optional[Dict[str, float]] = None   # event-triggered pass settings (v4)
+    bleed: Dict[str, Dict[str, float]] = field(default_factory=dict)   # source -> led_id -> fraction (v4)
 
     def constellation(self) -> List[Tuple[float, float]]:
         """Every LED's reference pixel position, bound or not - the point set
@@ -172,8 +179,12 @@ class LedMap:
                 else [[round(x, 2), round(y, 2)] for x, y in self.board_search_poly],
                 "frame_size": list(self.frame_size) if self.frame_size else None,
                 "created": self.created,
+                "sensor_polarity": self.sensor_polarity,
             },
             "detector": asdict(self.detector),
+            "event_map": self.event_map,
+            "bleed": {src: {k: round(v, 3) for k, v in row.items()}
+                      for src, row in self.bleed.items()},
             "fiducials": [{
                 "fid_id": f.fid_id,
                 "ref_px": [round(f.ref_px[0], 2), round(f.ref_px[1], 2)],
@@ -259,10 +270,15 @@ def from_dict(d: dict) -> LedMap:
                              None if e.get("lag_s") is None else float(e["lag_s"]),
                              str(e.get("note") or "")))
     fs = ref.get("frame_size")
+    bleed = d.get("bleed") or {}
+    if not isinstance(bleed, dict) or not all(isinstance(r, dict) for r in bleed.values()):
+        raise ValueError("bleed must be {source: {led_id: fraction}}")
     return LedMap(str(ref.get("session_id") or ""), _rect(ref.get("board_rect") or []), leds, det,
                   None if not fs else (int(fs[0]), int(fs[1])), str(ref.get("created") or ""),
                   fiducials, _poly(ref.get("board_poly")),
-                  _poly(ref.get("board_search_poly")))
+                  _poly(ref.get("board_search_poly")),
+                  ref.get("sensor_polarity"), d.get("event_map"),
+                  {str(s): {str(k): float(v) for k, v in r.items()} for s, r in bleed.items()})
 
 
 def load(path: Optional[str] = None) -> LedMap:

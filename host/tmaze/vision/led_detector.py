@@ -39,7 +39,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import Iterator, List, Optional, Sequence, Tuple
+from typing import Callable, Iterator, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -370,15 +370,19 @@ def mask_extremes(ext: Extremes, poly: Optional[Sequence[Tuple[float, float]]]) 
 
 def accumulate_extremes(path: str, crop: Optional[Tuple[int, int, int, int]],
                         start: int, n: Optional[int], p: DetectorParams,
-                        poly: Optional[Sequence[Tuple[float, float]]] = None) -> Extremes:
+                        poly: Optional[Sequence[Tuple[float, float]]] = None,
+                        progress: Optional[Callable[[int], None]] = None) -> Extremes:
     """Pass 1: read the window and accumulate the running max/min/median samples.
     Shared by the blink detector, the fiducial detector, and the trace sampler so
     one video read serves all three. ``poly`` (crop-relative vertices), when
     given, blanks everything outside it so a rat/hand crossing a corner of the
-    crop rectangle can't inflate the noise floor or spawn blobs (ADR-0195)."""
+    crop rectangle can't inflate the noise floor or spawn blobs (ADR-0195).
+    ``progress(k)``, when given, is called after each frame."""
     ext = Extremes(p.sample_every)
-    for _, fr in iter_frames(path, start, n, crop):
+    for k, fr in iter_frames(path, start, n, crop):
         ext.add(fr)
+        if progress:
+            progress(k)
     if ext.n == 0:
         raise RuntimeError("no frames read")
     mask_extremes(ext, poly)
@@ -387,7 +391,9 @@ def accumulate_extremes(path: str, crop: Optional[Tuple[int, int, int, int]],
 
 def sample_traces(path: str, crop: Optional[Tuple[int, int, int, int]], start: int,
                   n: int, blobs: Sequence[Blob], shape: Tuple[int, int],
-                  p: DetectorParams) -> Tuple[np.ndarray, np.ndarray]:
+                  p: DetectorParams,
+                  progress: Optional[Callable[[int], None]] = None
+                  ) -> Tuple[np.ndarray, np.ndarray]:
     """Pass 2: per-frame disk-minus-ring traces for a given blob list (which may
     mix detected blobs with synthetic points at pose-transformed map positions -
     the hybrid path). Returns (grey, rmg), each (n, n_blobs)."""
@@ -397,6 +403,8 @@ def sample_traces(path: str, crop: Optional[Tuple[int, int, int, int]], start: i
         sampler = TraceSampler(shape, blobs, p)
         for k, fr in iter_frames(path, start, n, crop):
             grey[k], rmg[k] = sampler.sample(fr)
+            if progress:
+                progress(k)
     return grey, rmg
 
 

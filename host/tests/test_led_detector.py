@@ -456,7 +456,7 @@ class TestLedMap(unittest.TestCase):
             with open(p, encoding="utf-8") as f:
                 raw = json.load(f)
             self.assertEqual(LM.load(p).to_dict(), m.to_dict())
-        self.assertEqual(raw["schema_version"], 3)
+        self.assertEqual(raw["schema_version"], LM.SCHEMA_VERSION)
         self.assertEqual(back.session_id, m.session_id)
         self.assertEqual(back.board_rect, m.board_rect)
         self.assertEqual(back.frame_size, (1280, 1024))
@@ -507,7 +507,7 @@ class TestLedMap(unittest.TestCase):
             with open(p, encoding="utf-8") as f:
                 raw = json.load(f)
             self.assertEqual(LM.load(p).to_dict(), m.to_dict())
-        self.assertEqual(raw["schema_version"], 3)
+        self.assertEqual(raw["schema_version"], LM.SCHEMA_VERSION)
         self.assertEqual([f.fid_id for f in back.fiducials], ["red_0", "green_0", "red_1", "green_1"])
         self.assertEqual(back.fiducial_colors(), [LM.RED, LM.GREEN, LM.RED, LM.GREEN])
         self.assertEqual(back.fiducial_constellation()[0], (840.0, 590.0))
@@ -521,10 +521,30 @@ class TestLedMap(unittest.TestCase):
             back = LM.load(p)
             with open(p, encoding="utf-8") as f:
                 raw = json.load(f)
-        self.assertEqual(raw["schema_version"], 3)
+        self.assertEqual(raw["schema_version"], LM.SCHEMA_VERSION)
         self.assertEqual(raw["reference"]["board_search_poly"][0], [820.0, 560.0])
         self.assertEqual(back.board_search_poly[0], (820.0, 560.0))
         self.assertEqual(back.to_dict(), m.to_dict())
+
+    def test_v4_polarity_event_settings_and_bleed_round_trip(self):
+        m = self._fid_map()
+        m.sensor_polarity = "corrected"
+        m.event_map = {"guard_frames": 1, "snr_min": 6.0}
+        m.bleed = {"L1": {"L0_b": 0.46123, "L0_a": 0.32}}
+        back = LM.from_dict(json.loads(json.dumps(m.to_dict())))
+        self.assertEqual(back.sensor_polarity, "corrected")
+        self.assertEqual(back.event_map["snr_min"], 6.0)
+        self.assertEqual(back.bleed, {"L1": {"L0_b": 0.461, "L0_a": 0.32}})
+
+    def test_v3_map_loads_without_the_v4_fields(self):
+        v3 = self._fid_map().to_dict()
+        v3["schema_version"] = 3
+        for k in ("event_map", "bleed"):
+            v3.pop(k)
+        v3["reference"].pop("sensor_polarity")
+        back = LM.from_dict(v3)
+        self.assertIsNone(back.sensor_polarity)
+        self.assertEqual(back.bleed, {})
 
     def test_v2_map_without_search_poly_still_loads(self):
         v2 = self._fid_map().to_dict()
