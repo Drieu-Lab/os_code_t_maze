@@ -63,6 +63,7 @@ from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
 from tmaze.core.phase3 import bundle_format as BF
 from tmaze.core.session import session_registry, session_serial
 from tmaze.core.session.session_log import SessionManifest
+from tmaze.core.sync import board_layout as BL, event_frames as EF
 from tmaze.core.sync import clockfit, led_map as LM, matching, pipeline
 from tmaze.core.sync import spans as S
 from tmaze.core.timeutil import now_iso
@@ -220,7 +221,8 @@ class SyncRun:
                  *, sensor_polarity: SensorPolarity, fiducials=(), fid_registration=None,
                  board_poly: Optional[List[Tuple[float, float]]] = None,
                  search_poly: Optional[List[Tuple[float, float]]] = None,
-                 frame_size: Optional[Tuple[int, int]] = None, median=None):
+                 frame_size: Optional[Tuple[int, int]] = None, median=None,
+                 frames: Sequence[S.Frame] = (), video: Optional[str] = None):
         self.sid = sid
         self.header = header
         self.blobs = blobs
@@ -242,6 +244,8 @@ class SyncRun:
         self.search_poly = search_poly         # operator-drawn search region, FULL-frame px (v3)
         self.frame_size = frame_size
         self.median = median                   # the crop's median image, for the overlay
+        self.frames = list(frames)             # the analysed window's sidecar frames
+        self.video = video
 
     def led_id(self, blob: int) -> str:
         return self.led_ids.get(blob, f"blob_{blob}")
@@ -280,7 +284,8 @@ def analyze_bundle(bundle: str, *, start_min: float = 0.0, minutes: Optional[flo
                    search_poly_path: Optional[str] = None,
                    min_matched: int = 3, min_pairs: int = 30,
                    serial_path: Optional[str] = None,
-                   sensor_polarity: Optional[str] = None) -> SyncRun:
+                   sensor_polarity: Optional[str] = None,
+                   progress: bool = False) -> SyncRun:
     """Detect the LEDs, bind them, fit the clock.
 
     The ROI is self-calibrating: the persistently-lit red/green fiducials are
@@ -294,6 +299,7 @@ def analyze_bundle(bundle: str, *, start_min: float = 0.0, minutes: Optional[flo
     window that overrides both (a v1-style fast path / fallback).
     ``sensor_polarity`` overrides the bundle's S/L polarity (resolve_sensor_polarity);
     it is resolved before the video is read, so an unresolvable bundle fails fast.
+    ``progress`` prints how far each video read has got (the --map build).
     """
     sid = bundle_id(bundle)
     header, frames = _read_frames(bundle, sid)
@@ -339,8 +345,11 @@ def analyze_bundle(bundle: str, *, start_min: float = 0.0, minutes: Optional[flo
     win = frames[start:start + n] if n is not None else frames[start:]
 
     from tmaze.vision import led_detector as D
+    from tmaze.vision.led_event_map import progress_printer
     video = _video_path(bundle, sid)
-    ext = D.accumulate_extremes(video, crop, start, n, params, poly=poly_crop)
+    ext = D.accumulate_extremes(video, crop, start, n, params, poly=poly_crop,
+                                progress=progress_printer("read 1/3 (find LEDs)", len(win))
+                                if progress else None)
     got = ext.n
     if got != len(win):
         win = win[:got]
@@ -393,7 +402,9 @@ def analyze_bundle(bundle: str, *, start_min: float = 0.0, minutes: Optional[flo
                 if 0 <= ref_i < len(used_map.leds):
                     led_ids[blobs[obs_i].id] = used_map.leds[ref_i].led_id
 
-    grey, _rmg = D.sample_traces(video, crop, start, got, blobs, shape, params)
+    grey, _rmg = D.sample_traces(video, crop, start, got, blobs, shape, params,
+                                 progress=progress_printer("read 2/3 (LED traces)", got)
+                                 if progress else None)
     blob_spans = [D.blob_spans(b.id, grey[:, i], win, tick) for i, b in enumerate(blobs)]
 
     result = pipeline.analyze(blob_spans, events, tol_s=tol_s, min_visible_s=min_visible_s,
@@ -403,36 +414,159 @@ def analyze_bundle(bundle: str, *, start_min: float = 0.0, minutes: Optional[flo
                    registration, used_map, (start, got), tol_s, min_visible_s, crop,
                    sensor_polarity=polarity, fiducials=fiducials, fid_registration=fid_registration,
                    board_poly=board_poly, search_poly=search_poly,
-                   frame_size=frame_size, median=ext.median())
+                   frame_size=frame_size, median=ext.median(), frames=win, video=video)
 
 
 # ------------------------------------------------------------ led_map builder
 
-def build_led_map(run: SyncRun) -> LM.LedMap:
-    """Turn a mapping run into a ``led_map.json`` (schema v2): the persistent
-    red/green fiducials, the board ROI polygon (their hull), and every blinking
-    LED's full-frame position + binding."""
+LED_FUNCTIONS = ("S", "L", "SOL")      # the channels that drive a board LED
+
+
+class EventPass(NamedTuple):
+    """The map builder's second pass (ADR-0196): per channel, its frame weights,
+    its during-minus-before composite image and the LEDs found in it (crop px)."""
+    weights: Dict[str, EF.ChannelWeights]
+    composites: Dict[str, object]           # channel -> numpy image
+    peaks: Dict[str, list]                  # channel -> [led_event_map.Peak], brightest first
+    layout: BL.BoardLayout
+    params: EF.EventMapParams
+
+
+def _crop_mask(run: SyncRun, shape: Tuple[int, int]):
+    """The board search region (or the fiducial ROI) as a crop-sized bool mask."""
+    import numpy as np
+    from tmaze.vision import led_detector as D
+    ox, oy = (run.crop[0], run.crop[1]) if run.crop else (0, 0)
+    poly = run.search_poly or run.board_poly
+    if not poly:
+        return np.ones(shape, bool)
+    return D.polygon_mask(shape[0], shape[1], [(x - ox, y - oy) for x, y in poly])
+
+
+def event_pass(run: SyncRun, layout: BL.BoardLayout,
+               params: EF.EventMapParams = EF.EventMapParams(),
+               progress: bool = True) -> Optional[EventPass]:
+    """Localise every channel's LED(s) from its serial events, using pass 1's
+    clock fit to put the events on the video (one more video read). None when
+    pass 1 produced no fit to place the events with."""
+    fit = run.result.fit
+    if fit is None or run.video is None or run.median is None:
+        return None
+    from tmaze.vision import led_event_map as EM
+    active = {ch: sp for ch, sp in S.active_spans(run.events, run.sensor_polarity.value).items()
+              if EF.function_of(ch) in LED_FUNCTIONS}
+    weights = EF.event_weights(active, fit, [f.cam_ts for f in run.frames], params)
+    usable = {ch: w for ch, w in weights.items() if w.n_used >= params.min_events}
+    shape = run.median.shape[:2]
+    comps = EM.composites_from_video(
+        run.video, run.crop, run.window[0], len(run.frames), EF.frame_roles(usable), shape,
+        EM.progress_printer("read 3/3 (event images)", len(run.frames)) if progress else None)
+    expected = {ch: layout.expected(ch) for ch in comps}
+    peaks = EM.localise_all(comps, expected, _crop_mask(run, shape), params)
+    return EventPass(weights, comps, peaks, layout, params)
+
+
+def _pass1_leds(run: SyncRun) -> List[Tuple[Tuple[float, float], Optional[str], Optional[str],
+                                           Optional[float], int]]:
+    """Pass 1's blinking LEDs: ``(full-frame px, channel, polarity, lag_s, blob id)``."""
+    ox, oy = (run.crop[0], run.crop[1]) if run.crop else (0, 0)
+    out = []
+    for b in sorted(run.blobs, key=lambda b: (round(b.y), b.x)):
+        binding = run.result.bindings.get(b.id)
+        out.append(((round(b.x + ox, 2), round(b.y + oy, 2)),
+                    binding.channel if binding else None,
+                    binding.polarity if binding else None,
+                    binding.lag_s if binding else None, b.id))
+    return out
+
+
+def _merge_passes(run: SyncRun, ev: EventPass) -> List[LM.LedEntry]:
+    """Channel LEDs from pass 2 (named ``_a`` brightest ... per channel), plus
+    pass-1 LEDs pass 2 did not reproduce: a pass-1 binding on a channel pass 2
+    localised elsewhere is kept but NOTED (a contradiction to look at, not
+    silently dropped); unbound pass-1 blobs are kept unless they sit on a channel
+    LED. A pass-1 binding pass 2 reproduces lends it its measured lag."""
+    ox, oy = (run.crop[0], run.crop[1]) if run.crop else (0, 0)
+    p1 = _pass1_leds(run)
+    radius = ev.params.same_led_px
+    entries: List[LM.LedEntry] = []
+    taken: List[str] = []
+    claimed: List[Tuple[float, float]] = []
+    reproduced = set()
+    for ch in sorted(ev.peaks):
+        for pk in ev.peaks[ch]:
+            px = (round(pk.x + ox, 2), round(pk.y + oy, 2))
+            polarity = matching.LIT if pk.sign > 0 else matching.DARK
+            lag, note = None, "pass 2 only"
+            for i, (q, qch, qpol, qlag, _bid) in enumerate(p1):
+                if qch == ch and i not in reproduced and BL.near(px, [q], radius):
+                    reproduced.add(i)
+                    lag = qlag
+                    note = ("pass 1+2" if qpol == polarity
+                            else f"pass 1+2; pass 1 said {qpol}")
+                    break
+            led_id = LM.led_id_for(ch, polarity, taken, len(entries))
+            taken.append(led_id)
+            claimed.append(px)
+            entries.append(LM.LedEntry(led_id, px, ch, polarity, lag,
+                                       f"{note}; snr {pk.snr:.0f}"))
+    localised = {ch for ch, pks in ev.peaks.items() if pks}
+    for i, (px, ch, pol, lag, bid) in enumerate(p1):
+        if i in reproduced:
+            continue
+        if ch is None:
+            if not BL.near(px, claimed, radius):
+                led_id = LM.led_id_for(None, None, taken, bid)
+                taken.append(led_id)
+                entries.append(LM.LedEntry(led_id, px))
+            continue
+        led_id = LM.led_id_for(ch, pol, taken, bid)
+        taken.append(led_id)
+        note = ("pass 1 only; pass 2 put this channel elsewhere" if ch in localised
+                else "pass 1 only")
+        entries.append(LM.LedEntry(led_id, px, ch, pol, lag, note))
+    return entries
+
+
+def _bleed(run: SyncRun, ev: EventPass, entries: Sequence[LM.LedEntry],
+           det: LM.DetectorParams) -> Dict[str, Dict[str, float]]:
+    from tmaze.vision import led_event_map as EM
+    ox, oy = (run.crop[0], run.crop[1]) if run.crop else (0, 0)
+    leds = [(e.led_id, e.channel, (e.ref_px[0] - ox, e.ref_px[1] - oy))
+            for e in entries if e.channel in ev.composites]
+    raw = EM.bleed_matrix(ev.composites, leds, det)
+    return {BL.channel_base(src): row for src, row in raw.items()}
+
+
+def build_led_map(run: SyncRun, ev: Optional[EventPass] = None) -> LM.LedMap:
+    """Turn a mapping run into a ``led_map.json``: the persistent red/green
+    fiducials, the board ROI polygon (their hull), and every LED's full-frame
+    position + binding. With the event pass (``ev``, ADR-0196) the channel LEDs
+    come from it, fiducials sitting on a channel LED are dropped (a channel LED
+    resting lit), and the bleed between LEDs is measured; without it, pass 1's
+    blinking LEDs are the whole map (the pre-ADR-0196 behaviour)."""
     ox, oy = (run.crop[0], run.crop[1]) if run.crop else (0, 0)
     frame_size = run.frame_size
+    det = run.used_map.detector if run.used_map else LM.DetectorParams()
+    if ev is not None:
+        entries = _merge_passes(run, ev)
+    else:
+        entries = []
+        taken: List[str] = []
+        for px, channel, polarity, lag, bid in _pass1_leds(run):
+            led_id = LM.led_id_for(channel, polarity, taken, bid)
+            taken.append(led_id)
+            entries.append(LM.LedEntry(led_id, px, channel, polarity, lag))
+    channel_px = [e.ref_px for e in entries if e.bound]
     fiducials: List[LM.Fiducial] = []
     counts: Dict[str, int] = {}
     for f in sorted(run.fiducials, key=lambda f: (round(f.y), f.x)):
+        px = (round(f.x + ox, 2), round(f.y + oy, 2))
+        if ev is not None and BL.near(px, channel_px, ev.params.fid_exclude_px):
+            continue
         idx = counts.get(f.color, 0)
         counts[f.color] = idx + 1
-        fiducials.append(LM.Fiducial(f"{f.color}_{idx}",
-                                     (round(f.x + ox, 2), round(f.y + oy, 2)), f.color))
-    entries: List[LM.LedEntry] = []
-    taken: List[str] = []
-    for b in sorted(run.blobs, key=lambda b: (round(b.y), b.x)):
-        binding = run.result.bindings.get(b.id)
-        channel = binding.channel if binding else None
-        polarity = binding.polarity if binding else None
-        lag = binding.lag_s if binding else None
-        led_id = LM.led_id_for(channel, polarity, taken, b.id)
-        taken.append(led_id)
-        entries.append(LM.LedEntry(led_id, (round(b.x + ox, 2), round(b.y + oy, 2)),
-                                   channel, polarity, lag))
-    det = run.used_map.detector if run.used_map else LM.DetectorParams()
+        fiducials.append(LM.Fiducial(f"{f.color}_{idx}", px, f.color))
     # The search rectangle is the operator-drawn search polygon's bounding box when
     # one was used (so later sessions read + mask the same region, ADR-0195), else
     # the fiducials' hull bbox, else an explicit crop, else a box around the LEDs.
@@ -449,7 +583,45 @@ def build_led_map(run: SyncRun) -> LM.LedMap:
     return LM.LedMap(run.sid, rect, entries, det, frame_size,
                      datetime.now().replace(microsecond=0).isoformat(),
                      fiducials=fiducials, board_poly=board_poly,
-                     board_search_poly=search_poly)
+                     board_search_poly=search_poly,
+                     sensor_polarity=run.sensor_polarity.value,
+                     event_map=None if ev is None else dict(asdict(ev.params),
+                                                            layout=ev.layout.source),
+                     bleed={} if ev is None else _bleed(run, ev, entries, det))
+
+
+def map_warnings(m: LM.LedMap, ev: Optional[EventPass]) -> List[str]:
+    """What to look at before trusting a built map: channels with fewer LEDs
+    than the layout says, channels with too few clean events to localise, a
+    bright/dim pair that does not match the board's row offset, and pass-1
+    bindings pass 2 contradicted."""
+    out: List[str] = []
+    if ev is None:
+        return out
+    for ch, w in sorted(ev.weights.items()):
+        want = ev.layout.expected(ch)
+        got = len(ev.peaks.get(ch, ()))
+        if w.n_used < ev.params.min_events:
+            out.append(f"{ch}: only {w.n_used}/{w.n_spans} events had a clean before/during "
+                       f"window (need {ev.params.min_events}) - not localised")
+        elif got < want:
+            out.append(f"{ch}: found {got} of the {want} LED(s) the board layout expects")
+    pairs: Dict[str, Tuple[Tuple[float, float], Tuple[float, float]]] = {}
+    for e in m.leds:
+        if e.bound and e.led_id.endswith("_a"):
+            b = m.by_id().get(e.led_id[:-2] + "_b")
+            if b is not None and b.channel == e.channel:
+                pairs[e.channel] = (e.ref_px, b.ref_px)
+    off = BL.row_offset(pairs)
+    if off is not None and len(pairs) >= 3:
+        for ch in BL.row_offset_outliers(pairs, off):
+            a, b = pairs[ch]
+            out.append(f"{ch}: bright->dim LED offset ({b[0] - a[0]:+.1f}, {b[1] - a[1]:+.1f}) px "
+                       f"is off the board's row offset ({off[0]:+.1f}, {off[1]:+.1f})")
+    for e in m.leds:
+        if "pass 2 put this channel elsewhere" in e.note or "pass 1 said" in e.note:
+            out.append(f"{e.led_id}: {e.note}")
+    return out
 
 
 # --------------------------------------------------------------- artifacts
@@ -526,6 +698,24 @@ def write_overlay(path: str, run: SyncRun) -> bool:
     ox, oy = (run.crop[0], run.crop[1]) if run.crop else (0, 0)
     poly = [(x - ox, y - oy) for x, y in run.board_poly] if run.board_poly else None
     img = D.draw_overlay(run.median, poly, run.fiducials, run.blobs, labels=run.led_ids)
+    D.cv2.imwrite(path, img)
+    return True
+
+
+def write_map_overlay(path: str, run: SyncRun, m: LM.LedMap) -> bool:
+    """Like :func:`write_overlay`, but draws the map as built (after pass 2):
+    its fiducials and every LED labelled with its led_id."""
+    from tmaze.vision import led_detector as D
+    if D.cv2 is None or run.median is None:
+        return False
+    ox, oy = (run.crop[0], run.crop[1]) if run.crop else (0, 0)
+    poly = [(x - ox, y - oy) for x, y in run.board_poly] if run.board_poly else None
+    fids = [D.Fiducial(i, f.ref_px[0] - ox, f.ref_px[1] - oy, f.color, 0.0)
+            for i, f in enumerate(m.fiducials)]
+    blobs = [D.Blob(i, e.ref_px[0] - ox, e.ref_px[1] - oy, 0, 0.0, D.ON)
+             for i, e in enumerate(m.leds)]
+    img = D.draw_overlay(run.median, poly, fids, blobs,
+                         labels={i: e.led_id for i, e in enumerate(m.leds)})
     D.cv2.imwrite(path, img)
     return True
 
@@ -944,6 +1134,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                          "'Define LED board region'); excludes maze corners a rat crosses, and is "
                          "baked into led_map.json on --map. Overrides --board-rect. Default when "
                          "absent while building a map: host/led_board_search.json (ADR-0195)")
+    ap.add_argument("--layout", metavar="FILE",
+                    help="with --map: how many LEDs each channel drives (default "
+                         "host/led_board_layout.json; without one, 1 per channel; ADR-0196)")
     ap.add_argument("--serial", help="read serial events from this log instead of the bundle's "
                     "central-only capture; use the FULL rig_logger CSV for a mapping session "
                     "(it keeps the left/right-reward and rinse/drain valve acks the capture drops)")
@@ -1011,28 +1204,38 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                              whole_frame=a.map and rect is None, board_rect=rect,
                              search_poly_path=a.board_poly,
                              min_matched=a.min_matched, min_pairs=a.min_pairs,
-                             serial_path=a.serial, sensor_polarity=a.sensor_polarity)
+                             serial_path=a.serial, sensor_polarity=a.sensor_polarity,
+                             progress=a.map)
     except (FileNotFoundError, RuntimeError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
 
     if a.map:
-        m = build_led_map(run)
+        layout = BL.load(a.layout)
+        ev = event_pass(run, layout)
+        if ev is None:
+            print("  WARNING: pass 1 produced no clock fit, so the event-triggered pass "
+                  "(ADR-0196) was skipped; the map holds pass 1's LEDs only", file=sys.stderr)
+        m = build_led_map(run, ev)
         path = LM.save(m, a.map_out or LM.led_map_path())
         bound = sum(1 for e in m.leds if e.bound)
-        fc = _fiducial_color_counts(run.fiducials)
+        fc = _fiducial_color_counts(m.fiducials)
         p = run.sensor_polarity
         print(f"\nsession {run.sid}: {len(m.fiducials)} fiducials "
               f"({fc.get('red', 0)} red, {fc.get('green', 0)} green), "
               f"{len(m.leds)} LEDs, {bound} bound, board_rect={m.board_rect}")
         print(f"  sensor polarity: {p.value} (from {p.source})"
               + ("  WARNING: the serial log disagrees" if p.disagrees else ""))
+        print(f"  board layout: {layout.source}")
         for e in m.leds:
             tag = f"{e.channel} {e.polarity}" if e.bound else "(unbound)"
-            print(f"  {e.led_id:>10} at ({e.ref_px[0]:.1f},{e.ref_px[1]:.1f})  {tag}")
+            note = f"  [{e.note}]" if e.note else ""
+            print(f"  {e.led_id:>10} at ({e.ref_px[0]:.1f},{e.ref_px[1]:.1f})  {tag}{note}")
+        for w in map_warnings(m, ev):
+            print(f"  WARNING: {w}")
         print(f"\n  wrote {path}")
         overlay_path = os.path.splitext(path)[0] + f"_overlay_{run.sid}.png"
-        if write_overlay(overlay_path, run):
+        if write_map_overlay(overlay_path, run, m):
             print(f"  wrote {overlay_path}  (check the ROI lands inside the marker corners)")
         return 0
 

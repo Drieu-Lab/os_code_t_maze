@@ -159,6 +159,74 @@ class TestPureBuilders(unittest.TestCase):
         self.assertTrue(x0 < 970 < x1 and y0 < 702 < y1)
 
 
+@unittest.skipIf(D is None, "numpy/OpenCV not available")
+class TestBuildMapWithEventPass(unittest.TestCase):
+    """build_led_map + map_warnings given a pass-2 result (ADR-0196): pass 2's
+    LEDs named _a (bright) / _b (dim), pass 1's binding reproduced (lends its
+    lag), a channel LED resting lit no longer filed as a fiducial, shortfalls
+    and contradictions reported."""
+
+    CROP = (900, 650, 1050, 760)
+
+    def _run_and_pass(self, s2_peaks, expected=2):
+        import numpy as np
+        from tmaze.core.sync import board_layout as BL, event_frames as EF
+        from tmaze.vision.led_event_map import Peak
+        run = _synthetic_run()
+        ox, oy = self.CROP[:2]
+        run.crop = self.CROP
+        run.blobs[0].x, run.blobs[0].y = 970.0 - ox, 702.0 - oy     # pass 1's S2 LED
+
+        class _Fid:
+            def __init__(self, x, y, color):
+                self.x, self.y, self.color = x - ox, y - oy, color
+        run.fiducials = [_Fid(973.0, 704.0, "red"),     # ~3 px off S2_a: S2 resting lit
+                         _Fid(1000.0, 740.0, "green")]  # a real fiducial
+        shape = (self.CROP[3] - oy, self.CROP[2] - ox)
+        comp = np.zeros(shape, np.float32)
+        for x, y, m in s2_peaks:
+            comp[int(y - oy) - 1:int(y - oy) + 2, int(x - ox) - 1:int(x - ox) + 2] = -m
+        peaks = [Peak("S2=0", x - ox, y - oy, m, -1.0, m / 2) for x, y, m in s2_peaks]
+        ev = sync_fit.EventPass(
+            {"S2=0": EF.ChannelWeights("S2=0", 20, 20, {})}, {"S2=0": comp}, {"S2=0": peaks},
+            BL.BoardLayout({"S": expected}), EF.EventMapParams())
+        return run, ev
+
+    def test_pass_two_names_rows_and_reproduces_pass_one(self):
+        run, ev = self._run_and_pass([(970.8, 702.5, 90.0), (981.5, 705.0, 30.0)])
+        m = sync_fit.build_led_map(run, ev)
+        led = m.by_id()
+        self.assertEqual([e.led_id for e in m.leds], ["S2_a", "S2_b"])
+        self.assertEqual(led["S2_a"].ref_px, (970.8, 702.5))
+        self.assertEqual(led["S2_a"].polarity, matching.DARK)
+        self.assertTrue(led["S2_a"].note.startswith("pass 1+2"))
+        self.assertAlmostEqual(led["S2_a"].lag_s, run.result.bindings[0].lag_s)
+        self.assertTrue(led["S2_b"].note.startswith("pass 2 only"))
+        self.assertIsNone(led["S2_b"].lag_s)
+        self.assertEqual([f.fid_id for f in m.fiducials], ["green_0"])
+        self.assertEqual(m.sensor_polarity, BF.POLARITY_LEGACY)
+        self.assertEqual(m.event_map["same_led_px"], 3.0)
+        self.assertEqual(sync_fit.map_warnings(m, ev), [])
+
+    def test_shortfall_and_contradiction_are_warned(self):
+        run, ev = self._run_and_pass([(990.0, 720.0, 90.0)], expected=2)
+        m = sync_fit.build_led_map(run, ev)
+        self.assertEqual(sorted(e.led_id for e in m.leds), ["S2_a", "S2_b"])
+        kept = m.by_id()["S2_b"]
+        self.assertEqual(kept.ref_px, (970.0, 702.0))
+        self.assertIn("pass 2 put this channel elsewhere", kept.note)
+        warnings = sync_fit.map_warnings(m, ev)
+        self.assertTrue(any("found 1 of the 2 LED(s)" in w for w in warnings))
+        self.assertTrue(any(w.startswith("S2_b:") for w in warnings))
+
+    def test_without_the_event_pass_the_map_is_pass_one(self):
+        run, _ev = self._run_and_pass([])
+        m = sync_fit.build_led_map(run)
+        self.assertEqual([e.led_id for e in m.leds], ["S2_a"])
+        self.assertEqual(len(m.fiducials), 2)
+        self.assertEqual(m.bleed, {})
+
+
 def _events_with_active_state(state: str):
     """One beam whose brief (active) spans are in wire state ``state``."""
     rest = "1" if state == "0" else "0"
@@ -526,8 +594,13 @@ class TestEndToEndOnClip(unittest.TestCase):
             overlay = os.path.splitext(mp)[0] + f"_overlay_{SID}.png"
             self.assertTrue(os.path.isfile(overlay))       # --map writes the QA overlay
         self.assertEqual(m.session_id, SID)
-        self.assertEqual(len(m.leds), 11)
-        self.assertEqual(sum(1 for e in m.leds if e.bound), 11)
+        # pass 1 binds 11; the event pass (ADR-0196) adds both rows of ENTRY/EXIT
+        # (S0/S1), which rest lit and are only briefly dark
+        self.assertEqual(len(m.leds), 15)
+        self.assertEqual(sum(1 for e in m.leds if e.bound), 15)
+        ids = {e.led_id for e in m.leds}
+        self.assertTrue({"S0_a", "S0_b", "S1_a", "S1_b"} <= ids)
+        self.assertEqual(m.sensor_polarity, BF.POLARITY_LEGACY)
         # v2 map: persistent fiducials of both colours + a board ROI polygon whose
         # bounding box is the (fiducial-derived) search rect, inside the crop
         self.assertGreaterEqual(len(m.fiducials), 8)
@@ -557,7 +630,7 @@ class TestEndToEndOnClip(unittest.TestCase):
         self.assertLess(abs(run.fid_registration.transform.tx)
                         + abs(run.fid_registration.transform.ty), 2.0)
         self.assertIsNotNone(run.board_poly)
-        self.assertEqual(len(run.led_ids), 11)             # all 11 located (hybrid)
+        self.assertEqual(len(run.led_ids), 15)             # all 15 located (hybrid)
         self.assertIsNotNone(run.result.fit)
         self.assertEqual(run.result.verdict, clockfit.VERDICT_OK)
         d = sync_fit.clock_fit_dict(run)

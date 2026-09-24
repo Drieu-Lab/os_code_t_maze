@@ -29,6 +29,15 @@ window one dominant mode by simple, explicit rules (no model fitting), so the
 label always traces back to one checkable number. This makes the ebb and flow of
 strategies visible where a single accuracy number would hide it. See ADR-0112.
 
+### Bleed (LED crosstalk)
+Light from one board LED that shows up in the measurement of a neighbouring LED,
+so the neighbour looks as if it changed when it did not. Written as a fraction of
+the neighbour's own change: "L1 bleeds 37 % into `L0_b`" means that when L1
+lights, the brightness measured at `L0_b` moves by 37 % of what it moves when L0
+itself lights. It can also be negative, when the flash lands in the background
+ring subtracted around the neighbour. Measured once per map build and stored in
+`led_map.json` (ADR-0196).
+
 ### Bounded queue
 A [queue](#queue) with a fixed maximum size. When it is full, new items are
 **dropped** (and counted) instead of the queue growing without limit or the
@@ -133,6 +142,14 @@ which arm it chose to come back through, so "does the return cue affect the next
 choice" is entangled with the animal's own habits. The return-cue analysis controls
 for prior choice/reward but stays *observational* — only a randomised return-cue
 schedule could make it causal. See ADR-0112.
+
+### Event-triggered image (composite)
+An average picture lined up on many repeats of one event: for every beam break
+(say), take the video frames during the break minus the frames just before it,
+and average over all the breaks. Anything that did not change at those moments
+cancels out, so what is left is the LED that responds to that event. The
+LED-map builder uses one per serial channel to find each channel's LED(s),
+including ones that are almost always lit or only flash briefly (ADR-0196).
 
 ### Excursion event
 One *outbound trip* the rat makes away from the hub, treated as a single logged

@@ -132,6 +132,16 @@ The bundle's own `serial/serial_<id>.csv` carries every port now (ADR-0178). Add
   (`led_map_overlay_<id>.png`) — you use it in step 5.
 - `--map-out <path>` writes elsewhere than `host/led_map.json` if you want to
   inspect before installing.
+- **It reads the video three times** (find LEDs, LED traces, event images) and
+  prints the percentage of each read — about 2–3 minutes for a 9-minute session.
+  The third read finds every channel's LED(s) from its own serial events
+  (ADR-0196), so LEDs that are almost always lit (ENTRY/EXIT) or only flash
+  briefly (the licks) are found too.
+- **How many LEDs to expect** comes from
+  [`host/led_board_layout.json`](../host/led_board_layout.json): each beam and lick
+  lights 2 (named `_a` = bright row, `_b` = dim row), each reward valve 1 — 33 in
+  all for a session that fires everything. Point `--layout <file>` elsewhere if
+  the board changes.
 
 **5. Review the report and the overlay.** Expect **every fired channel** to appear
 as a bound LED with a plausible lag (start lag ~ +30 ms for lit-on-event LEDs,
@@ -148,14 +158,22 @@ as a bound LED with a plausible lag (start lag ~ +30 ms for lit-on-event LEDs,
 - **left/right reward + rinse/drain** bind, because the bundle's full capture
   (ADR-0178) now carries every port's ack — a rat session's filtered capture
   used to drop these, which was the whole point of the old `--serial` override;
-- **ENTRY/EXIT beams `S0`/`S1`** — the open question from design §3.7: if they
-  stay *silent/unbound*, their channel LEDs are hidden by wiring or face away.
-  Record which; a wider board or a `--board-rect` re-run can rule out that they
-  sit outside the searched region.
+- **ENTRY/EXIT beams `S0`/`S1`** — both rows are found by the event pass
+  (confirmed on `000_20260922_163830`); they are no longer filed as fiducials.
+- **No `WARNING:` lines** — the report warns when a channel has fewer LEDs than
+  the layout expects, too few clean events to localise, a bright/dim pair that
+  does not match the board's row spacing, or a pass-1 binding the event pass put
+  elsewhere. Each LED line ends with how it was found (`pass 1+2` = both passes
+  agree, `pass 2 only` = found only from its events).
+- **Check it the way a real session will use it**: run the ordinary sync on the
+  same bundle, `python -m tmaze.tools.sync_fit <bundle> --dry-run --out <folder>`.
+  Every LED should bind to its own channel (`S0_a` → `S0=…`, and so on).
 
 Then open `host/led_map.json`: the persistent `fiducials` (red/green), the
-`board_poly` ROI outline + its `board_rect`, and one entry per LED with `led_id`,
-`ref_px`, `channel`, and `polarity`.
+`board_poly` ROI outline + its `board_rect`, one entry per LED with `led_id`,
+`ref_px`, `channel`, and `polarity`, the session's `sensor_polarity`, and the
+`bleed` table (how much each LED's reading moves when another channel fires; see
+[glossary](glossary.md#bleed-led-crosstalk)).
 
 **6. Keep the test session out of the records.** Add the mapping bundle's id to
 the `ignore` list in [`host/session_ignore.json`](../host/session_ignore.json)
@@ -172,8 +190,8 @@ want the QA PNG for a with-rat run too.
 | Channel | How to fire | Serial line | Notes |
 |---|---|---|---|
 | Reward/wash valves | `maze_gui` Solenoids grid, `R<port><sol>` | `SOL,<port>,<sol>` | port 0 L / 1 R / 2 C; sol 0–2 = R1–R3, 3 DRAIN, 4 RINSE; the bundle's full capture (ADR-0178) carries L/R + drain/rinse — `--serial` only for a pre-0178 bundle |
-| Body beams | break by hand | `S,<i>,0` (broken) | i: 0 ENTRY,1 EXIT,2 LCHOICE,3 RCHOICE,4 LRETURN,5 RRETURN |
-| Lick ports | touch (damp swab) | `L,<i>,0` (contact) | i: 0 left, 1 right, 2 center |
+| Body beams | break by hand | `S,<i>,1` (broken; `0` before firmware v8, ADR-0164) | i: 0 ENTRY,1 EXIT,2 LCHOICE,3 RCHOICE,4 LRETURN,5 RRETURN |
+| Lick ports | touch (damp swab) | `L,<i>,1` (contact; `0` before firmware v8) | i: 0 left, 1 right, 2 center |
 | Cues | — | — | no LED until Phase 2; re-map afterwards |
 
 Dwell **≥150 ms**, **≥5 repeats**, **~2 s** apart; hold each channel separate in
