@@ -649,25 +649,31 @@ def hybrid_blobs(expected: Sequence[Tuple[float, float]], detected: Sequence[Blo
 
     ``expected`` are the stored LED positions transformed into this session's crop
     coordinates (parallel to the map's LED order); ``detected`` are the blinking
-    blobs actually found. For each expected LED the nearest detected blob within
-    ``tol_px`` is used (``is_detected`` True); otherwise a synthetic blob is placed
-    at the expected position so it is still traced (the hybrid fallback, ADR-0153).
-    Detected blobs matching no expected LED are appended (``exp_index`` None) for
-    reporting. Returns ``(blob, exp_index, is_detected)`` with ids renumbered."""
+    blobs actually found. Expected LEDs and detected blobs within ``tol_px`` are
+    paired closest pair first, each at most once, and a paired expected LED uses
+    its blob (``is_detected`` True); otherwise a synthetic blob is placed at the
+    expected position so it is still traced (the hybrid fallback, ADR-0153).
+    Closest-first matters when channel LEDs sit about ``tol_px`` apart (a
+    neighbouring row's LED, ~4 px): pairing in map order let an LED take its
+    neighbour's blob (docs/decisions/0196). Detected blobs matching no expected
+    LED are appended (``exp_index`` None) for reporting. Returns
+    ``(blob, exp_index, is_detected)`` with ids renumbered."""
     det = list(detected)
+    cands = sorted(((b.x - ex) ** 2 + (b.y - ey) ** 2, ei, j)
+                   for ei, (ex, ey) in enumerate(expected) for j, b in enumerate(det))
+    pair: dict = {}
     used: set = set()
+    for dd, ei, j in cands:
+        if dd > tol_px * tol_px:
+            break
+        if ei in pair or j in used:
+            continue
+        pair[ei] = j
+        used.add(j)
     out: List[Tuple[Blob, Optional[int], bool]] = []
     for ei, (ex, ey) in enumerate(expected):
-        best_j, best_d = None, tol_px * tol_px
-        for j, b in enumerate(det):
-            if j in used:
-                continue
-            dd = (b.x - ex) ** 2 + (b.y - ey) ** 2
-            if dd <= best_d:
-                best_d, best_j = dd, j
-        if best_j is not None:
-            used.add(best_j)
-            out.append((det[best_j], ei, True))
+        if ei in pair:
+            out.append((det[pair[ei]], ei, True))
         else:
             out.append((Blob(0, float(ex), float(ey), 0, 0.0, BOTH), ei, False))
     for j, b in enumerate(det):

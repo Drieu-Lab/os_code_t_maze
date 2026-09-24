@@ -415,6 +415,17 @@ class TestFiducials(unittest.TestCase):
         self.assertEqual(len(out), 4)
         self.assertEqual([b.id for b, _e, _d in out], [0, 1, 2, 3])   # renumbered
 
+    def test_hybrid_blobs_pairs_closest_first_so_a_neighbour_keeps_its_blob(self):
+        # ENTRY (S0_a) sits 4 px from S4_a and comes first in map order; only
+        # S4's LED blinked as a blob. S0_a must NOT take it (ADR-0196).
+        expected = [(950.0, 735.0), (950.0, 739.0)]            # S0_a, S4_a
+        detected = [D.Blob(0, 950.1, 739.0, 3, 90.0, D.OFF)]
+        out = D.hybrid_blobs(expected, detected, tol_px=4.0)
+        by_exp = {ei: (b, det) for b, ei, det in out}
+        self.assertFalse(by_exp[0][1])                          # S0_a traced at its own spot
+        self.assertAlmostEqual(by_exp[0][0].y, 735.0)
+        self.assertTrue(by_exp[1][1])                           # S4_a keeps its blob
+
     @unittest.skipUnless(np is not None and D.cv2 is not None, "cv2 not available")
     def test_overlay_draws_without_error(self):
         canvas = np.full((H, W, 3), 40, np.uint8)
