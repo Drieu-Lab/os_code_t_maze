@@ -110,6 +110,29 @@ class SnapshotTest(unittest.TestCase):
         self.assertIsNone(out["format_path"])
         self.assertFalse(os.path.isfile(os.path.join(dest, "format.json")))
 
+    def test_update_format_manifest_rewrites_through_patch(self):
+        # docs/decisions/0200: a late firmware version is patched in after Start.
+        dest = os.path.join(self.root, "config")
+        out = session_config.write_config_snapshot(
+            dest, format_manifest={"firmware_proto": None}, host_dir=self.host)
+        with open(out["snapshot_path"], "rb") as fh:
+            index_before = fh.read()
+        self.assertTrue(session_config.update_format_manifest(
+            out["format_path"], lambda m: dict(m, firmware_proto=9)))
+        with open(out["format_path"], encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh), {"firmware_proto": 9})
+        with open(out["snapshot_path"], "rb") as fh:
+            self.assertEqual(fh.read(), index_before, "index must not change")
+
+    def test_update_format_manifest_no_change_or_missing_file(self):
+        dest = os.path.join(self.root, "config")
+        out = session_config.write_config_snapshot(
+            dest, format_manifest={"firmware_proto": 7}, host_dir=self.host)
+        self.assertFalse(session_config.update_format_manifest(
+            out["format_path"], lambda m: None))
+        self.assertFalse(session_config.update_format_manifest(
+            os.path.join(dest, "absent.json"), lambda m: dict(m)))
+
     def test_led_map_is_a_known_config_file(self):
         # sync_fit --map writes host/led_map.json; the snapshot must carry it into
         # the bundle like the other host config (ADR-0153/0154).

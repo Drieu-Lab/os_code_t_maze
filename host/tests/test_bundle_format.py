@@ -48,5 +48,23 @@ class TestFormatManifestProvenance(unittest.TestCase):
         self.assertEqual(man["sensor_polarity"], bf.POLARITY_LEGACY)
 
 
+class TestBackfillFirmwareProto(unittest.TestCase):
+    """docs/decisions/0200: a version learned after Start fills an unset manifest."""
+
+    def test_fills_an_unseen_proto_and_its_polarity(self):
+        written = bf.format_manifest()
+        out = bf.backfill_firmware_proto(written, 9)
+        self.assertEqual(out["firmware_proto"], 9)
+        self.assertEqual(out["sensor_polarity"], bf.POLARITY_CORRECTED)
+        self.assertEqual(out, bf.format_manifest(firmware_proto=9))
+        self.assertIsNone(written["firmware_proto"], "input must not be mutated")
+
+    def test_never_overwrites_a_recorded_proto(self):
+        self.assertIsNone(bf.backfill_firmware_proto(bf.format_manifest(7), 9))
+
+    def test_nothing_learned_is_no_change(self):
+        self.assertIsNone(bf.backfill_firmware_proto(bf.format_manifest(), None))
+
+
 if __name__ == "__main__":
     unittest.main()

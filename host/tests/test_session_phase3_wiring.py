@@ -1078,6 +1078,36 @@ class SessionPhase3WiringTest(unittest.TestCase):
             self.session._manifest.provenance.get("cue_mapping"),
             {"high_tone_is_left": per_animal, "source": "animals.json"})
 
+    # ------------------------------ late firmware version (ADR-0200)
+    def test_version_reply_after_start_fills_format_json(self):
+        """docs/decisions/0200: format.json is written at Start before the VERSION
+        reply lands; the reply must fill its firmware_proto + sensor_polarity (as
+        it already does the manifest provenance), and a PROTO after Stop must not
+        touch the closed bundle."""
+        self._open_gate()
+        self._run_a_trial()
+        session_dir = self._start_session()
+        fmt_path = os.path.join(session_dir, "config", "format.json")
+
+        def fmt():
+            with open(fmt_path, encoding="utf-8") as fh:
+                return json.load(fh)
+
+        self.assertIsNone(fmt()["firmware_proto"])
+        self.assertEqual(fmt()["sensor_polarity"], "unknown")
+
+        self.session.apply(protocol.classify(
+            "42,VERSION,9,abc1234,Sep 21 2026 16:40:00"))
+        self.assertEqual(fmt()["firmware_proto"], 9)
+        self.assertEqual(fmt()["sensor_polarity"], "corrected")
+        self.assertEqual(
+            self.session._manifest.provenance.get("firmware_proto_seen"), 9)
+
+        self.session._stop_session()
+        self.session._firmware_proto = None
+        self.session.apply(protocol.classify("0,PROTO,7"))
+        self.assertEqual(fmt()["firmware_proto"], 9)
+
     def test_manifest_never_records_a_file_outside_the_session(self):
         """The backstop, independent of the rebind: a reported path from outside
         the session's tree is refused rather than recorded."""

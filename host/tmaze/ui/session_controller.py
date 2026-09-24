@@ -269,6 +269,9 @@ class SessionControlView:
         # seen (pre-v9 firmware never sends one).
         self._firmware_git_sha: Optional[str] = None
         self._firmware_build: Optional[str] = None
+        # The active session's config/format.json, so a firmware version that
+        # arrives after Start can be filled in (docs/decisions/0200).
+        self._format_path: Optional[str] = None
         # Canonical animal-id list (resources repo), loaded best-effort once so
         # Session Start can normalize/validate the entered id (docs/decisions/0075).
         # An empty (unavailable) registry when the resources repo is absent.
@@ -386,6 +389,8 @@ class SessionControlView:
             # after the manifest's provenance was already collected/written; fold
             # it in and rewrite so the persisted manifest carries the build id.
             self._backfill_firmware_provenance()
+        if proto is not None or ver is not None:
+            self._backfill_format_manifest()
         # Capture the COMPLETE verbatim stream between Start and Stop into the
         # bundle (docs/decisions/0178): every line the session sees, not the old
         # sensor + central-port subset. The full stream keeps the cue echoes,
@@ -1381,6 +1386,7 @@ class SessionControlView:
         serial_dir = os.path.join(self._session_dir, SERIAL_SUBDIR)
         summary_dir = os.path.join(self._session_dir, SUMMARY_SUBDIR)
         config_dir = os.path.join(self._session_dir, CONFIG_SUBDIR)
+        self._format_path = None
         for d in (self._video_dir, task_dir, serial_dir, summary_dir, config_dir):
             try:
                 os.makedirs(d, exist_ok=True)
@@ -1606,6 +1612,24 @@ class SessionControlView:
             m.set_provenance(prov)
             self._write_manifest()
 
+    def _backfill_format_manifest(self) -> None:
+        """Fill the firmware proto (and the S/L polarity it implies) into this
+        session's ``config/format.json`` once it is known.
+
+        ``format.json`` is written at Start, before the reply to the ``VERSION``
+        sent there arrives (and ``0,PROTO`` is only emitted at the Due's boot), so
+        it would otherwise record ``sensor_polarity: "unknown"``. Only while a
+        session is active, so a reboot after Stop can't edit a closed bundle; a
+        recorded proto is never overwritten. see docs/decisions/0200
+        """
+        if not self._active or not self._format_path or self._firmware_proto is None:
+            return
+        from tmaze.core.phase3 import bundle_format
+        proto = self._firmware_proto
+        session_config.update_format_manifest(
+            self._format_path,
+            lambda fmt: bundle_format.backfill_firmware_proto(fmt, proto))
+
     # ------------------------------------------------------- path resolution
     def _resolve_paths(self, reschedule: bool = True) -> None:
         """Fill in each recorder's output path as it becomes available, rewriting
@@ -1803,6 +1827,7 @@ class SessionControlView:
                     firmware_proto=self._firmware_proto))
         except Exception:
             return False
+        self._format_path = result["format_path"]
         if self._manifest is not None:
             self._manifest.set_stream("config_dir", result["config_dir"])
             self._manifest.set_stream("config_snapshot", result["snapshot_path"])

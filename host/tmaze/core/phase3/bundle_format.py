@@ -186,10 +186,12 @@ def format_manifest(firmware_proto: Optional[int] = None) -> Dict[str, Any]:
     and the trial-CSV column dictionary - all derived from the live cores so the
     manifest is always consistent with what the rig writes.
 
-    ``firmware_proto`` is the version seen on the run's ``0,PROTO`` handshake (the
-    one runtime-observed value here); it is recorded verbatim and used to derive
-    ``sensor_polarity`` - the S/L state convention (see docs/decisions/0164). It
-    is ``None`` (-> ``sensor_polarity`` "unknown") when the handshake was not seen.
+    ``firmware_proto`` is the version seen on the run's ``0,PROTO`` handshake or
+    its ``VERSION`` reply (the one runtime-observed value here); it is recorded
+    verbatim and used to derive ``sensor_polarity`` - the S/L state convention
+    (see docs/decisions/0164). It is ``None`` (-> ``sensor_polarity`` "unknown")
+    when neither was seen. A value learned after this was first written is filled
+    in later by :func:`backfill_firmware_proto`.
     """
     return {
         "format_version": FORMAT_VERSION,
@@ -205,3 +207,22 @@ def format_manifest(firmware_proto: Optional[int] = None) -> Dict[str, Any]:
         "stream_notes": dict(_STREAM_NOTES),
         "sync": _sync(),
     }
+
+
+def backfill_firmware_proto(manifest: Dict[str, Any],
+                            firmware_proto: Optional[int]) -> Optional[Dict[str, Any]]:
+    """A copy of a written ``format.json`` payload with a late-learned firmware
+    proto filled in, or ``None`` when there is nothing to change.
+
+    ``format.json`` is written at Session Start, but the firmware's version
+    usually arrives a few ms later (the ``VERSION`` reply to the request sent at
+    Start; ``0,PROTO`` is only emitted at the Due's boot). Only a manifest that
+    never saw a version (``firmware_proto`` null) is filled; a recorded value is
+    never overwritten. see docs/decisions/0200
+    """
+    if firmware_proto is None or manifest.get("firmware_proto") is not None:
+        return None
+    out = dict(manifest)
+    out["firmware_proto"] = firmware_proto
+    out["sensor_polarity"] = sensor_polarity_for(firmware_proto)
+    return out

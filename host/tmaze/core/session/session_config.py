@@ -34,7 +34,7 @@ import json
 import os
 import shutil
 from tmaze.core.timeutil import now_iso
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Callable, Dict, List, Mapping, Optional
 
 from tmaze.paths import host_dir as _host_dir
 
@@ -165,3 +165,31 @@ def write_config_snapshot(dest_dir: str, *, session_id: str = "",
         "present": [e["name"] for e in entries if e["present"]],
         "missing": [e["name"] for e in entries if not e["present"]],
     }
+
+
+def update_format_manifest(
+        format_path: str,
+        patch: Callable[[Dict[str, Any]], Optional[Dict[str, Any]]]) -> bool:
+    """Rewrite a written ``format.json`` through ``patch`` (atomically).
+
+    ``patch`` gets the current payload and returns the new one, or ``None`` for
+    no change. ``format.json`` is not in the snapshot's SHA-256 index, so a
+    rewrite leaves that integrity record valid. Best-effort: a missing or
+    unreadable file is left alone. Returns whether the file was rewritten.
+    see docs/decisions/0200
+    """
+    try:
+        with open(format_path, "r", encoding="utf-8") as fh:
+            current = json.load(fh)
+    except (OSError, ValueError):
+        return False
+    if not isinstance(current, dict):
+        return False
+    updated = patch(current)
+    if updated is None:
+        return False
+    try:
+        _atomic_json(format_path, updated)
+    except OSError:
+        return False
+    return True
