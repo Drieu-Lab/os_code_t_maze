@@ -1,0 +1,631 @@
+{
+  "_schema": "tmaze led_map v4 - which board indicator LED mirrors which serial channel, and where it sits (full-frame px) in the reference session, plus the persistently-lit red/green fiducial LEDs whose hull is the board ROI and whose pattern gives the board pose, plus the optional operator-drawn board_search_poly the detector is confined to (v3; excludes maze corners a rat crosses). v4 adds the reference session's sensor_polarity (which wire state the channel names' =0/=1 mean), the event-triggered pass settings, and 'bleed': bleed[source][led_id] = how much that LED's disk-minus-ring brightness moves when the source channel fires, as a fraction of its own channel's change (only |fraction| >= 0.05 listed; ADR-0196). Written by `python -m tmaze.tools.sync_fit --map`; see docs/design/cross-stream-sync-design.md sections 3.1/3.4 and tmaze/core/sync/led_map.py.",
+  "schema_version": 4,
+  "reference": {
+    "session_id": "000_20260922_163830",
+    "board_rect": [
+      832,
+      268,
+      1127,
+      877
+    ],
+    "board_poly": [
+      [
+        883.06,
+        727.24
+      ],
+      [
+        920.88,
+        580.77
+      ],
+      [
+        955.67,
+        538.02
+      ],
+      [
+        1077.67,
+        623.01
+      ],
+      [
+        1048.21,
+        765.26
+      ],
+      [
+        964.89,
+        775.48
+      ]
+    ],
+    "board_search_poly": [
+      [
+        949.33,
+        281.33
+      ],
+      [
+        1126.67,
+        268.0
+      ],
+      [
+        1040.0,
+        876.0
+      ],
+      [
+        838.67,
+        853.33
+      ],
+      [
+        832.0,
+        698.67
+      ]
+    ],
+    "frame_size": [
+      1280,
+      1024
+    ],
+    "created": "2026-09-24T11:58:10",
+    "sensor_polarity": "corrected"
+  },
+  "detector": {
+    "blob_thresh": 30.0,
+    "min_area": 2,
+    "nms_radius": 3,
+    "radius": 2,
+    "ring_in": 5,
+    "ring_out": 9,
+    "sample_every": 10,
+    "margin_px": 24,
+    "fid_thresh": 25.0,
+    "fid_min_frac": 0.9,
+    "hull_margin_px": 30
+  },
+  "event_map": {
+    "guard_frames": 1,
+    "during_frames": 6,
+    "before_frames": 8,
+    "before_guard": 2,
+    "quiet_margin": 1,
+    "min_events": 3,
+    "snr_min": 6.0,
+    "rel_min": 0.15,
+    "min_sep_px": 4.0,
+    "claim_px": 2.0,
+    "reward_claim_px": 4.0,
+    "same_led_px": 3.0,
+    "fid_exclude_px": 5.0,
+    "layout": "C:\\Users\\Celine\\Documents\\git_repos\\os_code_t_maze\\host\\led_board_layout.json"
+  },
+  "bleed": {
+    "S4": {
+      "S0_b": -0.079,
+      "S5_b": -0.061
+    },
+    "S0": {
+      "S4_a": 0.103,
+      "S5_b": -0.335
+    },
+    "S1": {
+      "S3_a": 0.143
+    },
+    "S2": {
+      "S1_b": -0.156,
+      "S3_a": -0.08,
+      "S3_b": -0.149
+    },
+    "S3": {
+      "S1_a": 0.086,
+      "S1_b": 0.145,
+      "S2_a": -0.055,
+      "S2_b": -0.056
+    },
+    "S5": {
+      "S0_b": -0.197,
+      "S4_a": -0.071,
+      "S4_b": -0.128
+    },
+    "L2": {
+      "L0_b": -0.068,
+      "L1_a": 0.287,
+      "L1_b": 0.248,
+      "SOL2.4_a": 0.274
+    },
+    "L0": {
+      "L1_a": 0.095,
+      "L1_b": 0.144,
+      "L2_b": -0.106,
+      "SOL0.4_a": 0.052
+    },
+    "L1": {
+      "L0_a": 0.283,
+      "L0_b": 0.37,
+      "L2_a": 0.171,
+      "L2_b": 0.206
+    },
+    "SOL0.0": {
+      "SOL0.1_a": -0.074
+    },
+    "SOL0.1": {
+      "SOL0.0_a": -0.1,
+      "SOL0.2_a": -0.092
+    },
+    "SOL0.2": {
+      "SOL0.1_a": -0.089,
+      "SOL0.3_a": -0.096
+    },
+    "SOL0.3": {
+      "SOL0.2_a": -0.099
+    },
+    "SOL0.4": {
+      "L0_a": 0.115,
+      "L0_b": 0.127,
+      "SOL1.4_a": -0.069
+    },
+    "SOL1.0": {
+      "SOL1.1_a": -0.073
+    },
+    "SOL1.1": {
+      "SOL1.0_a": -0.072,
+      "SOL1.2_a": -0.07
+    },
+    "SOL1.2": {
+      "SOL1.1_a": -0.091,
+      "SOL1.3_a": -0.082
+    },
+    "SOL1.3": {
+      "SOL1.2_a": -0.092
+    },
+    "SOL1.4": {
+      "SOL0.4_a": -0.088,
+      "SOL2.4_a": -0.078
+    },
+    "SOL2.0": {
+      "SOL2.1_a": -0.069
+    },
+    "SOL2.1": {
+      "L2_a": 0.055,
+      "L2_b": 0.052,
+      "SOL2.0_a": -0.067,
+      "SOL2.2_a": -0.074
+    },
+    "SOL2.2": {
+      "SOL2.1_a": -0.077,
+      "SOL2.3_a": -0.072
+    },
+    "SOL2.3": {
+      "SOL2.2_a": -0.076
+    },
+    "SOL2.4": {
+      "L2_a": 0.137,
+      "L2_b": 0.14
+    }
+  },
+  "fiducials": [
+    {
+      "fid_id": "red_0",
+      "ref_px": [
+        960.23,
+        567.67
+      ],
+      "color": "red"
+    },
+    {
+      "fid_id": "red_1",
+      "ref_px": [
+        996.8,
+        603.58
+      ],
+      "color": "red"
+    },
+    {
+      "fid_id": "red_2",
+      "ref_px": [
+        936.86,
+        606.17
+      ],
+      "color": "red"
+    },
+    {
+      "fid_id": "red_3",
+      "ref_px": [
+        1050.2,
+        635.06
+      ],
+      "color": "red"
+    },
+    {
+      "fid_id": "red_4",
+      "ref_px": [
+        926.13,
+        653.75
+      ],
+      "color": "red"
+    },
+    {
+      "fid_id": "green_0",
+      "ref_px": [
+        908.31,
+        711.03
+      ],
+      "color": "green"
+    },
+    {
+      "fid_id": "green_1",
+      "ref_px": [
+        1030.29,
+        741.2
+      ],
+      "color": "green"
+    },
+    {
+      "fid_id": "green_2",
+      "ref_px": [
+        967.87,
+        745.63
+      ],
+      "color": "green"
+    }
+  ],
+  "leds": [
+    {
+      "led_id": "L0_a",
+      "ref_px": [
+        891.95,
+        698.0
+      ],
+      "channel": "L0=1",
+      "polarity": "lit",
+      "lag_s": null,
+      "note": "pass 2 only; snr 1007"
+    },
+    {
+      "led_id": "L0_b",
+      "ref_px": [
+        903.99,
+        700.97
+      ],
+      "channel": "L0=1",
+      "polarity": "lit",
+      "lag_s": null,
+      "note": "pass 2 only; snr 339"
+    },
+    {
+      "led_id": "L1_a",
+      "ref_px": [
+        891.01,
+        701.96
+      ],
+      "channel": "L1=1",
+      "polarity": "lit",
+      "lag_s": 0.0487,
+      "note": "pass 1+2; snr 1215"
+    },
+    {
+      "led_id": "L1_b",
+      "ref_px": [
+        902.07,
+        704.05
+      ],
+      "channel": "L1=1",
+      "polarity": "lit",
+      "lag_s": null,
+      "note": "pass 2 only; snr 385"
+    },
+    {
+      "led_id": "L2_a",
+      "ref_px": [
+        890.04,
+        705.03
+      ],
+      "channel": "L2=1",
+      "polarity": "lit",
+      "lag_s": null,
+      "note": "pass 2 only; snr 1083"
+    },
+    {
+      "led_id": "L2_b",
+      "ref_px": [
+        901.95,
+        707.95
+      ],
+      "channel": "L2=1",
+      "polarity": "lit",
+      "lag_s": 0.0404,
+      "note": "pass 1+2; snr 343"
+    },
+    {
+      "led_id": "S0_a",
+      "ref_px": [
+        949.97,
+        734.98
+      ],
+      "channel": "S0=1",
+      "polarity": "dark",
+      "lag_s": null,
+      "note": "pass 2 only; snr 346"
+    },
+    {
+      "led_id": "S0_b",
+      "ref_px": [
+        961.0,
+        737.15
+      ],
+      "channel": "S0=1",
+      "polarity": "dark",
+      "lag_s": null,
+      "note": "pass 2 only; snr 105"
+    },
+    {
+      "led_id": "S1_a",
+      "ref_px": [
+        1012.07,
+        731.0
+      ],
+      "channel": "S1=1",
+      "polarity": "dark",
+      "lag_s": null,
+      "note": "pass 2 only; snr 469"
+    },
+    {
+      "led_id": "S1_b",
+      "ref_px": [
+        1024.97,
+        734.11
+      ],
+      "channel": "S1=1",
+      "polarity": "dark",
+      "lag_s": null,
+      "note": "pass 2 only; snr 183"
+    },
+    {
+      "led_id": "S2_a",
+      "ref_px": [
+        1013.98,
+        726.98
+      ],
+      "channel": "S2=1",
+      "polarity": "dark",
+      "lag_s": 0.0616,
+      "note": "pass 1+2; snr 627"
+    },
+    {
+      "led_id": "S2_b",
+      "ref_px": [
+        1025.98,
+        729.02
+      ],
+      "channel": "S2=1",
+      "polarity": "dark",
+      "lag_s": 0.0616,
+      "note": "pass 1+2; snr 174"
+    },
+    {
+      "led_id": "S3_a",
+      "ref_px": [
+        1012.04,
+        735.02
+      ],
+      "channel": "S3=1",
+      "polarity": "dark",
+      "lag_s": 0.0646,
+      "note": "pass 1+2; snr 677"
+    },
+    {
+      "led_id": "S3_b",
+      "ref_px": [
+        1024.97,
+        738.96
+      ],
+      "channel": "S3=1",
+      "polarity": "dark",
+      "lag_s": 0.0698,
+      "note": "pass 1+2; snr 185"
+    },
+    {
+      "led_id": "S4_a",
+      "ref_px": [
+        949.96,
+        738.97
+      ],
+      "channel": "S4=1",
+      "polarity": "dark",
+      "lag_s": 0.0585,
+      "note": "pass 1+2; snr 611"
+    },
+    {
+      "led_id": "S4_b",
+      "ref_px": [
+        961.98,
+        741.91
+      ],
+      "channel": "S4=1",
+      "polarity": "dark",
+      "lag_s": 0.0591,
+      "note": "pass 1+2; snr 196"
+    },
+    {
+      "led_id": "S5_a",
+      "ref_px": [
+        951.01,
+        730.95
+      ],
+      "channel": "S5=1",
+      "polarity": "dark",
+      "lag_s": 0.0568,
+      "note": "pass 1+2; snr 572"
+    },
+    {
+      "led_id": "S5_b",
+      "ref_px": [
+        963.03,
+        732.96
+      ],
+      "channel": "S5=1",
+      "polarity": "dark",
+      "lag_s": 0.0568,
+      "note": "pass 1+2; snr 186"
+    },
+    {
+      "led_id": "SOL0.0_a",
+      "ref_px": [
+        1037.99,
+        632.96
+      ],
+      "channel": "SOL0.0",
+      "polarity": "lit",
+      "lag_s": 0.0456,
+      "note": "pass 1+2; snr 1624"
+    },
+    {
+      "led_id": "SOL0.1_a",
+      "ref_px": [
+        1036.03,
+        640.93
+      ],
+      "channel": "SOL0.1",
+      "polarity": "lit",
+      "lag_s": 0.0521,
+      "note": "pass 1+2; snr 1380"
+    },
+    {
+      "led_id": "SOL0.2_a",
+      "ref_px": [
+        1035.99,
+        648.03
+      ],
+      "channel": "SOL0.2",
+      "polarity": "lit",
+      "lag_s": 0.0519,
+      "note": "pass 1+2; snr 1343"
+    },
+    {
+      "led_id": "SOL0.3_a",
+      "ref_px": [
+        1034.03,
+        656.03
+      ],
+      "channel": "SOL0.3",
+      "polarity": "lit",
+      "lag_s": 0.0419,
+      "note": "pass 1+2; snr 1454"
+    },
+    {
+      "led_id": "SOL0.4_a",
+      "ref_px": [
+        914.03,
+        668.04
+      ],
+      "channel": "SOL0.4",
+      "polarity": "lit",
+      "lag_s": 0.0444,
+      "note": "pass 1+2; snr 1236"
+    },
+    {
+      "led_id": "SOL1.0_a",
+      "ref_px": [
+        984.06,
+        600.99
+      ],
+      "channel": "SOL1.0",
+      "polarity": "lit",
+      "lag_s": 0.0465,
+      "note": "pass 1+2; snr 1265"
+    },
+    {
+      "led_id": "SOL1.1_a",
+      "ref_px": [
+        983.03,
+        608.98
+      ],
+      "channel": "SOL1.1",
+      "polarity": "lit",
+      "lag_s": 0.0457,
+      "note": "pass 1+2; snr 1240"
+    },
+    {
+      "led_id": "SOL1.2_a",
+      "ref_px": [
+        982.02,
+        616.96
+      ],
+      "channel": "SOL1.2",
+      "polarity": "lit",
+      "lag_s": 0.0525,
+      "note": "pass 1+2; snr 1282"
+    },
+    {
+      "led_id": "SOL1.3_a",
+      "ref_px": [
+        981.03,
+        624.03
+      ],
+      "channel": "SOL1.3",
+      "polarity": "lit",
+      "lag_s": 0.0471,
+      "note": "pass 1+2; snr 1300"
+    },
+    {
+      "led_id": "SOL1.4_a",
+      "ref_px": [
+        915.97,
+        660.03
+      ],
+      "channel": "SOL1.4",
+      "polarity": "lit",
+      "lag_s": 0.0529,
+      "note": "pass 1+2; snr 1496"
+    },
+    {
+      "led_id": "SOL2.0_a",
+      "ref_px": [
+        925.02,
+        605.02
+      ],
+      "channel": "SOL2.0",
+      "polarity": "lit",
+      "lag_s": 0.0476,
+      "note": "pass 1+2; snr 1309"
+    },
+    {
+      "led_id": "SOL2.1_a",
+      "ref_px": [
+        924.01,
+        612.98
+      ],
+      "channel": "SOL2.1",
+      "polarity": "lit",
+      "lag_s": 0.0392,
+      "note": "pass 1+2; snr 1423"
+    },
+    {
+      "led_id": "SOL2.2_a",
+      "ref_px": [
+        922.99,
+        620.97
+      ],
+      "channel": "SOL2.2",
+      "polarity": "lit",
+      "lag_s": 0.0429,
+      "note": "pass 1+2; snr 1341"
+    },
+    {
+      "led_id": "SOL2.3_a",
+      "ref_px": [
+        921.98,
+        628.04
+      ],
+      "channel": "SOL2.3",
+      "polarity": "lit",
+      "lag_s": 0.0511,
+      "note": "pass 1+2; snr 1349"
+    },
+    {
+      "led_id": "SOL2.4_a",
+      "ref_px": [
+        916.08,
+        652.97
+      ],
+      "channel": "SOL2.4",
+      "polarity": "lit",
+      "lag_s": 0.0554,
+      "note": "pass 1+2; snr 2226"
+    }
+  ]
+}
