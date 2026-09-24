@@ -8,13 +8,13 @@ are expressed this way before anything is matched:
   (``serial/serial_<id>.csv``, the full stream since docs/decisions/0178, or the
   pre-0178 ``sensors_<id>.csv``: one ``<host iso>,<firmware line>`` per row).
   A beam that reads ``S,2,0`` at t0 and ``S,2,1`` at t1 gives a span of channel
-  ``S2=0``; the opposite pairing gives ``S2=1``. Both states are emitted so a
-  test can check the polarity against real logs, but only the ACTIVE state is
-  matched (``active_spans``): the crossing is ``S<i>=0`` and the lick contact
-  is ``L<i>=0`` - a fixed property of the sensor wiring, measured on recorded
-  sessions (the ``0`` spans of both sensor kinds last 50-400 ms while the ``1``
-  spans reach minutes; the board LEDs go dark during a crossing and light
-  during a contact; design doc section 3.7, FW-0058). A solenoid ack
+  ``S2=0``; the opposite pairing gives ``S2=1``. Channel names keep the WIRE
+  state. Both states are emitted, but only the ACTIVE one (beam broken, tongue
+  on the port) is matched (``active_spans``), and which wire state that is
+  depends on the firmware that recorded the bundle: ``0`` on pre-v8 firmware,
+  ``1`` from v8 on (docs/decisions/0164, 0199). The caller passes the bundle's
+  ``sensor_polarity``; when the bundle does not know it, ``infer_polarity``
+  reads it off the log (the active state is the brief one). A solenoid ack
   ``SOL,2,1,300`` is a span of channel ``SOL2.1`` lasting its pulse width.
   ``REWARD`` duplicates ``SOL`` and is skipped.
 - **LED spans** come from the vision layer's per-frame brightness trace for one
@@ -42,9 +42,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import datetime
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, NamedTuple, Optional, Sequence, Tuple
 
 from tmaze.core import protocol
+from tmaze.core.phase3.bundle_format import POLARITY_CORRECTED, POLARITY_LEGACY
 
 
 # ---------------------------------------------------------------- the record
@@ -97,34 +98,74 @@ def gap_s(prev: Span, nxt: Span) -> float:
 
 FIRMWARE_MS = 1e-3     # clk_unit_s of the Arduino's millis() clock
 
-# The state in which a two-state sensor is ACTIVE (the event the camera can
-# see): a beam reports 0 while the rat breaks it, a lick detector 0 while the
-# tongue is in contact. Both sensor kinds rest at 1 (the firmware reports 1
-# when the optocoupler pulls its pin LOW, which is the sensors' idle output).
-# Deterministic wiring, verified on recorded logs (tests/test_sync_fixture.py::
-# test_active_states_are_the_brief_ones); PROTOCOL.md's `S`/`L` rows were
-# corrected to match (FW-0058 tracks the firmware comment + consumer audit).
-BEAM_ACTIVE_STATE = "0"
-LICK_ACTIVE_STATE = "0"
+# The wire state in which a two-state sensor is ACTIVE (the event the camera
+# can see: beam broken, tongue on the port), per bundle ``sensor_polarity``.
+# Beams and licks flipped together in firmware v8 (docs/decisions/0164): pre-v8
+# logs report the active state as 0, v8+ logs as 1. See docs/decisions/0199.
+_ACTIVE_STATE = {POLARITY_LEGACY: "0", POLARITY_CORRECTED: "1"}
 
 
-def is_active_channel(channel: str) -> bool:
-    """``S2=0`` and ``L2=0`` -> True (the sensor's active state); ``S2=1`` and
-    ``L2=1`` -> False (its resting state); pulse channels (``SOL2.1``) -> True."""
+def active_state(polarity: str) -> str:
+    """``"0"`` or ``"1"``: the wire state of an active beam/lick under
+    ``polarity`` (``legacy_inverted`` or ``corrected``). ``unknown`` is refused
+    - resolve it first (``infer_polarity``); guessing is how the sync matched
+    the resting spans of v8+ bundles."""
+    try:
+        return _ACTIVE_STATE[polarity]
+    except KeyError:
+        raise ValueError(f"sensor polarity must be {POLARITY_CORRECTED!r} or "
+                         f"{POLARITY_LEGACY!r}, got {polarity!r}") from None
+
+
+def is_active_channel(channel: str, polarity: str) -> bool:
+    """Is ``channel`` a sensor's active state under ``polarity``? Legacy:
+    ``S2=0`` / ``L2=0`` -> True, ``S2=1`` / ``L2=1`` -> False; corrected: the
+    reverse. Pulse channels (``SOL2.1``) are always active."""
     base, sep, state = channel.rpartition("=")
-    if not sep:
+    if not sep or channel_kind(base) not in ("S", "L"):
         return True
-    kind = channel_kind(base)
-    if kind == "S":
-        return state == BEAM_ACTIVE_STATE
-    if kind == "L":
-        return state == LICK_ACTIVE_STATE
-    return True
+    return state == active_state(polarity)
 
 
-def active_spans(events: Dict[str, List[Span]]) -> Dict[str, List[Span]]:
+def active_spans(events: Dict[str, List[Span]], polarity: str) -> Dict[str, List[Span]]:
     """Keep only the channels an LED is matched against (see is_active_channel)."""
-    return {ch: spans for ch, spans in events.items() if is_active_channel(ch)}
+    return {ch: spans for ch, spans in events.items() if is_active_channel(ch, polarity)}
+
+
+class PolarityGuess(NamedTuple):
+    """What a serial log says about its own polarity (``infer_polarity``)."""
+    polarity: Optional[str]     # None = the log does not say clearly
+    n_agree: int                # sensors voting for ``polarity``
+    n_votes: int                # sensors that voted at all
+
+
+def infer_polarity(events: Dict[str, List[Span]], min_ratio: float = 5.0) -> PolarityGuess:
+    """Read the S/L polarity off the log itself: the active state is the BRIEF
+    one. A beam crossing or a tongue contact lasts well under two seconds; the
+    resting state between events runs for tens of seconds or minutes. Sensor
+    chatter splits the resting state into short pieces too, so each sensor
+    compares its LONGEST span in each state, and votes only when one is at
+    least ``min_ratio`` times the other. The answer is the unanimous vote;
+    any dissent (or no vote) gives ``polarity=None``."""
+    votes = {"0": 0, "1": 0}
+    bases = {ch.rpartition("=")[0] for ch in events
+             if "=" in ch and channel_kind(ch) in ("S", "L")}
+    for base in bases:
+        zero, one = events.get(f"{base}=0", []), events.get(f"{base}=1", [])
+        if not zero or not one:
+            continue
+        long0 = max(s.duration for s in zero)
+        long1 = max(s.duration for s in one)
+        if long1 >= min_ratio * long0:
+            votes["0"] += 1                 # 0 is brief -> active
+        elif long0 >= min_ratio * long1:
+            votes["1"] += 1
+    n = votes["0"] + votes["1"]
+    if n == 0 or (votes["0"] and votes["1"]):
+        return PolarityGuess(None, max(votes.values()), n)
+    state = "0" if votes["0"] else "1"
+    pol = POLARITY_LEGACY if state == "0" else POLARITY_CORRECTED
+    return PolarityGuess(pol, n, n)
 
 
 def channel_kind(channel: str) -> str:

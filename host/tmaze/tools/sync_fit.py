@@ -60,6 +60,7 @@ from dataclasses import asdict
 from datetime import datetime
 from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
 
+from tmaze.core.phase3 import bundle_format as BF
 from tmaze.core.session import session_registry, session_serial
 from tmaze.core.session.session_log import SessionManifest
 from tmaze.core.sync import clockfit, led_map as LM, matching, pipeline
@@ -99,6 +100,81 @@ def _read_events(bundle: str, sid: str, serial_path: Optional[str] = None) -> Di
         os.path.join(bundle, "serial"), sid)
     with open(path, encoding="utf-8") as f:
         return S.serial_spans(S.parse_serial_csv(f))
+
+
+# ------------------------------------------------------- sensor polarity
+
+POLARITY_CHOICES = (BF.POLARITY_CORRECTED, BF.POLARITY_LEGACY)
+# Where the polarity used for a run came from (recorded in clock_fit_<id>.json).
+SRC_CLI = "cli"                  # --sensor-polarity
+SRC_DECLARED = "format.json"     # the bundle's own sensor_polarity (from the 0,PROTO handshake)
+SRC_PRE_FLAG = "pre-flag bundle"  # format.json predates the flag -> pre-v8 firmware
+SRC_INFERRED = "inferred"        # declared unknown -> read off the serial log
+
+
+class PolarityUnresolved(RuntimeError):
+    """Neither the bundle nor its serial log says which S/L state is active."""
+
+
+class SensorPolarity(NamedTuple):
+    """The S/L polarity a run used, where it came from, and the log's own
+    opinion (docs/decisions/0199)."""
+    value: str                  # corrected / legacy_inverted
+    source: str                 # SRC_*
+    declared: Optional[str]     # format.json's sensor_polarity (None if absent)
+    inferred: S.PolarityGuess
+
+    @property
+    def disagrees(self) -> bool:
+        """The serial log clearly points the other way - a red flag."""
+        return self.inferred.polarity is not None and self.inferred.polarity != self.value
+
+    def to_dict(self) -> dict:
+        return {"value": self.value, "active_state": S.active_state(self.value),
+                "source": self.source, "declared": self.declared,
+                "inferred": self.inferred.polarity,
+                "inferred_votes": f"{self.inferred.n_agree}/{self.inferred.n_votes}",
+                "disagrees": self.disagrees}
+
+
+def _declared_polarity(bundle: str) -> Tuple[Optional[str], int]:
+    """(format.json ``sensor_polarity`` or None, ``format_version`` or 0)."""
+    path = os.path.join(bundle, "config", "format.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            d = json.load(f)
+    except (OSError, ValueError):
+        return None, 0
+    return d.get("sensor_polarity"), int(d.get("format_version") or 0)
+
+
+def resolve_sensor_polarity(bundle: str, events: Dict[str, List[S.Span]],
+                            override: Optional[str] = None) -> SensorPolarity:
+    """Which wire state is a broken beam / a lick contact in this bundle.
+
+    Precedence: ``override`` (--sensor-polarity) > the bundle's declared
+    ``sensor_polarity`` > ``legacy_inverted`` for a bundle whose format.json
+    predates the flag (format < v3 = recorded before the v8 firmware existed) >
+    the serial log's own answer (``spans.infer_polarity``). A declared
+    ``unknown`` (the handshake was missed) with no clear answer from the log
+    raises PolarityUnresolved rather than guessing. The log's answer is always
+    computed and recorded, so a disagreement is visible (docs/decisions/0199)."""
+    guess = S.infer_polarity(events)
+    declared, fmt_version = _declared_polarity(bundle)
+    if override is not None:
+        if override not in POLARITY_CHOICES:
+            raise ValueError(f"--sensor-polarity must be one of {POLARITY_CHOICES}")
+        return SensorPolarity(override, SRC_CLI, declared, guess)
+    if declared in POLARITY_CHOICES:
+        return SensorPolarity(declared, SRC_DECLARED, declared, guess)
+    if declared is None and fmt_version < 3:
+        return SensorPolarity(BF.POLARITY_LEGACY, SRC_PRE_FLAG, declared, guess)
+    if guess.polarity is not None:
+        return SensorPolarity(guess.polarity, SRC_INFERRED, declared, guess)
+    raise PolarityUnresolved(
+        f"sensor polarity unknown for {bundle_id(bundle)}: format.json says "
+        f"{declared!r} and the serial log is not conclusive "
+        f"({guess.n_agree}/{guess.n_votes} sensor votes); pass --sensor-polarity")
 
 
 # ------------------------------------------------------- detection + spans
@@ -141,7 +217,7 @@ class SyncRun:
                  blob_spans: List[pipeline.BlobSpans], events: Dict[str, List[S.Span]],
                  registration, used_map: Optional[LM.LedMap], window: Tuple[int, Optional[int]],
                  tol_s: float, min_visible_s: float, crop: Optional[Tuple[int, int, int, int]],
-                 fiducials=(), fid_registration=None,
+                 *, sensor_polarity: SensorPolarity, fiducials=(), fid_registration=None,
                  board_poly: Optional[List[Tuple[float, float]]] = None,
                  search_poly: Optional[List[Tuple[float, float]]] = None,
                  frame_size: Optional[Tuple[int, int]] = None, median=None):
@@ -159,6 +235,7 @@ class SyncRun:
         self.tol_s = tol_s
         self.min_visible_s = min_visible_s
         self.crop = crop
+        self.sensor_polarity = sensor_polarity
         self.fiducials = fiducials             # detected persistent LEDs (crop coords)
         self.fid_registration = fid_registration   # pose from the fiducials (v2 maps / --map)
         self.board_poly = board_poly           # ROI outline in FULL-frame pixels
@@ -202,7 +279,8 @@ def analyze_bundle(bundle: str, *, start_min: float = 0.0, minutes: Optional[flo
                    board_rect: Optional[Tuple[int, int, int, int]] = None,
                    search_poly_path: Optional[str] = None,
                    min_matched: int = 3, min_pairs: int = 30,
-                   serial_path: Optional[str] = None) -> SyncRun:
+                   serial_path: Optional[str] = None,
+                   sensor_polarity: Optional[str] = None) -> SyncRun:
     """Detect the LEDs, bind them, fit the clock.
 
     The ROI is self-calibrating: the persistently-lit red/green fiducials are
@@ -214,12 +292,15 @@ def analyze_bundle(bundle: str, *, start_min: float = 0.0, minutes: Optional[flo
     present, else its pose-transformed stored position). ``whole_frame`` (--map)
     searches the whole frame for fiducials; ``board_rect`` is an explicit search
     window that overrides both (a v1-style fast path / fallback).
+    ``sensor_polarity`` overrides the bundle's S/L polarity (resolve_sensor_polarity);
+    it is resolved before the video is read, so an unresolvable bundle fails fast.
     """
     sid = bundle_id(bundle)
     header, frames = _read_frames(bundle, sid)
     if not frames:
         raise RuntimeError(f"no frames in the sidecar for {sid}")
     events = _read_events(bundle, sid, serial_path)
+    polarity = resolve_sensor_polarity(bundle, events, sensor_polarity)
     fps = float(header.get("fps", "25") or "25")
     frame_size = _frame_size(header)
 
@@ -316,10 +397,11 @@ def analyze_bundle(bundle: str, *, start_min: float = 0.0, minutes: Optional[flo
     blob_spans = [D.blob_spans(b.id, grey[:, i], win, tick) for i, b in enumerate(blobs)]
 
     result = pipeline.analyze(blob_spans, events, tol_s=tol_s, min_visible_s=min_visible_s,
-                              min_matched=min_matched, min_pairs=min_pairs)
+                              min_matched=min_matched, min_pairs=min_pairs,
+                              sensor_polarity=polarity.value)
     return SyncRun(sid, header, blobs, floor, led_ids, result, blob_spans, events,
                    registration, used_map, (start, got), tol_s, min_visible_s, crop,
-                   fiducials=fiducials, fid_registration=fid_registration,
+                   sensor_polarity=polarity, fiducials=fiducials, fid_registration=fid_registration,
                    board_poly=board_poly, search_poly=search_poly,
                    frame_size=frame_size, median=ext.median())
 
@@ -388,7 +470,7 @@ def _residual_ms(fit: Optional[clockfit.ClockFit], y_ticks: Optional[float],
 def led_event_rows(run: SyncRun) -> List[dict]:
     """One row per matched LED edge (both ends of every matched span)."""
     fit = run.result.fit
-    active = S.active_spans(run.events)
+    active = S.active_spans(run.events, run.sensor_polarity.value)
     rows: List[dict] = []
     for blob, binding in sorted(run.result.bindings.items()):
         bs = run.blob_spans[blob]
@@ -465,6 +547,7 @@ def clock_fit_dict(run: SyncRun) -> dict:
             "source_session": run.used_map.session_id if run.used_map else None,
             "schema_version": LM.SCHEMA_VERSION,
         },
+        "sensor_polarity": run.sensor_polarity.to_dict(),
         "window": {"start_frame": start, "frames": n, "fps": float(run.header.get("fps", "25") or "25")},
         "detector": asdict(run.used_map.detector if run.used_map else LM.DetectorParams()),
         "noise_floor": round(run.floor, 2),
@@ -551,6 +634,7 @@ def register_sync_in_manifest(bundle: str, run: SyncRun,
             "verdict": run.result.verdict,
             "residual_mad_ms": (round(fit.residuals.mad_ms, 3)
                                 if good and fit is not None else None),
+            "sensor_polarity": run.sensor_polarity.value,
         },
     })
     _atomic_write(path, m.render())
@@ -606,6 +690,13 @@ def print_report(run: SyncRun, out: str) -> None:
     print(f"\nsession {run.sid}: codec={run.header.get('codec')} "
           f"fps={run.header.get('fps')} frames(window)={run.window[1]} "
           f"blobs={len(run.blobs)} noise_floor={run.floor:.1f}")
+    p = run.sensor_polarity
+    print(f"  sensor polarity: {p.value} (active state = {S.active_state(p.value)}; "
+          f"from {p.source}; serial log says {p.inferred.polarity} "
+          f"{p.inferred.n_agree}/{p.inferred.n_votes})")
+    if p.disagrees:
+        print("  WARNING: the serial log's brief sensor states point to "
+              f"{p.inferred.polarity}, not {p.value} - check the bundle before trusting this fit")
     if run.search_poly:
         print(f"  board search: operator polygon ({len(run.search_poly)} pts), "
               f"crop {tuple(run.crop) if run.crop else None}")
@@ -700,7 +791,8 @@ def _selftest() -> int:
         host += 1.0
         prev_end_fw = c1
     blob = pipeline.BlobSpans(0, lit, dark)
-    res = pipeline.analyze([blob], events, min_matched=3, min_pairs=10)
+    res = pipeline.analyze([blob], events, min_matched=3, min_pairs=10,
+                           sensor_polarity=BF.POLARITY_LEGACY)
     ok = (res.verdict == clockfit.VERDICT_OK and res.fit is not None
           and 0 in res.bindings and res.bindings[0].channel == "S2=0"
           and abs(res.fit.rate - rate) < 1.0
@@ -788,6 +880,8 @@ def fit_one_bundle(bundle: str, *, refit: bool, **fit_kwargs) -> BundleFitResult
         return BundleFitResult(sid, FIT_SKIPPED, "already fit (use --refit)")
     try:
         run = analyze_bundle(bundle, **fit_kwargs)
+    except PolarityUnresolved as e:
+        return BundleFitResult(sid, FIT_SKIPPED, str(e))
     except (FileNotFoundError, RuntimeError) as e:
         return BundleFitResult(sid, FIT_SKIPPED, f"no video/data ({e})")
     if not run.fiducials:
@@ -853,6 +947,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--serial", help="read serial events from this log instead of the bundle's "
                     "central-only capture; use the FULL rig_logger CSV for a mapping session "
                     "(it keeps the left/right-reward and rinse/drain valve acks the capture drops)")
+    ap.add_argument("--sensor-polarity", choices=POLARITY_CHOICES,
+                    help="override which beam/lick wire state is ACTIVE (corrected: 1 = broken/"
+                         "contact, firmware v8+; legacy_inverted: 0, pre-v8). Default: the "
+                         "bundle's format.json, else read off the serial log (ADR-0199)")
     ap.add_argument("--dry-run", action="store_true",
                     help="do not touch the bundle; print the report and write artifacts to --out")
     ap.add_argument("--out", help="scratch folder for --dry-run artifacts (default <bundle>/_sync_dryrun)")
@@ -898,7 +996,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                        tol_s=a.tol_ms / 1000.0,
                        min_visible_s=a.min_visible_ms / 1000.0,
                        min_matched=a.min_matched, min_pairs=a.min_pairs,
-                       serial_path=a.serial)
+                       serial_path=a.serial, sensor_polarity=a.sensor_polarity)
 
     if not a.bundle:
         ap.error("a bundle folder is required (or use --all / --selftest)")
@@ -913,7 +1011,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                              whole_frame=a.map and rect is None, board_rect=rect,
                              search_poly_path=a.board_poly,
                              min_matched=a.min_matched, min_pairs=a.min_pairs,
-                             serial_path=a.serial)
+                             serial_path=a.serial, sensor_polarity=a.sensor_polarity)
     except (FileNotFoundError, RuntimeError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
@@ -923,9 +1021,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         path = LM.save(m, a.map_out or LM.led_map_path())
         bound = sum(1 for e in m.leds if e.bound)
         fc = _fiducial_color_counts(run.fiducials)
+        p = run.sensor_polarity
         print(f"\nsession {run.sid}: {len(m.fiducials)} fiducials "
               f"({fc.get('red', 0)} red, {fc.get('green', 0)} green), "
               f"{len(m.leds)} LEDs, {bound} bound, board_rect={m.board_rect}")
+        print(f"  sensor polarity: {p.value} (from {p.source})"
+              + ("  WARNING: the serial log disagrees" if p.disagrees else ""))
         for e in m.leds:
             tag = f"{e.channel} {e.polarity}" if e.bound else "(unbound)"
             print(f"  {e.led_id:>10} at ({e.ref_px[0]:.1f},{e.ref_px[1]:.1f})  {tag}")

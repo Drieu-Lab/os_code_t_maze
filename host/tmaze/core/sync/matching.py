@@ -32,8 +32,8 @@ reported alongside as camera coverage, not folded into the score: the camera
 catches only ~30-45 % of licks (fast bursts), and an F1 score would have
 rejected a lick LED whose every blink is a real lick. ``bind_blob`` tries every
 channel x polarity and keeps the best. Channels are the sensors' active states only (a beam's
-crossing ``S4=0``, a lick contact ``L2=0``, a valve pulse ``SOL2.1``; see
-``spans.active_spans``): the resting state is the same wire phrased the other
+crossing, e.g. ``S4=0`` on a pre-v8 bundle / ``S4=1`` from v8 on, a lick contact, a valve
+pulse ``SOL2.1``; see ``spans.active_spans``): the resting state is the same wire phrased the other
 way round, and letting both compete gave two labels for one LED.
 
 Tolerance: the pipeline's default is 200 ms. The nominal worst case is ~140 ms
@@ -186,7 +186,7 @@ class Binding:
                     is active": LIT for reward and lick LEDs (lit during the
                     pulse / contact), DARK for beam LEDs (dark during the
                     crossing). Channels are the sensors' ACTIVE states only
-                    (``S4=0``, ``L2=0``, ``SOL2.1``;
+                    (``S4=0``, ``L2=0``, ``SOL2.1`` on a pre-v8 bundle;
                     spans.active_spans), so every count below refers to the same
                     spans and the score can be recomputed from them.
     n_events      - visible serial spans of the channel (recall denominator).
@@ -259,7 +259,7 @@ def bind_blob(blob: int, led_by_polarity: Dict[str, Sequence[Span]],
     """Try every (channel, polarity) for one LED; return (accepted, all candidates).
 
     ``events_by_channel`` should hold the sensors' active states only
-    (spans.active_spans) - otherwise "dark while S4=0" and "lit while S4=1"
+    (spans.active_spans) - otherwise "dark while S4 broken" and "lit while S4 clear"
     would compete as two candidates for the same wire. Accepted = the
     best-scoring candidate whose lags are plausible (``lag_plausible``) that
     clears ``min_score`` (precision) and ``min_matched`` (so three coincidences

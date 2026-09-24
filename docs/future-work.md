@@ -3035,6 +3035,12 @@ provenance increment; the rules-engine `L,<i>,1` top-up, previously firing on th
 release edge, now fires on contact. Recorded pre-v8 logs keep their inverted
 meaning, read per `PROTO_VERSION` / `sensor_polarity`.
 
+**Update (2026-09-24).** The `core/sync/spans.py` follow-up is done (ADR-0199):
+the sync core takes the polarity as a required input, `sync_fit` resolves it per
+bundle (`format.json` flag, else pre-flag -> legacy, else read off the serial log)
+and records it in `clock_fit_<id>.json`. The analysis repo does not parse `S`/`L`
+states, so it needs no change.
+
 **Update (2026-09-08, Slice 1 of FW-0045).** Two things done, the rest still
 open. (a) The **lick detector has the same inversion**: over the full session
 `600_20260903_134552`, `L2=1` runs unbroken for up to 257 s (1582 s in total)

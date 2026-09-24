@@ -31,6 +31,7 @@ try:
 except Exception:  # pragma: no cover
     np = cv2 = None
 
+from tmaze.core.phase3.bundle_format import POLARITY_LEGACY
 from tmaze.core.sync import led_map as LM
 from tmaze.core.sync import matching, pipeline
 from tmaze.core.sync import spans as S
@@ -142,7 +143,8 @@ class TestBoardClip(unittest.TestCase):
     def test_every_led_binds_to_its_channel_from_one_minute(self):
         events = S.serial_spans(S.parse_serial_csv(self.fx["serial_rows"]))
         blob_spans = [D.blob_spans(b.id, self.grey[:, b.id], self.frames, self.tick) for b in self.blobs]
-        res = pipeline.analyze(blob_spans, events, min_matched=2, min_pairs=10)
+        res = pipeline.analyze(blob_spans, events, min_matched=2, min_pairs=10,
+                               sensor_polarity=POLARITY_LEGACY)   # pre-v8 recording
         want = {0: ("SOL2.1", matching.LIT), 1: ("L2=0", matching.LIT), 2: ("L2=0", matching.LIT),
                 3: ("S2=0", matching.DARK), 4: ("S2=0", matching.DARK),
                 5: ("S5=0", matching.DARK), 6: ("S5=0", matching.DARK),

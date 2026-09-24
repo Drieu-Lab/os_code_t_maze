@@ -7,8 +7,9 @@ The synthetic rig (``Rig`` below) models what the spike measured on real
 footage (design doc section 3.7): a camera clock in ns running 27 ppm fast
 relative to the Arduino's ms, frames every ~40 ms, LED ON edges visible in the
 frame that contains them and OFF edges one frame later, a ~60 ms host-stamp
-latency for frames, a few ms of serial-stamp jitter, and the measured sensor
-polarity: beams and lick detector rest at 1, a crossing / contact is 0.
+latency for frames, a few ms of serial-stamp jitter, and the pre-v8 (legacy)
+sensor polarity: beams and lick detector rest at 1, a crossing / contact is 0.
+``flipped`` turns its log into the v8+ (corrected) convention.
 
 Run (from host/):  python -m unittest tests.test_sync_core
 """
@@ -19,9 +20,24 @@ import random
 import unittest
 from typing import Dict, List, Tuple
 
+from tmaze.core.phase3.bundle_format import POLARITY_CORRECTED, POLARITY_LEGACY, POLARITY_UNKNOWN
 from tmaze.core.sync import clockfit, matching, pipeline, spans as S
 
 # ------------------------------------------------------------------ helpers
+
+LEGACY = POLARITY_LEGACY          # what the synthetic Rig writes
+
+
+def flipped(rows):
+    """A legacy log rewritten in the corrected (v8+) convention: every S/L
+    state bit inverted, everything else untouched."""
+    out = []
+    for n, stamp, fw in rows:
+        parts = fw.split(",")
+        if len(parts) >= 4 and parts[1] in ("S", "L") and parts[3] in ("0", "1"):
+            parts[3] = "1" if parts[3] == "0" else "0"
+        out.append((n, stamp, ",".join(parts)))
+    return out
 
 RATE = 1e6 * (1 + 27e-6)          # camera ns per firmware ms
 CAM0 = 8_647_278_000_000_000.0    # camera ticks at firmware ms 0
@@ -149,7 +165,9 @@ class TestSerialSpans(unittest.TestCase):
         ]
         out = S.serial_spans(rows)
         self.assertEqual(sorted(out), ["S2=0", "S2=1", "SOL1.1", "SOL2.1"])
-        self.assertEqual(sorted(S.active_spans(out)), ["S2=0", "SOL1.1", "SOL2.1"])
+        self.assertEqual(sorted(S.active_spans(out, LEGACY)), ["S2=0", "SOL1.1", "SOL2.1"])
+        self.assertEqual(sorted(S.active_spans(out, POLARITY_CORRECTED)),
+                         ["S2=1", "SOL1.1", "SOL2.1"])
         self.assertEqual([round(s.duration, 3) for s in out["S2=0"]], [0.2, 0.3])
         self.assertEqual([s.clk0 for s in out["S2=0"]], [1000, 5000])
         self.assertEqual([round(s.duration, 3) for s in out["S2=1"]], [3.8])
@@ -284,7 +302,7 @@ class TestBinding(unittest.TestCase):
         lit = [S.Span("beam3", a.host_t1, b.host_t0, a.clk1, b.clk0, a.ref1, b.ref0)
                for a, b in zip(dark, dark[1:])]                 # lit between the dark spans
         best, cands = matching.bind_blob(3, {matching.LIT: lit, matching.DARK: dark},
-                                         S.active_spans(events), 0.15, 0.06)
+                                         S.active_spans(events, LEGACY), 0.15, 0.06)
         self.assertIsNotNone(best)
         self.assertEqual((best.channel, best.polarity), ("S3=0", matching.DARK))
         self.assertGreater(best.score, 0.9)
@@ -297,14 +315,24 @@ class TestBinding(unittest.TestCase):
         self.assertAlmostEqual(best.lag_s, 0.07, delta=0.03)
         self.assertEqual(cands[0], best)
 
-    def test_active_states_are_zero_for_both_sensor_kinds_plus_pulses(self):
-        self.assertTrue(S.is_active_channel("S4=0"))
-        self.assertFalse(S.is_active_channel("S4=1"))
-        self.assertTrue(S.is_active_channel("L2=0"))
-        self.assertFalse(S.is_active_channel("L2=1"))
-        self.assertTrue(S.is_active_channel("SOL2.1"))
+    def test_active_state_follows_the_bundle_polarity(self):
+        self.assertEqual(S.active_state(LEGACY), "0")
+        self.assertEqual(S.active_state(POLARITY_CORRECTED), "1")
+        for pol, active, rest in ((LEGACY, "0", "1"), (POLARITY_CORRECTED, "1", "0")):
+            for sensor in ("S4", "L2"):
+                self.assertTrue(S.is_active_channel(f"{sensor}={active}", pol))
+                self.assertFalse(S.is_active_channel(f"{sensor}={rest}", pol))
+            self.assertTrue(S.is_active_channel("SOL2.1", pol))
         ev = {"S4=0": [], "S4=1": [], "L2=1": [], "L2=0": [], "SOL2.1": []}
-        self.assertEqual(sorted(S.active_spans(ev)), ["L2=0", "S4=0", "SOL2.1"])
+        self.assertEqual(sorted(S.active_spans(ev, LEGACY)), ["L2=0", "S4=0", "SOL2.1"])
+        self.assertEqual(sorted(S.active_spans(ev, POLARITY_CORRECTED)), ["L2=1", "S4=1", "SOL2.1"])
+
+    def test_unknown_polarity_is_refused_not_guessed(self):
+        for bad in (POLARITY_UNKNOWN, None, ""):
+            with self.assertRaises(ValueError):
+                S.active_state(bad)
+            with self.assertRaises(ValueError):
+                S.is_active_channel("S4=0", bad)
 
     def test_coincidence_that_precedes_its_wire_is_rejected(self):
         # Real case: the centre reward fires as the rat crosses the centre beam,
@@ -328,8 +356,37 @@ class TestBinding(unittest.TestCase):
         rng = random.Random(9)
         noise = [span(HOST0 + t, HOST0 + t + 0.2) for t in sorted(rng.uniform(5, 230) for _ in range(40))]
         best, _ = matching.bind_blob(99, {matching.LIT: noise, matching.DARK: []},
-                                     S.active_spans(events), 0.15, 0.06)
+                                     S.active_spans(events, LEGACY), 0.15, 0.06)
         self.assertIsNone(best)
+
+
+class TestInferPolarity(unittest.TestCase):
+    def test_reads_both_conventions_off_the_log(self):
+        rig, _ = scripted_session(minutes=6)
+        rows = rig.sorted_lines()
+        legacy = S.infer_polarity(S.serial_spans(rows))
+        self.assertEqual(legacy.polarity, LEGACY)
+        self.assertGreater(legacy.n_votes, 0)
+        self.assertEqual(legacy.n_agree, legacy.n_votes)
+        corrected = S.infer_polarity(S.serial_spans(flipped(rows)))
+        self.assertEqual(corrected.polarity, POLARITY_CORRECTED)
+        self.assertEqual(corrected.n_votes, legacy.n_votes)
+
+    def _sensor(self, name, brief_state, brief_s, long_s):
+        rest = "1" if brief_state == "0" else "0"
+        return {f"{name}={brief_state}": [S.Span("", 0, brief_s)],
+                f"{name}={rest}": [S.Span("", 0, long_s)]}
+
+    def test_dissent_or_no_clear_vote_gives_none(self):
+        ev = {**self._sensor("S2", "0", 0.3, 60.0), **self._sensor("S3", "1", 0.3, 60.0)}
+        g = S.infer_polarity(ev)
+        self.assertIsNone(g.polarity)
+        self.assertEqual((g.n_agree, g.n_votes), (1, 2))
+        # Longest spans within 5x of each other: that sensor abstains.
+        self.assertEqual(S.infer_polarity(self._sensor("S2", "0", 10.0, 20.0)).n_votes, 0)
+        self.assertIsNone(S.infer_polarity({}).polarity)
+        # Valve pulses carry no polarity and never vote.
+        self.assertEqual(S.infer_polarity({"SOL2.1": [S.Span("", 0, 0.3)]}).n_votes, 0)
 
 
 # ----------------------------------------------------------------- clock fit
@@ -412,7 +469,7 @@ class TestAnalyze(unittest.TestCase):
         ]
 
     def test_bindings_fit_and_verdicts(self):
-        res = pipeline.analyze(self.blobs, self.events)
+        res = pipeline.analyze(self.blobs, self.events, sensor_polarity=LEGACY)
         want = {0: "SOL2.1", 1: "L2=0", 2: "S2=0", 3: "S3=0", 4: "S4=0", 5: "S5=0"}
         self.assertEqual({k: b.channel for k, b in res.bindings.items()}, want)
         self.assertEqual(res.bindings[0].polarity, matching.LIT)
@@ -434,18 +491,33 @@ class TestAnalyze(unittest.TestCase):
         self.assertEqual(len({(p.channel, p.x) for p in res.pairs}), len(res.pairs))
 
     def test_licks_can_be_opted_in(self):
-        res = pipeline.analyze(self.blobs, self.events, fit_channel_kinds=("S", "SOL", "L"))
+        res = pipeline.analyze(self.blobs, self.events, fit_channel_kinds=("S", "SOL", "L"),
+                               sensor_polarity=LEGACY)
         self.assertTrue(any(S.channel_kind(p.channel) == "L" for p in res.pairs))
+
+    def test_corrected_log_binds_the_same_leds_to_the_1_state(self):
+        # The same session recorded by v8+ firmware: state bits inverted. With
+        # the bundle's polarity passed in, every LED binds to the same sensor,
+        # now named by its active wire state 1, and the fit is unchanged.
+        events = S.serial_spans(flipped(self.rig.sorted_lines()))
+        res = pipeline.analyze(self.blobs, events, sensor_polarity=POLARITY_CORRECTED)
+        want = {0: "SOL2.1", 1: "L2=1", 2: "S2=1", 3: "S3=1", 4: "S4=1", 5: "S5=1"}
+        self.assertEqual({k: b.channel for k, b in res.bindings.items()}, want)
+        self.assertEqual(res.bindings[2].polarity, matching.DARK)
+        legacy = pipeline.analyze(self.blobs, self.events, sensor_polarity=LEGACY)
+        self.assertEqual(res.verdict, clockfit.VERDICT_OK)
+        self.assertEqual(res.fit.n_pairs, legacy.fit.n_pairs)
+        self.assertAlmostEqual(res.fit.rate, legacy.fit.rate, delta=1e-6)
 
     def test_too_few_events_verdict(self):
         # Only the reward LED: 20 rewards -> 40 edge pairs, below a 50-pair floor.
-        res = pipeline.analyze(self.blobs[:1], self.events, min_pairs=50)
+        res = pipeline.analyze(self.blobs[:1], self.events, min_pairs=50, sensor_polarity=LEGACY)
         self.assertEqual(res.verdict, clockfit.VERDICT_TOO_FEW)
         self.assertIsNone(res.fit)
         self.assertIn(0, res.bindings)
 
     def test_to_dict(self):
-        d = pipeline.analyze(self.blobs, self.events).to_dict()
+        d = pipeline.analyze(self.blobs, self.events, sensor_polarity=LEGACY).to_dict()
         self.assertEqual(d["verdict"], "ok")
         self.assertEqual(d["bindings"]["2"]["channel"], "S2=0")
 

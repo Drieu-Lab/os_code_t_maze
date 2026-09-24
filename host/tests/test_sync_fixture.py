@@ -17,8 +17,11 @@ import json
 import pathlib
 import unittest
 
+from tmaze.core.phase3.bundle_format import POLARITY_LEGACY
 from tmaze.core.sync import clockfit, matching, pipeline, spans as S
 
+# Recorded 2026-09-03 on pre-v8 firmware: the active state is 0 (ADR-0164).
+POLARITY = POLARITY_LEGACY
 FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "sync_excerpt_600_20260903_134552.json"
 
 
@@ -39,24 +42,27 @@ class TestRealExcerpt(unittest.TestCase):
                                dark=[_span(f"blob{b['blob']}", r) for r in b["dark"]])
             for b in cls.fx["blobs"]
         ]
-        cls.res = pipeline.analyze(cls.blobs, cls.events)
+        cls.res = pipeline.analyze(cls.blobs, cls.events, sensor_polarity=POLARITY)
 
     # ---- the serial log itself -------------------------------------------
     def test_active_states_are_the_brief_ones(self):
-        """Verifies the hard-coded sensor polarity (spans.BEAM_ACTIVE_STATE and
-        LICK_ACTIVE_STATE, both "0"; PROTOCOL.md `S`/`L` rows; FW-0058) against
-        a real log. A sensor's active state is the brief one: a beam crossing or
-        a tongue contact lasts well under two seconds, while the resting state
-        runs for tens of seconds (full session: `L2=1` up to 257 s, `L2=0` never
-        above 0.3 s). Sensor chatter splits the resting state into many short
-        pieces too, so compare the LONGEST spans, not medians."""
+        """This pre-v8 log's active state is 0, and infer_polarity reads that
+        off the log (docs/decisions/0164, 0199). A sensor's active state is the
+        brief one: a beam crossing or a tongue contact lasts well under two
+        seconds, while the resting state runs for tens of seconds (full session:
+        `L2=1` up to 257 s, `L2=0` never above 0.3 s). Sensor chatter splits the
+        resting state into many short pieces too, so compare the LONGEST spans,
+        not medians."""
         for sensor in ("S2", "S3", "S4", "S5", "L2"):
             longest_1 = max(s.duration for s in self.events[f"{sensor}=1"])
             longest_0 = max(s.duration for s in self.events[f"{sensor}=0"])
             self.assertGreater(longest_1, 10.0, sensor)
             self.assertLess(longest_0, 2.0, sensor)
-            self.assertTrue(S.is_active_channel(f"{sensor}=0"), sensor)
-            self.assertFalse(S.is_active_channel(f"{sensor}=1"), sensor)
+            self.assertTrue(S.is_active_channel(f"{sensor}=0", POLARITY), sensor)
+            self.assertFalse(S.is_active_channel(f"{sensor}=1", POLARITY), sensor)
+        guess = S.infer_polarity(self.events)
+        self.assertEqual(guess.polarity, POLARITY)
+        self.assertEqual(guess.n_agree, guess.n_votes)
 
     def test_single_firmware_segment(self):
         self.assertEqual({s.segment for v in self.events.values() for s in v}, {0})
@@ -76,7 +82,7 @@ class TestRealExcerpt(unittest.TestCase):
         self.assertTrue(all(v == pipeline.MATCHED for v in self.res.blob_verdicts.values()))
         # Resting states never appear as candidates.
         for cands in self.res.candidates.values():
-            self.assertTrue(all(S.is_active_channel(c.channel) for c in cands))
+            self.assertTrue(all(S.is_active_channel(c.channel, POLARITY) for c in cands))
         # The centre-beam LEDs also overlap 7 of 8 reward pulses (the reward
         # fires as the rat crosses); that coincidence is present as a runner-up
         # but rejected because the LED relights before the pulse ends.

@@ -12,8 +12,9 @@ here touches pixels or files.
 Steps:
 
 1. **Bind** every blob (matching.bind_blob) against the sensors' active states
-   (``S<i>=0`` crossings, ``L<i>=0`` lick contacts, ``SOL`` pulses;
-   spans.active_spans):
+   (beam crossings, lick contacts - ``S<i>=0``/``L<i>=0`` on pre-v8 bundles,
+   ``=1`` from v8 on, per the ``sensor_polarity`` argument - and ``SOL``
+   pulses; spans.active_spans):
    which serial channel it mirrors, with which polarity, and how well. A blob
    with no spans is ``silent``; one whose best candidate is too weak is
    ``unbound``; otherwise ``matched``.
@@ -103,15 +104,17 @@ def analyze(blobs: Sequence[BlobSpans], events: Dict[str, Sequence[Span]],
             tol_s: float = 0.20, min_visible_s: float = 0.06,
             fit_channel_kinds: Sequence[str] = DEFAULT_FIT_CHANNEL_KINDS,
             min_score: float = 0.5, min_matched: int = 3, min_pairs: int = 30,
-            seed: int = 0) -> SyncResult:
+            seed: int = 0, *, sensor_polarity: str) -> SyncResult:
     """Bind every blob, collect fit pairs from the chosen channel kinds, fit.
 
     ``events`` may hold both states of each sensor (as ``serial_spans`` returns
-    them); only the active states are matched (``spans.active_spans``).
+    them); only the active states under ``sensor_polarity`` (``corrected`` or
+    ``legacy_inverted``; required, no default - docs/decisions/0199) are
+    matched (``spans.active_spans``).
     ``tol_s`` is the both-ends host-clock tolerance (why 200 ms: matching.py).
     """
     res = SyncResult()
-    events = active_spans(events)
+    events = active_spans(events, sensor_polarity)
     seen: set = set()
     for blob in blobs:
         if not blob.lit and not blob.dark:

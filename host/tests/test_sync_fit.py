@@ -17,6 +17,7 @@ import shutil
 import tempfile
 import unittest
 
+from tmaze.core.phase3 import bundle_format as BF
 from tmaze.core.sync import clockfit, led_map as LM, matching, pipeline
 from tmaze.core.sync import spans as S
 from tmaze.tools import sync_fit
@@ -62,16 +63,19 @@ def _synthetic_run() -> sync_fit.SyncRun:
                            1000 + 2 * i, 1000 + 2 * i + 1, 0, 1e-9))
         host += 1.0
     bs = pipeline.BlobSpans(0, [], dark)
-    result = pipeline.analyze([bs], events, min_matched=3, min_pairs=10)
+    result = pipeline.analyze([bs], events, min_matched=3, min_pairs=10,
+                              sensor_polarity=BF.POLARITY_LEGACY)
 
     class _Blob:
         def __init__(self, id, x, y):
             self.id, self.x, self.y, self.area, self.peak, self.direction = id, x, y, 5, 120.0, "off"
 
     header = {"codec": "h264", "fps": "25", "width": "1280", "height": "1024"}
+    polarity = sync_fit.SensorPolarity(BF.POLARITY_LEGACY, sync_fit.SRC_DECLARED,
+                                       BF.POLARITY_LEGACY, S.infer_polarity(events))
     return sync_fit.SyncRun(SID, header, [_Blob(0, 970.0, 702.0)], 22.0,
                             {0: "S2_a"}, result, [bs], events, None, None,
-                            (0, 500), 0.20, 0.06, None)
+                            (0, 500), 0.20, 0.06, None, sensor_polarity=polarity)
 
 
 class TestPureBuilders(unittest.TestCase):
@@ -106,6 +110,15 @@ class TestPureBuilders(unittest.TestCase):
         self.assertAlmostEqual(d["fit"]["rate"], 1_000_000.0, delta=1.0)
         self.assertEqual(d["bindings"]["S2_a"]["channel"], "S2=0")
         self.assertIn("recall", d["bindings"]["S2_a"])
+        pol = d["sensor_polarity"]
+        self.assertEqual((pol["value"], pol["active_state"]), (BF.POLARITY_LEGACY, "0"))
+        self.assertEqual(pol["source"], sync_fit.SRC_DECLARED)
+        # 0.2 s crossings vs 0.8 s rests: under the 5x ratio, so the log abstains
+        # (a real session's rests run for tens of seconds) - and abstaining is
+        # never a disagreement.
+        self.assertIsNone(pol["inferred"])
+        self.assertEqual(pol["inferred_votes"], "0/0")
+        self.assertFalse(pol["disagrees"])
 
     def test_artifacts_round_trip(self):
         with tempfile.TemporaryDirectory() as dd:
@@ -143,6 +156,66 @@ class TestPureBuilders(unittest.TestCase):
         # a whole-frame bootstrap fits the rect around the LEDs (+ margin), clipped
         x0, y0, x1, y1 = m.board_rect
         self.assertTrue(x0 < 970 < x1 and y0 < 702 < y1)
+
+
+def _events_with_active_state(state: str):
+    """One beam whose brief (active) spans are in wire state ``state``."""
+    rest = "1" if state == "0" else "0"
+    return {f"S2={state}": [S.Span(f"S2={state}", 0.0, 0.3)],
+            f"S2={rest}": [S.Span(f"S2={rest}", 0.3, 60.0)]}
+
+
+def _bundle_with_format(root: str, fmt) -> str:
+    """A bundle dir holding only config/format.json (``fmt`` dict, or None = no file)."""
+    b = os.path.join(root, "b")
+    os.makedirs(os.path.join(b, "config"), exist_ok=True)
+    if fmt is not None:
+        with open(os.path.join(b, "config", "format.json"), "w", encoding="utf-8") as f:
+            json.dump(fmt, f)
+    return b
+
+
+class TestResolveSensorPolarity(unittest.TestCase):
+    """Which S/L wire state is active for a bundle (docs/decisions/0199)."""
+
+    def _resolve(self, fmt, events, override=None):
+        with tempfile.TemporaryDirectory() as root:
+            return sync_fit.resolve_sensor_polarity(_bundle_with_format(root, fmt), events, override)
+
+    def test_declared_polarity_wins(self):
+        p = self._resolve({"format_version": 4, "sensor_polarity": "corrected"},
+                          _events_with_active_state("1"))
+        self.assertEqual((p.value, p.source), (BF.POLARITY_CORRECTED, sync_fit.SRC_DECLARED))
+        self.assertFalse(p.disagrees)
+
+    def test_declared_polarity_kept_but_flagged_when_the_log_disagrees(self):
+        p = self._resolve({"format_version": 4, "sensor_polarity": "legacy_inverted"},
+                          _events_with_active_state("1"))
+        self.assertEqual(p.value, BF.POLARITY_LEGACY)
+        self.assertEqual(p.inferred.polarity, BF.POLARITY_CORRECTED)
+        self.assertTrue(p.disagrees)
+        self.assertTrue(sync_fit.SensorPolarity(*p).to_dict()["disagrees"])
+
+    def test_bundle_older_than_the_flag_is_legacy(self):
+        for fmt in (None, {"format_version": 2}):
+            p = self._resolve(fmt, {})
+            self.assertEqual((p.value, p.source), (BF.POLARITY_LEGACY, sync_fit.SRC_PRE_FLAG))
+
+    def test_unknown_is_read_off_the_log(self):
+        p = self._resolve({"format_version": 4, "sensor_polarity": "unknown"},
+                          _events_with_active_state("1"))
+        self.assertEqual((p.value, p.source), (BF.POLARITY_CORRECTED, sync_fit.SRC_INFERRED))
+
+    def test_unknown_and_inconclusive_log_refuses(self):
+        with self.assertRaises(sync_fit.PolarityUnresolved):
+            self._resolve({"format_version": 4, "sensor_polarity": "unknown"}, {})
+
+    def test_override(self):
+        p = self._resolve({"format_version": 4, "sensor_polarity": "unknown"}, {},
+                          override=BF.POLARITY_LEGACY)
+        self.assertEqual((p.value, p.source), (BF.POLARITY_LEGACY, sync_fit.SRC_CLI))
+        with self.assertRaises(ValueError):
+            self._resolve(None, {}, override="unknown")
 
 
 class TestBoardSearchPoly(unittest.TestCase):
@@ -236,6 +309,7 @@ class TestPostHocLog(unittest.TestCase):
         self.assertEqual(e["result"]["method"], "led-fit")
         self.assertEqual(e["result"]["verdict"], clockfit.VERDICT_OK)
         self.assertIsNotNone(e["result"]["residual_mad_ms"])
+        self.assertEqual(e["result"]["sensor_polarity"], BF.POLARITY_LEGACY)
         self.assertEqual(man["fiducial"]["method"], "led-fit")
 
     def test_failed_fit_records_streams_only_and_stays_host_t0(self):
