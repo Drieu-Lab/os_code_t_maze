@@ -29,6 +29,7 @@ import unittest
 from tmaze.core import protocol
 from tmaze.core.session.session_notes import (
     AUTO_CAP_REACHED, AUTO_FIRMWARE_RESET, AUTO_SEND_FAILED, AUTO_WRITE_FAILED)
+from tmaze.core.phase3.probe_blocks import ProbeBlockConfig
 from tmaze.core.phase3.session_cap import SessionCapConfig
 from tmaze.core.maze_state import (
     CENTRAL_STEM, HUB, IN_WELL, LEFT_CHOICE, RIGHT_CHOICE, UP_STEM, RatState)
@@ -665,7 +666,7 @@ class SessionPhase3WiringTest(unittest.TestCase):
         # One auto-note, carrying the cap detail.
         caps = [e for e in events if e["tag"] == AUTO_CAP_REACHED]
         self.assertEqual(len(caps), 1)
-        self.assertIn("2 trials", caps[0]["text"])
+        self.assertIn("2 normal trials", caps[0]["text"])
         self.assertEqual(caps[0]["cap"]["reason"], "trials")
         # The banner is unmistakable.
         self.phase3._publish_status(self.phase3._act_snapshot)
@@ -911,6 +912,48 @@ class SessionPhase3WiringTest(unittest.TestCase):
             self._run_full_trial("left")
         self.assertEqual(self.phase3._correct + self.phase3._incorrect, 3)
         self.assertIsNone(self.phase3.cap_reached())
+
+    def _run_correct_trial(self):
+        """One full trial where the rat picks the planned-CORRECT arm. The side is
+        read after the stem departure, once the trial is committed."""
+        self._feed(RatState(zone=HUB, substate=IN_WELL, valid=True, confidence=1.0))
+        self._feed(RatState(zone=CENTRAL_STEM, direction=UP_STEM, entered=CENTRAL_STEM,
+                            exited=HUB, valid=True, confidence=1.0))
+        arm = self.phase3._seq.correct_arm(self.phase3._task.index)
+        zone, side = (LEFT_CHOICE, "left") if arm == 0 else (RIGHT_CHOICE, "right")
+        self._feed(RatState(zone=zone, entered=zone, valid=True, confidence=1.0))
+        self._feed(RatState(zone=HUB, substate=IN_WELL, entered=HUB, exited=zone,
+                            loop_completed=True, loop_side=side, valid=True,
+                            confidence=1.0))
+
+    def test_probe_block_runs_on_top_of_the_trial_cap(self):
+        """docs/decisions/0205: the trial cap counts NORMAL scored trials only. A
+        probe block (the correct-choice trigger + its forced trials) does not use
+        up the budget, so the rat still gets ``max_trials`` normal trials."""
+        self.phase3._current_trial_config = lambda: TrialConfig(
+            max_trials=40, probe=ProbeBlockConfig(
+                enabled=True, block_len=2, windows=((1, 40),)))
+        self._cap(enabled=True, max_trials=3, max_minutes=45.0)
+        self._arm()
+        self._start_session()
+
+        # Trial 1 is correct inside the window -> it becomes the probe trigger,
+        # and the next two trials are the forced probe block.
+        for _ in range(3):
+            self._run_correct_trial()
+        self.assertEqual(self.phase3._correct + self.phase3._incorrect, 3)
+        self.assertEqual(self.phase3._probe_done, 2)       # trigger excluded
+        self.assertEqual(self.phase3._cap_scored, 0)
+        self.assertIsNone(self.phase3.cap_reached())
+
+        # Three normal trials reach the cap; a further trip is silent.
+        for _ in range(4):
+            self._run_correct_trial()
+        hit = self.phase3.cap_reached()
+        self.assertIsNotNone(hit)
+        self.assertEqual(hit["reason"], "trials")
+        self.assertEqual(hit["completed"], 3)
+        self.assertEqual(self.phase3._correct + self.phase3._incorrect, 6)
 
     def test_uncued_trip_is_not_scored_and_reruns(self):
         """A genuine trip whose CHOICE cue never sounds (cue disabled) is UNCUED:

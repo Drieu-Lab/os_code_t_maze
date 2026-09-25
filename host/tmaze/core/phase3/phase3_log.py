@@ -339,10 +339,13 @@ class SupersedeResult:
     scored outcome (CORRECT/INCORRECT/ABANDONED/None) and ``probe`` whether it was
     a probe trial that COUNTED toward the probe tally (i.e. a block trial, not the
     always-correct trigger, which is excluded from probe accuracy; docs/decisions/
-    0134). Only returned when an attempt with recorded behavior was actually
+    0134). ``probe_block`` is True for ANY trial of an unrewarded probe block,
+    trigger included - the trials the session cap does not count (docs/decisions/
+    0205). Only returned when an attempt with recorded behavior was actually
     preserved; None means nothing was archived (an empty row)."""
     outcome: Optional[str]
     probe: bool
+    probe_block: bool = False
 
 
 # The planned cue columns that a trial edit must KEEP (they belong to the trial's
@@ -683,7 +686,8 @@ class Phase3Log:
                 (index, self._attempt[index], self._edit[index], replace(r)))
             result = SupersedeResult(
                 outcome=r.outcome,
-                probe=(r.probe == "1" and r.probe_trigger != "1"))
+                probe=(r.probe == "1" and r.probe_trigger != "1"),
+                probe_block=(r.probe == "1"))
             self._attempt[index] += 1
             self._edit[index] = edit
         self._clear_live(r)

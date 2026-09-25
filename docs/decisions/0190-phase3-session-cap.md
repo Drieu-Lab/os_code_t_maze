@@ -18,7 +18,8 @@
   explicitly deferred "a configurable hard cap"), ADR-0059, ADR-0060; paired
   with ADR-0191 (per-animal reward volume); refined by ADR-0198 (the cap anchor
   is taken once per arm and survives a recording restart - see there for the
-  points-1-and-4 amendments)
+  points-1-and-4 amendments) and by ADR-0205 (the trial limit counts NORMAL
+  scored trials only; probe blocks run on top)
 
 ## Context
 

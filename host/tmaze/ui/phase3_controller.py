@@ -321,6 +321,11 @@ class Phase3ControlView(VisionActuator):
         # it. Written on the actuation thread (set_session_context publishes before
         # the rebind), read by the Tk status poll.
         self._cap_reached: Optional[dict] = None
+        # What the trial limit counts: NORMAL scored trials only (correct or
+        # incorrect, ``not dec.probe``). The whole unrewarded probe block (trigger +
+        # forced trials) runs ON TOP of the limit, so the rat always gets
+        # ``max_trials`` chances at reward (docs/decisions/0205).
+        self._cap_scored = 0
         self._cap_base_done = 0
         self._cap_anchored = False
         self._cap_t0: Optional[dict] = None
@@ -531,7 +536,7 @@ class Phase3ControlView(VisionActuator):
             # ``_cap_anchored`` so the next run re-anchors. Trials run between arm
             # and the first Start don't count (the base is the scored count now).
             if not self._cap_anchored:
-                self._cap_base_done = self._correct + self._incorrect
+                self._cap_base_done = self._cap_scored
                 self._cap_t0 = session_t0
                 self._cap_anchored = True
                 self._cap_reached = None
@@ -791,6 +796,7 @@ class Phase3ControlView(VisionActuator):
         # once at the first Session Start and preserved across a recording restart
         # (docs/decisions/0198), so re-anchor it here on a genuine (re)arm.
         self._cap_reached = None
+        self._cap_scored = 0
         self._cap_base_done = 0
         self._cap_anchored = False
         self._cap_t0 = None
@@ -991,6 +997,8 @@ class Phase3ControlView(VisionActuator):
                 self._correct = max(0, self._correct - 1)
             elif result.outcome == INCORRECT:
                 self._incorrect = max(0, self._incorrect - 1)
+            if not result.probe_block and result.outcome in (CORRECT, INCORRECT):
+                self._cap_scored = max(0, self._cap_scored - 1)
             if result.probe and result.outcome in (CORRECT, INCORRECT):
                 self._probe_done = max(0, self._probe_done - 1)
                 if result.outcome == CORRECT:
@@ -1350,6 +1358,10 @@ class Phase3ControlView(VisionActuator):
                 self._incorrect += 1
             elif dec.outcome == UNCUED:
                 self._uncued += 1
+            # The session cap counts NORMAL scored trials only; ``dec.probe`` is set
+            # for the whole unrewarded probe block, trigger included (ADR-0205).
+            if dec.outcome in (CORRECT, INCORRECT) and not dec.probe:
+                self._cap_scored += 1
             # A correct-choice PROBE just fired on THIS trial (docs/decisions/0134):
             # note where it landed in the session log (the trigger is automatic, so
             # this is the only START marker). Gate on the SCORING edge
@@ -1390,7 +1402,7 @@ class Phase3ControlView(VisionActuator):
                 and self._active_cue is None \
                 and not self._task.awaiting_return \
                 and not task_frame.trial_trip:
-            completed = (self._correct + self._incorrect) - self._cap_base_done
+            completed = self._cap_scored - self._cap_base_done
             elapsed_s = self._session_elapsed_s(snap)
             status = session_cap.evaluate(completed, elapsed_s, snap.session_cap)
             if status.reached:
@@ -1463,9 +1475,10 @@ class Phase3ControlView(VisionActuator):
             self._send_cmd("CUE_OFF")
             self._active_cue = None
         self._gate.reset()
-        limit = (f"{cap.max_trials} trials" if status.reason == session_cap.REASON_TRIALS
+        limit = (f"{cap.max_trials} normal trials"
+                 if status.reason == session_cap.REASON_TRIALS
                  else f"{session_cap.mmss(cap.max_minutes * 60.0)} min")
-        text = (f"session cap reached ({limit}): {completed} trials in "
+        text = (f"session cap reached ({limit}): {completed} normal trials in "
                 f"{session_cap.mmss(elapsed_s)} - earned "
                 f"{format_volume(self._reward_ul)} - remove rat, Stop session")
         target = session_cap.water_target_summary(snap.daily_water_ml, self._reward_ul)
@@ -1733,12 +1746,12 @@ class Phase3ControlView(VisionActuator):
         # rat is no longer being cued; the operator removes it and clicks Stop.
         hit = self._cap_reached
         if hit is not None:
-            limit = (f"{hit['max_trials']} trials"
+            limit = (f"{hit['max_trials']} normal trials"
                      if hit["reason"] == session_cap.REASON_TRIALS
                      else f"{session_cap.mmss(hit['max_minutes'] * 60.0)} min")
             self._status_text = (
                 warn + rec +
-                f"CAP REACHED ({limit}) - {hit['completed']} trials in "
+                f"CAP REACHED ({limit}) - {hit['completed']} normal trials in "
                 f"{session_cap.mmss(hit['elapsed_s'])}  "
                 f"correct:{self._correct}/{done} ({acc:.0f}%)  "
                 f"rewards:{self._reward_count} ({format_volume(self._reward_ul)})  "
@@ -1746,10 +1759,11 @@ class Phase3ControlView(VisionActuator):
             return
         extra = f"  drops:{self._act_drops}" if self._act_drops else ""
         # Live cap countdown once a session has been Started (docs/decisions/0190):
-        # scored trials since the (first) Start / limit, elapsed / limit.
+        # NORMAL scored trials since the (first) Start / limit (probe trials run on
+        # top; ADR-0205), elapsed / limit.
         if snap.session_cap.enabled and snap.cap_t0:
             extra += "  " + session_cap.format_countdown(
-                snap.session_cap, done - self._cap_base_done,
+                snap.session_cap, self._cap_scored - self._cap_base_done,
                 self._session_elapsed_s(snap))
         # UNCUED trips (a commit with no cue this trip; docs/decisions/0171) never
         # scored/rewarded - show the count when any occurred so the operator sees
@@ -2159,7 +2173,7 @@ class Phase3ControlView(VisionActuator):
         # Read-only session cap (file-only like the schedule params; ADR-0190).
         cap = self._current_session_cap()
         if cap.enabled:
-            cap_txt = (f" \u00b7 cap {cap.max_trials} trials / "
+            cap_txt = (f" \u00b7 cap {cap.max_trials} normal trials / "
                        f"{cap.max_minutes:g} min")
         else:
             cap_txt = " \u00b7 cap off"
