@@ -462,6 +462,23 @@ class TestBatchHelpers(unittest.TestCase):
             self.assertIn("2 bundle(s)", text)
             self.assertIn("0 fit, 0 failed, 2 skipped", text)
 
+    def test_run_all_turns_an_unexpected_error_into_one_failed_bundle(self):
+        with tempfile.TemporaryDirectory() as root:
+            _bare_bundle(root, "600_20260101_120000")
+            _bare_bundle(root, "601_20260102_120000")
+            real = sync_fit.fit_one_bundle
+            calls = []
+
+            def flaky(bundle, **kw):
+                calls.append(bundle)
+                if len(calls) == 1:
+                    raise ValueError("corrupt video")
+                return real(bundle, **kw)
+            with mock.patch.object(sync_fit, "fit_one_bundle", flaky):
+                code = sync_fit.run_all([root])
+            self.assertEqual(code, 1)
+            self.assertEqual(len(calls), 2, "the batch carried on after the error")
+
 
 def _make_bundle(root: str) -> str:
     """A throwaway bundle from the clip fixture: video/<id>.mp4 + sidecar +
@@ -568,6 +585,28 @@ class TestEndToEndOnClip(unittest.TestCase):
             with open(mpath, "rb") as f:
                 after = f.read()
         self.assertEqual(before, after)   # a dry run never edits the manifest
+
+    def test_batch_dry_run_touches_no_bundle(self):
+        with tempfile.TemporaryDirectory() as root:
+            bundle = _make_bundle(root)
+            mpath = os.path.join(bundle, f"session_{SID}.json")
+            with open(mpath, "rb") as f:
+                before = f.read()
+            out = os.path.join(root, "_dry")
+            log = os.path.join(out, "batch.log")
+            os.makedirs(out)
+            code = sync_fit.run_all([root], log_path=log, dry_run_dir=out,
+                                    board_rect=(0, 0, 210, 184), min_matched=2, min_pairs=10)
+            self.assertEqual(code, 0)
+            with open(mpath, "rb") as f:
+                self.assertEqual(f.read(), before)
+            self.assertFalse(os.path.isdir(os.path.join(bundle, "sync")))
+            for name in (f"clock_fit_{SID}.json", f"led_events_{SID}.csv", "report.txt"):
+                self.assertTrue(os.path.isfile(os.path.join(out, SID, name)), name)
+            with open(log, encoding="utf-8") as f:
+                text = f.read()
+        self.assertIn("DRY RUN", text)
+        self.assertIn("1 fit, 0 failed", text)
 
     def test_overlay_writes_clock_fit_plot(self):
         try:

@@ -51,11 +51,13 @@ and report formatting.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import csv
 import json
 import math
 import os
 import sys
+import time
 from dataclasses import asdict
 from datetime import datetime
 from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
@@ -1228,7 +1230,24 @@ def summarize(results: Sequence[BundleFitResult]) -> Tuple[str, int]:
     return "\n".join(lines), (1 if failed else 0)
 
 
-def fit_one_bundle(bundle: str, *, refit: bool, **fit_kwargs) -> BundleFitResult:
+def _flags(run: SyncRun) -> str:
+    """What a batch line should flag for review: map contradictions (ADR-0202)
+    and one-active conflict frames (ADR-0201)."""
+    out = []
+    n_bad = len(run.map_check.get("contradictions", {}))
+    if n_bad:
+        out.append(f"{n_bad} contradict map")
+    conflicts = sum(g.get("frames_conflict", 0)
+                    for g in run.one_active.get("groups", {}).values())
+    if conflicts:
+        out.append(f"{conflicts} conflict frames")
+    if run.sensor_polarity.disagrees:
+        out.append("polarity disagrees")
+    return f" [{'; '.join(out)}]" if out else ""
+
+
+def fit_one_bundle(bundle: str, *, refit: bool, dry_run_dir: Optional[str] = None,
+                   **fit_kwargs) -> BundleFitResult:
     """Fit a single bundle for batch mode and return its bucket + detail.
 
     Skips a bundle that already carries a clock fit (unless ``refit``), that has
@@ -1236,7 +1255,11 @@ def fit_one_bundle(bundle: str, *, refit: bool, **fit_kwargs) -> BundleFitResult
     left ``host-t0`` with no orphan clock-fit written). Otherwise writes the two
     ``sync/`` artifacts and registers the manifest (a good fit flips
     ``fiducial.method`` to led-fit; a failed one records the files but stays
-    host-t0). Never raises for an expected missing input - those become SKIPPED."""
+    host-t0). Never raises for an expected missing input - those become SKIPPED.
+
+    With ``dry_run_dir`` nothing in the bundle is touched: the artifacts, the
+    printed report (``report.txt``) and the fit plot go to
+    ``<dry_run_dir>/<session id>/`` instead."""
     sid = bundle_id(bundle)
     if not needs_fit(_manifest_dict(bundle, sid), refit):
         return BundleFitResult(sid, FIT_SKIPPED, "already fit (use --refit)")
@@ -1248,35 +1271,58 @@ def fit_one_bundle(bundle: str, *, refit: bool, **fit_kwargs) -> BundleFitResult
         return BundleFitResult(sid, FIT_SKIPPED, f"no video/data ({e})")
     if not run.fiducials:
         return BundleFitResult(sid, FIT_SKIPPED, "no fiducials in frame")
-    out_dir = os.path.join(bundle, "sync")
+    out_dir = (os.path.join(dry_run_dir, sid) if dry_run_dir
+               else os.path.join(bundle, "sync"))
     os.makedirs(out_dir, exist_ok=True)
     write_led_events(os.path.join(out_dir, f"led_events_{sid}.csv"),
                      led_event_rows(run), sid)
     write_clock_fit(os.path.join(out_dir, f"clock_fit_{sid}.json"), run)
     good = _fit_is_good(run)
-    register_sync_in_manifest(bundle, run, good=good)
+    if dry_run_dir:
+        with open(os.path.join(out_dir, "report.txt"), "w", encoding="utf-8") as fh, \
+                contextlib.redirect_stdout(fh):
+            print_report(run, out_dir)
+            write_fit_plot(os.path.join(out_dir, f"clock_fit_{sid}.png"), run)
+    else:
+        register_sync_in_manifest(bundle, run, good=good)
     if good:
         fit = run.result.fit
         return BundleFitResult(
             sid, FIT_OK,
             f"rate={fit.rate:.4f} MAD={fit.residuals.mad_ms:.1f}ms "
-            f"{fit.n_pairs} pairs")
-    return BundleFitResult(sid, FIT_FAILED, run.result.verdict)
+            f"{fit.n_pairs} pairs" + _flags(run))
+    return BundleFitResult(sid, FIT_FAILED, run.result.verdict + _flags(run))
 
 
 def run_all(roots: Sequence[str], *, refit: bool = False,
-            log_path: Optional[str] = None, **fit_kwargs) -> int:
+            log_path: Optional[str] = None, dry_run_dir: Optional[str] = None,
+            **fit_kwargs) -> int:
     """Fit every bundle under ``roots`` (batch mode). Scans the roots the same
     way the registry does (``session_registry.scan_roots_with_root``,
-    de-duplicated by session id), fits each via :func:`fit_one_bundle`, prints a
-    per-bundle table + summary (also written to ``log_path`` when given), and
-    returns the process exit code (non-zero iff any bundle FAILED; see
-    :func:`summarize`)."""
+    de-duplicated by session id), fits each via :func:`fit_one_bundle` (printing
+    each result as it lands, for an unattended run), prints a per-bundle table +
+    summary (also written to ``log_path`` when given), and returns the process
+    exit code (non-zero iff any bundle FAILED; see :func:`summarize`). An
+    unexpected error in one bundle marks it FAILED and the batch moves on.
+    ``dry_run_dir``: see :func:`fit_one_bundle` - no bundle is modified."""
     pairs = session_registry.scan_roots_with_root([str(r) for r in roots])
-    results = [fit_one_bundle(bundle, refit=refit, **fit_kwargs)
-               for _root, bundle in pairs]
+    results: List[BundleFitResult] = []
+    t_start = time.monotonic()
+    for i, (_root, bundle) in enumerate(pairs, 1):
+        t0 = time.monotonic()
+        try:
+            r = fit_one_bundle(bundle, refit=refit, dry_run_dir=dry_run_dir, **fit_kwargs)
+        except Exception as e:                           # one bad bundle must not end the night
+            r = BundleFitResult(bundle_id(bundle), FIT_FAILED,
+                                f"error: {type(e).__name__}: {e}")
+        results.append(r)
+        print(f"  [{i}/{len(pairs)}] {r.sid}: {r.bucket} {r.detail} "
+              f"({time.monotonic() - t0:.0f} s)", flush=True)
     text, code = summarize(results)
-    report = f"sync_fit --all: scanned {len(pairs)} bundle(s)\n{text}\n"
+    mode = (f" (DRY RUN: no bundle modified; artifacts in {dry_run_dir})"
+            if dry_run_dir else "")
+    report = (f"sync_fit --all: scanned {len(pairs)} bundle(s) in "
+              f"{(time.monotonic() - t_start) / 60:.0f} min{mode}\n{text}\n")
     print(report)
     if log_path:
         try:
@@ -1326,8 +1372,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                          "contact, firmware v8+; legacy_inverted: 0, pre-v8). Default: the "
                          "bundle's format.json, else read off the serial log (ADR-0199)")
     ap.add_argument("--dry-run", action="store_true",
-                    help="do not touch the bundle; print the report and write artifacts to --out")
-    ap.add_argument("--out", help="scratch folder for --dry-run artifacts (default <bundle>/_sync_dryrun)")
+                    help="do not touch the bundle; print the report and write artifacts to --out. "
+                         "With --all: no bundle is touched; each bundle's artifacts + report.txt go "
+                         "to --out/<session id>/, plus the batch log")
+    ap.add_argument("--out", help="scratch folder for --dry-run artifacts (default <bundle>/_sync_dryrun; "
+                                  "with --all, <recordings root>/_sync_dryrun_all_<date>_<time>)")
     ap.add_argument("--start-min", type=float, default=0.0, help="window start, minutes into video")
     ap.add_argument("--minutes", type=float, default=0.0,
                     help="window length in minutes (0 = whole session, the default)")
@@ -1361,11 +1410,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         else:
             roots = [str(p) for p in paths.phase3_recordings_roots()]
         minutes = None if a.minutes <= 0 else a.minutes
+        stamp = f"{datetime.now():%Y%m%d_%H%M%S}"
         log_dir = roots[0] if roots and os.path.isdir(roots[0]) else None
-        log_path = (os.path.join(log_dir,
-                    f"sync_fit_all_{datetime.now():%Y%m%d_%H%M%S}.log")
+        dry_dir = None
+        if a.dry_run:
+            dry_dir = a.out or (os.path.join(log_dir, f"_sync_dryrun_all_{stamp}")
+                                if log_dir else None)
+            if dry_dir is None:
+                ap.error("--all --dry-run needs --out (no recordings root found)")
+            os.makedirs(dry_dir, exist_ok=True)
+            log_dir = dry_dir
+        log_path = (os.path.join(log_dir, f"sync_fit_all_{stamp}.log")
                     if log_dir else None)
-        return run_all(roots, refit=a.refit, log_path=log_path,
+        return run_all(roots, refit=a.refit, log_path=log_path, dry_run_dir=dry_dir,
                        start_min=a.start_min, minutes=minutes,
                        tol_s=a.tol_ms / 1000.0,
                        min_visible_s=a.min_visible_ms / 1000.0,
