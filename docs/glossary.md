@@ -361,6 +361,13 @@ inconsistent ("torn"). It may work thousands of times and corrupt on the one bad
 interleaving, which makes it hard to reproduce. Avoided here by never letting two
 threads call the same core (see [lock](#lock), [thread](#thread)). See ADR-0043.
 
+### Reconcile (bundle audit)
+Check that two records of the *same* events agree. One session writes each
+reward three times: as a trial-CSV row, as a `REWARD` line in the serial log,
+and as a count in the summary. If the counts differ, something was lost or
+duplicated. The bundle audit reconciles rewards, cues, licks and trial counts
+this way. See ADR-0204.
+
 ### Reference (ghost) trace
 A faded, dashed line on the Metrics tab showing a *past* session of the same rat
 drawn behind the live traces, so today's run can be compared against an earlier

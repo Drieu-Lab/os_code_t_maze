@@ -124,6 +124,7 @@ criteria).
 | [FW-0070](#fw-0070-session-cap-fields-in-the-phase-3-tab) | Editable session-cap fields (trials / minutes / enabled) in the Phase 3 tab, saved like the reward knobs | `ui/phase3_controller.py`, `core/phase3/phase3_config.py` | Deferred (hand-edited per ADR-0190) |
 | [FW-0071](#fw-0071-per-day-daily-water-target-override) | Per-day daily-water target override (e.g. from `daily_log.csv`) on top of the per-animal `daily_water_ml` | `core/records/{animals,daily_log}.py`, `ui/phase3_controller.py` | Proposed |
 | [FW-0072](#fw-0072-per-animal-session-cap-overrides) | Per-animal `max_trials` / `max_minutes` overrides in `animals.json` (the ADR-0186 pattern) for slow rats the clock ends early | `core/records/animals.py`, `core/phase3/session_cap.py`, `ui/phase3_controller.py` | Proposed |
+| [FW-0073](#fw-0073-stamp-the-real-animal-id-into-the-video-sidecar) | Stamp the real animal id into the video sidecar (every sidecar so far says `animal: animal`) | `ui/camera_view.py`, `ui/session_controller.py` | Proposed |
 
 ## Entries
 
@@ -3654,6 +3655,39 @@ complicate cross-animal comparison of within-session effects (sated/fatigue).
 come with the same 120 trials (more time) or fewer trials (same time)?
 
 **ADR needed?** Yes.
+
+### FW-0073: Stamp the real animal id into the video sidecar
+
+- **Status:** Proposed
+- **Date added:** 2026-09-24
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** `host/tmaze/ui/camera_view.py` (`start_recording`),
+  `host/tmaze/ui/session_controller.py` (its caller)
+- **Related ADRs:** [ADR-0204](decisions/0204-in-bundle-integrity-audit.md)
+  (the audit that found it), [ADR-0048](decisions/0048-host-session-orchestration-and-manifest.md)
+
+**Motivation / context.** Every video sidecar recorded so far (148 sessions)
+has `# animal: animal`. `camera_view` fills the header from `self._animal_id`,
+which it only learns from a firmware `ANIMAL` line the rig no longer sends; the
+animal is now entered at Session Start and never passed to the camera. The
+fallback string `"animal"` is written instead. The session id in the same
+header is correct, so no data is misrouted, but the sidecar can't vouch for its
+animal on its own and the bundle audit has to skip that field.
+
+**Sketch of approach.** Add an `animal` argument to
+`CameraView.start_recording` next to `session_id`, and pass the resolved
+animal from the Session controller. Write it to the header (keep the old
+fallback only for a bare Record-button recording). Past sidecars stay as they
+are; the manifest holds their animal.
+
+**Evaluation / acceptance.** A new session's sidecar header names its animal;
+`bundle_audit` then checks it (drop the placeholder skip once no new bundle
+carries it, or keep it for the old ones).
+
+**Effort / risk.** Small. It changes code the rig loads at runtime, so land it
+between sessions and check one recording afterwards.
+
+**ADR needed?** No (a bug fix; reference ADR-0204).
 
 ## Completed
 
