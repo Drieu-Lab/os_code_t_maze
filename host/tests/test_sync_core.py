@@ -452,6 +452,71 @@ class TestClockFit(unittest.TestCase):
         self.assertEqual(d["offsets"].keys(), {"0"})
 
 
+class TestTypicalRate(unittest.TestCase):
+    """A session too short to pin its drift uses the rig's typical rate (ADR-0205)."""
+
+    PRIOR = clockfit.RatePrior(RATE, 0.4, "test")
+
+    _pairs = TestClockFit._pairs
+
+    def test_short_session_uses_the_typical_rate_and_records_its_own(self):
+        pairs = self._pairs(40)                          # ~5 min: SE ~20 ppm
+        plain = clockfit.fit_clock(pairs)
+        fit = clockfit.fit_clock(pairs, prior=self.PRIOR)
+        self.assertEqual(plain.rate_source, clockfit.RATE_FITTED)
+        self.assertEqual(fit.rate_source, clockfit.RATE_TYPICAL)
+        self.assertEqual(fit.rate, RATE)
+        self.assertEqual(fit.own_rate, plain.rate)       # the session's estimate is kept
+        self.assertGreater(fit.own_rate_se_ppm, clockfit.RATE_SE_MAX_PPM)
+        self.assertEqual(fit.typical_rate, RATE)
+        # offsets + residuals are recomputed under the typical rate
+        self.assertAlmostEqual(fit.offsets[0], clockfit.median(
+            [p.y - RATE * p.x for p in pairs if p.edge == clockfit.ON]), places=3)
+        self.assertLess(fit.residuals.mad_ms, FRAME_MS)
+
+    def test_long_session_keeps_its_own_rate(self):
+        fit = clockfit.fit_clock(self._pairs(600), prior=self.PRIOR)    # ~70 min
+        self.assertEqual(fit.rate_source, clockfit.RATE_FITTED)
+        self.assertEqual(fit.rate, fit.own_rate)
+        self.assertLess(fit.own_rate_se_ppm, 1.0)
+        self.assertFalse(fit.rate_far_from_typical)
+
+    def test_a_well_pinned_rate_far_from_typical_is_flagged_not_replaced(self):
+        prior = clockfit.RatePrior(1e6 * (1 + 60e-6), 0.4, "stale")
+        fit = clockfit.fit_clock(self._pairs(600), prior=prior)
+        self.assertEqual(fit.rate_source, clockfit.RATE_FITTED)
+        self.assertTrue(fit.rate_far_from_typical)
+        self.assertAlmostEqual(clockfit.drift_ppm(fit.rate), 27.0, delta=2.0)
+
+    def test_the_uncertainty_estimate_is_never_optimistic(self):
+        # Errs high here (~2x): flat frame-quantisation noise, which Theil-Sen
+        # handles better than the straight-line formula assumes. Over-stating the
+        # uncertainty only moves a session to the typical rate a little sooner.
+        drifts, ses = [], []
+        for seed in range(40):
+            fit = clockfit.fit_clock(self._pairs(60, seed=seed))
+            drifts.append(clockfit.drift_ppm(fit.rate))
+            ses.append(fit.own_rate_se_ppm)
+        m = sum(drifts) / len(drifts)
+        sd = (sum((d - m) ** 2 for d in drifts) / (len(drifts) - 1)) ** 0.5
+        mean_se = sum(ses) / len(ses)
+        self.assertLess(abs(m - 27.0), 3 * sd / math.sqrt(len(drifts)) + 0.5)
+        self.assertGreater(mean_se, sd)
+        self.assertLess(mean_se, sd * 3)
+
+    def test_no_spread_means_unknown_uncertainty_written_as_null(self):
+        import json
+        same_x = [clockfit.Pair(1000.0, CAM0 + k, "S2=0", clockfit.ON, 0.06, HOST0, 0)
+                  for k in range(40)]
+        self.assertEqual(clockfit.rate_se_ppm({0: same_x}, [float(k) for k in range(40)]),
+                         float("inf"))
+        d = clockfit.ClockFit(rate=RATE, offsets={0: CAM0}, n_pairs=0,
+                              residuals=clockfit.fit_clock(self._pairs(40)).residuals,
+                              host_lag_median_s=0.06, host_lag_mad_s=0.0).to_dict()
+        self.assertIsNone(d["own_rate_se_ppm"])
+        json.dumps(d, allow_nan=False)
+
+
 # ------------------------------------------------------------------ pipeline
 
 def session_blobs(led: Dict[str, List[S.Span]]) -> List[pipeline.BlobSpans]:

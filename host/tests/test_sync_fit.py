@@ -11,6 +11,7 @@ Two layers, no rig and (mostly) no OpenCV:
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import shutil
@@ -401,6 +402,74 @@ class TestPostHocLog(unittest.TestCase):
             with open(os.path.join(b, f"session_{SID}.json"), encoding="utf-8") as f:
                 man = json.load(f)
         self.assertEqual(len(man["post_hoc"]), 2)  # append-only history, not rewritten
+
+
+class TestTypicalRateLogging(unittest.TestCase):
+    """Which drift rate a fit used is said in the report, the batch line, the
+    clock_fit JSON and the manifest's post_hoc entry (ADR-0205)."""
+
+    PRIOR = clockfit.RatePrior(1e6 * (1 + 26.92e-6), 0.41, "sync_clock_rate.json (test)")
+
+    def _typical_run(self) -> sync_fit.SyncRun:
+        run = _synthetic_run()
+        fit = run.result.fit
+        run.rate_prior = self.PRIOR
+        run.result.fit = dataclasses.replace(
+            fit, rate=self.PRIOR.rate, rate_source=clockfit.RATE_TYPICAL,
+            own_rate=1e6 * (1 + 72e-6), own_rate_se_ppm=85.5, typical_rate=self.PRIOR.rate)
+        return run
+
+    def test_committed_rate_file_loads(self):
+        prior = sync_fit.TR.load()
+        self.assertIsNotNone(prior)
+        self.assertAlmostEqual(clockfit.drift_ppm(prior.rate), 26.92, places=2)
+        self.assertGreater(prior.sd_ppm, 0)
+
+    def test_missing_or_bad_file_means_no_typical_rate(self):
+        with tempfile.TemporaryDirectory() as root:
+            self.assertIsNone(sync_fit.TR.load(os.path.join(root, "absent.json")))
+            bad = os.path.join(root, "bad.json")
+            with open(bad, "w", encoding="utf-8") as f:
+                f.write('{"rate": "fast"}')
+            self.assertIsNone(sync_fit.TR.load(bad))
+
+    def test_report_says_the_typical_rate_was_used_and_why(self):
+        run = self._typical_run()
+        (line,) = sync_fit.rate_lines(run.result.fit, run.rate_prior)
+        self.assertIn("USING THE TYPICAL DRIFT RATE 26.92 ppm", line)
+        self.assertIn("72.00 ± 85.50 ppm is too uncertain", line)
+
+    def test_report_for_a_fitted_rate(self):
+        run = _synthetic_run()
+        self.assertIn("no typical rate on file", sync_fit.rate_lines(run.result.fit, None)[0])
+        far = dataclasses.replace(run.result.fit, rate_far_from_typical=True)
+        lines = sync_fit.rate_lines(far, self.PRIOR)
+        self.assertIn("own fit; typical 26.92", lines[0])
+        self.assertIn("WARNING", lines[1])
+
+    def test_batch_line_flags_the_typical_rate_live_and_from_a_saved_fit(self):
+        run = self._typical_run()
+        self.assertIn("typical rate used", sync_fit._flags(run))
+        with tempfile.TemporaryDirectory() as dry:
+            os.makedirs(os.path.join(dry, SID))
+            with open(os.path.join(dry, SID, "report.txt"), "w", encoding="utf-8"):
+                pass
+            sync_fit.write_clock_fit(os.path.join(dry, SID, f"clock_fit_{SID}.json"), run)
+            prev = sync_fit.previous_dry_result(dry, SID)
+        self.assertIn("typical rate used", prev.detail)
+        self.assertNotIn("typical rate", sync_fit._flags(_synthetic_run()))
+
+    def test_clock_fit_json_and_manifest_record_the_rate_source(self):
+        run = self._typical_run()
+        d = sync_fit.clock_fit_dict(run)
+        self.assertEqual(d["fit"]["rate_source"], clockfit.RATE_TYPICAL)
+        self.assertEqual(d["rate_prior"]["sd_ppm"], 0.41)
+        with tempfile.TemporaryDirectory() as root:
+            b = _bare_bundle(root, SID)
+            sync_fit.register_sync_in_manifest(b, run, good=True)
+            with open(os.path.join(b, f"session_{SID}.json"), encoding="utf-8") as f:
+                man = json.load(f)
+        self.assertEqual(man["post_hoc"][0]["result"]["rate_source"], clockfit.RATE_TYPICAL)
 
 
 class TestBatchHelpers(unittest.TestCase):

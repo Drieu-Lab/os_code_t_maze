@@ -31,12 +31,18 @@ doc section 3.7):
   between consecutive blocks of pairs means the PC's wall clock stepped (e.g. a
   Windows time resync) and the host-based join is untrustworthy from then on.
   Reported, never silently absorbed.
+- **Typical rate for a short session.** The drift rate is a property of the
+  camera + Arduino pair (sessions agree to ~0.4 ppm). A session whose own rate
+  is uncertain by more than ``RATE_SE_MAX_PPM`` (short, or few matched edges)
+  uses the typical rate instead; its offsets are still its own. Which rate was
+  used, and the session's own estimate, are always recorded (ADR-0205).
 
 Stdlib-only; tests in tests/test_sync_core.py.
 """
 
 from __future__ import annotations
 
+import math
 import random
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -48,6 +54,34 @@ ON, OFF = "on", "off"
 VERDICT_OK = "ok"
 VERDICT_TOO_FEW = "too_few_events"
 VERDICT_HOST_STEP = "host_clock_step"
+
+RATE_FITTED, RATE_TYPICAL = "fitted", "typical"
+# A session whose own rate is less certain than this (1 SE, ppm) uses the typical
+# rate. Below it, the own rate moves a 30 min session's ends by < 2 ms, so the
+# session keeps it as an independent check of the typical value (ADR-0205).
+RATE_SE_MAX_PPM = 2.0
+# A well-determined rate this many combined SEs from the typical one is flagged:
+# the camera or the Arduino may have changed, making the typical rate stale.
+RATE_FAR_SIGMAS = 4.0
+# 1.4826 * MAD estimates a standard deviation for normally distributed data.
+MAD_TO_SD = 1.4826
+
+
+NOMINAL_RATE = 1e6       # 1 GHz camera ticks per 1 kHz firmware ms: zero drift
+
+
+def drift_ppm(rate: float) -> float:
+    """How fast the camera clock runs against the Arduino's, in parts per million."""
+    return (rate / NOMINAL_RATE - 1.0) * 1e6
+
+
+@dataclass(frozen=True)
+class RatePrior:
+    """The typical drift rate of this rig's camera + Arduino (y units per x unit),
+    its between-session spread and where it came from."""
+    rate: float
+    sd_ppm: float
+    source: str = ""
 
 
 @dataclass(frozen=True)
@@ -90,6 +124,11 @@ class ClockFit:
     host_lag_mad_s: float = float("nan")
     host_steps: List[HostStep] = field(default_factory=list)
     verdict: str = VERDICT_OK
+    rate_source: str = RATE_FITTED               # fitted | typical
+    own_rate: float = float("nan")               # the session's own estimate
+    own_rate_se_ppm: float = float("nan")
+    typical_rate: Optional[float] = None         # the prior, when one was given
+    rate_far_from_typical: bool = False
 
     def predict(self, x: float, segment: int = 0) -> float:
         return self.offsets[segment] + self.rate * x
@@ -106,6 +145,11 @@ class ClockFit:
             "host_lag_mad_s": self.host_lag_mad_s,
             "host_steps": [vars(s) for s in self.host_steps],
             "verdict": self.verdict,
+            "rate_source": self.rate_source,
+            "own_rate": _finite(self.own_rate),
+            "own_rate_se_ppm": _finite(self.own_rate_se_ppm),
+            "typical_rate": self.typical_rate,
+            "rate_far_from_typical": self.rate_far_from_typical,
         }
 
 
@@ -176,13 +220,56 @@ def host_lag_steps(pairs: Sequence[Pair], block: int = 50, threshold_s: float = 
     return steps
 
 
+def _finite(v: float) -> Optional[float]:
+    """JSON has no inf/nan: an unknown number is written as null."""
+    return v if math.isfinite(v) else None
+
+
+def _offsets(by_seg: Dict[int, List[Pair]], rate: float, min_pairs: int) -> Dict[int, float]:
+    out: Dict[int, float] = {}
+    for seg, seg_pairs in by_seg.items():
+        on = [p for p in seg_pairs if p.edge == ON]
+        basis = on if len(on) >= max(2, min_pairs // 2) else seg_pairs
+        out[seg] = median([p.y - rate * p.x for p in basis])
+    return out
+
+
+def rate_se_ppm(by_seg: Dict[int, List[Pair]], resid_ms: Sequence[float]) -> float:
+    """How uncertain a fitted rate is, in ppm (one standard error).
+
+    The straight-line slope error ``sd(residual) / (sd(x) * sqrt(n))``, with the
+    residual SD taken robustly from the MAD and the x spread pooled within
+    segments (each segment has its own offset, so only within-segment spread
+    tells about the rate). It errs high rather than low (up to ~2x for flat
+    frame-quantisation noise, which Theil-Sen handles better than this formula
+    assumes); on the archive it matched the scatter of long sessions' rates.
+    Used only to decide whether the session pins its rate at all. ``inf`` when
+    there is no spread."""
+    n = sum(len(v) for v in by_seg.values())
+    ss = 0.0
+    for seg_pairs in by_seg.values():
+        m = sum(p.x for p in seg_pairs) / len(seg_pairs)
+        ss += sum((p.x - m) ** 2 for p in seg_pairs)
+    sd_x = (ss / n) ** 0.5 if n else 0.0
+    if sd_x <= 0 or n < 2:
+        return float("inf")
+    return MAD_TO_SD * mad(resid_ms) / (sd_x * n ** 0.5) * 1e6
+
+
 def fit_clock(pairs: Sequence[Pair], min_pairs: int = 30, max_pairs: int = 20000, seed: int = 0,
-              step_block: int = 50, step_threshold_s: float = 0.1) -> Optional[ClockFit]:
+              step_block: int = 50, step_threshold_s: float = 0.1,
+              prior: Optional[RatePrior] = None,
+              max_se_ppm: float = RATE_SE_MAX_PPM) -> Optional[ClockFit]:
     """Fit y = offset[segment] + rate * x over the pairs. None if too few.
 
     Slopes are computed within segments only (shared rate); each segment's
     offset is the median of ``y - rate * x`` over its ON edges when it has at
     least ``min_pairs // 2`` of them, else over all its pairs.
+
+    With a ``prior`` (the rig's typical rate), a session whose own rate is
+    uncertain by more than ``max_se_ppm`` uses the prior's rate, with offsets
+    and residuals recomputed under it; a well-determined own rate far from the
+    prior is flagged (``rate_far_from_typical``) but kept.
     """
     if len(pairs) < min_pairs:
         return None
@@ -201,13 +288,19 @@ def fit_clock(pairs: Sequence[Pair], min_pairs: int = 30, max_pairs: int = 20000
                       for i, j in _sample_pairs(len(xs), share, seed) if xs[j] != xs[i])
     if not slopes:
         return None
-    rate = median(slopes)
-    offsets: Dict[int, float] = {}
-    for seg, seg_pairs in by_seg.items():
-        on = [p for p in seg_pairs if p.edge == ON]
-        basis = on if len(on) >= max(2, min_pairs // 2) else seg_pairs
-        offsets[seg] = median([p.y - rate * p.x for p in basis])
+    own_rate = rate = median(slopes)
+    offsets = _offsets(by_seg, rate, min_pairs)
     resid = [(p.y - (offsets[p.segment] + rate * p.x)) / rate for p in pairs]
+    own_se = rate_se_ppm(by_seg, resid)
+    source, far = RATE_FITTED, False
+    if prior is not None:
+        if own_se > max_se_ppm:
+            rate, source = prior.rate, RATE_TYPICAL
+            offsets = _offsets(by_seg, rate, min_pairs)
+            resid = [(p.y - (offsets[p.segment] + rate * p.x)) / rate for p in pairs]
+        else:
+            gap_ppm = abs(own_rate - prior.rate) / prior.rate * 1e6
+            far = gap_ppm > RATE_FAR_SIGMAS * (own_se ** 2 + prior.sd_ppm ** 2) ** 0.5
     per_channel: Dict[str, List[float]] = {}
     per_edge: Dict[str, List[float]] = {}
     for p, r in zip(pairs, resid):
@@ -223,4 +316,7 @@ def fit_clock(pairs: Sequence[Pair], min_pairs: int = 30, max_pairs: int = 20000
         host_lag_median_s=median(host_lags), host_lag_mad_s=mad(host_lags),
         host_steps=steps,
         verdict=VERDICT_HOST_STEP if steps else VERDICT_OK,
+        rate_source=source, own_rate=own_rate, own_rate_se_ppm=own_se,
+        typical_rate=prior.rate if prior is not None else None,
+        rate_far_from_typical=far,
     )

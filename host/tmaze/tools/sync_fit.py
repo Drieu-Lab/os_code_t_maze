@@ -67,10 +67,12 @@ from tmaze.core.session import session_registry, session_serial
 from tmaze.core.session.session_log import SessionManifest
 from tmaze.core.sync import board_layout as BL, event_frames as EF, exclusive as EX
 from tmaze.core.sync import clockfit, led_map as LM, matching, pipeline
-from tmaze.core.sync import spans as S
+from tmaze.core.sync import spans as S, typical_rate as TR
 from tmaze.core.timeutil import now_iso
 
-TOOL_VERSION = 3       # 2: the one-active rule (ADR-0201); 3: the map check (ADR-0202)
+# 2: the one-active rule (ADR-0201); 3: the map check (ADR-0202);
+# 4: the typical drift rate for a session that cannot pin its own (ADR-0205)
+TOOL_VERSION = 4
                        # + reward-valve group (ADR-0203)
 FIDUCIAL_METHOD = "led-fit"
 
@@ -226,7 +228,8 @@ class SyncRun:
                  search_poly: Optional[List[Tuple[float, float]]] = None,
                  frame_size: Optional[Tuple[int, int]] = None, median=None,
                  frames: Sequence[S.Frame] = (), video: Optional[str] = None,
-                 one_active: Optional[dict] = None, map_check: Optional[dict] = None):
+                 one_active: Optional[dict] = None, map_check: Optional[dict] = None,
+                 rate_prior: Optional[clockfit.RatePrior] = None):
         self.sid = sid
         self.header = header
         self.blobs = blobs
@@ -252,6 +255,7 @@ class SyncRun:
         self.video = video
         self.one_active = one_active or {"applied": False, "reason": "not run"}   # ADR-0201
         self.map_check = map_check or {"applied": False, "reason": "not run"}     # ADR-0202
+        self.rate_prior = rate_prior           # the typical drift rate offered (ADR-0205)
 
     def led_id(self, blob: int) -> str:
         return self.led_ids.get(blob, f"blob_{blob}")
@@ -294,6 +298,8 @@ def analyze_bundle(bundle: str, *, start_min: float = 0.0, minutes: Optional[flo
                    layout_path: Optional[str] = None,
                    one_active_rule: bool = True,
                    map_check: bool = True,
+                   typical_rate: bool = True,
+                   rate_path: Optional[str] = None,
                    progress: bool = False) -> SyncRun:
     """Detect the LEDs, bind them, fit the clock.
 
@@ -314,6 +320,9 @@ def analyze_bundle(bundle: str, *, start_min: float = 0.0, minutes: Optional[flo
     is False (ADR-0201). With any map carrying LED channels, an LED that
     matches another channel instead of its own is reported and kept out of the
     fit, unless ``map_check`` is False (ADR-0202).
+    Unless ``typical_rate`` is False, the rig's typical drift rate
+    (``rate_path``, default ``host/sync_clock_rate.json``) replaces the session's
+    own rate when that is too uncertain to trust (ADR-0205).
     """
     sid = bundle_id(bundle)
     header, frames = _read_frames(bundle, sid)
@@ -425,16 +434,18 @@ def analyze_bundle(bundle: str, *, start_min: float = 0.0, minutes: Optional[flo
     blob_spans = [D.blob_spans(b.id, grey[:, i], win, tick) for i, b in enumerate(blobs)]
 
     expected, check = map_expectations(blobs, led_ids, used_map, enabled=map_check)
+    prior = TR.load(rate_path) if typical_rate else None
     result = pipeline.analyze(blob_spans, events, tol_s=tol_s, min_visible_s=min_visible_s,
                               min_matched=min_matched, min_pairs=min_pairs,
-                              sensor_polarity=polarity.value, expected=expected)
+                              sensor_polarity=polarity.value, expected=expected,
+                              rate_prior=prior)
     check.update(map_check_record(result, led_ids, used_map) if check["applied"] else {})
     return SyncRun(sid, header, blobs, floor, led_ids, result, blob_spans, events,
                    registration, used_map, (start, got), tol_s, min_visible_s, crop,
                    sensor_polarity=polarity, fiducials=fiducials, fid_registration=fid_registration,
                    board_poly=board_poly, search_poly=search_poly,
                    frame_size=frame_size, median=ext.median(), frames=win, video=video,
-                   one_active=one_active, map_check=check)
+                   one_active=one_active, map_check=check, rate_prior=prior)
 
 
 def map_direction(entry: LM.LedEntry, used_map: LM.LedMap) -> Optional[str]:
@@ -887,6 +898,7 @@ def clock_fit_dict(run: SyncRun) -> dict:
         "map_check": run.map_check,
         "blob_verdicts": verdicts,
         "bindings": bindings,
+        "rate_prior": None if run.rate_prior is None else asdict(run.rate_prior),
         "fit": res.fit.to_dict() if res.fit else None,
         "verdict": res.verdict,
     }
@@ -957,6 +969,7 @@ def register_sync_in_manifest(bundle: str, run: SyncRun,
             "verdict": run.result.verdict,
             "residual_mad_ms": (round(fit.residuals.mad_ms, 3)
                                 if good and fit is not None else None),
+            "rate_source": fit.rate_source if fit is not None else None,   # ADR-0205
             "sensor_polarity": run.sensor_polarity.value,
         },
     })
@@ -1047,6 +1060,26 @@ def map_check_lines(info: dict) -> List[str]:
     return out
 
 
+def rate_lines(fit: clockfit.ClockFit, prior: Optional[clockfit.RatePrior]) -> List[str]:
+    """The report lines saying which drift rate the fit used and why (ADR-0205)."""
+    own = (f"{clockfit.drift_ppm(fit.own_rate):.2f} ± {fit.own_rate_se_ppm:.2f} ppm"
+           if math.isfinite(fit.own_rate_se_ppm) else
+           f"{clockfit.drift_ppm(fit.own_rate):.2f} ppm (uncertainty unknown)")
+    if fit.rate_source == clockfit.RATE_TYPICAL and prior is not None:
+        return [f"    USING THE TYPICAL DRIFT RATE {clockfit.drift_ppm(prior.rate):.2f} ppm "
+                f"instead of this session's fit: its own rate {own} is too uncertain "
+                f"(limit ± {clockfit.RATE_SE_MAX_PPM:.1f} ppm; typical from {TR.FILENAME})"]
+    if prior is None:
+        return [f"    drift {own} (own fit; no typical rate on file)"]
+    lines = [f"    drift {own} (own fit; typical {clockfit.drift_ppm(prior.rate):.2f} "
+             f"± {prior.sd_ppm:.2f} ppm)"]
+    if fit.rate_far_from_typical:
+        lines.append("    WARNING: this well-determined drift is far from the typical one - "
+                     "was the camera or the Arduino changed? If so, re-measure "
+                     f"{TR.FILENAME} (ADR-0205)")
+    return lines
+
+
 def print_report(run: SyncRun, out: str) -> None:
     res = run.result
     print(f"\nsession {run.sid}: codec={run.header.get('codec')} "
@@ -1120,6 +1153,8 @@ def print_report(run: SyncRun, out: str) -> None:
         if fit.per_edge_offset_ms:
             print("    per-edge offset: " + ", ".join(f"{k}={v:.1f} ms"
                   for k, v in fit.per_edge_offset_ms.items()))
+        for line in rate_lines(fit, run.rate_prior):
+            print(line)
         print(f"    host lag median={fit.host_lag_median_s * 1000:.1f} ms "
               f"MAD={fit.host_lag_mad_s * 1000:.1f} ms; verdict {fit.verdict}")
         if fit.host_steps:
@@ -1230,11 +1265,17 @@ def summarize(results: Sequence[BundleFitResult]) -> Tuple[str, int]:
     return "\n".join(lines), (1 if failed else 0)
 
 
-def _flags_from(map_check: dict, one_active: dict, polarity_disagrees: bool) -> str:
-    """What a batch line should flag for review: map contradictions (ADR-0202),
+def _flags_from(map_check: dict, one_active: dict, polarity_disagrees: bool,
+                fit: Optional[dict] = None) -> str:
+    """What a batch line should flag for review: the typical drift rate used, or
+    a fitted rate far from it (ADR-0205), map contradictions (ADR-0202),
     one-active conflict frames (ADR-0201) and a serial-vs-format polarity clash.
     Takes the ``clock_fit`` dict's pieces so a saved fit can be re-flagged."""
     out = []
+    if (fit or {}).get("rate_source") == clockfit.RATE_TYPICAL:
+        out.append("typical rate used")
+    if (fit or {}).get("rate_far_from_typical"):
+        out.append("rate far from typical")
     n_bad = len((map_check or {}).get("contradictions", {}))
     if n_bad:
         out.append(f"{n_bad} contradict map")
@@ -1248,7 +1289,9 @@ def _flags_from(map_check: dict, one_active: dict, polarity_disagrees: bool) -> 
 
 
 def _flags(run: SyncRun) -> str:
-    return _flags_from(run.map_check, run.one_active, run.sensor_polarity.disagrees)
+    fit = run.result.fit
+    return _flags_from(run.map_check, run.one_active, run.sensor_polarity.disagrees,
+                       fit.to_dict() if fit is not None else None)
 
 
 # A dry run's per-bundle result, written LAST into ``<dry run dir>/<sid>/`` so
@@ -1280,9 +1323,9 @@ def previous_dry_result(dry_run_dir: str, sid: str) -> Optional[BundleFitResult]
     try:
         with open(os.path.join(d, f"clock_fit_{sid}.json"), encoding="utf-8") as fh:
             cf = json.load(fh)
-        flags = _flags_from(cf.get("map_check"), cf.get("one_active"),
-                            bool((cf.get("sensor_polarity") or {}).get("disagrees")))
         fit = cf.get("fit")
+        flags = _flags_from(cf.get("map_check"), cf.get("one_active"),
+                            bool((cf.get("sensor_polarity") or {}).get("disagrees")), fit)
         if fit and cf.get("verdict") == clockfit.VERDICT_OK:
             return BundleFitResult(sid, FIT_OK, _fit_detail(fit) + flags)
         return BundleFitResult(sid, FIT_FAILED, str(cf.get("verdict")) + flags)
@@ -1433,6 +1476,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     help="let an LED bind to whatever channel it matches best, even one other "
                          "than its led_map.json channel (default: such an LED is reported and "
                          "kept out of the fit; never applied while building a map; ADR-0202)")
+    ap.add_argument("--no-typical-rate", action="store_true",
+                    help="always use the session's own drift rate, even when it is too uncertain "
+                         "(default: such a session uses the typical rate; ADR-0205)")
+    ap.add_argument("--typical-rate", metavar="FILE",
+                    help="the typical drift rate file (default host/sync_clock_rate.json)")
     ap.add_argument("--serial", help="read serial events from this log instead of the bundle's "
                     "central-only capture; use the FULL rig_logger CSV for a mapping session "
                     "(it keeps the left/right-reward and rinse/drain valve acks the capture drops)")
@@ -1507,7 +1555,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                        min_matched=a.min_matched, min_pairs=a.min_pairs,
                        serial_path=a.serial, sensor_polarity=a.sensor_polarity,
                        layout_path=a.layout, one_active_rule=not a.no_one_active,
-                       map_check=not a.no_map_check)
+                       map_check=not a.no_map_check,
+                       typical_rate=not a.no_typical_rate, rate_path=a.typical_rate)
 
     if not a.bundle:
         ap.error("a bundle folder is required (or use --all / --selftest)")
@@ -1525,6 +1574,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                              serial_path=a.serial, sensor_polarity=a.sensor_polarity,
                              layout_path=a.layout, one_active_rule=not a.no_one_active,
                              map_check=not (a.no_map_check or a.map),
+                             typical_rate=not a.no_typical_rate, rate_path=a.typical_rate,
                              progress=a.map)
     except (FileNotFoundError, RuntimeError) as e:
         print(f"error: {e}", file=sys.stderr)

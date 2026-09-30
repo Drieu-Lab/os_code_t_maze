@@ -73,6 +73,11 @@ line `time_B = offset + rate * time_A` estimated from events seen in both stream
 ([fiducials](#fiducial)); the residuals (how far each event sits from the line)
 tell you the alignment's precision. See
 [`docs/design/cross-stream-sync-design.md`](design/cross-stream-sync-design.md).
+The **drift rate** is quoted in **ppm** (parts per million): this rig's camera
+clock runs ~27 ppm fast against the Arduino, i.e. ~27 µs gained per second
+(~0.1 s per hour). It is a fixed property of that camera + Arduino pair, so a
+session too short to measure it well borrows the rig's **typical rate**
+(`host/sync_clock_rate.json`; ADR-0205).
 
 ### Constellation registration
 Finding where a known, fixed pattern of points (the "constellation" — here the

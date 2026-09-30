@@ -123,7 +123,8 @@ def analyze(blobs: Sequence[BlobSpans], events: Dict[str, Sequence[Span]],
             fit_channel_kinds: Sequence[str] = DEFAULT_FIT_CHANNEL_KINDS,
             min_score: float = 0.5, min_matched: int = 3, min_pairs: int = 30,
             seed: int = 0, *, sensor_polarity: str,
-            expected: Optional[Dict[int, Tuple[str, Optional[str]]]] = None) -> SyncResult:
+            expected: Optional[Dict[int, Tuple[str, Optional[str]]]] = None,
+            rate_prior: Optional[clockfit.RatePrior] = None) -> SyncResult:
     """Bind every blob, collect fit pairs from the chosen channel kinds, fit.
 
     ``events`` may hold both states of each sensor (as ``serial_spans`` returns
@@ -138,6 +139,9 @@ def analyze(blobs: Sequence[BlobSpans], events: Dict[str, Sequence[Span]],
     even if another channel scores higher (recorded in ``map_preferred``); when
     only another channel qualifies it is ``contradicts_map`` and feeds nothing
     (docs/decisions/0202).
+
+    ``rate_prior`` (the rig's typical drift rate) replaces the session's own
+    rate when that is too uncertain (``clockfit.fit_clock``; ADR-0205).
     """
     res = SyncResult()
     events = active_spans(events, sensor_polarity)
@@ -175,6 +179,6 @@ def analyze(blobs: Sequence[BlobSpans], events: Dict[str, Sequence[Span]],
             seen.add(key)
             res.pairs.append(p)
     res.pairs.sort(key=lambda p: p.host_t)
-    res.fit = clockfit.fit_clock(res.pairs, min_pairs=min_pairs, seed=seed)
+    res.fit = clockfit.fit_clock(res.pairs, min_pairs=min_pairs, seed=seed, prior=rate_prior)
     res.verdict = res.fit.verdict if res.fit is not None else clockfit.VERDICT_TOO_FEW
     return res
