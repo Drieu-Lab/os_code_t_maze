@@ -1230,20 +1230,71 @@ def summarize(results: Sequence[BundleFitResult]) -> Tuple[str, int]:
     return "\n".join(lines), (1 if failed else 0)
 
 
-def _flags(run: SyncRun) -> str:
-    """What a batch line should flag for review: map contradictions (ADR-0202)
-    and one-active conflict frames (ADR-0201)."""
+def _flags_from(map_check: dict, one_active: dict, polarity_disagrees: bool) -> str:
+    """What a batch line should flag for review: map contradictions (ADR-0202),
+    one-active conflict frames (ADR-0201) and a serial-vs-format polarity clash.
+    Takes the ``clock_fit`` dict's pieces so a saved fit can be re-flagged."""
     out = []
-    n_bad = len(run.map_check.get("contradictions", {}))
+    n_bad = len((map_check or {}).get("contradictions", {}))
     if n_bad:
         out.append(f"{n_bad} contradict map")
     conflicts = sum(g.get("frames_conflict", 0)
-                    for g in run.one_active.get("groups", {}).values())
+                    for g in ((one_active or {}).get("groups") or {}).values())
     if conflicts:
         out.append(f"{conflicts} conflict frames")
-    if run.sensor_polarity.disagrees:
+    if polarity_disagrees:
         out.append("polarity disagrees")
     return f" [{'; '.join(out)}]" if out else ""
+
+
+def _flags(run: SyncRun) -> str:
+    return _flags_from(run.map_check, run.one_active, run.sensor_polarity.disagrees)
+
+
+# A dry run's per-bundle result, written LAST into ``<dry run dir>/<sid>/`` so
+# its presence means that bundle finished (``--skip-done``).
+DRY_RUN_RESULT = "result.json"
+
+
+def _fit_detail(fit: dict) -> str:
+    return (f"rate={fit['rate']:.4f} MAD={fit['residual_ms']['mad_ms']:.1f}ms "
+            f"{fit['n_pairs']} pairs")
+
+
+def previous_dry_result(dry_run_dir: str, sid: str) -> Optional[BundleFitResult]:
+    """The result an earlier dry run left for ``sid`` in ``dry_run_dir``, or None
+    if that bundle never finished there.
+
+    Reads the ``result.json`` marker; a folder from before the marker existed
+    counts as finished when it holds both ``report.txt`` and the clock fit, and
+    its line is rebuilt from the clock fit. Anything unreadable is None (redo)."""
+    d = os.path.join(dry_run_dir, sid)
+    try:
+        with open(os.path.join(d, DRY_RUN_RESULT), encoding="utf-8") as fh:
+            r = json.load(fh)
+        return BundleFitResult(sid, r["bucket"], r["detail"])
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    if not os.path.isfile(os.path.join(d, "report.txt")):
+        return None
+    try:
+        with open(os.path.join(d, f"clock_fit_{sid}.json"), encoding="utf-8") as fh:
+            cf = json.load(fh)
+        flags = _flags_from(cf.get("map_check"), cf.get("one_active"),
+                            bool((cf.get("sensor_polarity") or {}).get("disagrees")))
+        fit = cf.get("fit")
+        if fit and cf.get("verdict") == clockfit.VERDICT_OK:
+            return BundleFitResult(sid, FIT_OK, _fit_detail(fit) + flags)
+        return BundleFitResult(sid, FIT_FAILED, str(cf.get("verdict")) + flags)
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def _write_dry_result(dry_run_dir: str, r: BundleFitResult) -> None:
+    d = os.path.join(dry_run_dir, r.sid)
+    os.makedirs(d, exist_ok=True)
+    _atomic_write(os.path.join(d, DRY_RUN_RESULT),
+                  json.dumps({"bucket": r.bucket, "detail": r.detail}, indent=2) + "\n")
 
 
 def fit_one_bundle(bundle: str, *, refit: bool, dry_run_dir: Optional[str] = None,
@@ -1296,7 +1347,7 @@ def fit_one_bundle(bundle: str, *, refit: bool, dry_run_dir: Optional[str] = Non
 
 def run_all(roots: Sequence[str], *, refit: bool = False,
             log_path: Optional[str] = None, dry_run_dir: Optional[str] = None,
-            **fit_kwargs) -> int:
+            skip_done: bool = False, **fit_kwargs) -> int:
     """Fit every bundle under ``roots`` (batch mode). Scans the roots the same
     way the registry does (``session_registry.scan_roots_with_root``,
     de-duplicated by session id), fits each via :func:`fit_one_bundle` (printing
@@ -1304,14 +1355,30 @@ def run_all(roots: Sequence[str], *, refit: bool = False,
     summary (also written to ``log_path`` when given), and returns the process
     exit code (non-zero iff any bundle FAILED; see :func:`summarize`). An
     unexpected error in one bundle marks it FAILED and the batch moves on.
-    ``dry_run_dir``: see :func:`fit_one_bundle` - no bundle is modified."""
+    ``dry_run_dir``: see :func:`fit_one_bundle` - no bundle is modified; each
+    bundle's result is also saved there (``result.json``, not after an
+    unexpected error, so that bundle is retried). ``skip_done`` (dry run only):
+    reuse the result an earlier dry run into the same folder left
+    (:func:`previous_dry_result`) instead of fitting that bundle again, so an
+    interrupted dry batch can be finished."""
     pairs = session_registry.scan_roots_with_root([str(r) for r in roots])
     results: List[BundleFitResult] = []
     t_start = time.monotonic()
+    n_reused = 0
     for i, (_root, bundle) in enumerate(pairs, 1):
         t0 = time.monotonic()
+        prev = (previous_dry_result(dry_run_dir, bundle_id(bundle))
+                if skip_done and dry_run_dir else None)
+        if prev is not None:
+            results.append(prev)
+            n_reused += 1
+            print(f"  [{i}/{len(pairs)}] {prev.sid}: {prev.bucket} {prev.detail} "
+                  "(earlier run)", flush=True)
+            continue
         try:
             r = fit_one_bundle(bundle, refit=refit, dry_run_dir=dry_run_dir, **fit_kwargs)
+            if dry_run_dir:
+                _write_dry_result(dry_run_dir, r)
         except Exception as e:                           # one bad bundle must not end the night
             r = BundleFitResult(bundle_id(bundle), FIT_FAILED,
                                 f"error: {type(e).__name__}: {e}")
@@ -1321,6 +1388,8 @@ def run_all(roots: Sequence[str], *, refit: bool = False,
     text, code = summarize(results)
     mode = (f" (DRY RUN: no bundle modified; artifacts in {dry_run_dir})"
             if dry_run_dir else "")
+    if n_reused:
+        mode += f"\n  {n_reused} bundle(s) reused from an earlier run into the same folder"
     report = (f"sync_fit --all: scanned {len(pairs)} bundle(s) in "
               f"{(time.monotonic() - t_start) / 60:.0f} min{mode}\n{text}\n")
     print(report)
@@ -1397,12 +1466,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                          "skips already-fit bundles unless --refit")
     ap.add_argument("--refit", action="store_true",
                     help="with --all, re-fit bundles that already carry a clock fit")
+    ap.add_argument("--skip-done", action="store_true",
+                    help="with --all --dry-run --out <an earlier dry-run folder>: skip the "
+                         "bundles that folder already holds a result for and finish the rest "
+                         "into it (an interrupted dry batch); the summary lists both")
     ap.add_argument("--selftest", action="store_true", help="run the synthetic self-check and exit")
     a = ap.parse_args(argv)
 
     if a.selftest:
         return _selftest()
 
+    if a.skip_done and not (a.all and a.dry_run and a.out):
+        ap.error("--skip-done needs --all --dry-run --out <the earlier dry-run folder> "
+                 "(a real --all already skips fitted bundles)")
+    if a.skip_done and not os.path.isdir(a.out):
+        ap.error(f"--skip-done: no such dry-run folder: {a.out}")
     if a.all:
         from tmaze import paths
         if a.bundle:
@@ -1423,7 +1501,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         log_path = (os.path.join(log_dir, f"sync_fit_all_{stamp}.log")
                     if log_dir else None)
         return run_all(roots, refit=a.refit, log_path=log_path, dry_run_dir=dry_dir,
-                       start_min=a.start_min, minutes=minutes,
+                       skip_done=a.skip_done, start_min=a.start_min, minutes=minutes,
                        tol_s=a.tol_ms / 1000.0,
                        min_visible_s=a.min_visible_ms / 1000.0,
                        min_matched=a.min_matched, min_pairs=a.min_pairs,

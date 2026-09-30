@@ -480,6 +480,97 @@ class TestBatchHelpers(unittest.TestCase):
             self.assertEqual(len(calls), 2, "the batch carried on after the error")
 
 
+class TestSkipDone(unittest.TestCase):
+    """--skip-done: finish an interrupted --all --dry-run into the same folder."""
+
+    FIT = {"rate": 1.00002, "n_pairs": 138, "residual_ms": {"mad_ms": 11.5}}
+
+    def _legacy_folder(self, out, sid, *, verdict="ok", report=True, **extra):
+        """A bundle folder as a dry run from before result.json left it."""
+        d = os.path.join(out, sid)
+        os.makedirs(d)
+        with open(os.path.join(d, f"clock_fit_{sid}.json"), "w", encoding="utf-8") as f:
+            json.dump({"verdict": verdict, "fit": self.FIT if verdict == "ok" else None,
+                       **extra}, f)
+        if report:
+            with open(os.path.join(d, "report.txt"), "w", encoding="utf-8") as f:
+                f.write("report\n")
+
+    def test_marker_is_the_result(self):
+        with tempfile.TemporaryDirectory() as out:
+            r = sync_fit.BundleFitResult("a", sync_fit.FIT_SKIPPED, "no fiducials in frame")
+            sync_fit._write_dry_result(out, r)
+            self.assertEqual(sync_fit.previous_dry_result(out, "a"), r)
+
+    def test_folder_from_before_the_marker_is_rebuilt_from_the_clock_fit(self):
+        with tempfile.TemporaryDirectory() as out:
+            self._legacy_folder(out, "a", map_check={"contradictions": {"L1_a": {}}},
+                                sensor_polarity={"disagrees": True})
+            self._legacy_folder(out, "b", verdict="too_few_events")
+            a = sync_fit.previous_dry_result(out, "a")
+            self.assertEqual(a.bucket, sync_fit.FIT_OK)
+            self.assertEqual(a.detail, "rate=1.0000 MAD=11.5ms 138 pairs "
+                                       "[1 contradict map; polarity disagrees]")
+            b = sync_fit.previous_dry_result(out, "b")
+            self.assertEqual((b.bucket, b.detail), (sync_fit.FIT_FAILED, "too_few_events"))
+
+    def test_unfinished_or_absent_bundles_are_redone(self):
+        with tempfile.TemporaryDirectory() as out:
+            self._legacy_folder(out, "a", report=False)      # stopped before its report
+            os.makedirs(os.path.join(out, "b"))
+            with open(os.path.join(out, "b", "report.txt"), "w") as f:
+                f.write("half")                              # report but no clock fit
+            for sid in ("a", "b", "never"):
+                self.assertIsNone(sync_fit.previous_dry_result(out, sid), sid)
+
+    def test_run_all_reuses_finished_bundles_and_fits_the_rest(self):
+        with tempfile.TemporaryDirectory() as root:
+            _bare_bundle(root, "600_20260101_120000")
+            _bare_bundle(root, "601_20260102_120000")
+            out = os.path.join(root, "_dry")
+            os.makedirs(out)
+            self._legacy_folder(out, "600_20260101_120000")
+            log = os.path.join(out, "batch.log")
+            calls = []
+            real = sync_fit.fit_one_bundle
+
+            def spy(bundle, **kw):
+                calls.append(sync_fit.bundle_id(bundle))
+                return real(bundle, **kw)
+            with mock.patch.object(sync_fit, "fit_one_bundle", spy):
+                code = sync_fit.run_all([root], log_path=log, dry_run_dir=out, skip_done=True)
+            self.assertEqual(code, 0)
+            self.assertEqual(calls, ["601_20260102_120000"])
+            with open(log, encoding="utf-8") as f:
+                text = f.read()
+            self.assertIn("1 fit, 0 failed, 1 skipped (2 bundle(s))", text)
+            self.assertIn("1 bundle(s) reused", text)
+            # the newly skipped bundle left its marker, so a third run redoes nothing
+            self.assertIsNotNone(sync_fit.previous_dry_result(out, "601_20260102_120000"))
+
+    def test_without_the_flag_every_bundle_is_fit_again(self):
+        with tempfile.TemporaryDirectory() as root:
+            _bare_bundle(root, "600_20260101_120000")
+            out = os.path.join(root, "_dry")
+            os.makedirs(out)
+            self._legacy_folder(out, "600_20260101_120000")
+            with mock.patch.object(sync_fit, "fit_one_bundle",
+                                   wraps=sync_fit.fit_one_bundle) as spy:
+                sync_fit.run_all([root], dry_run_dir=out)
+            self.assertEqual(spy.call_count, 1)
+
+    def test_flag_needs_a_dry_run_into_an_existing_folder(self):
+        with tempfile.TemporaryDirectory() as root:
+            for argv in (["--all", "--skip-done"],
+                         ["--all", "--dry-run", "--skip-done"],
+                         ["--all", "--skip-done", "--out", root],
+                         ["--all", "--dry-run", "--skip-done", "--out",
+                          os.path.join(root, "missing")]):
+                with self.assertRaises(SystemExit, msg=argv), \
+                        mock.patch("sys.stderr"):
+                    sync_fit.main(argv)
+
+
 def _make_bundle(root: str) -> str:
     """A throwaway bundle from the clip fixture: video/<id>.mp4 + sidecar +
     serial capture, laid out the way analyze_bundle expects."""
