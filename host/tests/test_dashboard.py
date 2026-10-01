@@ -1,7 +1,7 @@
 """
 test_dashboard.py - headless tests for the welfare-dashboard signals.
 
-Covers the pure ``dashboard`` core: signal 1 (% baseline + <90% flag +
+Covers the pure ``dashboard`` core: signal 1 (% baseline + <80% flag +
 grams-to-threshold deficit), signal 2 (not-logged / not-weighed today), signal 3
 (water intake by source + total, no flag), and signal 4 (weight/% baseline trend
 over a window). Pure stdlib; no hardware/Tk.
@@ -19,8 +19,8 @@ from tmaze.core.records.daily_log import DailyLog
 _ROWS = [
     {"animal_id": "600", "date": "2026-07-01", "weight_g": "340",
      "baseline_g": "348", "pct_baseline": "0.977"},
-    {"animal_id": "600", "date": "2026-07-02", "weight_g": "312",
-     "baseline_g": "348", "pct_baseline": ""},          # 312/348 = 0.8966 (<90%)
+    {"animal_id": "600", "date": "2026-07-02", "weight_g": "270",
+     "baseline_g": "348", "pct_baseline": ""},          # 270/348 = 0.7759 (<80%)
     {"animal_id": "600", "date": "2026-07-03", "weight_g": "",
      "baseline_g": "348", "pct_baseline": ""},           # logged, not weighed
     {"animal_id": "601", "date": "2026-07-02", "weight_g": "338",
@@ -42,10 +42,10 @@ class TestSignal1(unittest.TestCase):
         # weight/baseline are the source of truth: a stored mirror that disagrees
         # is ignored, not trusted (docs/decisions/0163).
         log = DailyLog([{"animal_id": "600", "date": "2026-07-10",
-                         "weight_g": "300", "baseline_g": "348",
+                         "weight_g": "270", "baseline_g": "348",
                          "pct_baseline": "0.999"}])
         s = dashboard.weight_status(log, "600", "2026-07-10")
-        self.assertAlmostEqual(s["pct_baseline"], round(300 / 348, 4))
+        self.assertAlmostEqual(s["pct_baseline"], round(270 / 348, 4))
         self.assertTrue(s["below_threshold"])
 
     def test_falls_back_to_stored_when_not_computable(self):
@@ -56,12 +56,30 @@ class TestSignal1(unittest.TestCase):
         s = dashboard.weight_status(log, "600", "2026-07-11")
         self.assertAlmostEqual(s["pct_baseline"], 0.9123)
 
-    def test_computes_pct_and_flags_below_90(self):
+    def test_threshold_is_the_ra26a102_floor(self):
+        self.assertEqual(dashboard.BELOW_THRESHOLD, 0.80)
+        self.assertEqual(dashboard.THRESHOLD_LABEL, "80%")
+
+    def test_computes_pct_and_flags_below_80(self):
         s = dashboard.weight_status(self.log, "600", "2026-07-02")
-        self.assertAlmostEqual(s["pct_baseline"], round(312 / 348, 4))
+        self.assertAlmostEqual(s["pct_baseline"], round(270 / 348, 4))
         self.assertTrue(s["below_threshold"])
-        # 90% of 348 = 313.2; deficit = 313.2 - 312 = 1.2 g
-        self.assertEqual(s["grams_to_threshold"], 1.2)
+        # 80% of 348 = 278.4; deficit = 278.4 - 270 = 8.4 g
+        self.assertEqual(s["grams_to_threshold"], 8.4)
+
+    def test_between_80_and_90_is_no_longer_flagged(self):
+        # 312/348 = 89.7%: flagged under the old 90% floor, fine under 80%.
+        log = DailyLog([{"animal_id": "600", "date": "2026-07-12",
+                         "weight_g": "312", "baseline_g": "348"}])
+        s = dashboard.weight_status(log, "600", "2026-07-12")
+        self.assertFalse(s["below_threshold"])
+        self.assertEqual(s["grams_to_threshold"], 0.0)
+
+    def test_exactly_80_is_not_flagged(self):
+        log = DailyLog([{"animal_id": "600", "date": "2026-07-13",
+                         "weight_g": "280", "baseline_g": "350"}])
+        s = dashboard.weight_status(log, "600", "2026-07-13")
+        self.assertFalse(s["below_threshold"])
 
     def test_unlogged_day(self):
         s = dashboard.weight_status(self.log, "600", "2026-07-09")
@@ -171,7 +189,7 @@ class TestSignal4(unittest.TestCase):
         # 07-03 has no weight -> excluded; 07-01 and 07-02 remain, oldest first.
         self.assertEqual([r["date"] for r in series],
                          ["2026-07-01", "2026-07-02"])
-        self.assertAlmostEqual(series[1]["pct_baseline"], round(312 / 348, 4))
+        self.assertAlmostEqual(series[1]["pct_baseline"], round(270 / 348, 4))
 
     def test_window_excludes_out_of_range(self):
         series = dashboard.weight_trend(self.log, "600", "2026-07-02", days=1)

@@ -4,7 +4,7 @@ records_manager.py - desktop GUI for the animal/session records (thin shell).
 One window to keep the lab's *records* without hand-editing CSVs or workbooks:
 
 - **Daily entry** - add/edit a daily husbandry row (weight, baseline, auto
-  % baseline with a <90% flag, water on/off, supplemental water, notes). Saving
+  % baseline with a below-threshold flag, water on/off, supplemental water, notes). Saving
   upserts the row into ``daily_log.csv`` (the source of truth) by
   ``(animal_id, date)`` - it never rewrites the whole file, so a row another
   surface added survives.
@@ -20,9 +20,11 @@ One window to keep the lab's *records* without hand-editing CSVs or workbooks:
   the reward from when no explicit uL is set; ADR-0191); saving validates and
   writes ``animals.json`` (the identity source of truth).
 - **Dashboard** - a read-only welfare view: a compact per-rat status strip
-  (% baseline today + <90% flag + grams-to-90% deficit; a not-logged/not-weighed
-  alarm; water intake by source) above a single combined 14-day % baseline trend
-  chart that overlays every rat (per-rat show/hide toggles, one shared 90% line).
+  (% baseline today + below-threshold flag + grams-to-threshold deficit; a
+  not-logged/not-weighed alarm; water intake by source) above a single combined
+  14-day % baseline trend chart that overlays every rat (per-rat show/hide
+  toggles, one shared threshold line). The threshold is
+  ``dashboard.BELOW_THRESHOLD`` (80%, RA26A102; ADR-0207).
   The optional water-mL overlay draws only when exactly one rat is soloed. Signals
   come from the pure ``dashboard`` core.
 
@@ -189,7 +191,8 @@ _DAILY_MISSING_LOOKBACK_DAYS = 14
 _DAILY_HEADING_TIPS = {
     "day": "Weekday of the date (derived).",
     "wt_delta": "Day-over-day weight change in grams (derived).",
-    "pct_baseline": "Weight / baseline as a percentage (derived; <90% is red).",
+    "pct_baseline": "Weight / baseline as a percentage (derived; "
+                    f"<{dashboard.THRESHOLD_LABEL} is red).",
     "supp_water_ml": "Supplemental water hand-given, in mL (numeric; v4).",
     "supp_access_min": "Minutes of free bottle access (numeric; v4).",
     "supp_water": "Legacy free-text supplemental cell - read-only, "
@@ -668,7 +671,8 @@ class RecordsManager:
         ttk.Label(legend, text="Rows:", foreground="#555").pack(side="left")
         for text, bg, fg in (("weekend", "#f2f2f2", "#000"),
                              ("ad-lib", "#fde7d0", "#000"),
-                             ("<90%", "#ffffff", "#9C0006"),
+                             (f"<{dashboard.THRESHOLD_LABEL}", "#ffffff",
+                              "#9C0006"),
                              ("missing entry", "#fde0e0", "#9a6700")):
             tk.Label(legend, text=f" {text} ", background=bg, foreground=fg).pack(
                 side="left", padx=(6, 0))
@@ -682,7 +686,7 @@ class RecordsManager:
             self.d_tree.heading(cid, text=label)
             self.d_tree.column(cid, width=width, anchor=anchor)
         # Row tints (ADR-0103): weekend/ad-lib set the background (ad-lib wins if
-        # both), <90% sets a red foreground (independent of background), and a
+        # both), below-threshold sets a red foreground (independent of background), and a
         # missing-entry placeholder row gets its own pink row.
         self.d_tree.tag_configure("weekend", background="#f2f2f2")
         self.d_tree.tag_configure("adlib", background="#fde7d0")
@@ -784,7 +788,8 @@ class RecordsManager:
             self.d_pct.config(text="-", foreground="#000")
         else:
             flag = pct < dashboard.BELOW_THRESHOLD
-            self.d_pct.config(text=f"{pct * 100:.1f}%" + (" <90%!" if flag else ""),
+            warn = f" <{dashboard.THRESHOLD_LABEL}!" if flag else ""
+            self.d_pct.config(text=f"{pct * 100:.1f}%{warn}",
                               foreground="#9C0006" if flag else "#1a7f37")
 
     # ---- unsaved-edit tracking (#3) --------------------------------------
@@ -1232,8 +1237,8 @@ class RecordsManager:
         return str(row.get(col_id, ""))
 
     def _daily_row_tags(self, row: Dict[str, str]) -> tuple:
-        """Tint tags for a row: weekend/ad-lib background, <90% red foreground,
-        or the missing-entry placeholder tint (see docs/decisions/0103)."""
+        """Tint tags for a row: weekend/ad-lib background, below-threshold red
+        foreground, or the missing-entry placeholder tint (see docs/decisions/0103)."""
         if row.get("_missing"):
             return ("missing",)
         tags: List[str] = []
@@ -2231,7 +2236,8 @@ class RecordsManager:
             if pct_val is None:
                 line = "ad-lib (off restriction)"
             else:
-                flag = " <90% FLAG" if status["below_threshold"] else ""
+                flag = (f" <{dashboard.THRESHOLD_LABEL} FLAG"
+                        if status["below_threshold"] else "")
                 line = f"ad-lib \u00b7 % baseline: {pct_val * 100:.1f}%{flag}"
             fg = "#9C0006" if status["below_threshold"] else "#2451b3"
         elif pct_val is None:
@@ -2239,9 +2245,11 @@ class RecordsManager:
             fg = "#9C0006"
         else:
             pct = pct_val * 100
-            flag = " <90% FLAG" if status["below_threshold"] else ""
+            flag = (f" <{dashboard.THRESHOLD_LABEL} FLAG"
+                    if status["below_threshold"] else "")
             deficit = status["grams_to_threshold"] or 0.0
-            need = f" (needs +{deficit:.1f} g to reach 90%)" if deficit else ""
+            need = (f" (needs +{deficit:.1f} g to reach "
+                    f"{dashboard.THRESHOLD_LABEL})" if deficit else "")
             line = f"% baseline: {pct:.1f}%{flag}{need}"
             fg = "#9C0006" if status["below_threshold"] else "#1a7f37"
         ttk.Label(row, text=line, foreground=fg).pack(side="left")
@@ -2267,8 +2275,8 @@ class RecordsManager:
         as even spacing, gaps show as gaps). Two shading layers sit behind the
         lines: a faint calendar-weekend reference and solid ad-lib bands where
         the data marks off-restriction (union across enabled rats; ADR-0100).
-        Per-rat colour, markers, red where <90%, endpoint label, one dashed 90%
-        line. The optional water-mL overlay draws only for a solo rat (see
+        Per-rat colour, markers, red below the threshold, endpoint label, one
+        dashed threshold line. The optional water-mL overlay draws only for a solo rat (see
         docs/decisions/0087). Falls back to text if matplotlib is unavailable."""
         enabled = self._enabled_dash_rats()
         series = {}

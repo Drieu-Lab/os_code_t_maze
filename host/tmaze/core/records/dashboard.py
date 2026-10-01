@@ -7,8 +7,8 @@ the four signals it displays (no Tk, no I/O - it takes already-loaded rows so it
 stays headlessly testable):
 
 1. **% baseline today** - each rat's weight as a fraction of its baseline, the
-   ``< 90%`` red flag (the protocol's restriction floor, RA23A232), and the
-   *grams-to-90%* make-up deficit (how much weight is missing to clear the flag).
+   ``< 80%`` red flag (the protocol's water-restriction floor, RA26A102), and the
+   *grams-to-80%* make-up deficit (how much weight is missing to clear the flag).
 2. **Not-logged-today alarm** - which rats have no daily row yet ("not logged") or
    a row with no weight ("not weighed"), so a forgotten entry is obvious.
 3. **Daily water intake by source** - task-earned + operator-manual reward (summed
@@ -20,7 +20,7 @@ stays headlessly testable):
 4. **Weight / % baseline trend** - the last ~7-14 days of weight and % baseline
    per rat, oldest-first, for a sparkline/trend view.
 
-Fractions stay 0..1 (a fraction, e.g. 0.9 == 90%); the GUI renders them as %.
+Fractions stay 0..1 (a fraction, e.g. 0.8 == 80%); the GUI renders them as %.
 
 Pure stdlib, no Tk/serial. Headless tests: python -m unittest test_dashboard.
 """
@@ -32,9 +32,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from tmaze.core.records import daily_log
 
-# The protocol's restriction floor: below 90% of free-feeding baseline is a flag
-# (RA23A232). A fraction, not a percent.
-BELOW_THRESHOLD = 0.90
+# The protocol's water-restriction floor: RA26A102 s.14d maintains rats at
+# 80-85% of free-water/feeding weight, so below 80% is a flag. A fraction, not a
+# percent. See docs/decisions/0207.
+BELOW_THRESHOLD = 0.80
+THRESHOLD_LABEL = f"{BELOW_THRESHOLD * 100:.0f}%"
 
 # The provenance-labelled water channels, in display order (mirrors the four
 # water channels the session registry surfaces; ADR-0084).
@@ -60,7 +62,7 @@ def _iso(value: Any) -> Optional[dt.date]:
 
 
 # --------------------------------------------------------------------------- #
-# Signal 1: % baseline + <90% flag + grams-to-threshold deficit
+# Signal 1: % baseline + below-threshold flag + grams-to-threshold deficit
 # --------------------------------------------------------------------------- #
 def pct_baseline_of(row: Optional[Dict[str, str]]) -> Optional[float]:
     """A row's % baseline as a fraction, computed from weight/baseline.

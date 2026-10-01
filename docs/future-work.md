@@ -111,7 +111,7 @@ criteria).
 | [FW-0057](#fw-0057-live-alt-veto-readout-for-the-suppressed-debias-trigger) | Live `[ALT-VETO]` readout for the suppressed debias trigger | Phase 3 live readout (`intervention_stack.py` -> snapshot -> `phase3_stats.py` -> `behavior_view.py`) | Proposed |
 | [FW-0058](#fw-0058-reconcile-the-beam--and-lick-state-polarity-si1--li1-are-the-resting-states-not-broken--active) | Reconcile the beam- and lick-state polarity (`S,<i>,1` and `L,<i>,1` were the resting states in recorded logs). RESOLVED by ADR-0164: firmware flip + `PROTO_VERSION` 7->8, root cause the NOYIYO opto "Normal Low / Actuated High". Follow-ups (separate increments): bundle `sensor_polarity` flag + `core/sync/spans.py`/analysis reader | `firmware/PROTOCOL.md`, `cue-guided-task.ino` + `tmaze_test.ino` sensor reads, `rig_config.h`, host consumers of the `S`/`L` `active` flag | Done (ADR-0164) |
 | [FW-0059](#fw-0059-repeatable-retroreflective-marker-scheme-for-the-board) | Design a REPEATABLE retroreflective-marker placement scheme for the electronics board (a physical QA reference for the LED auto-ROI, and a future geometry fallback) | Rig electronics board (physical), `docs/mapping-session-runbook.md`, optional `led_detector` marker check | Proposed |
-| [FW-0060](#fw-0060-age-matched-baseline-weight-for-the-water-restriction-rule) | Age-matched baseline weight for the water-restriction rule (the fixed July baseline makes the 90% flag inert at 115-129%) | `core/records/{dashboard,daily_log,animals}.py`, resources `build_daily_log.py` | Deferred |
+| [FW-0060](#fw-0060-age-matched-baseline-weight-for-the-water-restriction-rule) | Age-matched baseline weight for the water-restriction rule (the fixed July baseline makes the weight flag - 80% since ADR-0207 - inert at 115-129%) | `core/records/{dashboard,daily_log,animals}.py`, resources `build_daily_log.py` | Deferred |
 | [FW-0061](#fw-0061-reconcile-the-onedrive-parallel-excel-logs-at-cutover) | Reconcile the OneDrive parallel Excel logs against the CSVs at cutover (one-off diff/import tool) | resources `records/animal/`, a new `tmaze.tools` reconciler | Deferred |
 | [FW-0062](#fw-0062-controlled-vocabulary-for-session-procedures) | Controlled vocabulary for session `procedures` (annotations) instead of free text | `core/records/session_annotations.py`, Records Manager Sessions tab, `build_session_training_log.py` | Proposed |
 | [FW-0063](#fw-0063-hours_since_water-semantics-under-task_earned-water) | Define `hours_since_water` when the day's water is `task_earned` (no `water_off` clock time exists) | `core/records/{animal_state,daily_log}.py`, `session_controller._write_animal_state` | Proposed |
@@ -3150,7 +3150,9 @@ refine ADR-0153); a pure placement spec is a runbook/manual doc change.
 free-feeding `baseline_g` taken in July 2026 and flags < 90%. The rats are young
 and still growing: on 2026-09-01 they sat at 115-129% of that baseline, so the
 flag can no longer fire for any plausible restriction-related loss, and a
-genuine drop to, say, 100% of the July weight would pass silently. The lab's
+genuine drop to, say, 100% of the July weight would pass silently. (Update
+2026-10-01: the flag line is now < 80%, per the new protocol RA26A102 s.14d;
+ADR-0207. The baseline problem is unchanged.) The lab's
 stated rule is a fixed free-feeding baseline *age-matched* to the animal, which
 means the reference weight should move with age (a growth curve) rather than
 stay pinned to one date. The user chose to keep the fixed 90% rule for now and
@@ -3168,7 +3170,7 @@ red flag, the registry `pct_baseline` column and the Excel Entry sheet agree.
 **Evaluation / acceptance.** Replaying the existing `daily_log.csv` under the new
 rule should flag no false alarms on the known-healthy history and should flag
 a synthetic 10% dip from the age-appropriate reference. A doc note states the
-rule in the terms the ACUC protocol (RA23A232) uses.
+rule in the terms the ACUC protocol (now RA26A102) uses.
 
 **Effort / risk.** Medium. Risk is scientific, not technical: the reference must
 match what the protocol and the lab actually mean by "baseline"; get that in

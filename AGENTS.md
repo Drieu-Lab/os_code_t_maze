@@ -46,9 +46,11 @@ This project spans **two sibling folders**:
  auditory cues to left/right choices for distinct rewards while the
  AC–VS–DS–HPC network is recorded (Neuropixels) to study wake/sleep neuronal
  reactivations.
- - `animal_protocol/RA23A232.pdf` — the JHU ACUC protocol (PI Janak) the
- experiments run under: Long-Evans rats, water restriction, viral
- injections, and survival surgery for probe implants.
+ - `animal_protocol/RA26A102.pdf` — the current JHU ACUC protocol (PI Drieu,
+ approved 2026-08-17) the experiments run under: Long-Evans rats, water
+ restriction (maintained at 80-85% of free-water weight, s.14d; ADR-0207),
+ viral injections, and survival surgery for probe implants.
+ `animal_protocol/RA23A232.pdf` (PI Janak) is the previous protocol.
  - `rig-hardware/neural_recording/` — neural-recording hardware references and
  vendor orders (probes, headstages).
 
