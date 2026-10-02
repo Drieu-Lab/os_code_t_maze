@@ -140,7 +140,7 @@ class TestJoinPrefersBundleState(unittest.TestCase):
             daily = daily_log.DailyLog([
                 {"animal_id": "600", "date": "2026-08-06", "weight_g": "330",
                  "baseline_g": "348", "pct_baseline": "0.9483",
-                 "water_on": "5:30pm", "water_off": "6pm", "water_ml": "",
+                 "water_on": "5:30pm", "water_off": "6pm", "bottle_water_ml": "",
                  "supp_water": "2 min", "notes": "",
                  "supp_water_ml": "2.5", "supp_access_min": "2"}])
             rows, _ = session_registry.build(root, daily=daily)
@@ -165,7 +165,7 @@ class TestDailyTableFallback(unittest.TestCase):
             daily = daily_log.DailyLog([
                 {"animal_id": "601", "date": "2026-08-06", "weight_g": "300",
                  "baseline_g": "320", "pct_baseline": "0.9375",
-                 "water_on": "4pm", "water_off": "5pm", "water_ml": "",
+                 "water_on": "4pm", "water_off": "5pm", "bottle_water_ml": "",
                  "supp_water": "1 min", "notes": ""}])
             rows, _ = session_registry.build(root, daily=daily)
             r = rows[0]

@@ -225,7 +225,7 @@ class TestValidateEntry(unittest.TestCase):
 
     def _row(self, **over):
         row = {"animal_id": "600", "date": "2026-08-11", "weight_g": "332",
-               "baseline_g": "348", "water_ml": "8.5"}
+               "baseline_g": "348", "bottle_water_ml": "8.5"}
         row.update(over)
         return row
 
@@ -234,7 +234,7 @@ class TestValidateEntry(unittest.TestCase):
 
     def test_blank_numeric_cells_are_allowed(self):
         # An incomplete row (no weight/water yet) is legitimate.
-        row = self._row(weight_g="", baseline_g="", water_ml="")
+        row = self._row(weight_g="", baseline_g="", bottle_water_ml="")
         self.assertEqual(validate_entry(row), [])
 
     def test_missing_animal_and_date_required(self):
@@ -253,9 +253,9 @@ class TestValidateEntry(unittest.TestCase):
         self.assertTrue(any("Weight" in e and "number" in e for e in errors))
 
     def test_negative_values_are_rejected(self):
-        errors = validate_entry(self._row(baseline_g="-5", water_ml="-1"))
+        errors = validate_entry(self._row(baseline_g="-5", bottle_water_ml="-1"))
         self.assertTrue(any("Baseline" in e for e in errors))
-        self.assertTrue(any("Water" in e for e in errors))
+        self.assertTrue(any("Bottle water" in e for e in errors))
 
     def test_supp_water_stays_free_text(self):
         # The LEGACY supp_water is not a hard-numeric field (free text like
@@ -381,9 +381,8 @@ class TestWaterMethod(unittest.TestCase):
 class TestSuppWaterV4(unittest.TestCase):
     """Schema v4 (ADR-0160): the supplemental cell split into mL + minutes."""
 
-    def test_fields_end_with_the_v4_pair_and_version_is_4(self):
+    def test_fields_end_with_the_v4_pair(self):
         self.assertEqual(FIELDS[-2:], ["supp_water_ml", "supp_access_min"])
-        self.assertEqual(SCHEMA_VERSION, 4)
 
     def test_numeric_accessors_ignore_legacy_text(self):
         row = {"supp_water": "2 min", "supp_water_ml": "", "supp_access_min": ""}
@@ -404,7 +403,7 @@ class TestSuppWaterV4(unittest.TestCase):
         self.assertFalse(supp_unsplit({"supp_water": ""}))
         self.assertFalse(supp_unsplit(None))
 
-    def test_v3_csv_reads_blank_v4_cells_and_rewrites_as_v4(self):
+    def test_v3_csv_reads_blank_v4_cells_and_rewrites_current(self):
         csv_v3 = (
             "# schema_version=3\n"
             "animal_id,date,weight_g,baseline_g,pct_baseline,water_on,"
@@ -423,10 +422,50 @@ class TestSuppWaterV4(unittest.TestCase):
             write_rows(back, path)
             with open(path, "r", encoding="utf-8", newline="") as fh:
                 text = fh.read()
-            self.assertTrue(text.startswith("# schema_version=4\n"))
+            self.assertTrue(text.startswith(f"# schema_version={SCHEMA_VERSION}\n"))
             self.assertIn("supp_water_ml,supp_access_min", text.splitlines()[1])
             again = load_rows(path)
             self.assertEqual(again[0]["supp_water"], "2 min")
+
+
+class TestBottleWaterV5(unittest.TestCase):
+    """Schema v5 (ADR-0208): water_ml renamed in place to bottle_water_ml."""
+
+    _V4 = (
+        "# schema_version=4\n"
+        "animal_id,date,weight_g,baseline_g,pct_baseline,water_on,water_off,"
+        "water_ml,supp_water,notes,water_regime,water_method,supp_water_ml,"
+        "supp_access_min\n"
+        "600,2026-09-05,350,348,1.0057,3PM,3PM,7,,,,measured_bottle,,\n"
+    )
+
+    def test_version_and_in_place_rename(self):
+        self.assertEqual(SCHEMA_VERSION, 5)
+        self.assertNotIn("water_ml", FIELDS)
+        self.assertEqual(FIELDS.index("bottle_water_ml"), 7)
+
+    def test_v4_file_reads_under_the_new_name(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = _write(d, self._V4)
+            self.assertEqual(load_rows(path)[0]["bottle_water_ml"], "7")
+            self.assertEqual(load_rows_for_write(path)[0]["bottle_water_ml"], "7")
+
+    def test_v4_file_saves_as_v5_with_values_kept(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = _write(d, self._V4)
+            write_rows(load_rows_for_write(path), path)
+            with open(path, "r", encoding="utf-8", newline="") as fh:
+                lines = fh.read().splitlines()
+            self.assertEqual(lines[0], "# schema_version=5")
+            self.assertIn(",bottle_water_ml,", lines[1])
+            self.assertNotIn(",water_ml,", lines[1])
+            self.assertEqual(load_rows(path)[0]["bottle_water_ml"], "7")
+
+    def test_unknown_column_still_refused_after_alias(self):
+        bad = self._V4.replace(",water_ml,", ",cage_ml,")
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(RecordsFileError):
+                load_rows_for_write(_write(d, bad))
 
 
 class TestComputePctBaseline(unittest.TestCase):
@@ -448,10 +487,12 @@ class TestWriteRows(unittest.TestCase):
         rows = [
             {"animal_id": "600", "date": "2026-07-02", "weight_g": "332",
              "baseline_g": "348", "pct_baseline": "0.954", "water_on": "6pm",
-             "water_off": "7pm", "water_ml": "", "supp_water": "", "notes": ""},
+             "water_off": "7pm", "bottle_water_ml": "", "supp_water": "",
+             "notes": ""},
             {"animal_id": "601", "date": "2026-07-02", "weight_g": "338",
              "baseline_g": "350", "pct_baseline": "0.9657", "water_on": "6pm",
-             "water_off": "7pm", "water_ml": "", "supp_water": "", "notes": ""},
+             "water_off": "7pm", "bottle_water_ml": "", "supp_water": "",
+             "notes": ""},
         ]
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "daily_log.csv")

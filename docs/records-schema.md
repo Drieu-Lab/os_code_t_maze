@@ -52,18 +52,27 @@ Canonical animal identity — the join key between recordings and husbandry.
   it with `AnimalRegistry.age_days(id, on_date)`. The records audit's
   `missing_date_of_birth` section lists rats whose date is blank.
 
-## `daily_log.csv` (v4)
+## `daily_log.csv` (v5)
 
 Machine-readable daily husbandry table (source of truth); a leading
-`# schema_version=4` comment line precedes the header. One row per `(animal, date)`:
+`# schema_version=5` comment line precedes the header. One row per `(animal, date)`:
 
 `animal_id, date (YYYY-MM-DD), weight_g, baseline_g, pct_baseline, water_on,
-water_off, water_ml, supp_water, notes, water_regime, water_method,
+water_off, bottle_water_ml, supp_water, notes, water_regime, water_method,
 supp_water_ml, supp_access_min`.
 
 Each schema bump appends its column(s) LAST so older readers ignore them and
 the Excel Entry sheet's column letters never shift; a file from an older
-version loads with the missing columns as `""`.
+version loads with the missing columns as `""`. The one exception is v5, which
+renames `water_ml` to `bottle_water_ml` IN PLACE (same position, so the column
+letters still don't move). Readers map the old header name to the new one
+(`daily_log.LEGACY_FIELD_NAMES`), so a v1-v4 file still loads and is rewritten
+as v5 on its next save (ADR-0208).
+
+`bottle_water_ml` is water given **outside the task** only - a measured bottle
+or cage water. The rig's reward water is never typed here: it is already in
+`session_registry.csv` (`task_reward_ml` / `manual_reward_ml`), and the Records
+Manager's Daily table shows it in its read-only Task mL / Man mL columns.
 
 `water_on`/`water_off` are free text today ("6pm"); see FW-0029 for hardening
 them into real timestamps.
@@ -77,9 +86,11 @@ the Excel Entry sheet can keep it as a live formula.
 
 `water_method` (schema v3, ADR-0104) records HOW the day's restricted water was
 delivered: blank (unspecified), `timed_access`, `measured_bottle` or
-`task_earned`. Orthogonal to `water_regime`. On a `task_earned` day the entered
-`water_ml` is the same water the rig measured as reward, so the dashboard counts
-it once (ADR-0106).
+`task_earned`. Orthogonal to `water_regime`. The dashboard's daily total always
+adds task + manual + supplemental + bottle water (ADR-0208, superseding
+ADR-0106's "entered value wins" rule on `task_earned` days); the records
+audit's `bottle_water_on_task_day` section flags a `bottle_water_ml` that looks
+like task water typed in by hand.
 
 **Supplemental water** (schema v4, ADR-0160): `supp_water_ml` (millilitres
 hand-given) and `supp_access_min` (minutes of free bottle access) are the two

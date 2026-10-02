@@ -106,7 +106,7 @@ _ENTRY_LABELS = {
     "baseline_g": "Baseline (g)",
     "water_on": "H2O ON",
     "water_off": "H2O OFF",
-    "water_ml": "Water (mL)",
+    "bottle_water_ml": "Bottle water (mL)",
     "supp_water_ml": "Supp. water (mL)",
     "supp_access_min": "Supp. access (min)",
     "supp_water": "Legacy supp.",
@@ -174,7 +174,7 @@ _DAILY_TREE_COLUMNS = (
     ("pct_baseline", "% base", 62, "center"),
     ("water_on", "Water on", 76, "center"),
     ("water_off", "Water off", 76, "center"),
-    ("water_ml", "Water mL", 70, "center"),
+    ("bottle_water_ml", "Bottle mL", 70, "center"),
     ("supp_water_ml", "Supp mL", 62, "center"),
     ("supp_access_min", "Supp min", 62, "center"),
     ("supp_water", "Supp (legacy)", 82, "center"),
@@ -193,6 +193,9 @@ _DAILY_HEADING_TIPS = {
     "wt_delta": "Day-over-day weight change in grams (derived).",
     "pct_baseline": "Weight / baseline as a percentage (derived; "
                     f"<{dashboard.THRESHOLD_LABEL} is red).",
+    "bottle_water_ml": "Measured bottle / cage water given OUTSIDE the task. "
+                       "Never type task water here - it is already in the "
+                       "session registry.",
     "supp_water_ml": "Supplemental water hand-given, in mL (numeric; v4).",
     "supp_access_min": "Minutes of free bottle access (numeric; v4).",
     "supp_water": "Legacy free-text supplemental cell - read-only, "
@@ -591,8 +594,8 @@ class RecordsManager:
         ttk.Entry(form, textvariable=self.d_vars["water_on"], width=12).grid(row=2, column=1, sticky="w")
         ttk.Label(form, text=_ENTRY_LABELS["water_off"]).grid(row=2, column=2, sticky="e", padx=4)
         ttk.Entry(form, textvariable=self.d_vars["water_off"], width=12).grid(row=2, column=3, sticky="w")
-        ttk.Label(form, text=_ENTRY_LABELS["water_ml"]).grid(row=2, column=4, sticky="e", padx=4)
-        ttk.Entry(form, textvariable=self.d_vars["water_ml"], width=12).grid(row=2, column=5, sticky="w")
+        ttk.Label(form, text=_ENTRY_LABELS["bottle_water_ml"]).grid(row=2, column=4, sticky="e", padx=4)
+        ttk.Entry(form, textvariable=self.d_vars["bottle_water_ml"], width=12).grid(row=2, column=5, sticky="w")
 
         # Supplemental water (ADR-0160): two NUMERIC cells - millilitres
         # hand-given and minutes of free bottle access. The legacy free-text
@@ -722,7 +725,7 @@ class RecordsManager:
 
     # Per-day data fields: everything except the key (animal, date), the
     # prefilled baseline, and the derived pct.
-    _DAY_FIELDS = ("weight_g", "water_on", "water_off", "water_ml",
+    _DAY_FIELDS = ("weight_g", "water_on", "water_off", "bottle_water_ml",
                    "supp_water", "supp_water_ml", "supp_access_min", "notes")
 
     def _refresh_legacy_supp(self) -> None:

@@ -4,7 +4,7 @@ daily_log.py - read the resources repo's daily husbandry table (pure core).
 The resources repo owns the machine-readable daily husbandry table
 `records/animal/daily_log.csv` (the source of truth defined in
 docs/decisions/0076): one row per `(animal_id, date)` with weight, baseline,
-% baseline, water on/off, water mL, supplemental water, and free-text notes,
+% baseline, water on/off, bottle water mL, supplemental water, and free-text notes,
 behind a leading `# schema_version=N` comment line.
 
 This core is the *code-repo* reader/writer for that file. It resolves the
@@ -57,16 +57,37 @@ from tmaze.core.records import (
 # shift in the Excel Entry sheet.
 FIELDS = [
     "animal_id", "date", "weight_g", "baseline_g", "pct_baseline",
-    "water_on", "water_off", "water_ml", "supp_water", "notes",
+    "water_on", "water_off", "bottle_water_ml", "supp_water", "notes",
     "water_regime", "water_method",
     "supp_water_ml", "supp_access_min",
 ]
 
 # Bumped in lockstep with the resources builder's schema. v2 adds water_regime
 # (docs/decisions/0076 + 0100); v3 adds water_method (docs/decisions/0104); v4
-# adds supp_water_ml + supp_access_min (docs/decisions/0160). Readers stay
+# adds supp_water_ml + supp_access_min (docs/decisions/0160); v5 renames
+# water_ml -> bottle_water_ml IN PLACE (docs/decisions/0208). Readers stay
 # backward-compatible: a row from an older file reads the missing columns as "".
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
+
+# Columns renamed in a later schema: old header name -> current name. Applied to
+# a file's header and rows BEFORE the header guard and the FIELDS projection, so
+# an older file reads (and is rewritten) under the current name instead of being
+# refused as "renamed column". ``bottle_water_ml`` is water given OUTSIDE the
+# task only; the rig's reward water lives in the session registry
+# (docs/decisions/0208).
+LEGACY_FIELD_NAMES = {"water_ml": "bottle_water_ml"}
+
+
+def _current_name(field: str) -> str:
+    return LEGACY_FIELD_NAMES.get(field, field)
+
+
+def _upgrade_header(header: List[str]) -> List[str]:
+    return [_current_name(h) for h in header]
+
+
+def _upgrade_row(row: Dict[str, str]) -> Dict[str, str]:
+    return {_current_name(k): v for k, v in row.items()}
 
 # Supplemental water (schema v4, ADR-0160). The legacy free-text ``supp_water``
 # cell mixed two different facts - a VOLUME ("2.5 ml") and an ACCESS DURATION
@@ -185,14 +206,16 @@ def load_rows(path: Optional[str] = None) -> List[Dict[str, str]]:
     Skips the leading ``# schema_version`` comment line(s), then parses the
     header + rows with ``csv`` (``read_commented_csv``; a ``#`` inside a quoted
     notes cell is data, not a comment). Rows are projected onto FIELDS by
-    column NAME, so an older file lacking the appended columns reads them as "".
+    column NAME, so an older file lacking the appended columns reads them as "",
+    and a renamed column (:data:`LEGACY_FIELD_NAMES`) reads under its new name.
     """
     p = path or default_daily_log_path()
     try:
         parsed = read_commented_csv(p)
     except (OSError, ValueError):
         return []
-    return [{k: row.get(k, "") for k in FIELDS} for row in parsed.rows]
+    return [{k: row.get(k, "") for k in FIELDS}
+            for row in map(_upgrade_row, parsed.rows)]
 
 
 class DailyLog:
@@ -288,13 +311,14 @@ def load_rows_for_write(path: Optional[str] = None) -> List[Dict[str, str]]:
         raise RecordsFileError(
             f"{p} exists but could not be read ({exc}); refusing to overwrite "
             "it, which would drop the rows already in the file.") from exc
-    problems = check_header(parsed.header, FIELDS, parsed.schema_version,
-                            SCHEMA_VERSION)
+    problems = check_header(_upgrade_header(parsed.header), FIELDS,
+                            parsed.schema_version, SCHEMA_VERSION)
     if problems:
         raise RecordsFileError(
             f"{p} is not safe to save into: " + " ".join(problems)
             + " Fix the file by hand (or update the software) first.")
-    return [{k: row.get(k, "") for k in FIELDS} for row in parsed.rows]
+    return [{k: row.get(k, "") for k in FIELDS}
+            for row in map(_upgrade_row, parsed.rows)]
 
 
 # --------------------------------------------------------------------------- #
@@ -356,10 +380,10 @@ def _is_iso_date(value: str) -> bool:
 
 
 # The numeric daily-entry cells a save/import must not accept as garbage. These
-# are the fields analysis joins/aggregates on (weight, baseline, cage water mL,
+# are the fields analysis joins/aggregates on (weight, baseline, bottle water mL,
 # the v4 supplemental mL/minutes); the legacy supp_water and water_on/off stay
 # free text (hardening -> FW-0029).
-NUMERIC_ENTRY_FIELDS = ("weight_g", "baseline_g", "water_ml",
+NUMERIC_ENTRY_FIELDS = ("weight_g", "baseline_g", "bottle_water_ml",
                         "supp_water_ml", "supp_access_min")
 
 
@@ -383,7 +407,8 @@ def validate_entry(row: Dict[str, str]) -> List[str]:
     elif not _is_iso_date(date):
         errors.append(f"Date '{date}' must be in YYYY-MM-DD form.")
     labels = {"weight_g": "Weight (g)", "baseline_g": "Baseline (g)",
-              "water_ml": "Water (mL)", "supp_water_ml": "Supp. water (mL)",
+              "bottle_water_ml": "Bottle water (mL)",
+              "supp_water_ml": "Supp. water (mL)",
               "supp_access_min": "Supp. access (min)"}
     for field in NUMERIC_ENTRY_FIELDS:
         raw = str(row.get(field, "")).strip()

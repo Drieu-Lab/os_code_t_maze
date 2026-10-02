@@ -116,68 +116,59 @@ class TestSignal3(unittest.TestCase):
         ]
         day = dashboard.registry_rows_for(reg, "600", "2026-07-02")
         self.assertEqual(len(day), 2)
-        daily_row = {"supp_water_ml": "3", "water_ml": "10"}
+        daily_row = {"supp_water_ml": "3", "bottle_water_ml": "10"}
         water = dashboard.collect_water(daily_row, day)
         self.assertEqual(water["task"], 3.5)
         self.assertEqual(water["manual"], 0.5)
         self.assertEqual(water["supplemental"], 3.0)
-        self.assertEqual(water["cage"], 10.0)
+        self.assertEqual(water["bottle"], 10.0)
 
     def test_breakdown_drops_zero_and_totals(self):
         out = dashboard.water_breakdown(
-            {"task": 3.5, "manual": 0.0, "supplemental": 3.0, "cage": 0.0})
+            {"task": 3.5, "manual": 0.0, "supplemental": 3.0, "bottle": 0.0})
         self.assertEqual(out["sources"], [("task", 3.5), ("supplemental", 3.0)])
         self.assertEqual(out["total_ml"], 6.5)
 
     def test_non_numeric_supp_is_zero(self):
         # supp_water_ml may be blank/garbage - treated as 0 mL.
-        water = dashboard.collect_water({"supp_water_ml": "n/a", "water_ml": ""},
+        water = dashboard.collect_water({"supp_water_ml": "n/a", "bottle_water_ml": ""},
                                         [])
         self.assertEqual(water["supplemental"], 0.0)
-        self.assertEqual(water["cage"], 0.0)
+        self.assertEqual(water["bottle"], 0.0)
 
     def test_legacy_supp_water_text_is_never_counted(self):
         # ADR-0160: the legacy free-text cell ("2 min", or even a bare "3") is
         # not a volume; only the v4 supp_water_ml cell contributes.
         for legacy in ("2 min", "3", "6:30pm"):
             water = dashboard.collect_water(
-                {"supp_water": legacy, "supp_water_ml": "", "water_ml": ""}, [])
+                {"supp_water": legacy, "supp_water_ml": "", "bottle_water_ml": ""}, [])
             self.assertEqual(water["supplemental"], 0.0, legacy)
 
-    def test_task_earned_day_counts_entered_water_once(self):
-        # ADR-0106: on a task_earned day the entered water_ml IS the rig reward,
-        # so the rig task/manual are dropped (no double count). supp still counts.
+    def test_four_sources_always_sum_whatever_the_method(self):
+        # ADR-0208 (supersedes ADR-0106): bottle water is never the rig reward,
+        # so the method no longer drops any source from the total.
         reg = [{"animal": "602", "date": "2026-08-10",
                 "task_reward_ml": "4.4", "manual_reward_ml": "0.12"}]
         day = dashboard.registry_rows_for(reg, "602", "2026-08-10")
-        water = dashboard.collect_water(
-            {"water_ml": "4.52", "supp_water_ml": "1.0",
-             "water_method": "task_earned"}, day)
-        self.assertEqual(water, {"task": 0.0, "manual": 0.0,
-                                 "supplemental": 1.0, "cage": 4.52})
-        self.assertEqual(dashboard.water_breakdown(water)["total_ml"], 5.52)
+        for method in ("task_earned", "measured_bottle", "timed_access", ""):
+            water = dashboard.collect_water(
+                {"bottle_water_ml": "5.0", "supp_water_ml": "1.0",
+                 "water_method": method}, day)
+            self.assertEqual(water, {"task": 4.4, "manual": 0.12,
+                                     "supplemental": 1.0, "bottle": 5.0},
+                             method)
+            self.assertAlmostEqual(
+                dashboard.water_breakdown(water)["total_ml"], 10.52)
 
-    def test_task_earned_blank_water_ml_falls_back_to_rig_reward(self):
-        # No typed amount on a session day -> keep the rig reward so it isn't lost.
+    def test_task_earned_day_with_blank_bottle_keeps_rig_reward(self):
         reg = [{"animal": "602", "date": "2026-08-10",
                 "task_reward_ml": "4.4", "manual_reward_ml": "0.12"}]
         day = dashboard.registry_rows_for(reg, "602", "2026-08-10")
         water = dashboard.collect_water(
-            {"water_ml": "", "water_method": "task_earned"}, day)
+            {"bottle_water_ml": "", "water_method": "task_earned"}, day)
         self.assertEqual(water["task"], 4.4)
         self.assertEqual(water["manual"], 0.12)
-        self.assertEqual(water["cage"], 0.0)
-
-    def test_measured_bottle_day_still_sums_cage_and_reward(self):
-        # A non-task_earned method leaves the summing behaviour unchanged.
-        reg = [{"animal": "602", "date": "2026-08-10",
-                "task_reward_ml": "2.0", "manual_reward_ml": "0.0"}]
-        day = dashboard.registry_rows_for(reg, "602", "2026-08-10")
-        water = dashboard.collect_water(
-            {"water_ml": "5.0", "water_method": "measured_bottle"}, day)
-        self.assertEqual(water["task"], 2.0)
-        self.assertEqual(water["cage"], 5.0)
-        self.assertEqual(dashboard.water_breakdown(water)["total_ml"], 7.0)
+        self.assertEqual(water["bottle"], 0.0)
 
 
 class TestSignal4(unittest.TestCase):
@@ -206,11 +197,11 @@ class TestWaterMlTrend(unittest.TestCase):
 
     _WATER_ROWS = [
         {"animal_id": "600", "date": "2026-07-01",
-         "water_ml": "10", "supp_water_ml": "3"},       # 13 mL (cage + supp)
+         "bottle_water_ml": "10", "supp_water_ml": "3"},       # 13 mL (bottle + supp)
         {"animal_id": "600", "date": "2026-07-02",
-         "water_ml": "", "supp_water": "6:30pm"},        # legacy text only -> 0
+         "bottle_water_ml": "", "supp_water": "6:30pm"},        # legacy text only -> 0
         {"animal_id": "600", "date": "2026-07-03",
-         "water_ml": "8", "supp_water_ml": ""},          # 8 mL, but registry adds task
+         "bottle_water_ml": "8", "supp_water_ml": ""},          # 8 mL, but registry adds task
     ]
 
     def setUp(self):
@@ -228,9 +219,9 @@ class TestWaterMlTrend(unittest.TestCase):
         self.assertEqual([r["date"] for r in series],
                          ["2026-07-01", "2026-07-02", "2026-07-03"])
         totals = {r["date"]: r["total_ml"] for r in series}
-        self.assertEqual(totals["2026-07-01"], 13.0)   # 10 cage + 3 supp
+        self.assertEqual(totals["2026-07-01"], 13.0)   # 10 bottle + 3 supp
         self.assertEqual(totals["2026-07-02"], 0.0)    # time string -> 0
-        self.assertEqual(totals["2026-07-03"], 11.0)   # 8 cage + 2.5 + 0.5 reward
+        self.assertEqual(totals["2026-07-03"], 11.0)   # 8 bottle + 2.5 + 0.5 reward
 
     def test_window_excludes_out_of_range(self):
         series = dashboard.water_ml_trend(self.log, self.reg, "600",
@@ -314,8 +305,8 @@ class TestExplicitStartWindow(unittest.TestCase):
 
     def test_water_trend_start_date_override(self):
         series = dashboard.water_ml_trend(
-            DailyLog([{"animal_id": "600", "date": "2026-07-01", "water_ml": "5"},
-                      {"animal_id": "600", "date": "2026-07-09", "water_ml": "7"}]),
+            DailyLog([{"animal_id": "600", "date": "2026-07-01", "bottle_water_ml": "5"},
+                      {"animal_id": "600", "date": "2026-07-09", "bottle_water_ml": "7"}]),
             [], "600", "2026-07-10", days=3, start_date="2026-07-05")
         self.assertEqual([r["date"] for r in series], ["2026-07-09"])
 

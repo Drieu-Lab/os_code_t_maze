@@ -12,11 +12,11 @@ stays headlessly testable):
 2. **Not-logged-today alarm** - which rats have no daily row yet ("not logged") or
    a row with no weight ("not weighed"), so a forgotten entry is obvious.
 3. **Daily water intake by source** - task-earned + operator-manual reward (summed
-   from that day's ``session_registry`` rows) plus supplemental and cage water
+   from that day's ``session_registry`` rows) plus supplemental and bottle water
    (from the daily row), as a labelled breakdown + total. Totals only; there is no
-   target/adequacy flag (that's a human judgement). On a ``task_earned`` day the
-   entered ``water_ml`` is the same water as the rig reward, so it's counted once
-   (ADR-0106) rather than added on top.
+   target/adequacy flag (that's a human judgement). The four sources are always
+   added: ``bottle_water_ml`` is water given outside the task only, never the rig
+   reward typed in again (docs/decisions/0208, superseding ADR-0106).
 4. **Weight / % baseline trend** - the last ~7-14 days of weight and % baseline
    per rat, oldest-first, for a sparkline/trend view.
 
@@ -40,7 +40,7 @@ THRESHOLD_LABEL = f"{BELOW_THRESHOLD * 100:.0f}%"
 
 # The provenance-labelled water channels, in display order (mirrors the four
 # water channels the session registry surfaces; ADR-0084).
-WATER_SOURCES: Tuple[str, ...] = ("task", "manual", "supplemental", "cage")
+WATER_SOURCES: Tuple[str, ...] = ("task", "manual", "supplemental", "bottle")
 
 
 def _num(value: Any) -> Optional[float]:
@@ -177,28 +177,23 @@ def collect_water(daily_row: Optional[Dict[str, str]],
 
     ``task``/``manual`` are summed from the day's already-filtered
     ``registry_rows`` (see :func:`registry_rows_for`); ``supplemental`` and
-    ``cage`` come from the daily row's ``supp_water_ml`` / ``water_ml`` cells,
-    read as mL when numeric and 0 otherwise. The LEGACY free-text ``supp_water``
-    cell is never parsed ("2 min" is not 2 mL; ADR-0160) - an unsplit legacy
-    cell simply contributes nothing until a human splits it.
+    ``bottle`` come from the daily row's ``supp_water_ml`` / ``bottle_water_ml``
+    cells, read as mL when numeric and 0 otherwise. The LEGACY free-text
+    ``supp_water`` cell is never parsed ("2 min" is not 2 mL; ADR-0160) - an
+    unsplit legacy cell simply contributes nothing until a human splits it.
 
-    On a ``task_earned`` day (``water_method``; ADR-0104) the entered ``water_ml``
-    records the SAME water the rig already measures as task/manual reward, so
-    counting both double-counts it (ADR-0106). There the entered ``water_ml``
-    wins - it's reported as the ``cage`` amount and the rig reward is dropped -
-    UNLESS ``water_ml`` is blank, in which case the rig reward stands so a session
-    day with no typed amount isn't lost. ``supplemental`` (a separate hand-given
-    source) always counts. Other methods are unchanged.
+    All four are separate water and are always counted, whatever the day's
+    ``water_method``: task water lives only in the registry, so a bottle cell
+    holding it is a records error for the audit to flag
+    (``records_audit.bottle_water_on_task_day``), not something to guess around
+    here (docs/decisions/0208).
     """
     task = sum(_num(r.get("task_reward_ml")) or 0.0 for r in registry_rows)
     manual = sum(_num(r.get("manual_reward_ml")) or 0.0 for r in registry_rows)
     supp = daily_log.supp_water_ml(daily_row) or 0.0
-    cage = _num((daily_row or {}).get("water_ml")) or 0.0
-    method = daily_log.normalize_method((daily_row or {}).get("water_method", ""))
-    if method == daily_log.METHOD_TASK_EARNED and cage > 0.0:
-        task = 0.0
-        manual = 0.0
-    return {"task": task, "manual": manual, "supplemental": supp, "cage": cage}
+    bottle = _num((daily_row or {}).get("bottle_water_ml")) or 0.0
+    return {"task": task, "manual": manual, "supplemental": supp,
+            "bottle": bottle}
 
 
 def water_breakdown(by_source: Dict[str, float]) -> Dict[str, Any]:
@@ -270,7 +265,7 @@ def water_ml_trend(log: daily_log.DailyLog, registry_rows: List[Dict[str, Any]],
     distort it (ADR-0100 / FW-0030). The % baseline trend still plots those days.
 
     This is the optional water overlay behind the dashboard's Show-water toggle;
-    it stays sparse until the numeric ``water_ml``/``supp_water`` cells (or the
+    it stays sparse until the numeric ``bottle_water_ml``/``supp_water_ml`` cells (or the
     registry's reward channels) are populated.
     """
     end = _iso(end_date)

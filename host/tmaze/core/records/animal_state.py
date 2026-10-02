@@ -217,7 +217,7 @@ def from_daily_row(session_id: str, animal: str, date: str,
         last_water_on=(row.get("water_on") or None),
         last_water_off=(row.get("water_off") or None),
         hours_since_water=hours_since_water(last_water_off, session_start),
-        measured_water_ml=_num(row.get("water_ml")),
+        measured_water_ml=_num(row.get("bottle_water_ml")),
         note=(row.get("notes") or ""),
     )
 

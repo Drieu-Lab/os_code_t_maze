@@ -9,7 +9,9 @@ ADR-0097). The fixes are the operator's - this just makes the drift visible:
   un-listed test session that belongs in ``host/session_ignore.json``);
 - sessions whose ``(animal, date)`` has no ``daily_log.csv`` husbandry row;
 - ``daily_log.csv`` water-on/off cells holding a volume or free-text note instead
-  of a clock time (so the machine-readable ``water_ml`` never captured it);
+  of a clock time (so the machine-readable ``bottle_water_ml`` never captured it);
+- ``bottle_water_ml`` cells that look like the rig's task water typed in by hand
+  (counted twice in the daily total; ADR-0208);
 - near-zero-duration bundles that look like start/stop churn;
 - same-animal sessions starting within a few minutes of each other (a restart),
   sessions whose bundle has no behavioural summary, a bundle's frozen weight

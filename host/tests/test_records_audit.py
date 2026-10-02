@@ -106,6 +106,57 @@ class TestUnsplitSuppWater(unittest.TestCase):
         self.assertIn("'2 min'", by["unsplit_supp_water"].findings[0].text)
 
 
+class TestBottleWaterOnTaskDay(unittest.TestCase):
+    """ADR-0208: bottle_water_ml holding the rig's task water, double-counted."""
+
+    _REG = [
+        {"animal": "602", "date": "2026-08-10",
+         "task_reward_ml": "4.40", "manual_reward_ml": "0.12"},
+        {"animal": "600", "date": "2026-08-12",
+         "task_reward_ml": "5.00", "manual_reward_ml": ""},
+        {"animal": "600", "date": "2026-08-12",
+         "task_reward_ml": "3.20", "manual_reward_ml": "0.04"},   # 2 sessions
+        {"animal": "601", "date": "2026-09-05",
+         "task_reward_ml": "2.00", "manual_reward_ml": "0"},
+    ]
+
+    def test_flags_task_earned_and_rig_matches_only(self):
+        rows = [
+            {"animal_id": "602", "date": "2026-08-10", "bottle_water_ml": "4.52",
+             "water_method": "task_earned"},                  # method says task
+            {"animal_id": "600", "date": "2026-08-12", "bottle_water_ml": "8.24",
+             "water_method": ""},                             # equals 8.24 rig
+            {"animal_id": "601", "date": "2026-09-05", "bottle_water_ml": "10",
+             "water_method": "measured_bottle"},              # real bottle: ok
+            {"animal_id": "602", "date": "2026-09-01", "bottle_water_ml": "",
+             "water_method": "task_earned"},                  # blank: ok
+            {"animal_id": "602", "date": "2026-09-02", "bottle_water_ml": "n/a",
+             "water_method": "task_earned"},                  # not a number: ok
+        ]
+        got = records_audit.bottle_water_on_task_day(rows, self._REG)
+        self.assertEqual([g[:3] for g in got],
+                         [("602", "2026-08-10", 4.52),
+                          ("600", "2026-08-12", 8.24)])
+        self.assertIn("task_earned", got[0][3])
+        self.assertIn("8.24", got[1][3])
+
+    def test_close_but_not_matching_bottle_is_not_flagged(self):
+        rows = [{"animal_id": "601", "date": "2026-09-05",
+                 "bottle_water_ml": "2.1", "water_method": "measured_bottle"}]
+        self.assertEqual(
+            records_audit.bottle_water_on_task_day(rows, self._REG), [])
+
+    def test_wired_into_report_with_stable_key(self):
+        rows = [{"animal_id": "602", "date": "2026-08-10",
+                 "bottle_water_ml": "4.52", "water_method": "task_earned"}]
+        sections = records_audit.build_report(
+            [], rows, self._REG, DailyLog(rows), None)
+        by = {s.id: s for s in sections}
+        self.assertEqual(
+            [f.key for f in by["bottle_water_on_task_day"].findings],
+            ["bottle_water_on_task_day:602:2026-08-10"])
+
+
 class TestSessionsMissingDaily(unittest.TestCase):
     def setUp(self):
         self.daily = DailyLog([

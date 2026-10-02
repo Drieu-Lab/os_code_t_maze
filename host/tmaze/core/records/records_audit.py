@@ -84,6 +84,13 @@ _TIME_RE = re.compile(
 # The two daily-log columns that are meant to hold clock times.
 WATER_TIME_FIELDS = ("water_on", "water_off")
 
+# A bottle-water cell within this many mL of the day's rig reward (task +
+# manual) is taken to be the rig reward typed in again, not separate bottle
+# water. 0.05 mL is below any real bottle measurement but covers the 2-dp
+# rounding of a hand copy (August's 602 rows matched to 0.00). See
+# docs/decisions/0208.
+BOTTLE_MATCHES_RIG_ML = 0.05
+
 
 def looks_like_time(value: Any) -> bool:
     """Whether ``value`` reads as a clock time (see ``_TIME_RE``)."""
@@ -97,7 +104,7 @@ def suspect_water_cells(
 
     A blank cell is fine (nothing was entered); a non-time value means a volume
     or free-text note was filed into a time column, so the machine-readable
-    ``water_ml`` never got it (finding C of #260810)."""
+    ``bottle_water_ml`` never got it (finding C of #260810)."""
     out: List[Tuple[str, str, str, str]] = []
     for row in daily_rows or []:
         for field in WATER_TIME_FIELDS:
@@ -143,6 +150,39 @@ def unsplit_supp_water(
             out.append((str(row.get("animal_id", "") or "").strip(),
                         str(row.get("date", "") or "").strip(),
                         str(row.get(daily_log.SUPP_LEGACY_FIELD, "")).strip()))
+    return out
+
+
+def bottle_water_on_task_day(
+        daily_rows: Sequence[dict],
+        registry_rows: Sequence[dict]) -> List[Tuple[str, str, float, str]]:
+    """``(animal_id, date, bottle_ml, reason)`` for each row whose numeric
+    ``bottle_water_ml`` looks like the rig's task water typed in by hand.
+
+    Two signs, either is enough: the day's ``water_method`` is ``task_earned``
+    (the water came from the task, so there was no bottle), or the number is
+    within :data:`BOTTLE_MATCHES_RIG_ML` of that day's rig reward (task +
+    manual from ``registry_rows``). The daily total adds bottle water to the
+    rig reward, so such a cell double-counts until it is cleared
+    (docs/decisions/0208)."""
+    out: List[Tuple[str, str, float, str]] = []
+    for row in daily_rows or []:
+        bottle = _num(row.get("bottle_water_ml"))
+        if bottle is None or bottle <= 0:
+            continue
+        aid = str(row.get("animal_id", "") or "").strip()
+        date = str(row.get("date", "") or "").strip()
+        if (daily_log.normalize_method(row.get("water_method", ""))
+                == daily_log.METHOD_TASK_EARNED):
+            out.append((aid, date, bottle, "method is task_earned"))
+            continue
+        rig = sum((_num(r.get("task_reward_ml")) or 0.0)
+                  + (_num(r.get("manual_reward_ml")) or 0.0)
+                  for r in registry_rows or []
+                  if str(r.get("animal", "")).strip() == aid
+                  and str(r.get("date", "")).strip() == date)
+        if rig > 0 and abs(bottle - rig) <= BOTTLE_MATCHES_RIG_ML:
+            out.append((aid, date, bottle, f"equals the rig reward {rig:g} mL"))
     return out
 
 
@@ -516,7 +556,8 @@ def build_report(triples: Sequence[Tuple[str, str, str]],
                     for a, d, field, val in suspect_water_cells(daily_rows)]
         sections.append(_section(
             sid, "Daily-log water cells that aren't clock times", findings,
-            "move the volume into water_ml (and any note into supp_water/notes); "
+            "move a bottle volume into bottle_water_ml (and any note into "
+            "notes; rig water is already in the session registry); "
             "leave water_on/water_off for on/off times.", acked))
         sid = "suspect_water_methods"
         findings = [Finding(f"{sid}:{a}:{d}", f"{a} {d}  water_method={val!r}")
@@ -536,6 +577,18 @@ def build_report(triples: Sequence[Tuple[str, str, str]],
             "'Supp. water (mL)' and/or the access time into 'Supp. access "
             "(min)', then clear the legacy cell and save. Until then that "
             "day's supplemental water counts as 0 mL.", acked))
+        sid = "bottle_water_on_task_day"
+        findings = [Finding(f"{sid}:{a}:{d}",
+                            f"{a} {d}  bottle_water_ml={ml:g} ({why})")
+                    for a, d, ml, why in bottle_water_on_task_day(
+                        daily_rows, kept_registry)]
+        sections.append(_section(
+            sid, "Bottle mL cells that look like task water typed in by hand",
+            findings,
+            "the rig's task water is already shown in Task mL / Man mL and is "
+            "added to the total, so this day is counted twice: in the Daily "
+            "tab load the row, clear 'Bottle water (mL)' and save (keep it only "
+            "if a real bottle was given as well, then acknowledge).", acked))
     else:
         sections.append(AuditSection(
             sid, "Sessions with no daily_log.csv (animal, date) row", [],

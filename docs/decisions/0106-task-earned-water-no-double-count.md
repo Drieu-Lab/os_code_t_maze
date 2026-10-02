@@ -1,12 +1,14 @@
 # ADR 0106: Don't double-count task-earned water in the welfare dashboard
 
-- **Status:** Accepted
+- **Status:** Superseded
 - **Date:** 2026-08-13
 - **Author / Agent:** Agent (Cursor) on behalf of Celine
 - **Affects:** `host/tmaze/core/records/dashboard.py` (`collect_water`),
   `host/tests/test_dashboard.py`
 - **Supersedes / Superseded by:** Builds on ADR-0104 (`water_method`) and
-  ADR-0084 (the four provenance-labelled water channels)
+  ADR-0084 (the four provenance-labelled water channels). Superseded by
+  ADR-0208 (the column is now `bottle_water_ml`, bottle water only, and the
+  total always adds all four sources)
 
 ## Context
 

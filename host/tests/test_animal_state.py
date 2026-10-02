@@ -21,7 +21,7 @@ from tmaze.core.records.animal_state import AnimalState
 class TestFromDailyRow(unittest.TestCase):
     def test_uses_row_values(self):
         row = {"weight_g": "332", "baseline_g": "348", "pct_baseline": "0.954",
-               "water_on": "6pm", "water_off": "7pm", "water_ml": "",
+               "water_on": "6pm", "water_off": "7pm", "bottle_water_ml": "",
                "notes": "hi"}
         s = animal_state.from_daily_row("600_x", "600", "2026-07-02", row)
         self.assertEqual(s.source, animal_state.SOURCE_DAILY_TABLE)
@@ -31,6 +31,11 @@ class TestFromDailyRow(unittest.TestCase):
         self.assertEqual(s.last_water_on, "6pm")
         self.assertEqual(s.note, "hi")
         self.assertIsNone(s.measured_water_ml)
+
+    def test_measured_water_comes_from_bottle_water(self):
+        s = animal_state.from_daily_row("x", "600", "2026-09-05",
+                                        {"bottle_water_ml": "7"})
+        self.assertEqual(s.measured_water_ml, 7)
 
     def test_computes_pct_when_blank(self):
         row = {"weight_g": "330", "baseline_g": "348", "pct_baseline": ""}
