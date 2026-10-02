@@ -663,18 +663,24 @@ def hybrid_blobs(expected: Sequence[Tuple[float, float]], detected: Sequence[Blo
     expected position so it is still traced (the hybrid fallback, ADR-0153).
     Closest-first matters when channel LEDs sit about ``tol_px`` apart (a
     neighbouring row's LED, ~4 px): pairing in map order let an LED take its
-    neighbour's blob (docs/decisions/0196). Detected blobs matching no expected
-    LED are appended (``exp_index`` None) for reporting. Returns
-    ``(blob, exp_index, is_detected)`` with ids renumbered."""
+    neighbour's blob (docs/decisions/0196). A blob is only ever paired with the
+    expected LED it is NEAREST to: a second detection of an LED that already has
+    a closer blob is left over rather than handed to the next-nearest LED, which
+    would then be traced off its own spot (docs/decisions/0206). Detected blobs
+    matching no expected LED are appended (``exp_index`` None) for reporting.
+    Returns ``(blob, exp_index, is_detected)`` with ids renumbered."""
     det = list(detected)
     cands = sorted(((b.x - ex) ** 2 + (b.y - ey) ** 2, ei, j)
                    for ei, (ex, ey) in enumerate(expected) for j, b in enumerate(det))
+    nearest: dict = {}
+    for _dd, ei, j in cands:
+        nearest.setdefault(j, ei)
     pair: dict = {}
     used: set = set()
     for dd, ei, j in cands:
         if dd > tol_px * tol_px:
             break
-        if ei in pair or j in used:
+        if ei in pair or j in used or nearest[j] != ei:
             continue
         pair[ei] = j
         used.add(j)

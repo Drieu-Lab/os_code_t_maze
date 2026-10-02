@@ -426,6 +426,21 @@ class TestFiducials(unittest.TestCase):
         self.assertAlmostEqual(by_exp[0][0].y, 735.0)
         self.assertTrue(by_exp[1][1])                           # S4_a keeps its blob
 
+    def test_hybrid_blobs_a_second_detection_of_a_neighbour_is_not_handed_on(self):
+        # 602_20260925_131452 (ADR-0206): S2_b has its own blob, plus a second
+        # detection 2.6 px from it and 3.4 px from S1_b. S1_b must stay at its own
+        # spot, not take S2_b's duplicate.
+        expected = [(1024.97, 734.11), (1025.98, 729.02)]       # S1_b, S2_b
+        detected = [D.Blob(0, 1025.9, 729.2, 3, 90.0, D.OFF),   # S2_b itself
+                    D.Blob(1, 1024.1, 730.8, 2, 40.0, D.OFF)]   # S2_b's duplicate
+        out = D.hybrid_blobs(expected, detected, tol_px=4.0)
+        by_exp = {ei: (b, det) for b, ei, det in out}
+        self.assertFalse(by_exp[0][1])                          # S1_b traced at its own spot
+        self.assertAlmostEqual(by_exp[0][0].y, 734.11)
+        self.assertTrue(by_exp[1][1])
+        self.assertAlmostEqual(by_exp[1][0].x, 1025.9)          # S2_b keeps its closer blob
+        self.assertEqual(sum(1 for _b, ei, _d in out if ei is None), 1)   # duplicate reported
+
     @unittest.skipUnless(np is not None and D.cv2 is not None, "cv2 not available")
     def test_overlay_draws_without_error(self):
         canvas = np.full((H, W, 3), 40, np.uint8)
