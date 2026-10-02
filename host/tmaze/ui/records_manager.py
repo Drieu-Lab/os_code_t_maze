@@ -162,8 +162,9 @@ _DASH_DEFAULT_SPAN_DAYS = 14
 _DASH_MAX_SPAN_DAYS = 180
 
 # The Daily-tab table columns: (source id, heading, width, anchor). Most ids map
-# straight to a daily_log field; "day" and "wt_delta" are DERIVED (weekday label
-# and day-over-day weight change) - display-only, computed from the pure core.
+# straight to a daily_log field; "day", "wt_delta" and the three water ids in
+# _DAILY_WATER_COLUMNS are DERIVED - display-only, computed from the pure core
+# (the rig's reward water comes from the session registry, docs/decisions/0208).
 _DAILY_TREE_COLUMNS = (
     ("animal_id", "Animal", 68, "center"),
     ("date", "Date", 90, "center"),
@@ -172,16 +173,24 @@ _DAILY_TREE_COLUMNS = (
     ("wt_delta", "\u0394 g", 54, "center"),      # day-over-day change
     ("baseline_g", "Baseline", 66, "center"),
     ("pct_baseline", "% base", 62, "center"),
+    ("task_ml", "Task mL", 62, "center"),
+    ("manual_ml", "Man mL", 58, "center"),
     ("water_on", "Water on", 76, "center"),
     ("water_off", "Water off", 76, "center"),
     ("bottle_water_ml", "Bottle mL", 70, "center"),
     ("supp_water_ml", "Supp mL", 62, "center"),
     ("supp_access_min", "Supp min", 62, "center"),
     ("supp_water", "Supp (legacy)", 82, "center"),
+    ("total_ml", "Total mL", 66, "center"),
     ("water_regime", "Regime", 78, "center"),
     ("water_method", "Method", 100, "center"),
     ("notes", "Notes", 200, "w"),
 )
+
+# Derived water columns -> the dashboard.collect_water source each one shows
+# (None = the four-source total).
+_DAILY_WATER_COLUMNS = {"task_ml": "task", "manual_ml": "manual",
+                        "total_ml": None}
 
 # How many days back (ending today) the Daily table flags as missing-entry gaps
 # for a single selected rat. Bounded so old history doesn't fill with placeholders.
@@ -193,9 +202,14 @@ _DAILY_HEADING_TIPS = {
     "wt_delta": "Day-over-day weight change in grams (derived).",
     "pct_baseline": "Weight / baseline as a percentage (derived; "
                     f"<{dashboard.THRESHOLD_LABEL} is red).",
+    "task_ml": "Rig task reward that day, summed over its sessions "
+               "(from the session registry; read-only).",
+    "manual_ml": "Rig manual (hand-triggered) reward that day, summed over "
+                 "its sessions (from the session registry; read-only).",
     "bottle_water_ml": "Measured bottle / cage water given OUTSIDE the task. "
-                       "Never type task water here - it is already in the "
-                       "session registry.",
+                       "Never type task water here - it is already in Task mL.",
+    "total_ml": "Task + Man + Supp + Bottle mL - the same total the dashboard "
+                "plots (read-only).",
     "supp_water_ml": "Supplemental water hand-given, in mL (numeric; v4).",
     "supp_access_min": "Minutes of free bottle access (numeric; v4).",
     "supp_water": "Legacy free-text supplemental cell - read-only, "
@@ -1212,7 +1226,10 @@ class RecordsManager:
 
     def _daily_cell(self, row: Dict[str, str], col_id: str) -> str:
         """The display string for one table cell - a raw daily_log field, or a
-        derived value for the "day"/"wt_delta"/"pct_baseline" columns."""
+        derived value for the "day"/"wt_delta"/"pct_baseline" columns and the
+        water columns in ``_DAILY_WATER_COLUMNS``."""
+        if col_id in _DAILY_WATER_COLUMNS:
+            return self._daily_water_cell(row, col_id)
         if row.get("_missing"):
             if col_id == "day":
                 return dashboard.weekday_label(row.get("date", ""))
@@ -1238,6 +1255,21 @@ class RecordsManager:
                     return ""
             return f"{pct * 100:.1f}%"
         return str(row.get(col_id, ""))
+
+    def _daily_water_cell(self, row: Dict[str, str], col_id: str) -> str:
+        """Task / Man / Total mL for the row's (animal, date): the rig reward
+        from that day's registry rows plus the row's own cells, through the same
+        ``dashboard.collect_water`` the dashboard plots. Also filled on a
+        missing-entry placeholder, so an unlogged session day still shows its
+        water. Blank when zero."""
+        day_reg = dashboard.registry_rows_for(
+            self.registry_rows, row.get("animal_id", ""), row.get("date", ""))
+        by_source = dashboard.collect_water(
+            None if row.get("_missing") else row, day_reg)
+        source = _DAILY_WATER_COLUMNS[col_id]
+        ml = (dashboard.water_breakdown(by_source)["total_ml"] if source is None
+              else by_source[source])
+        return f"{ml:.2f}" if ml else ""
 
     def _daily_row_tags(self, row: Dict[str, str]) -> tuple:
         """Tint tags for a row: weekend/ad-lib background, below-threshold red
