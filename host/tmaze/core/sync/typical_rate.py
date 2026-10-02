@@ -3,7 +3,7 @@
 ``host/sync_clock_rate.json`` holds the drift rate this rig's camera and Arduino
 show across long sessions (they agree to ~0.4 ppm), so a short session whose
 own rate is poorly determined can use it instead (``clockfit.fit_clock``;
-ADR-0205). It is a property of the HARDWARE pair: replace the camera or the
+ADR-0209). It is a property of the HARDWARE pair: replace the camera or the
 Arduino and the value must be re-measured (``sync_fit`` flags a well-determined
 session whose rate is far from it).
 

@@ -141,7 +141,7 @@ def analyze(blobs: Sequence[BlobSpans], events: Dict[str, Sequence[Span]],
     (docs/decisions/0202).
 
     ``rate_prior`` (the rig's typical drift rate) replaces the session's own
-    rate when that is too uncertain (``clockfit.fit_clock``; ADR-0205).
+    rate when that is too uncertain (``clockfit.fit_clock``; ADR-0209).
     """
     res = SyncResult()
     events = active_spans(events, sensor_polarity)

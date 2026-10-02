@@ -35,7 +35,7 @@ doc section 3.7):
   camera + Arduino pair (sessions agree to ~0.4 ppm). A session whose own rate
   is uncertain by more than ``RATE_SE_MAX_PPM`` (short, or few matched edges)
   uses the typical rate instead; its offsets are still its own. Which rate was
-  used, and the session's own estimate, are always recorded (ADR-0205).
+  used, and the session's own estimate, are always recorded (ADR-0209).
 
 Stdlib-only; tests in tests/test_sync_core.py.
 """
@@ -58,7 +58,7 @@ VERDICT_HOST_STEP = "host_clock_step"
 RATE_FITTED, RATE_TYPICAL = "fitted", "typical"
 # A session whose own rate is less certain than this (1 SE, ppm) uses the typical
 # rate. Below it, the own rate moves a 30 min session's ends by < 2 ms, so the
-# session keeps it as an independent check of the typical value (ADR-0205).
+# session keeps it as an independent check of the typical value (ADR-0209).
 RATE_SE_MAX_PPM = 2.0
 # A well-determined rate this many combined SEs from the typical one is flagged:
 # the camera or the Arduino may have changed, making the typical rate stale.

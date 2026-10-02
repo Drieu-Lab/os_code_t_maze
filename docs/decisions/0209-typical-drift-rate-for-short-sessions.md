@@ -1,10 +1,13 @@
-# ADR 0205: Use the rig's typical drift rate when a session cannot pin its own
+# ADR 0209: Use the rig's typical drift rate when a session cannot pin its own
 
 - **Status:** Accepted
 - **Date:** 2026-09-30
 - **Author / Agent:** Agent (Cursor) on behalf of Celine
 - **Affects:** `host/tmaze/core/sync/clockfit.py` (`RatePrior`, `rate_se_ppm`, `fit_clock(prior=)`, `drift_ppm`, new `ClockFit` fields), `host/tmaze/core/sync/typical_rate.py` (new), `host/sync_clock_rate.json` (new), `host/tmaze/core/sync/pipeline.py` (`analyze(rate_prior=)`), `host/tmaze/tools/sync_fit.py` (`TOOL_VERSION` 4, `rate_lines`, flags, `--no-typical-rate` / `--typical-rate`)
 - **Supersedes / Superseded by:** —
+- **Renumbered:** committed as ADR-0205 in `bd36bd1`, a number already used by
+  `0205-cap-counts-normal-trials-only.md`; renumbered 0209 on 2026-10-02 (the
+  reasoning is unchanged).
 
 ## Context
 

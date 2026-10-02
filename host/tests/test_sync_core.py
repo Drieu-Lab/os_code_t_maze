@@ -453,7 +453,7 @@ class TestClockFit(unittest.TestCase):
 
 
 class TestTypicalRate(unittest.TestCase):
-    """A session too short to pin its drift uses the rig's typical rate (ADR-0205)."""
+    """A session too short to pin its drift uses the rig's typical rate (ADR-0209)."""
 
     PRIOR = clockfit.RatePrior(RATE, 0.4, "test")
 

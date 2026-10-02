@@ -71,7 +71,7 @@ from tmaze.core.sync import spans as S, typical_rate as TR
 from tmaze.core.timeutil import now_iso
 
 # 2: the one-active rule (ADR-0201); 3: the map check (ADR-0202);
-# 4: the typical drift rate for a session that cannot pin its own (ADR-0205)
+# 4: the typical drift rate for a session that cannot pin its own (ADR-0209)
 TOOL_VERSION = 4
                        # + reward-valve group (ADR-0203)
 FIDUCIAL_METHOD = "led-fit"
@@ -255,7 +255,7 @@ class SyncRun:
         self.video = video
         self.one_active = one_active or {"applied": False, "reason": "not run"}   # ADR-0201
         self.map_check = map_check or {"applied": False, "reason": "not run"}     # ADR-0202
-        self.rate_prior = rate_prior           # the typical drift rate offered (ADR-0205)
+        self.rate_prior = rate_prior           # the typical drift rate offered (ADR-0209)
 
     def led_id(self, blob: int) -> str:
         return self.led_ids.get(blob, f"blob_{blob}")
@@ -322,7 +322,7 @@ def analyze_bundle(bundle: str, *, start_min: float = 0.0, minutes: Optional[flo
     fit, unless ``map_check`` is False (ADR-0202).
     Unless ``typical_rate`` is False, the rig's typical drift rate
     (``rate_path``, default ``host/sync_clock_rate.json``) replaces the session's
-    own rate when that is too uncertain to trust (ADR-0205).
+    own rate when that is too uncertain to trust (ADR-0209).
     """
     sid = bundle_id(bundle)
     header, frames = _read_frames(bundle, sid)
@@ -969,7 +969,7 @@ def register_sync_in_manifest(bundle: str, run: SyncRun,
             "verdict": run.result.verdict,
             "residual_mad_ms": (round(fit.residuals.mad_ms, 3)
                                 if good and fit is not None else None),
-            "rate_source": fit.rate_source if fit is not None else None,   # ADR-0205
+            "rate_source": fit.rate_source if fit is not None else None,   # ADR-0209
             "sensor_polarity": run.sensor_polarity.value,
         },
     })
@@ -1061,7 +1061,7 @@ def map_check_lines(info: dict) -> List[str]:
 
 
 def rate_lines(fit: clockfit.ClockFit, prior: Optional[clockfit.RatePrior]) -> List[str]:
-    """The report lines saying which drift rate the fit used and why (ADR-0205)."""
+    """The report lines saying which drift rate the fit used and why (ADR-0209)."""
     own = (f"{clockfit.drift_ppm(fit.own_rate):.2f} ± {fit.own_rate_se_ppm:.2f} ppm"
            if math.isfinite(fit.own_rate_se_ppm) else
            f"{clockfit.drift_ppm(fit.own_rate):.2f} ppm (uncertainty unknown)")
@@ -1076,7 +1076,7 @@ def rate_lines(fit: clockfit.ClockFit, prior: Optional[clockfit.RatePrior]) -> L
     if fit.rate_far_from_typical:
         lines.append("    WARNING: this well-determined drift is far from the typical one - "
                      "was the camera or the Arduino changed? If so, re-measure "
-                     f"{TR.FILENAME} (ADR-0205)")
+                     f"{TR.FILENAME} (ADR-0209)")
     return lines
 
 
@@ -1268,7 +1268,7 @@ def summarize(results: Sequence[BundleFitResult]) -> Tuple[str, int]:
 def _flags_from(map_check: dict, one_active: dict, polarity_disagrees: bool,
                 fit: Optional[dict] = None) -> str:
     """What a batch line should flag for review: the typical drift rate used, or
-    a fitted rate far from it (ADR-0205), map contradictions (ADR-0202),
+    a fitted rate far from it (ADR-0209), map contradictions (ADR-0202),
     one-active conflict frames (ADR-0201) and a serial-vs-format polarity clash.
     Takes the ``clock_fit`` dict's pieces so a saved fit can be re-flagged."""
     out = []
@@ -1478,7 +1478,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                          "kept out of the fit; never applied while building a map; ADR-0202)")
     ap.add_argument("--no-typical-rate", action="store_true",
                     help="always use the session's own drift rate, even when it is too uncertain "
-                         "(default: such a session uses the typical rate; ADR-0205)")
+                         "(default: such a session uses the typical rate; ADR-0209)")
     ap.add_argument("--typical-rate", metavar="FILE",
                     help="the typical drift rate file (default host/sync_clock_rate.json)")
     ap.add_argument("--serial", help="read serial events from this log instead of the bundle's "

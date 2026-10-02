@@ -77,7 +77,7 @@ The **drift rate** is quoted in **ppm** (parts per million): this rig's camera
 clock runs ~27 ppm fast against the Arduino, i.e. ~27 µs gained per second
 (~0.1 s per hour). It is a fixed property of that camera + Arduino pair, so a
 session too short to measure it well borrows the rig's **typical rate**
-(`host/sync_clock_rate.json`; ADR-0205).
+(`host/sync_clock_rate.json`; ADR-0209).
 
 ### Constellation registration
 Finding where a known, fixed pattern of points (the "constellation" — here the

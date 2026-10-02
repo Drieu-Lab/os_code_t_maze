@@ -406,7 +406,7 @@ class TestPostHocLog(unittest.TestCase):
 
 class TestTypicalRateLogging(unittest.TestCase):
     """Which drift rate a fit used is said in the report, the batch line, the
-    clock_fit JSON and the manifest's post_hoc entry (ADR-0205)."""
+    clock_fit JSON and the manifest's post_hoc entry (ADR-0209)."""
 
     PRIOR = clockfit.RatePrior(1e6 * (1 + 26.92e-6), 0.41, "sync_clock_rate.json (test)")
 

@@ -8,5 +8,5 @@
   "date": "2026-09-30",
   "camera": "Basler acA1300-60gc s/n 21758384",
   "arduino": "Arduino Due (rig board)",
-  "_note": "The camera-vs-Arduino clock drift rate (camera ticks per firmware ms; 1e6 = no drift) this rig shows across long sessions. sync_fit uses it instead of a session's own rate when that session cannot pin its rate to within 2 ppm (short or few matched LED edges); see docs/decisions/0205. Re-measure if the camera or the Arduino is replaced."
+  "_note": "The camera-vs-Arduino clock drift rate (camera ticks per firmware ms; 1e6 = no drift) this rig shows across long sessions. sync_fit uses it instead of a session's own rate when that session cannot pin its rate to within 2 ppm (short or few matched LED edges); see docs/decisions/0209. Re-measure if the camera or the Arduino is replaced."
 }
