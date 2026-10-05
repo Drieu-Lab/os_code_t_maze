@@ -317,7 +317,10 @@ TIPS: Dict[str, Entry] = {
                   "owns the trial sequence, cue identity, scoring, and reward, "
                   "and the Due only plays tones, pulses reward, and fires the "
                   "Open Ephys TTLs. Disarming cuts the tone and restores firmware "
-                  "autonomy (CUE,BEAM). See docs/decisions/0046.",
+                  "autonomy (CUE,BEAM). Re-arming with no recording running "
+                  "starts a fresh run from the current seed and settings; "
+                  "during a recording it resumes the same run (use Restart to "
+                  "apply edits). See docs/decisions/0046, 0210.",
     "phase3.choice": "Play the CHOICE tone while the rat is in the central-stem "
                      "zone, on a trip that set OFF up the stem from the hub "
                      "(ADR-0067) - a lap run backwards, out along a return arm, "

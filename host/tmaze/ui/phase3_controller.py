@@ -204,6 +204,12 @@ class _Phase3Snapshot:
     # Session Start, whichever first, then a soft stop. Resolved from phase3.json
     # on the Tk poll like the other tunables.
     session_cap: SessionCapConfig = field(default_factory=SessionCapConfig)
+    # How many times the operator has unticked the Arm checkbox (counted on the Tk
+    # side by a variable trace, so an untick while tracking is off and no frames
+    # flow is still seen). A gate rising edge whose count differs from the one the
+    # run was armed/resumed with is an operator re-arm, not a flicker
+    # (docs/decisions/0210).
+    disarm_count: int = 0
     # The cap's anchor (docs/decisions/0198): the manifest t0 captured at the
     # FIRST Start after an arm and PRESERVED across a stop->restart of the
     # recording, so an operationally-innocuous restart (e.g. a lossless->H.264
@@ -334,6 +340,14 @@ class Phase3ControlView(VisionActuator):
         # operator knows a tracking flicker did not restart / overwrite the run;
         # reset on every real (re)arm.
         self._reopen_resumes = 0
+        # Operator re-arm detection (docs/decisions/0210). ``_disarm_count`` is
+        # Tk-written (the Arm checkbox trace); the other three are actuation-thread
+        # state: the count and the plan settings the live run was armed (or last
+        # resumed) with, and whether a resume left changed settings unapplied.
+        self._disarm_count = 0
+        self._armed_disarm_count = 0
+        self._armed_settings: Optional[tuple] = None
+        self._unapplied_settings = False
         # The center-well lick channel (reward-collection lick), from the shared
         # rig-config pin map (ADR-0021/0022); None if unavailable -> no lick times.
         self._center_lick = load_rig_config().lick_index_by_role.get("center")
@@ -781,6 +795,9 @@ class Phase3ControlView(VisionActuator):
             default_topup_cooldown_ms=PHASE3_TOPUP_COOLDOWN_MS, rule_id="phase3")
         self._reward_trial_index = None
         self._active_seed = snap.seed
+        self._armed_disarm_count = snap.disarm_count
+        self._armed_settings = self._plan_settings(snap)
+        self._unapplied_settings = False
         self._correct = self._incorrect = self._reward_count = 0
         self._uncued = 0
         self._send_fails = 0
@@ -1100,9 +1117,23 @@ class Phase3ControlView(VisionActuator):
         matches the one the live log was armed with, so the SAME session is still
         active (docs/decisions/0120). A different (or absent) ``session_id`` -
         e.g. a new coordinated session, or a re-arm after Stop cleared the context
-        - is a genuinely new run and re-arms. A manual run (both ids blank) resumes
-        its own file; use Restart for a clean manual run."""
-        return self._log is not None and snap.session_id == self._log.session_id
+        - is a genuinely new run and re-arms.
+
+        An operator untick/retick of the Arm checkbox (``disarm_count`` moved since
+        the run was armed/resumed) re-arms fresh when NOT recording, so a new seed
+        or changed settings take effect; during a recording it still resumes, to
+        protect the session's data file (docs/decisions/0210)."""
+        if self._log is None or snap.session_id != self._log.session_id:
+            return False
+        operator_rearm = snap.disarm_count != self._armed_disarm_count
+        return not (operator_rearm and not snap.session_id)
+
+    @staticmethod
+    def _plan_settings(snap: _Phase3Snapshot) -> tuple:
+        """The settings a run applies only at arm (sequence + reward), compared on a
+        resume to tell the operator when an edit was not applied (ADR-0210)."""
+        return (snap.seed, snap.trial_config, snap.reward_incorrect,
+                snap.reward_pulse_ms, snap.max_topups)
 
     def _resume_after_reopen(self, snap) -> None:
         """Resume the SAME session after a gate reopen instead of re-arming it
@@ -1116,10 +1147,15 @@ class Phase3ControlView(VisionActuator):
         self._silence_and_rearm()            # CUE_OFF + per-trip cue/gate/well reset
         self._send_cmd("CUE,VISION")         # host re-owns the DAC (suppress auto-tone)
         self._reopen_resumes += 1
+        self._armed_disarm_count = snap.disarm_count
         idx = self._task.index if self._task is not None else 0
-        self._emit_intervention(
-            AUTO_RESUME, "tracking reopened mid-session - resumed (data preserved)",
-            idx, _now_iso())
+        text = "tracking reopened mid-session - resumed (data preserved)"
+        if self._plan_settings(snap) != self._armed_settings:
+            # Seed / sequence / reward edits only apply at arm (ADR-0210).
+            self._unapplied_settings = True
+            text += ("; seed/sequence/reward settings changed while disarmed were "
+                     "NOT applied - use Restart to apply them")
+        self._emit_intervention(AUTO_RESUME, text, idx, _now_iso())
         self._publish_state(armed=True)
 
     def _process_firmware_reset(self, last_fw_ms, iso: str) -> None:
@@ -1170,6 +1206,14 @@ class Phase3ControlView(VisionActuator):
         if not snap.gate_open or self._task is None or self._seq is None:
             self._publish_status(snap)
             return
+
+        # The cue gate reads the Return-cue checkbox live every frame, so the
+        # ribbon / planned-trials flag (display only) must follow it too, or a
+        # mid-run toggle shows return cues that never play (docs/decisions/0210).
+        if self._log is not None \
+                and self._log.return_enabled != snap.params.return_enabled:
+            self._log.return_enabled = snap.params.return_enabled
+            self._publish_state(armed=True)
 
         # Operator "pause cues" (docs/decisions/0058): silence any tone and freeze
         # trial progress without disarming. The early return skips folding frames
@@ -1779,6 +1823,8 @@ class Phase3ControlView(VisionActuator):
         # show the count so the operator knows the run survived the reopen.
         if self._reopen_resumes:
             extra += f"  resumes:{self._reopen_resumes}"
+        if self._unapplied_settings:
+            extra += "  !! settings changed while disarmed NOT applied - Restart to apply"
         # Mid-session Due reboots the host caught and re-asserted through (ADR-0184):
         # show the count so a survived reset isn't invisible (the matching
         # auto:firmware_reset notes + manifest carry the detail).
@@ -2238,6 +2284,7 @@ class Phase3ControlView(VisionActuator):
         arm = ttk.Checkbutton(
             root, text="Arm Phase 3 (host-owned cued task; firmware = actuator)",
             variable=self._enable_var)
+        self._enable_var.trace_add("write", self._on_enable_write)
         arm.grid(row=0, column=0, columnspan=2, sticky="w", **pad)
         tip(arm, "phase3.arm")
 
@@ -2587,7 +2634,16 @@ class Phase3ControlView(VisionActuator):
             session_t0=self._session_t0,
             cap_t0=self._cap_t0,
             paused=self._paused,
-            session_cap=self._current_session_cap())
+            session_cap=self._current_session_cap(),
+            disarm_count=self._disarm_count)
+
+    def _on_enable_write(self, *_args) -> None:
+        """Arm-checkbox trace: count each untick (docs/decisions/0210)."""
+        try:
+            if not self._enable_var.get():
+                self._disarm_count += 1
+        except tk.TclError:
+            pass
 
     def _current_session_cap(self) -> SessionCapConfig:
         """The session cap from the loaded phase3.json (docs/decisions/0190);

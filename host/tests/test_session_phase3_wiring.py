@@ -437,6 +437,96 @@ class SessionPhase3WiringTest(unittest.TestCase):
         # The reopen was surfaced to the operator as a resume, not a restart.
         self.assertGreaterEqual(self.phase3._reopen_resumes, 1)
 
+    # ------------------------------ operator re-arm (docs/decisions/0210)
+    def _operator_rearm(self, between=None):
+        """Untick Arm (gate closes), optionally edit settings, re-tick Arm."""
+        self.phase3._enable_var.set(False)
+        self._run_a_trial()                        # falling edge
+        if between is not None:
+            between()
+        self.phase3._enable_var.set(True)
+        self._run_a_trial()                        # rising edge
+
+    def test_operator_rearm_when_not_recording_starts_fresh(self):
+        """The reported bug: untick Arm, new seed + return cue off, re-tick - with
+        no recording this must build a NEW run from the new seed, and the ribbon
+        must stop showing return cues."""
+        self.phase3._return_var.set(True)
+        self.phase3._current_seed = lambda: 111
+        self._open_gate()
+        self._run_a_trial()
+        log_before = self.phase3._log
+        self.assertTrue(self.phase3.published_state().return_enabled)
+
+        def _edit():
+            self.phase3._current_seed = lambda: 222
+            self.phase3._return_var.set(False)
+        self._operator_rearm(_edit)
+
+        self.assertIsNot(self.phase3._log, log_before)
+        self.assertEqual(self.phase3._active_seed, 222)
+        self.assertEqual(self.phase3._reopen_resumes, 0)
+        self.assertFalse(self.phase3.published_state().return_enabled)
+
+    def test_tracking_flicker_when_not_recording_still_resumes(self):
+        """Only the operator's untick re-arms; a tracking flicker on an unrecorded
+        run keeps resuming (ADR-0120 unchanged for flickers)."""
+        self._open_gate()
+        self._run_a_trial()
+        log_before = self.phase3._log
+        self.camera.tracking = False
+        self._run_a_trial()
+        self.camera.tracking = True
+        self._run_a_trial()
+        self.assertIs(self.phase3._log, log_before)
+        self.assertEqual(self.phase3._reopen_resumes, 1)
+
+    def test_operator_rearm_while_recording_resumes_and_warns(self):
+        """During a recording an untick/retick still resumes (protects the file),
+        but a seed edit made while disarmed is flagged as NOT applied - in the
+        status line and the auto:resume note."""
+        events = []
+        self.phase3._on_intervention = events.append
+        self.phase3._current_seed = lambda: 111
+        self._open_gate()
+        self._run_a_trial()
+        self._start_session()
+        log_before = self.phase3._log
+
+        self._operator_rearm(lambda: setattr(self.phase3, "_current_seed",
+                                             lambda: 222))
+
+        self.assertIs(self.phase3._log, log_before)
+        self.assertEqual(self.phase3._active_seed, 111)
+        self.assertTrue(self.phase3._unapplied_settings)
+        self.phase3._publish_status(self.phase3._act_snapshot)
+        self.assertIn("NOT applied", self.phase3._status_text)
+        resumes = [e for e in events if "resumed" in e["text"]]
+        self.assertTrue(resumes and "NOT applied" in resumes[-1]["text"])
+
+        # Restart applies the edit and clears the warning.
+        self.phase3._process_act_item(("cmd", "restart"), self.phase3._act_snapshot)
+        self.assertEqual(self.phase3._active_seed, 222)
+        self.assertFalse(self.phase3._unapplied_settings)
+
+    def test_operator_rearm_while_recording_without_edits_does_not_warn(self):
+        self._open_gate()
+        self._run_a_trial()
+        self._start_session()
+        self._operator_rearm()
+        self.assertFalse(self.phase3._unapplied_settings)
+
+    def test_ribbon_return_flag_follows_the_checkbox_mid_run(self):
+        """The cue gate reads the Return-cue box live, so the published flag the
+        ribbon uses must follow it without a re-arm."""
+        self.phase3._return_var.set(True)
+        self._open_gate()
+        self._run_a_trial()
+        self.assertTrue(self.phase3.published_state().return_enabled)
+        self.phase3._return_var.set(False)
+        self._run_a_trial()
+        self.assertFalse(self.phase3.published_state().return_enabled)
+
     def test_disk_write_failure_is_surfaced_and_clears_on_recovery(self):
         """ADR-0121: a failed atomic write of the trial CSV is no longer swallowed
         - it is recorded per-file and surfaced loudly in the status line, then
