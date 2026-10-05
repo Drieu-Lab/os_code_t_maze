@@ -130,6 +130,14 @@ class TestProbeBlockController(unittest.TestCase):
         c.end_block()                                        # latch _manual_end
         self.assertEqual(c.upcoming_forced(), 0)
 
+    def test_upcoming_side_peeks_without_advancing(self):
+        c = self._ctrl(block_len=4)
+        self.assertIsNone(c.upcoming_side(0))                # idle
+        c.on_scored(trial_no=40, correct=True, intervention_active=False)
+        peek = [c.upcoming_side(k) for k in range(4)]
+        self.assertIsNone(c.upcoming_side(4))                # beyond the block
+        self.assertEqual(peek, _drain_block(c))
+
     def test_upcoming_forced_zero_after_disarm(self):
         c = self._ctrl(block_len=6)
         c.on_scored(trial_no=40, correct=True, intervention_active=False)
@@ -306,6 +314,39 @@ class TestTrialSequenceProbe(unittest.TestCase):
         self.assertEqual(seq.correct_arm(11), seq.seq[1])
         self.assertEqual(seq._spine_pos, 2)
         self.assertEqual(seq.probe_state(), "NORMAL")
+
+    def test_provisional_side_previews_the_probe_plan(self):
+        # The ribbon's preview of upcoming trials (correct_arm on an un-committed
+        # index) must show the probe block's planned sides, then the next spine
+        # sides after it - matching what commit() later hands out, for every seed.
+        for seed in range(1, 20):
+            seq = self._seq(seed=seed, block_len=10, windows=((1, 40),))
+            seq.commit(0)
+            seq.probe_trigger_on_score(0, correct=True, intervention_active=False)
+            predicted = [seq.correct_arm(i) for i in range(1, 14)]
+            actual = [seq.commit(i) for i in range(1, 14)]
+            self.assertEqual(predicted, actual, f"seed={seed}")
+
+    def test_provisional_side_mid_block(self):
+        # Re-previewing partway through still lines up with the remaining plan.
+        seq = self._seq(seed=5, block_len=10, windows=((1, 40),))
+        seq.commit(0)
+        seq.probe_trigger_on_score(0, correct=True, intervention_active=False)
+        for i in range(1, 5):
+            seq.commit(i)
+        predicted = [seq.correct_arm(i) for i in range(5, 13)]
+        actual = [seq.commit(i) for i in range(5, 13)]
+        self.assertEqual(predicted, actual)
+
+    def test_provisional_side_after_operator_end_walks_spine(self):
+        # Ending the probe clears its preview: upcoming trials read the spine.
+        seq = self._seq(seed=5, block_len=10, windows=((1, 40),))
+        seq.commit(0)
+        seq.probe_trigger_on_score(0, correct=True, intervention_active=False)
+        seq.commit(1)
+        seq.end_probe_block()
+        self.assertEqual(seq.correct_arm(2), seq.seq[1])
+        self.assertEqual(seq.commit(2), seq.seq[1])
 
     def test_block_honors_session_max_same_run(self):
         # _seq() sets max_same_run=3; the forced probe block should inherit it

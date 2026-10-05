@@ -313,6 +313,9 @@ class TrialSequence:
         only (never commits). Predicts what :meth:`commit` would decide assuming no
         *new* block triggers between the decision frontier and ``index``:
 
+          - if a probe block is running, its remaining trials take their planned
+            forced sides (the plan is fixed when the probe fires), and the walk
+            below starts after them;
           - if a corrective block is open, the immediate next trial continues it
             (forced side); trials beyond it are assumed NORMAL;
           - NORMAL trials consume the counterbalanced spine IN ORDER from the next
@@ -327,6 +330,13 @@ class TrialSequence:
         inherently uncertain in a closed loop - this is the aligned best guess,
         refined as each trial actually commits."""
         ahead = max(0, index - self._frontier)     # 0 == the next trial to commit
+        if self._probe is not None:
+            # A running probe takes priority in _commit_one, so its remaining plan
+            # comes first; neither it nor the suspended stack consumes the spine.
+            side = self._probe.upcoming_side(ahead)
+            if side is not None:
+                return side
+            ahead -= self._probe.upcoming_forced()
         spine_pos = self._spine_pos
         if self._ctl is not None and self._ctl.target is not None:
             # A block is open: the immediate next trial continues it (no spine

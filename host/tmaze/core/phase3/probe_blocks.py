@@ -173,6 +173,15 @@ class ProbeBlockController:
             return 0
         return max(0, len(self._plan) - self._pos)
 
+    def upcoming_side(self, ahead: int) -> Optional[int]:
+        """The planned forced side of the block trial ``ahead`` trials past the next
+        one to be issued (0 = the next), for the ribbon's provisional cue display;
+        None when that trial lies beyond the block's remaining plan (same latch
+        rules as :meth:`upcoming_forced`). A peek: it never advances the block."""
+        if 0 <= ahead < self.upcoming_forced():
+            return self._plan[self._pos + ahead]
+        return None
+
     # -------------------------------------------------------- operator overrides
     def end_block(self) -> None:
         """End a running probe early (operator "End" button). No manual START - the
