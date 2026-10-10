@@ -9,7 +9,9 @@ On the synthetic moving-square session from ``test_offline_track``:
 - building a rat model from marked frames runs on the worker;
 - a run started the window's way (``prepare_run`` + ``RunJob``) and the copied
   command line give the same rows;
-- Cancel stops a run and leaves no output.
+- Cancel stops a run and leaves no output;
+- a clip tracks the warm-up before A, draws on every written frame and saves an
+  H.264 file at the planned rate; a cancelled clip leaves no file.
 
 Needs numpy + OpenCV with an mp4 writer (skips otherwise).
 
@@ -199,6 +201,53 @@ class TestVideoPlayer(unittest.TestCase):
                                    background=self.defaults.background)
         with self.assertRaises(ValueError):
             VP.prepare_run(self.defaults, edited, self.tracker, out_dir=out, tag="r")
+
+    def _clip(self, plan, path, draw=lambda pic, idx, res: None):
+        self.player.save_clip(path, plan, draw)
+        done = []
+        self.assertTrue(_wait(lambda: done.append(self.player.take_job_result("clip"))
+                              or done[-1] is not None, 30))
+        return done[-1]
+
+    def test_save_clip_tracks_warmup_and_draws_each_written_frame(self):
+        if VP.av is None:
+            self.skipTest("PyAV not installed")
+        self.player.seek(5)
+        self.assertTrue(self._show(5))
+        path = os.path.join(self.tmp, "clip.mp4")
+        drawn = []
+
+        def draw(pic, idx, res):
+            drawn.append((idx, res is not None, len(self.calls)))
+            pic[:4, :4] = 255
+        plan = WB.clip_plan(20, 35, fps=25.0, speed=0.5, warmup=10)
+        time.sleep(0.05)
+        self.calls.clear()
+        out = self._clip(plan, path, draw)
+        self.assertEqual(out, {"path": path, "frames": 16})
+        self.assertEqual([d[:2] for d in drawn], [(i, True) for i in range(20, 36)])
+        self.assertEqual(drawn[0][2], 11)             # frames 10..20 tracked before A
+        cap = cv2.VideoCapture(path)
+        try:
+            self.assertEqual(int(cap.get(cv2.CAP_PROP_FRAME_COUNT)), 16)
+            self.assertAlmostEqual(cap.get(cv2.CAP_PROP_FPS), 12.5, places=1)
+            ok, first = cap.read()
+        finally:
+            cap.release()
+        self.assertTrue(ok)
+        self.assertGreater(int(first[:4, :4].mean()), 200)
+        self.assertTrue(self._show(5))                # the view goes back where it was
+
+    def test_cancelled_clip_leaves_no_file(self):
+        if VP.av is None:
+            self.skipTest("PyAV not installed")
+        path = os.path.join(self.tmp, "clip.mp4")
+        plan = WB.clip_plan(0, _N - 1, fps=25.0, speed=1.0, warmup=0)
+
+        def cancel_on_first(pic, idx, res):
+            self.player.cancel_clip()
+        self.assertEqual(self._clip(plan, path, cancel_on_first), {"cancelled": True})
+        self.assertFalse(os.path.exists(path))
 
 
 if __name__ == "__main__":

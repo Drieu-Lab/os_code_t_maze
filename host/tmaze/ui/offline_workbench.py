@@ -17,7 +17,9 @@ One window, three columns:
 Nothing is saved unless you ask: edits live in memory; "Save as" opens in
 ``host/ratmodels/`` for models and in the bundle's ``video/`` for the rest. A
 run writes ``video/<id>_offline_track_<tag>.csv`` + ``.json`` and gives the same
-rows as the copied command (ADR-0214).
+rows as the copied command (ADR-0214). "Save A-B as clip" writes the A-B range,
+with the overlay as shown, as an H.264 ``.mp4`` for presentations, at a chosen
+speed (ADR-0218).
 
 Run (env ``drieu_t_maze``, any directory):
 
@@ -126,6 +128,52 @@ def load_session(bundle: str, overrides: OT.Overrides = OT.Overrides(), *,
                    n_frames=n, fps=fps, frame_times=times,
                    markers=WB.trial_markers(_trial_rows(bundle), times),
                    zones=zones, live_track=live)
+
+
+@dataclass(frozen=True)
+class Overlay:
+    """The view's overlay, fixed when made, so a clip saved on the player's
+    worker draws exactly what the window showed when it started (ADR-0218)."""
+    show: Dict[str, bool]
+    tracker: Any
+    zones: Optional[ZoneMap]
+    live_track: Dict[int, WB.TrackPoint]
+    run_track: Dict[int, WB.TrackPoint]
+
+    def draw(self, disp, scale: float, idx: int, res, frame_shape) -> None:
+        from tmaze.vision.tracker import draw_overlay
+        sh = self.show
+        draw_overlay(disp, scale, self.tracker, res, draw_landmarks=sh["landmarks"],
+                     draw_roi=sh["roi"], draw_trail=sh["trail"] and res is not None,
+                     draw_candidates=sh["candidates"])
+        fh, fw = frame_shape[:2]
+        if sh["zones"] and self.zones is not None:
+            cur = None
+            if res is not None and res.smoothed is not None:
+                cur = self.zones.classify_point(res.smoothed[0] / fw, res.smoothed[1] / fh)
+            draw_zone_overlay(disp, self.zones, current_zone=cur)
+        live = self.live_track.get(idx)
+        if sh["live"] and live is not None and live.x is not None:
+            cv2.drawMarker(disp, (int(live.x * scale), int(live.y * scale)), LIVE_GHOST_BGR,
+                           markerType=cv2.MARKER_CROSS, markerSize=18, thickness=2)
+        run = self.run_track.get(idx)
+        if sh["run"] and run is not None and run.x is not None:
+            cv2.circle(disp, (int(run.x * scale), int(run.y * scale)), 9, RUN_GHOST_BGR, 2)
+        if sh["mask"] and res is not None and res.mask is not None:
+            _draw_mask_inset(disp, res)
+
+
+def _draw_mask_inset(disp, res) -> None:
+    m = cv2.cvtColor(res.mask, cv2.COLOR_GRAY2BGR)
+    if res.chosen_contour is not None:
+        cv2.drawContours(m, [res.chosen_contour], -1, (0, 255, 0), thickness=cv2.FILLED)
+    dh, dw = disp.shape[:2]
+    iw = max(1, int(dw * MASK_INSET_FRAC))
+    ih = max(1, int(m.shape[0] * iw / max(1, m.shape[1])))
+    if ih >= dh:
+        return
+    disp[0:ih, dw - iw:dw] = cv2.resize(m, (iw, ih), interpolation=cv2.INTER_NEAREST)
+    cv2.rectangle(disp, (dw - iw, 0), (dw - 1, ih - 1), (200, 200, 200), 1)
 
 
 def _describe(choice: Optional[OT.FileChoice]) -> str:
@@ -327,6 +375,18 @@ class OfflineWorkbench:
         wu.pack(side=tk.LEFT)
         wu.bind("<Return>", lambda _e: self._push_warmup())
         ttk.Button(row3, text="Reset tracker", command=self._reset_tracker).pack(side=tk.LEFT, padx=6)
+        ttk.Separator(row3, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=6)
+        self.clip_btn = ttk.Button(row3, text="Save A-B as clip...", command=self._ask_save_clip)
+        self.clip_btn.pack(side=tk.LEFT)
+        ttk.Label(row3, text="at").pack(side=tk.LEFT, padx=(4, 0))
+        self.clip_speed_var = tk.StringVar(value="1x")
+        ttk.Combobox(row3, textvariable=self.clip_speed_var, width=5, state="readonly",
+                     values=[self._speed_text(v) for v in WB.CLIP_SPEEDS]).pack(side=tk.LEFT)
+        self.clip_cancel_btn = ttk.Button(row3, text="Cancel", state=tk.DISABLED,
+                                          command=self.player.cancel_clip)
+        self.clip_cancel_btn.pack(side=tk.LEFT, padx=(4, 0))
+        self.clip_var = tk.StringVar()
+        ttk.Label(row3, textvariable=self.clip_var).pack(side=tk.LEFT, padx=4)
 
     @staticmethod
     def _speed_text(v: float) -> str:
@@ -914,6 +974,64 @@ class OfflineWorkbench:
         except (ValueError, tk.TclError):
             pass
 
+    # ----------------------------------------------------------------- clips
+    def _clip_speed(self) -> float:
+        texts = [self._speed_text(v) for v in WB.CLIP_SPEEDS]
+        return WB.CLIP_SPEEDS[texts.index(self.clip_speed_var.get())]
+
+    def _ask_save_clip(self) -> None:
+        ab = self.marks.ab()
+        if ab is None:
+            self.status.set("set A and B around the stretch to save first")
+            return
+        path = filedialog.asksaveasfilename(
+            title="Save A-B as clip", initialdir=self.video_dir,
+            initialfile=WB.clip_name(self.s.defaults.session_id, *ab, self._clip_speed()),
+            defaultextension=".mp4", filetypes=[("MP4 video", "*.mp4")])
+        if path:
+            self.save_clip(path)
+
+    def save_clip(self, path: str) -> Optional[str]:
+        """Save the A-B range at the chosen speed, with the overlay as it is
+        shown now; returns an error message instead (also shown) if it can't."""
+        ab = self.marks.ab()
+        try:
+            if ab is None:
+                raise ValueError("set A and B around the stretch to save first")
+            if self.clip_cancel_btn.instate(["!disabled"]):
+                raise ValueError("a clip is already being saved")
+            plan = WB.clip_plan(*ab, fps=self.player.fps, speed=self._clip_speed(),
+                                warmup=self.player.warmup)
+        except ValueError as e:
+            self.status.set(str(e))
+            return str(e)
+        overlay = self._overlay()
+        self.player.save_clip(path, plan, lambda pic, idx, res:
+                              overlay.draw(pic, 1.0, idx, res, pic.shape))
+        self.clip_btn.configure(state=tk.DISABLED)
+        self.clip_cancel_btn.configure(state=tk.NORMAL)
+        self.clip_var.set("saving clip...")
+        return None
+
+    def _poll_clip(self) -> None:
+        if self.clip_cancel_btn.instate(["disabled"]):
+            return
+        done = self.player.take_job_result("clip")
+        if done is None:
+            n, total = self.player.clip_progress
+            self.clip_var.set(f"saving clip: {n} / {total} frames")
+            return
+        self.clip_btn.configure(state=tk.NORMAL)
+        self.clip_cancel_btn.configure(state=tk.DISABLED)
+        if done.get("cancelled"):
+            self.clip_var.set("clip cancelled; nothing saved")
+        elif done.get("error"):
+            self.clip_var.set("")
+            self.status.set(f"clip failed: {done['error']}")
+        else:
+            self.clip_var.set(f"saved {done['frames']} frames: "
+                              f"{os.path.basename(done['path'])}")
+
     def _reset_tracker(self) -> None:
         self.player.reset_tracker()
         if not self.player.playing():
@@ -966,42 +1084,15 @@ class OfflineWorkbench:
         bh = max(240, self.view_box.winfo_height() - 4)
         return int(min(bw, bh * w / max(1, h)))
 
-    def _draw(self, disp, scale: float) -> None:
-        from tmaze.vision.tracker import draw_overlay
-        shown = self.player.shown()
-        res = shown.result
-        sh = {k: v.get() for k, v in self.show.items()}
-        draw_overlay(disp, scale, self.tracker, res, draw_landmarks=sh["landmarks"],
-                     draw_roi=sh["roi"], draw_trail=sh["trail"] and res is not None,
-                     draw_candidates=sh["candidates"])
-        fh, fw = shown.frame.shape[:2]
-        if sh["zones"] and self.s.zones is not None:
-            cur = None
-            if res is not None and res.smoothed is not None:
-                cur = self.s.zones.classify_point(res.smoothed[0] / fw, res.smoothed[1] / fh)
-            draw_zone_overlay(disp, self.s.zones, current_zone=cur)
-        live = self.s.live_track.get(shown.idx)
-        if sh["live"] and live is not None and live.x is not None:
-            cv2.drawMarker(disp, (int(live.x * scale), int(live.y * scale)), LIVE_GHOST_BGR,
-                           markerType=cv2.MARKER_CROSS, markerSize=18, thickness=2)
-        run = self.run_track.get(shown.idx)
-        if sh["run"] and run is not None and run.x is not None:
-            cv2.circle(disp, (int(run.x * scale), int(run.y * scale)), 9, RUN_GHOST_BGR, 2)
-        if sh["mask"] and res is not None and res.mask is not None:
-            self._draw_mask_inset(disp, res)
+    def _overlay(self) -> "Overlay":
+        """What to draw, read from the toggles now (Tk thread only)."""
+        return Overlay(show={k: v.get() for k, v in self.show.items()}, tracker=self.tracker,
+                       zones=self.s.zones, live_track=self.s.live_track,
+                       run_track=self.run_track)
 
-    @staticmethod
-    def _draw_mask_inset(disp, res) -> None:
-        m = cv2.cvtColor(res.mask, cv2.COLOR_GRAY2BGR)
-        if res.chosen_contour is not None:
-            cv2.drawContours(m, [res.chosen_contour], -1, (0, 255, 0), thickness=cv2.FILLED)
-        dh, dw = disp.shape[:2]
-        iw = max(1, int(dw * MASK_INSET_FRAC))
-        ih = max(1, int(m.shape[0] * iw / max(1, m.shape[1])))
-        if ih >= dh:
-            return
-        disp[0:ih, dw - iw:dw] = cv2.resize(m, (iw, ih), interpolation=cv2.INTER_NEAREST)
-        cv2.rectangle(disp, (dw - iw, 0), (dw - 1, ih - 1), (200, 200, 200), 1)
+    def _draw(self, disp, scale: float) -> None:
+        shown = self.player.shown()
+        self._overlay().draw(disp, scale, shown.idx, shown.result, shown.frame.shape)
 
     def _frame_time(self, idx: int) -> float:
         t = self.s.frame_times
@@ -1067,6 +1158,7 @@ class OfflineWorkbench:
                                                   copy_unscaled=True)
                 self._update_readouts(shown)
             self._poll_run()
+            self._poll_clip()
         finally:
             self._afters["poll"] = self.root.after(POLL_MS, self._poll)
 
@@ -1100,6 +1192,7 @@ class OfflineWorkbench:
             self.root.after_cancel(after_id)
         if self.run_job is not None:
             self.run_job.cancel()
+        self.player.cancel_clip()
         self.tab.close()
         self.player.close()
         self.root.destroy()

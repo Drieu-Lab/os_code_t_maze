@@ -17,7 +17,9 @@ races the frame loop.
 ``RunJob`` runs a whole-video (or range) offline track in the background with a
 progress readout and Cancel, using the same settings path as the command line;
 :func:`prepare_run` saves any model that exists only in memory beside the run's
-outputs first. See docs/decisions/0215. Needs ``opencv-python`` + ``numpy``.
+outputs first. See docs/decisions/0215. :meth:`VideoPlayer.save_clip` writes the
+A-B range with its overlay as an H.264 clip for presentations (ADR-0218).
+Needs ``opencv-python`` + ``numpy`` (+ ``av`` for clips).
 """
 from __future__ import annotations
 
@@ -25,18 +27,26 @@ import os
 import threading
 import time
 from dataclasses import asdict, dataclass, replace
+from fractions import Fraction
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from tmaze.core import offline_track as OT
 from tmaze.core import offline_workbench as WB
 from tmaze.core.session.session_config import sha256_file
 from tmaze.vision import offline_tracker as OTR
-from tmaze.vision.tracker import RatTracker, cv2
+from tmaze.vision.tracker import RatTracker, cv2, np
+
+try:
+    import av  # type: ignore
+except ImportError:  # pragma: no cover
+    av = None  # type: ignore
 
 MODE_TRACK = "track"
 MODE_VIEW = "view"         # show the recorded video only, no tracking
 _SEEK_FORWARD_MAX = 300    # a forward jump this short is decoded, not seeked
 _IDLE_WAIT_S = 0.05
+CLIP_CRF = 18              # H.264 quality of saved clips (~18 is visually lossless)
+CLIP_PRESET = "fast"
 
 
 @dataclass(frozen=True)
@@ -78,6 +88,47 @@ class _Decoder:
         self._cap.release()
 
 
+class ClipWriter:
+    """H.264 ``.mp4`` that presentation software plays (yuv420p, moov atom at
+    the front). The rate may be fractional (slow motion of a 15 fps video is
+    3.75 fps). Odd frame sizes are cropped by one pixel, as yuv420p needs even
+    ones."""
+
+    def __init__(self, path: str, rate: Fraction):
+        if av is None:
+            raise RuntimeError("saving clips needs PyAV (pip install av)")
+        self.path = path
+        self.rate = Fraction(rate)
+        self._container = av.open(path, mode="w", options={"movflags": "+faststart"})
+        self._stream = None
+        self.frames = 0
+
+    def write(self, frame_bgr) -> None:
+        h, w = frame_bgr.shape[:2]
+        frame_bgr = frame_bgr[: h - h % 2, : w - w % 2]
+        if self._stream is None:
+            s = self._container.add_stream("libx264", rate=self.rate,
+                                           options={"crf": str(CLIP_CRF),
+                                                    "preset": CLIP_PRESET})
+            s.width, s.height = frame_bgr.shape[1], frame_bgr.shape[0]
+            s.pix_fmt = "yuv420p"
+            self._stream = s
+        vf = av.VideoFrame.from_ndarray(np.ascontiguousarray(frame_bgr), format="bgr24")
+        vf = vf.reformat(format="yuv420p")
+        vf.pts = self.frames
+        self.frames += 1
+        for packet in self._stream.encode(vf):
+            self._container.mux(packet)
+
+    def close(self) -> None:
+        try:
+            if self._stream is not None:
+                for packet in self._stream.encode(None):
+                    self._container.mux(packet)
+        finally:
+            self._container.close()
+
+
 class VideoPlayer:
     """Threaded play / pause / seek / step over one video, feeding ``tracker``.
 
@@ -111,6 +162,8 @@ class VideoPlayer:
         self._busy: Optional[str] = None
         self._last_error: Optional[str] = None
         self._job_results: Dict[str, Any] = {}
+        self.clip_progress: Tuple[int, int] = (0, 0)    # (frames written, of)
+        self._clip_cancel = threading.Event()
         self._stop = False
         self._thread = threading.Thread(target=self._run, name="video-player", daemon=True)
         self._thread.start()
@@ -246,6 +299,61 @@ class VideoPlayer:
             self.tracker.reset()
             return info
         self.submit("register", job)
+
+    def save_clip(self, path: str, plan: WB.ClipPlan,
+                  draw: Callable[[Any, int, Any], None]) -> None:
+        """Write ``plan``'s frames to an H.264 ``path`` on the worker, tracked as
+        playback would be (warm-up first) with ``draw(picture, frame_idx,
+        result)`` painting the overlay on each. Pauses playback. The result is
+        job ``"clip"``: ``{"path", "frames"}``, or ``{"cancelled": True}`` /
+        ``{"error": ...}`` with the partial file deleted."""
+        self.pause()
+        self._clip_cancel.clear()
+        self.clip_progress = (0, len(plan.written()))
+
+        def job():
+            writer = None
+            try:
+                writer = ClipWriter(path, plan.rate)
+                self._write_clip(writer, plan, draw)
+                if writer.frames == 0:
+                    raise OTR.OfflineTrackError("no frames in the A-B range")
+                writer.close()
+                return {"path": path, "frames": writer.frames}
+            except Exception as e:
+                if writer is not None:
+                    try:
+                        writer.close()
+                    except Exception:
+                        pass
+                if os.path.exists(path):
+                    os.remove(path)
+                if isinstance(e, RunCancelled):
+                    return {"cancelled": True}
+                return {"error": f"{type(e).__name__}: {e}"}
+        self.submit("clip", job)
+
+    def cancel_clip(self) -> None:
+        self._clip_cancel.set()
+
+    def _write_clip(self, writer: ClipWriter, plan: WB.ClipPlan, draw) -> None:
+        tracking = self._mode == MODE_TRACK
+        if tracking:
+            self.tracker.reset()
+        start = plan.track_from if tracking else plan.first
+        self._dec.seek(start)
+        for idx in range(start, plan.last + 1):
+            if self._clip_cancel.is_set() or self._stop:
+                raise RunCancelled()
+            frame = self._dec.read()
+            if frame is None:
+                break
+            result = self._track(frame)
+            if idx >= plan.first and (idx - plan.first) % plan.step == 0:
+                picture = frame.copy()
+                draw(picture, idx, result)
+                writer.write(picture)
+                self.clip_progress = (writer.frames, self.clip_progress[1])
 
     def close(self) -> None:
         self._request(_stop=True)

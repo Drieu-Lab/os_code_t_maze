@@ -7,6 +7,7 @@ needs no pixels or Tk, so it can be tested on its own:
 
 - where to start tracking after a jump (warm-up), and frame stepping inside an
   A-B loop;
+- the frames and frame rate of a presentation clip saved from the A-B range;
 - trial markers: each trial's start / choice / reward / end time from the trial
   log, mapped onto video frame numbers through the sidecar's ``host_unix_s``;
 - the settings table (which layer set each setting, or "you" for a change made
@@ -29,6 +30,7 @@ import os
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime
+from fractions import Fraction
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from tmaze.core import offline_track as OT
@@ -94,6 +96,47 @@ def next_frame(current: int, step: int, n_frames: int, marks: Marks = Marks(),
         elif target < lo:
             target = hi
     return clamp_frame(target, n_frames)
+
+
+# ------------------------------------------------------------------- clips
+# Clip speeds offered (multiples of the recorded frame rate). A clip faster than
+# MAX_CLIP_FPS keeps every n-th frame instead: many players, PowerPoint among
+# them, stutter or drop frames above 60 fps (see docs/decisions/0218).
+CLIP_SPEEDS: Tuple[float, ...] = (0.25, 0.5, 1.0, 2.0, 4.0)
+MAX_CLIP_FPS = 60
+
+
+@dataclass(frozen=True)
+class ClipPlan:
+    """Which frames a presentation clip tracks and writes, and at what rate."""
+    first: int                 # first frame written (A)
+    last: int                  # last frame that may be written (B)
+    track_from: int            # first frame tracked (warm-up before A)
+    step: int                  # write every step-th frame from A
+    rate: Fraction             # frames per second of the saved file
+
+    def written(self) -> range:
+        return range(self.first, self.last + 1, self.step)
+
+
+def clip_plan(a: int, b: int, *, fps: float, speed: float, warmup: int) -> ClipPlan:
+    """Plan a clip of frames ``a..b`` played at ``speed`` x the recording's
+    ``fps``, tracked from ``warmup`` frames before ``a`` so the overlay is
+    already locked on at the first frame."""
+    if fps <= 0:
+        raise ValueError("the video's frame rate is unknown")
+    if speed <= 0:
+        raise ValueError("pick a clip speed (max is not a speed)")
+    first, last = min(int(a), int(b)), max(int(a), int(b))
+    rate = Fraction(fps).limit_denominator(1001) * Fraction(speed).limit_denominator(100)
+    step = max(1, math.ceil(rate / MAX_CLIP_FPS))
+    return ClipPlan(first, last, warmup_start(first, warmup), step, rate / step)
+
+
+def clip_name(session_id: str, a: int, b: int, speed: float) -> str:
+    """Suggested file name, e.g. ``600_20260714_131656_clip_1200-1650_0.5x.mp4``."""
+    suffix = "" if speed == 1 else f"_{speed:g}x"
+    return f"{session_id}_clip_{min(a, b)}-{max(a, b)}{suffix}.mp4"
 
 
 # ------------------------------------------------------------------ trials

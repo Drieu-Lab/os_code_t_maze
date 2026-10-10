@@ -9,7 +9,8 @@ window built but hidden:
 - a setting changed in the window shows as layer "you" and appears as --set in
   the copied command;
 - a rat model built from the A-B marks becomes --register-frames;
-- a range run started from the window and the copied command give the same rows.
+- a range run started from the window and the copied command give the same rows;
+- "Save A-B as clip" refuses without A-B, then writes the range as an mp4.
 
 Needs Tk + numpy + OpenCV with an mp4 writer + Pillow (skips otherwise).
 
@@ -138,6 +139,23 @@ class TestWorkbenchWindow(unittest.TestCase):
         self.assertEqual(len(gui), 26)
         self.assertEqual(gui, cli)
         self.assertIn("gui", WB.offline_runs(self.bundle))
+
+    def test_save_clip_from_marks(self):
+        from tmaze.vision import video_player as VP
+        if VP.av is None:
+            self.skipTest("PyAV not installed")
+        path = os.path.join(self.tmp, "clip.mp4")
+        self.assertIn("A and B", self.wb.save_clip(path) or "")
+        self.wb.marks = WB.Marks(a=10, b=29)
+        self.wb.clip_speed_var.set("2x")
+        self.assertIsNone(self.wb.save_clip(path))
+        self.assertTrue(self._pump(lambda: self.wb.clip_btn.instate(["!disabled"]), 30))
+        self.assertIn("saved 20 frames", self.wb.clip_var.get())
+        cap = UI.cv2.VideoCapture(path)
+        try:
+            self.assertEqual(int(cap.get(UI.cv2.CAP_PROP_FRAME_COUNT)), 20)
+        finally:
+            cap.release()
 
 
 if __name__ == "__main__":

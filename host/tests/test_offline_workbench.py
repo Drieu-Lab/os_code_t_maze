@@ -2,6 +2,7 @@
 test_offline_workbench.py - the pure decisions behind the offline workbench.
 
 Covers ``tmaze.core.offline_workbench``: warm-up start and A-B loop stepping,
+presentation-clip plans (rate, warm-up, frame skipping above 60 fps, name),
 trial-log times mapped to video frames, the settings table and the ``--set``
 values that reproduce the window's settings (round-tripped through the same
 ``merge_params`` the command line uses), the equivalent command line for each
@@ -16,6 +17,7 @@ import shutil
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
+from fractions import Fraction
 from types import SimpleNamespace
 
 from tmaze.core import offline_track as OT
@@ -67,6 +69,30 @@ class TestFrames(unittest.TestCase):
         m = WB.Marks().toggle_blocker(30).toggle_blocker(10)
         self.assertEqual(m.blocker_frames, (10, 30))
         self.assertEqual(m.toggle_blocker(30).blocker_frames, (10,))
+
+
+class TestClips(unittest.TestCase):
+    def test_slow_motion_keeps_every_frame_at_a_fractional_rate(self):
+        p = WB.clip_plan(1650, 1200, fps=15.0, speed=0.25, warmup=150)
+        self.assertEqual((p.first, p.last, p.track_from, p.step), (1200, 1650, 1050, 1))
+        self.assertEqual(p.rate, Fraction(15, 4))
+        self.assertEqual(len(p.written()), 451)
+
+    def test_fast_clip_above_60_fps_skips_frames(self):
+        p = WB.clip_plan(0, 99, fps=42.0, speed=4.0, warmup=150)
+        self.assertEqual((p.step, p.rate, p.track_from), (3, Fraction(56), 0))
+        self.assertEqual(list(p.written())[:3], [0, 3, 6])
+        self.assertEqual(WB.clip_plan(0, 9, fps=15.0, speed=4.0, warmup=0).step, 1)
+
+    def test_bad_speed_or_rate(self):
+        with self.assertRaises(ValueError):
+            WB.clip_plan(0, 9, fps=15.0, speed=0.0, warmup=0)       # "max"
+        with self.assertRaises(ValueError):
+            WB.clip_plan(0, 9, fps=0.0, speed=1.0, warmup=0)
+
+    def test_clip_name(self):
+        self.assertEqual(WB.clip_name("600_x", 1650, 1200, 1.0), "600_x_clip_1200-1650.mp4")
+        self.assertEqual(WB.clip_name("600_x", 1, 2, 0.5), "600_x_clip_1-2_0.5x.mp4")
 
 
 class TestTrials(unittest.TestCase):
