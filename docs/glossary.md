@@ -282,6 +282,15 @@ a faint "ghost" of the rat. The tracker compares each frame against this picture
 to find what moved. The offline tracker builds one when a session has no saved
 background (ADR-0211).
 
+### Warm-up (tracking)
+Frames the tracker processes *before* the ones you look at or save, so it has
+already found the rat and settled its smoothing. The tracker remembers where the
+rat just was, so its answer on a frame depends on the frames before it; starting
+cold on a frame can give a different (worse) answer than the live run did. The
+offline tracker's `--warmup-frames` and the workbench's jump-to-frame both
+re-track a stretch before the target (default 150 frames in the workbench;
+ADR-0214).
+
 ### Noise floor (video)
 How much a pixel's brightness wanders when *nothing* is happening — here mostly
 video-compression noise, ~25 grey levels (of 255) in the "brightest ever minus
