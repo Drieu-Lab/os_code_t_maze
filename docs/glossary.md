@@ -273,6 +273,15 @@ animal starting to use the tone?" — the cue weight climbing above the
 history weights is the emergence signature a single accuracy number hides. See
 ADR-0112.
 
+### Median background
+A picture of the empty rig built from frames of a recording that has the rat in
+it: for every pixel, take the middle value (the *median*) of that pixel across
+many frames spread over the session. The rat covers any one spot in only a few of
+those frames, so the middle value is the empty floor. A plain average would leave
+a faint "ghost" of the rat. The tracker compares each frame against this picture
+to find what moved. The offline tracker builds one when a session has no saved
+background (ADR-0211).
+
 ### Noise floor (video)
 How much a pixel's brightness wanders when *nothing* is happening — here mostly
 video-compression noise, ~25 grey levels (of 255) in the "brightest ever minus

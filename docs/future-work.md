@@ -125,6 +125,12 @@ criteria).
 | [FW-0071](#fw-0071-per-day-daily-water-target-override) | Per-day daily-water target override (e.g. from `daily_log.csv`) on top of the per-animal `daily_water_ml` | `core/records/{animals,daily_log}.py`, `ui/phase3_controller.py` | Proposed |
 | [FW-0072](#fw-0072-per-animal-session-cap-overrides) | Per-animal `max_trials` / `max_minutes` overrides in `animals.json` (the ADR-0186 pattern) for slow rats the clock ends early | `core/records/animals.py`, `core/phase3/session_cap.py`, `ui/phase3_controller.py` | Proposed |
 | [FW-0073](#fw-0073-stamp-the-real-animal-id-into-the-video-sidecar) | Stamp the real animal id into the video sidecar (every sidecar so far says `animal: animal`) | `ui/camera_view.py`, `ui/session_controller.py` | Proposed |
+| [FW-0074](#fw-0074-offline-tracker-workbench-window) | Offline tracker workbench: a separate Tk window to scrub a recorded video, tune every live-tab setting, register/save models, and run | new `ui/` window over `vision/offline_tracker.py` | Proposed |
+| [FW-0075](#fw-0075-beam-break-agreement-for-an-offline-run) | Score an offline run against the beam-break sensors (top-priority tracker evaluation) | `tools/offline_track.py`, `tools/maze_state_validate.py`, `core/maze_state.py` | Proposed |
+| [FW-0076](#fw-0076-overlay-snippet-export-from-the-offline-tracker) | Overlay snippet export from the offline tracker: diagnostic + task layers, clip by trials or time | new core plan + `vision/` drawing shell, `tools/offline_track.py` | Proposed |
+| [FW-0077](#fw-0077-further-offline-tracker-evaluation) | Further offline evaluation: per-run stats, A/B comparison of runs, per-frame video-quality indicators | `core/offline_track.py`, `tools/` | Proposed |
+| [FW-0078](#fw-0078-retire-the-analysis-repos-render_overlay) | Retire `drieu_lab_analysis` `render_overlay` / `video_overlay` once FW-0076 lands (the rig owns overlay clips) | `drieu_lab_analysis` | Blocked (on FW-0076) |
+| [FW-0079](#fw-0079-snapshot-the-blocker-model-into-the-bundle) | Snapshot the active blocker model into the session's `config/` at Start, like the rat model | `ui/experiment_control.py` (`config_inputs`), `ui/tracker_view.py` | Proposed |
 
 ## Entries
 
@@ -3690,6 +3696,209 @@ carries it, or keep it for the old ones).
 between sessions and check one recording afterwards.
 
 **ADR needed?** No (a bug fix; reference ADR-0204).
+
+### FW-0074: Offline tracker workbench window
+
+- **Status:** Proposed
+- **Date added:** 2026-10-10
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** new `host/tmaze/ui/offline_workbench.py` (Tk) over
+  `host/tmaze/vision/offline_tracker.py`; shared slider/tolerance widgets from
+  `host/tmaze/ui/tracker_view.py`
+- **Related ADRs:** [ADR-0211](decisions/0211-offline-tracking-of-recorded-video.md)
+
+**Motivation / context.** The offline command-line tool (ADR-0211) re-tracks
+whole videos, but developing the tracker needs an interactive view: watch a
+recorded session, change settings, see the effect, build and save models. The
+operator wants every option the live Tracking tab offers to be available here.
+It was chosen as a separate window (not an offline mode in the rig GUI) so it
+can never disturb a live session.
+
+**Sketch of approach.** Open a bundle; load its settings via
+`offline_track.resolve_settings`. A scrub bar plus frame stepping (cache recent
+frames; re-run the tracker from a warm-up point after a jump, using
+`iter_track(warmup)`); the overlay and the binary-mask view; all `TrackerParams`
+sliders and the tolerance panel (factor the widgets out of `tracker_view.py`
+rather than copy them); register/enrich/save the rat model, blocker
+registration, ROI/landmark editors (reuse `still_frame_editor`); "Run whole
+video" calls `offline_tracker.run` with the current settings and a tag.
+
+**Evaluation / acceptance.** Settings changed in the window and a CLI run with
+the same `--set` values give identical CSVs; a model saved here loads in the
+live tab.
+
+**Effort / risk.** Large (new window, frame cache, widget extraction). Risk:
+copying `tracker_view` code instead of sharing it.
+
+**Open questions.** How far back to warm up after a jump.
+
+**ADR needed?** Yes (window design, widget sharing).
+
+### FW-0075: Beam-break agreement for an offline run
+
+- **Status:** Proposed (top priority of the evaluation items)
+- **Date added:** 2026-10-10
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** `host/tmaze/tools/maze_state_validate.py`,
+  `host/tmaze/core/maze_state.py`, `host/tmaze/tools/offline_track.py`
+- **Related ADRs:** [ADR-0211](decisions/0211-offline-tracking-of-recorded-video.md),
+  [ADR-0025](decisions/0025-maze-state-module.md)
+
+**Motivation / context.** The beam-break sensors are an independent record of
+where the rat was, so they are the best available check on a track. The operator
+named this the most important evaluation for judging tracker settings and
+changes.
+
+**Sketch of approach.** Replay the offline CSV through `maze_state` with the
+bundle's `config/zones.json`, align its zone entries with the bundle's serial
+`S,<i>` beam edges (as `maze_state_validate` already does for a track log), and
+report per-beam match rate, signed latency and false transitions. Write it into
+the run's `.json` summary (or a sibling file) so two runs can be compared.
+
+**Evaluation / acceptance.** On a session with good live tracking, the live
+sidecar and an offline run score similarly; a deliberately bad `--set` scores
+worse.
+
+**Effort / risk.** Medium. Risk: serial beam polarity before firmware proto v8
+(ADR-0164).
+
+**Open questions.** Which serial file and clock to align on for older bundles.
+
+**ADR needed?** Probably (metric definition).
+
+### FW-0076: Overlay snippet export from the offline tracker
+
+- **Status:** Proposed
+- **Date added:** 2026-10-10
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** new pure "overlay plan" core + a `vision/` drawing shell,
+  `host/tmaze/tools/offline_track.py` (or a sibling tool)
+- **Related ADRs:** [ADR-0211](decisions/0211-offline-tracking-of-recorded-video.md);
+  `drieu_lab_analysis` ADR-0158 (the cue/reward overlay rules)
+
+**Motivation / context.** Short MP4 clips with the tracking drawn on top, to see
+where the tracker is weak and to share task demos. The analysis repo's
+`render_overlay` already makes task-demo clips, but it can only show the saved
+centroid. The diagnostic layer needs the full tracker result on each frame,
+which only exists while the tracker runs. The operator decided the rig becomes
+the single owner of overlay clips (task layer included); see FW-0078.
+
+**Sketch of approach.** Port, don't import (neither repo depends on the other's
+code), from `render_overlay` / `video_overlay`:
+- clip selection by inclusive trial range or by a time window from the session
+  anchor, plus padding (the `select_clip_rows` idea); trial times from the rig's
+  own `core/phase3/phase3_log_reader.py`;
+- seek to the clip start with a sequential fallback and `--no-seek`, then
+  `iter_track(warmup_frames=...)` so the tracker is locked on;
+- H.264 via PyAV (already a rig dep): `--crf` (default 28), `--preset`,
+  `--scale` rounded to even dimensions, yuv420p; names like
+  `<id>_offline_<tag>_trials12-15.mp4`;
+- a pure per-frame overlay plan + a thin drawing shell (the `video_overlay` /
+  `render_overlay` split).
+
+Layers, chosen with `--layers task,diag,zones,mask`:
+- `diag`: blob contour, rejected candidates, raw vs smoothed centroid, ROI,
+  and a state/confidence/frame/time panel in drop-shadowed text;
+- `mask`: binary-mask inset;
+- `zones`: zone outlines (`draw_zone_overlay`) + the track trail (`draw_overlay`
+  / `get_path`);
+- `task`: the ADR-0158 rules - stem lit in the cue colour from cue-on to cue-off
+  (capped at choice time), trial number + cue caption ("HIGH tone: Left"),
+  choice and outcome text once scored, a choice zone lit only when the rat
+  enters it (using the offline track), and the reward droplet for 1.5 s from
+  `reward_cmd_iso`. Zones from `config/zones.json` via `maze_state.ZoneMap`;
+  fills with OpenCV blending, text with Pillow.
+
+**Evaluation / acceptance.** Pure tests of the plan on the golden fixture;
+a rendered clip of a known trial shows the cue, choice, and reward at the right
+frames.
+
+**Effort / risk.** Medium-large; ship the diagnostic layer and the task layer as
+separate commits.
+
+**Open questions.** Default warm-up length for clips.
+
+**ADR needed?** Yes (overlay ownership moves to the rig; supersedes analysis
+ADR-0158 there via FW-0078).
+
+### FW-0077: Further offline tracker evaluation
+
+- **Status:** Proposed
+- **Date added:** 2026-10-10
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** `host/tmaze/core/offline_track.py`, `host/tmaze/tools/`
+- **Related ADRs:** [ADR-0211](decisions/0211-offline-tracking-of-recorded-video.md)
+
+**Motivation / context.** Beyond beam agreement (FW-0075), the operator wants
+to see where the tracker is strong and weak and where video quality is the
+bottleneck.
+
+**Sketch of approach.** (a) Per-run stats in the summary: confidence
+distribution, lost/coasting episodes with start time and length. (b) A/B
+comparison of two runs on the same video (live vs offline, or setting X vs Y):
+per-frame distance, frames where only one tracks. (c) Per-frame video-quality
+indicators (brightness, sharpness/blur, contrast) to line up with tracking
+failures.
+
+**Evaluation / acceptance.** Known-bad stretches show up as episodes; a
+synthetic blurred clip lowers the sharpness indicator.
+
+**Effort / risk.** Medium, in small independent pieces.
+
+**ADR needed?** Only if a metric choice is non-obvious.
+
+### FW-0078: Retire the analysis repo's render_overlay
+
+- **Status:** Blocked (on FW-0076)
+- **Date added:** 2026-10-10
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** `drieu_lab_analysis/src/tmaze_analysis/{render_overlay,video_overlay}.py`,
+  their tests, the analysis README/AGENTS
+- **Related ADRs:** [ADR-0211](decisions/0211-offline-tracking-of-recorded-video.md);
+  `drieu_lab_analysis` ADR-0158
+
+**Motivation / context.** Once the rig's snippet export has the task layer
+(FW-0076), the same overlay rules would otherwise live in two repos and could
+drift apart. The operator chose the rig as the single owner.
+
+**Sketch of approach.** Delete the two modules (or reduce `render_overlay` to a
+message pointing at the rig tool), supersede analysis ADR-0158 with a new ADR
+there, and check the progress notebook and any demo-video workflow.
+
+**Evaluation / acceptance.** Analysis tests pass; no notebook imports the
+removed modules.
+
+**Effort / risk.** Small.
+
+**ADR needed?** Yes, in the analysis repo.
+
+### FW-0079: Snapshot the blocker model into the bundle
+
+- **Status:** Proposed
+- **Date added:** 2026-10-10
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** `host/tmaze/ui/experiment_control.py` (`config_inputs`),
+  `host/tmaze/ui/tracker_view.py` (an `active_blocker_model_path()`),
+  `host/tmaze/core/offline_track.py` (prefer the snapshot)
+- **Related ADRs:** [ADR-0211](decisions/0211-offline-tracking-of-recorded-video.md),
+  [ADR-0072](decisions/0072-per-session-config-snapshot.md),
+  [ADR-0034](decisions/0034-parallel-blocker-tracking.md)
+
+**Motivation / context.** Sessions save the rat model into `config/` but not the
+blocker model, so an offline run replays whatever blocker model is current
+(`FALLBACK_BLOCKER_MODEL_NAME`), not necessarily the one used that day.
+
+**Sketch of approach.** Track the loaded blocker model's path in the Tracking
+tab; add it to the config snapshot as `blocker_model_<name>.npz`; have
+`resolve_settings` prefer it over the fallback.
+
+**Evaluation / acceptance.** A new bundle contains the blocker model, and an
+offline run's summary lists it with source `bundle`.
+
+**Effort / risk.** Small; it touches code the rig runs at Start, so land it
+between sessions.
+
+**ADR needed?** No (extends ADR-0072).
 
 ## Completed
 
