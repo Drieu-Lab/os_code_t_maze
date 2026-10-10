@@ -210,6 +210,7 @@ TIPS: Dict[str, Entry] = {
     "tracker.define_landmarks": "Mark reward wells / body-sensor points on a "
                                 "still frame.",
     "tracker.clear_landmarks": "Remove all placed landmarks.",
+    "tracker.save_landmarks": "Save the placed landmarks to a JSON file you choose.",
     "tracker.show_mask": "Show the binary detection mask with the tracked blob "
                          "filled green.",
     "tracker.readout": "Live tracker state, confidence, and blob metrics.",

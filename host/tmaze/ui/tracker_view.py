@@ -35,8 +35,9 @@ import json
 import os
 import time
 import tkinter as tk
+from dataclasses import dataclass
 from tkinter import filedialog, messagebox, simpledialog, ttk
-from typing import Optional
+from typing import FrozenSet, Optional
 
 from tmaze.core import protocol
 from tmaze.paths import host_dir
@@ -88,6 +89,30 @@ LANDMARKS_PATH = os.path.join(_HERE, "landmarks.json")  # reward-well/body-senso
 MODEL_DIR = os.path.join(_HERE, "ratmodels")          # appearance models (.npz)
 TRACK_LOG_SUBDIR = "track_logs"   # subfolder of the recordings dir for track CSVs
 
+# Control groups a host can hide (TrackerTabOptions.hide).
+HIDE_ENABLE = "enable"          # Enable tracking checkbox
+HIDE_GRAB_BG = "grab_bg"        # Grab background button
+HIDE_LED_BOARD = "led_board"    # LED board search region row
+HIDE_TRACK_LOG = "track_log"    # standalone track log row
+
+
+@dataclass(frozen=True)
+class TrackerTabOptions:
+    """How the tab loads and saves its files. The defaults are the live rig's
+    behaviour; the offline workbench hosts the tab with options that never read
+    or write the rig's host/ files (see docs/decisions/0213).
+
+    ``ask_before_saving``: Save ROI / landmarks go through a Save-as dialog
+    (opening in ``file_dir``), defining landmarks no longer saves them, and
+    Clear landmarks no longer deletes a file.
+    """
+    load_host_files: bool = True
+    ask_before_saving: bool = False
+    hide: FrozenSet[str] = frozenset()
+    show_preview: bool = True
+    file_dir: Optional[str] = None      # ROI / landmarks / background dialogs
+    model_dir: str = MODEL_DIR          # model + blocker model dialogs
+
 POLL_INTERVAL_MS = 150       # readout / mask / standalone-log refresh
 PREVIEW_INTERVAL_MS = 66     # ~15 fps live preview (only while the tab is visible)
 PREVIEW_MAX_W = 640          # live preview width on this tab (right column)
@@ -119,10 +144,12 @@ _TOL_SLIDERS = (
 class TrackerControlView:
     """Tk module: controls + live readout for the shared RatTracker."""
 
-    def __init__(self, parent: tk.Misc, tracker=None, camera=None):
+    def __init__(self, parent: tk.Misc, tracker=None, camera=None,
+                 options: Optional[TrackerTabOptions] = None):
         self._parent = parent
         self._tracker = tracker
         self._camera = camera
+        self._opts = options or TrackerTabOptions()
         self.frame = ttk.Frame(parent)
         self._animal = ""
         self._photo_mask = None       # keep ref so Tk doesn't GC the mask image
@@ -135,6 +162,7 @@ class TrackerControlView:
         # came from Register rat and was never saved). Read by the Session panel
         # to snapshot the active model into the session config (docs/decisions/0072).
         self._model_path: Optional[str] = None
+        self._blocker_path: Optional[str] = None   # same, for the blocker model
         self._closed = False
 
         missing = self._missing_dependency()
@@ -148,14 +176,14 @@ class TrackerControlView:
 
         self._build_ui()
         # Reuse a previously drawn ROI (also written by the prototype), if any.
-        if os.path.exists(ROI_PATH):
+        if self._opts.load_host_files and os.path.exists(ROI_PATH):
             try:
                 self._tracker.load_roi(ROI_PATH)
                 self._roi_status.set(f"ROI: loaded {os.path.basename(ROI_PATH)}")
             except Exception:
                 pass
         # Reuse previously marked landmarks (reward wells + body sensors), if any.
-        if os.path.exists(LANDMARKS_PATH):
+        if self._opts.load_host_files and os.path.exists(LANDMARKS_PATH):
             try:
                 self._tracker.load_landmarks(LANDMARKS_PATH)
             except Exception:
@@ -163,11 +191,12 @@ class TrackerControlView:
         self._set_landmark_status()
         self._push_params()
         self._schedule_poll()
-        self._preview_loop = PreviewLoop(
-            self.frame, self._preview, PREVIEW_INTERVAL_MS, PREVIEW_MAX_W,
-            source=lambda: self._camera.get_latest_frame() if self._camera else None,
-            draw=self._draw_preview, is_closed=lambda: self._closed)
-        self._preview_loop.start()
+        if self._opts.show_preview:
+            self._preview_loop = PreviewLoop(
+                self.frame, self._preview, PREVIEW_INTERVAL_MS, PREVIEW_MAX_W,
+                source=lambda: self._camera.get_latest_frame() if self._camera else None,
+                draw=self._draw_preview, is_closed=lambda: self._closed)
+            self._preview_loop.start()
 
     # ------------------------------------------------------------ module API
     def widget(self) -> tk.Widget:
@@ -202,8 +231,10 @@ class TrackerControlView:
         controls = ttk.Frame(content)
         controls.pack(side=tk.LEFT, fill=tk.Y, anchor="n")
         # Right column: live camera preview on top, colorized mask stacked below.
+        hide = self._opts.hide
         viewcol = ttk.Frame(content)
-        viewcol.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        if self._opts.show_preview:
+            viewcol.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self._preview = ttk.Label(viewcol, anchor="center")
         self._preview.pack(side=tk.TOP, fill=tk.BOTH, expand=True, **pad)
         self._mask_label = ttk.Label(viewcol, anchor="center")
@@ -215,13 +246,15 @@ class TrackerControlView:
         self._enable_var = tk.BooleanVar(value=False)
         cb = ttk.Checkbutton(top, text="Enable tracking", variable=self._enable_var,
                              command=self._on_enable)
-        cb.pack(side=tk.LEFT)
+        if HIDE_ENABLE not in hide:
+            cb.pack(side=tk.LEFT)
         tip(cb, "tracker.enable")
         if self._camera is None:
             cb.configure(state=tk.DISABLED)
             self._enable_var.set(False)
         grab_bg_btn = ttk.Button(top, text="Grab background", command=self._grab_bg)
-        grab_bg_btn.pack(side=tk.LEFT, padx=(12, 2))
+        if HIDE_GRAB_BG not in hide:
+            grab_bg_btn.pack(side=tk.LEFT, padx=(12, 2))
         tip(grab_bg_btn, "tracker.grab_bg")
         save_bg_btn = ttk.Button(top, text="Save background...",
                                  command=self._save_background)
@@ -239,7 +272,7 @@ class TrackerControlView:
         cancel_btn = ttk.Button(reg, text="Cancel", command=self._cancel_register)
         cancel_btn.pack(side=tk.LEFT, padx=2)
         tip(cancel_btn, "tracker.cancel")
-        self._enrich_var = tk.BooleanVar(value=False)
+        self._enrich_var = tk.BooleanVar(value=bool(self._tracker.get_params().adapt_enrich))
         enrich_cb = ttk.Checkbutton(reg, text="Enrich while tracking",
                                     variable=self._enrich_var,
                                     command=self._push_params)
@@ -299,7 +332,9 @@ class TrackerControlView:
                                       command=self._clear_region)
         clear_region_btn.pack(side=tk.LEFT, padx=2)
         tip(clear_region_btn, "tracker.clear_region")
-        save_roi_btn = ttk.Button(region, text="Save ROI", command=self._save_roi)
+        save_roi_btn = ttk.Button(
+            region, text=("Save ROI..." if self._opts.ask_before_saving else "Save ROI"),
+            command=self._save_roi)
         save_roi_btn.pack(side=tk.LEFT, padx=2)
         tip(save_roi_btn, "tracker.save_roi")
         load_roi_btn = ttk.Button(region, text="Load ROI", command=self._load_roi)
@@ -312,7 +347,8 @@ class TrackerControlView:
         # whole indicator board, an input to `sync_fit --map` (ADR-0195). Separate
         # from the tracker ROI above; drawn with the same still-frame polygon editor.
         ledboard = ttk.Frame(controls)
-        ledboard.pack(side=tk.TOP, fill=tk.X, **pad)
+        if HIDE_LED_BOARD not in hide:
+            ledboard.pack(side=tk.TOP, fill=tk.X, **pad)
         define_ledbrd_btn = ttk.Button(ledboard, text="Define LED board region...",
                                        command=self._define_led_board_region)
         define_ledbrd_btn.pack(side=tk.LEFT, padx=2)
@@ -334,6 +370,11 @@ class TrackerControlView:
                                   command=self._clear_landmarks)
         clear_lm_btn.pack(side=tk.LEFT, padx=2)
         tip(clear_lm_btn, "tracker.clear_landmarks")
+        if self._opts.ask_before_saving:
+            save_lm_btn = ttk.Button(marks, text="Save landmarks...",
+                                     command=self._save_landmarks_as)
+            save_lm_btn.pack(side=tk.LEFT, padx=2)
+            tip(save_lm_btn, "tracker.save_landmarks")
         self._landmark_status = tk.StringVar(value="landmarks: none")
         ttk.Label(marks, textvariable=self._landmark_status).pack(side=tk.LEFT, padx=6)
 
@@ -358,7 +399,8 @@ class TrackerControlView:
         show_mask_cb = ttk.Checkbutton(
             bottom, text="Show mask (tracked blob in green)",
             variable=self._show_mask_var, command=self._on_show_mask)
-        show_mask_cb.pack(side=tk.TOP, anchor="w")
+        if self._opts.show_preview:
+            show_mask_cb.pack(side=tk.TOP, anchor="w")
         tip(show_mask_cb, "tracker.show_mask")
         self._readout = tk.StringVar(value="state: -")
         readout_lbl = ttk.Label(bottom, textvariable=self._readout, anchor="w")
@@ -367,7 +409,8 @@ class TrackerControlView:
 
         # Standalone track log.
         logrow = ttk.Frame(controls)
-        logrow.pack(side=tk.TOP, fill=tk.X, **pad)
+        if HIDE_TRACK_LOG not in hide:
+            logrow.pack(side=tk.TOP, fill=tk.X, **pad)
         self._log_btn = ttk.Button(logrow, text="Start track log", command=self._toggle_log)
         self._log_btn.pack(side=tk.LEFT, padx=2)
         tip(self._log_btn, "tracker.log")
@@ -462,8 +505,8 @@ class TrackerControlView:
             messagebox.showinfo("Save background",
                                 "No background yet - grab a background first.")
             return
-        initialdir = _HERE
-        if self._camera is not None:
+        initialdir = self._opts.file_dir or _HERE
+        if self._camera is not None and self._opts.file_dir is None:
             try:
                 initialdir = self._camera.get_output_dir()
             except Exception:
@@ -514,11 +557,11 @@ class TrackerControlView:
         if not self._tracker.has_model():
             messagebox.showinfo("Save model", "No model yet - register the rat first.")
             return
-        os.makedirs(MODEL_DIR, exist_ok=True)
+        os.makedirs(self._opts.model_dir, exist_ok=True)
         animal = self._animal or "animal"
         default = f"{animal}_ratmodel.npz"
         path = filedialog.asksaveasfilename(
-            title="Save appearance model", initialdir=MODEL_DIR,
+            title="Save appearance model", initialdir=self._opts.model_dir,
             initialfile=default, defaultextension=".npz",
             filetypes=[("RatModel", "*.npz"), ("All files", "*.*")])
         if not path:
@@ -532,7 +575,7 @@ class TrackerControlView:
 
     def _load_model(self) -> None:
         path = filedialog.askopenfilename(
-            title="Load appearance model", initialdir=MODEL_DIR,
+            title="Load appearance model", initialdir=self._opts.model_dir,
             filetypes=[("RatModel", "*.npz"), ("All files", "*.*")])
         if not path:
             return
@@ -594,6 +637,26 @@ class TrackerControlView:
         config snapshot (docs/decisions/0072)."""
         return self._model_path
 
+    def active_blocker_model_path(self) -> Optional[str]:
+        """Path of the blocker model currently loaded/saved, or None (none, or
+        built from captures and not saved)."""
+        return self._blocker_path
+
+    def set_active_paths(self, model_path: Optional[str],
+                         blocker_path: Optional[str]) -> None:
+        """Record which files a host loaded into the tracker itself."""
+        self._model_path = model_path
+        self._blocker_path = blocker_path
+
+    def refresh_from_tracker(self) -> None:
+        """Re-read sliders + the enrich checkbox after a host changed the
+        tracker's settings directly. Does not push settings back."""
+        if self._tracker is None or not self._sliders:
+            return
+        params = self._tracker.get_params()
+        self._refresh_controls(params)
+        self._enrich_var.set(bool(params.adapt_enrich))
+
     # ----------------------------------------------------------- blocker I/O
     def _capture_blocker(self) -> None:
         if not self._tracker.has_reference():
@@ -615,12 +678,14 @@ class TrackerControlView:
                 "Blocker", "Capture at least one sample (at a few placements) first.")
             return
         self._tracker.finalize_blocker_model()
+        self._blocker_path = None
 
     def _cancel_blocker(self) -> None:
         self._tracker.cancel_blocker_registration()
 
     def _clear_blocker(self) -> None:
         self._tracker.clear_blocker_model()
+        self._blocker_path = None
         self._blocker_status.set("blocker: none")
 
     def _save_blocker(self) -> None:
@@ -628,42 +693,58 @@ class TrackerControlView:
             messagebox.showinfo("Save blocker",
                                 "No blocker model yet - capture samples and Finish first.")
             return
-        os.makedirs(MODEL_DIR, exist_ok=True)
+        os.makedirs(self._opts.model_dir, exist_ok=True)
         animal = self._animal or "animal"
         default = f"{animal}_blockermodel.npz"
         path = filedialog.asksaveasfilename(
-            title="Save blocker model", initialdir=MODEL_DIR,
+            title="Save blocker model", initialdir=self._opts.model_dir,
             initialfile=default, defaultextension=".npz",
             filetypes=[("Blocker model", "*.npz"), ("All files", "*.*")])
         if not path:
             return
         try:
             self._tracker.save_blocker_model(path)
+            self._blocker_path = path
             self._blocker_status.set(f"blocker: saved {os.path.basename(path)}")
         except Exception as e:
             messagebox.showerror("Save blocker", f"{type(e).__name__}: {e}")
 
     def _load_blocker(self) -> None:
         path = filedialog.askopenfilename(
-            title="Load blocker model", initialdir=MODEL_DIR,
+            title="Load blocker model", initialdir=self._opts.model_dir,
             filetypes=[("Blocker model", "*.npz"), ("All files", "*.*")])
         if not path:
             return
         try:
             self._tracker.load_blocker_model(path)
+            self._blocker_path = path
         except Exception as e:
             messagebox.showerror("Load blocker", f"{type(e).__name__}: {e}")
 
     # ------------------------------------------------------------- ROI I/O
+    def _ask_save_json(self, title: str, initialfile: str) -> Optional[str]:
+        return filedialog.asksaveasfilename(
+            title=title, initialdir=self._opts.file_dir or _HERE,
+            initialfile=initialfile, defaultextension=".json",
+            filetypes=[("JSON", "*.json"), ("All files", "*.*")]) or None
+
     def _save_roi(self) -> None:
-        if self._tracker.save_roi(ROI_PATH):
-            self._roi_status.set(f"ROI: saved {os.path.basename(ROI_PATH)}")
+        if not self._tracker.get_roi_polygon():
+            messagebox.showinfo("Save ROI", "No ROI to save - define a region first.")
+            return
+        path = ROI_PATH
+        if self._opts.ask_before_saving:
+            path = self._ask_save_json("Save ROI polygon", "roi_polygon.json")
+            if path is None:
+                return
+        if self._tracker.save_roi(path):
+            self._roi_status.set(f"ROI: saved {os.path.basename(path)}")
         else:
             messagebox.showinfo("Save ROI", "No ROI to save - define a region first.")
 
     def _load_roi(self) -> None:
         path = filedialog.askopenfilename(
-            title="Load ROI polygon", initialdir=_HERE,
+            title="Load ROI polygon", initialdir=self._opts.file_dir or _HERE,
             filetypes=[("ROI JSON", "*.json"), ("All files", "*.*")])
         if not path:
             return
@@ -742,16 +823,31 @@ class TrackerControlView:
 
     def _on_landmarks_committed(self, landmarks) -> None:
         self._tracker.set_landmarks(landmarks)
-        self._tracker.save_landmarks(LANDMARKS_PATH)
+        if not self._opts.ask_before_saving:
+            self._tracker.save_landmarks(LANDMARKS_PATH)
         self._set_landmark_status()
+
+    def _save_landmarks_as(self) -> None:
+        if not self._tracker.get_landmarks():
+            messagebox.showinfo("Save landmarks", "No landmarks placed yet.")
+            return
+        path = self._ask_save_json("Save landmarks", "landmarks.json")
+        if path is None:
+            return
+        try:
+            self._tracker.save_landmarks(path)
+            self._landmark_status.set(f"landmarks: saved {os.path.basename(path)}")
+        except Exception as e:
+            messagebox.showerror("Save landmarks", f"{type(e).__name__}: {e}")
 
     def _clear_landmarks(self) -> None:
         self._tracker.clear_landmarks()
-        try:
-            if os.path.exists(LANDMARKS_PATH):
-                os.remove(LANDMARKS_PATH)
-        except OSError:
-            pass
+        if not self._opts.ask_before_saving:
+            try:
+                if os.path.exists(LANDMARKS_PATH):
+                    os.remove(LANDMARKS_PATH)
+            except OSError:
+                pass
         self._set_landmark_status()
 
     # ----------------------------------------------------- standalone log

@@ -293,7 +293,8 @@ def draw_landmarks_overlay(img_bgr, tracker) -> None:
 
 
 def draw_overlay(img_bgr, scale: float, tracker, result,
-                 draw_landmarks: bool = True) -> None:
+                 draw_landmarks: bool = True, *, draw_roi: bool = True,
+                 draw_trail: bool = True, draw_candidates: bool = True) -> None:
     """Draw the tracking overlay on a (preview-scaled) BGR image, in place.
 
     Shared by every preview (camera tab + tracking tab) so they look identical.
@@ -302,18 +303,20 @@ def draw_overlay(img_bgr, scale: float, tracker, result,
     (e.g. tracking off) - then only the ROI outline + any path are drawn.
     `draw_landmarks` lets a caller suppress the landmark diamonds so they can be
     toggled separately (the Rig view tab draws them via draw_landmarks_overlay).
+    ``draw_roi`` / ``draw_trail`` / ``draw_candidates`` are display toggles for the
+    offline workbench; the defaults draw everything, as every live preview does.
     """
     if cv2 is None or np is None or img_bgr is None:
         return
     try:
         dh, dw = img_bgr.shape[:2]
-        roi = tracker.get_roi_polygon() if tracker is not None else None
+        roi = tracker.get_roi_polygon() if (tracker is not None and draw_roi) else None
         if roi:
             pts = np.array([[int(x * dw), int(y * dh)] for x, y in roi], np.int32)
             cv2.polylines(img_bgr, [pts], True, (255, 180, 0), 1)
         if draw_landmarks:
             draw_landmarks_overlay(img_bgr, tracker)
-        path = tracker.get_path() if tracker is not None else []
+        path = tracker.get_path() if (tracker is not None and draw_trail) else []
         for i in range(1, len(path)):
             cv2.line(img_bgr,
                      (int(path[i - 1][0] * scale), int(path[i - 1][1] * scale)),
@@ -328,7 +331,7 @@ def draw_overlay(img_bgr, scale: float, tracker, result,
                                markerType=cv2.MARKER_SQUARE, markerSize=14, thickness=2)
                 cv2.putText(img_bgr, "BLOCKER", (bx + 8, by - 8),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 140, 255), 1, cv2.LINE_AA)
-            for c in result.candidates:
+            for c in (result.candidates if draw_candidates else ()):
                 cv2.circle(img_bgr, (int(c[0] * scale), int(c[1] * scale)), 4,
                            (120, 120, 120), 1)
             if result.centroid is not None:
