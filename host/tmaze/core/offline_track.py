@@ -52,6 +52,7 @@ SRC_BUNDLE = "bundle"
 SRC_OVERRIDE = "override"
 SRC_FALLBACK = "fallback"
 SRC_COMPUTED = "computed"
+SRC_REGISTERED = "registered"   # built in this run from the video's own frames
 
 # Where each tracker setting came from (keys not listed keep the model's saved
 # setting, or the TrackerParams default when the model has none).
@@ -395,6 +396,57 @@ def frame_range(start: int, end: Optional[int], warmup: int
     return max(0, start - warmup), start, end
 
 
+# -------------------------------------------------------------- registration
+@dataclass(frozen=True)
+class RegistrationRequest:
+    """Build models from the video before tracking (the live tab's Register
+    buttons, non-interactively).
+
+    ``rat_frames`` is an inclusive ``(first, last)`` window in which only the
+    rat should be in the maze; ``blocker_frames`` are single frames in which the
+    blocker is placed and nothing else moves (the live tab's still captures).
+    """
+    rat_frames: Optional[Tuple[int, int]] = None
+    blocker_frames: Tuple[int, ...] = ()
+    save_model: Optional[str] = None
+    save_blocker_model: Optional[str] = None
+    only: bool = False   # build (and save) the models, then skip tracking
+
+    @property
+    def any(self) -> bool:
+        return self.rat_frames is not None or bool(self.blocker_frames)
+
+
+def validate_registration(req: RegistrationRequest) -> RegistrationRequest:
+    """Check a request and return it with ``blocker_frames`` sorted and unique.
+
+    Raises ``ValueError`` with a message naming the flag at fault.
+    """
+    if req.rat_frames is not None:
+        a, b = req.rat_frames
+        if a < 0 or b < a:
+            raise ValueError("--register-frames needs 0 <= FIRST <= LAST")
+    if any(f < 0 for f in req.blocker_frames):
+        raise ValueError("--blocker-frames must be >= 0")
+    if req.save_model and req.rat_frames is None:
+        raise ValueError("--save-model needs --register-frames")
+    if req.save_blocker_model and not req.blocker_frames:
+        raise ValueError("--save-blocker-model needs --blocker-frames")
+    if req.only and not req.any:
+        raise ValueError("--register-only needs --register-frames and/or --blocker-frames")
+    return RegistrationRequest(
+        rat_frames=req.rat_frames, blocker_frames=tuple(sorted(set(req.blocker_frames))),
+        save_model=req.save_model, save_blocker_model=req.save_blocker_model,
+        only=req.only)
+
+
+def registered_choice(saved_path: Optional[str]) -> FileChoice:
+    """The FileChoice for a model built in this run (hashed if it was saved)."""
+    if saved_path:
+        return FileChoice(os.path.abspath(saved_path), SRC_REGISTERED, sha256_file(saved_path))
+    return FileChoice(None, SRC_REGISTERED)
+
+
 # ------------------------------------------------------------------- summary
 class RunTally:
     """Running counts over the WRITTEN frames of one run."""
@@ -425,7 +477,8 @@ def summary_dict(settings: OfflineSettings, *, tally: RunTally,
                  sidecar_rows: Optional[int], frames_decoded: int,
                  first_written: int, last_written: Optional[int], warmup: int,
                  elapsed_s: float, created_iso: str, tag: Optional[str],
-                 csv_path: str, notes: Sequence[str]) -> Dict[str, Any]:
+                 csv_path: str, notes: Sequence[str],
+                 registration: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
     """The run's summary JSON: what was used, what range ran, and the counts."""
     def fc(c: Optional[FileChoice]) -> Optional[Dict[str, Any]]:
         return c.to_dict() if c else None
@@ -456,6 +509,7 @@ def summary_dict(settings: OfflineSettings, *, tally: RunTally,
         "elapsed_s": round(elapsed_s, 2),
         "frames_per_s": round(tally.frames / elapsed_s, 1) if elapsed_s > 0 else None,
         **tally.to_dict(),
+        "registration": dict(registration) if registration else None,
         "notes": list(notes),
     }
 
@@ -479,7 +533,12 @@ def csv_header_lines(settings: OfflineSettings, sidecar_header: Mapping[str, str
     def name(c: Optional[FileChoice]) -> str:
         if c is None:
             return "(none)"
-        base = os.path.basename(c.path) if c.path else "(median of video frames)"
+        if c.path:
+            base = os.path.basename(c.path)
+        elif c.source == SRC_COMPUTED:
+            base = "(median of video frames)"
+        else:
+            base = "(built in this run, not saved)"
         return f"{base} [{c.source}]"
 
     lines += [

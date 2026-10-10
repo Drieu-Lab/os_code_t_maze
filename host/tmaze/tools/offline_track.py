@@ -25,6 +25,11 @@ Run (env ``drieu_t_maze``, any directory):
         --end-frame 9000 --warmup-frames 300 --out-dir <scratch>
     python -m tmaze.tools.offline_track --list-params
 
+    # Build a new rat model from frames 1200-2100 and save it, without tracking
+    # (add --blocker-frames F1 F2 ... --save-blocker-model PATH for the blocker):
+    python -m tmaze.tools.offline_track <bundle_dir> --register-frames 1200 2100 \
+        --save-model host/ratmodels/<name>.npz --register-only
+
 Thin shell: decisions live in ``tmaze.core.offline_track``; pixels in
 ``tmaze.vision.offline_tracker``.
 """
@@ -82,6 +87,20 @@ def _build_parser() -> argparse.ArgumentParser:
     s.add_argument("--list-params", action="store_true",
                    help="list every tracker setting with its default, then exit")
 
+    m = p.add_argument_group(
+        "build models from the video (the live tab's Register buttons)")
+    m.add_argument("--register-frames", nargs=2, type=int, metavar=("FIRST", "LAST"),
+                   help="build a new rat model from these frames (inclusive); only the "
+                        "rat should be in the maze, ideally running, turning and rearing")
+    m.add_argument("--save-model", metavar="PATH", help="save the new rat model (.npz)")
+    m.add_argument("--blocker-frames", nargs="+", type=int, metavar="FRAME",
+                   help="build a new blocker model, one sample per frame; the blocker "
+                        "placed and nothing else moving")
+    m.add_argument("--save-blocker-model", metavar="PATH",
+                   help="save the new blocker model (.npz)")
+    m.add_argument("--register-only", action="store_true",
+                   help="build (and save) the models, then stop without tracking")
+
     r = p.add_argument_group("frame range")
     r.add_argument("--start-frame", type=int, default=0, help="first frame to write")
     r.add_argument("--end-frame", type=int, default=None,
@@ -112,6 +131,28 @@ def _progress(sid: str):
     return cb
 
 
+def registration_request(args: argparse.Namespace) -> OT.RegistrationRequest:
+    return OT.validate_registration(OT.RegistrationRequest(
+        rat_frames=tuple(args.register_frames) if args.register_frames else None,
+        blocker_frames=tuple(args.blocker_frames or ()),
+        save_model=args.save_model, save_blocker_model=args.save_blocker_model,
+        only=args.register_only))
+
+
+def _print_registration(sid: str, info) -> None:
+    if not info:
+        return
+    if "blocker" in info:
+        b = info["blocker"]
+        print(f"  {sid}: blocker model from frames {b['frames']} "
+              f"({b['samples']} samples)")
+    if "rat" in info:
+        r = info["rat"]
+        ok = "good coverage" if r["coverage_ok"] else "THIN coverage"
+        print(f"  {sid}: rat model from frames {r['frames'][0]}-{r['frames'][1]} "
+              f"({r['samples']} samples, target {r['target_samples']}, {ok})")
+
+
 def run_one(bundle: str, args: argparse.Namespace) -> bool:
     from tmaze.vision import offline_tracker as OTR
     sid = OT.session_id_of(bundle)
@@ -123,6 +164,19 @@ def run_one(bundle: str, args: argparse.Namespace) -> bool:
             background_from_video=args.background_from_video,
             params_file=args.params_file, sets=tuple(args.set))
         settings = OT.resolve_settings(bundle, overrides, ratmodels_dir=ratmodels_dir())
+        registration = registration_request(args)
+        if registration.only:
+            print(f"{sid}: building models (no tracking)", flush=True)
+            result = OTR.register_only(settings, registration,
+                                       save_background=args.save_background)
+            _print_registration(sid, result["registration"])
+            for note in result["notes"]:
+                print(f"  note: {note}")
+            for key, flag in (("model", args.save_model),
+                              ("blocker_model", args.save_blocker_model)):
+                if flag:
+                    print(f"  {sid}: saved {key.replace('_', ' ')} -> {os.path.abspath(flag)}")
+            return True
         out_dir = args.out_dir or os.path.join(bundle, "video")
         csv_path, json_path = OT.output_paths(out_dir, sid, args.tag)
         OT.check_overwrite((csv_path, json_path), args.overwrite)
@@ -133,10 +187,11 @@ def run_one(bundle: str, args: argparse.Namespace) -> bool:
                           tag=args.tag, start_frame=args.start_frame,
                           end_frame=args.end_frame, warmup_frames=args.warmup_frames,
                           save_background=args.save_background,
-                          progress=_progress(sid))
+                          registration=registration, progress=_progress(sid))
     except (OSError, ValueError, RuntimeError) as e:
         print(f"{sid}: SKIPPED - {e}", file=sys.stderr)
         return False
+    _print_registration(sid, summary["registration"])
     fr = summary["state_fractions"]
     states = ", ".join(f"{k} {v:.0%}" for k, v in fr.items())
     print(f"{sid}: done, {summary['frames_written']} frames in "
@@ -151,6 +206,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         OT.validate_tag(args.tag)
         OT.frame_range(args.start_frame, args.end_frame, args.warmup_frames)
+        registration_request(args)
     except ValueError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
@@ -169,9 +225,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if not bundles:
         print("error: give at least one bundle or --root (see --help)", file=sys.stderr)
         return 2
-    if args.save_background and len(bundles) > 1:
-        print("error: --save-background needs a single bundle", file=sys.stderr)
-        return 2
+    for flag in ("save_background", "save_model", "save_blocker_model"):
+        if getattr(args, flag) and len(bundles) > 1:
+            print(f"error: --{flag.replace('_', '-')} needs a single bundle", file=sys.stderr)
+            return 2
     failed = [b for b in bundles if not run_one(b, args)]
     if len(bundles) > 1:
         print(f"{len(bundles) - len(failed)}/{len(bundles)} bundles tracked")

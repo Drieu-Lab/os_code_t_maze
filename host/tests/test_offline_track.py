@@ -220,6 +220,30 @@ class TestFramesAndOutputs(unittest.TestCase):
         with self.assertRaises(ValueError):
             OT.frame_range(10, 5, 0)
 
+    def test_validate_registration(self):
+        R = OT.RegistrationRequest
+        ok = OT.validate_registration(R(rat_frames=(10, 40), blocker_frames=(9, 3, 3)))
+        self.assertEqual(ok.blocker_frames, (3, 9))
+        self.assertTrue(ok.any)
+        self.assertFalse(R().any)
+        for bad in (R(rat_frames=(40, 10)), R(rat_frames=(-1, 5)),
+                    R(blocker_frames=(-2,)), R(save_model="m.npz"),
+                    R(save_blocker_model="b.npz", rat_frames=(0, 5)), R(only=True)):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                OT.validate_registration(bad)
+
+    def test_registered_choice(self):
+        c = OT.registered_choice(None)
+        self.assertEqual((c.path, c.source), (None, OT.SRC_REGISTERED))
+        tmp = tempfile.mkdtemp()
+        try:
+            p = _touch(os.path.join(tmp, "m.npz"))
+            c = OT.registered_choice(p)
+            self.assertEqual(c.source, OT.SRC_REGISTERED)
+            self.assertEqual(len(c.sha256), 64)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
     def test_tally(self):
         t = OT.RunTally()
         for s, d in (("TRACKING", True), ("TRACKING", True), ("LOST", False),
@@ -241,6 +265,10 @@ except Exception:  # pragma: no cover
     _HAVE_CV = False
 
 _W, _H, _N, _BG, _FG, _SQ = 320, 240, 60, 200, 40, 30
+# A static orange "blocker" in the top-left corner, larger than the rat square,
+# so it is the dominant blob in a still capture (BGR).
+_BLK = (10, 10, 70, 70)
+_ORANGE = (0, 128, 255)
 
 
 def _square_pos(i: int):
@@ -248,7 +276,7 @@ def _square_pos(i: int):
     return 20 + int(i * (_W - 2 * 20 - _SQ) / (_N - 1)), 100
 
 
-def _make_session(bundle: str, with_png: bool) -> bool:
+def _make_session(bundle: str, with_png: bool, blocker: bool = False) -> bool:
     """Write video/<id>.mp4 + sidecar (+ background PNG). False if no mp4 writer."""
     cv2, np = _trk.cv2, _trk.np
     vdir = os.path.join(bundle, "video")
@@ -260,6 +288,9 @@ def _make_session(bundle: str, with_png: bool) -> bool:
     bg = np.full((_H, _W, 3), _BG, np.uint8)
     for i in range(_N):
         f = bg.copy()
+        if blocker:
+            x0, y0, x1, y1 = _BLK
+            f[y0:y1, x0:x1] = _ORANGE
         x, y = _square_pos(i)
         f[y:y + _SQ, x:x + _SQ] = _FG
         vw.write(f)
@@ -283,8 +314,8 @@ def _read_rows(path: str):
 
 @unittest.skipUnless(_HAVE_CV, "numpy + OpenCV required")
 class TestEndToEnd(_TmpCase):
-    def _run(self, with_png: bool, **kw):
-        if not _make_session(self.bundle, with_png):
+    def _run(self, with_png: bool, blocker: bool = False, **kw):
+        if not _make_session(self.bundle, with_png, blocker=blocker):
             self.skipTest("no mp4 video writer in this OpenCV build")
         settings = OT.resolve_settings(self.bundle, OT.Overrides(sets=("min_area=100",)),
                                        ratmodels_dir=self.models)
@@ -334,6 +365,56 @@ class TestEndToEnd(_TmpCase):
         self.assertEqual(rows[0]["track_state"], "TRACKING")
         self.assertEqual(summary["range"], {"first_written": 20, "last_written": 29,
                                             "warmup_frames": 10})
+
+    def test_register_rat_model_then_track(self):
+        save = os.path.join(self.tmp, "models", "new_rat.npz")
+        req = OT.validate_registration(OT.RegistrationRequest(
+            rat_frames=(0, 39), save_model=save))
+        _, summary, _, j = self._run(with_png=True, registration=req)
+        reg = summary["registration"]["rat"]
+        self.assertEqual(reg["frames"], [0, 39])
+        self.assertGreater(reg["samples"], 30)
+        self.assertEqual(summary["files"]["model"]["source"], OT.SRC_REGISTERED)
+        self.assertEqual(summary["files"]["model"]["path"], os.path.abspath(save))
+        self.assertGreater(summary["state_counts"].get("TRACKING", 0), _N // 2)
+        loaded = _trk.RatModel.load(save)
+        self.assertEqual(loaded.n, reg["samples"])
+        self.assertIsNotNone(loaded.acq_params)   # settings stored with it (ADR-0027)
+
+    def test_register_blocker_model(self):
+        save = os.path.join(self.tmp, "blocker.npz")
+        req = OT.validate_registration(OT.RegistrationRequest(
+            blocker_frames=(5, 0), save_blocker_model=save))
+        _, summary, _, _ = self._run(with_png=True, blocker=True, registration=req)
+        b = summary["registration"]["blocker"]
+        self.assertEqual(b["frames"], [0, 5])
+        self.assertEqual(b["samples"], 2)
+        lo, hi = b["orange_lo"], b["orange_hi"]
+        self.assertTrue(lo[0] <= 15 <= hi[0], (lo, hi))   # orange hue ~15 (OpenCV 0-180)
+        self.assertEqual(summary["files"]["blocker_model"]["source"], OT.SRC_REGISTERED)
+        self.assertTrue(os.path.isfile(save))
+
+    def test_register_only_cli(self):
+        from tmaze.tools import offline_track as CLI
+        if not _make_session(self.bundle, with_png=True):
+            self.skipTest("no mp4 video writer in this OpenCV build")
+        save = os.path.join(self.tmp, "only.npz")
+        out = os.path.join(self.tmp, "out")
+        real = CLI.ratmodels_dir
+        CLI.ratmodels_dir = lambda: self.models   # don't depend on this machine's models
+        try:
+            rc = CLI.main([self.bundle, "--set", "min_area=100",
+                           "--register-frames", "0", "39", "--save-model", save,
+                           "--register-only", "--out-dir", out])
+        finally:
+            CLI.ratmodels_dir = real
+        self.assertEqual(rc, 0)
+        self.assertTrue(os.path.isfile(save))
+        self.assertFalse(os.path.exists(out))   # no tracking output written
+
+    def test_cli_rejects_save_model_without_frames(self):
+        from tmaze.tools import offline_track as CLI
+        self.assertEqual(CLI.main([self.tmp, "--save-model", "x.npz"]), 2)
 
 
 if __name__ == "__main__":
