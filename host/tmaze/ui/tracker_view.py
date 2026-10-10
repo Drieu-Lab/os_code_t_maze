@@ -37,7 +37,7 @@ import time
 import tkinter as tk
 from dataclasses import dataclass
 from tkinter import filedialog, messagebox, simpledialog, ttk
-from typing import FrozenSet, Optional
+from typing import Callable, FrozenSet, Optional
 
 from tmaze.core import protocol
 from tmaze.paths import host_dir
@@ -105,6 +105,11 @@ class TrackerTabOptions:
     ``ask_before_saving``: Save ROI / landmarks go through a Save-as dialog
     (opening in ``file_dir``), defining landmarks no longer saves them, and
     Clear landmarks no longer deletes a file.
+
+    ``on_event(kind, action, path)`` is called after the operator changes a
+    file-backed setting: kind is ``model`` / ``blocker`` / ``roi`` /
+    ``landmarks`` / ``background``; action is ``load`` / ``save`` (with the
+    path), or ``edit`` / ``register`` / ``clear`` / ``capture`` (path None).
     """
     load_host_files: bool = True
     ask_before_saving: bool = False
@@ -112,6 +117,7 @@ class TrackerTabOptions:
     show_preview: bool = True
     file_dir: Optional[str] = None      # ROI / landmarks / background dialogs
     model_dir: str = MODEL_DIR          # model + blocker model dialogs
+    on_event: Optional[Callable[[str, str, Optional[str]], None]] = None
 
 POLL_INTERVAL_MS = 150       # readout / mask / standalone-log refresh
 PREVIEW_INTERVAL_MS = 66     # ~15 fps live preview (only while the tab is visible)
@@ -526,14 +532,20 @@ class TrackerControlView:
         try:
             if cv2.imwrite(path, bg):
                 self._bg_status.set(f"reference: saved {os.path.basename(path)}")
+                self._notify("background", "save", path)
             else:
                 messagebox.showerror("Save background", "OpenCV failed to write the image.")
         except Exception as e:
             messagebox.showerror("Save background", f"{type(e).__name__}: {e}")
 
+    def _notify(self, kind: str, action: str, path: Optional[str] = None) -> None:
+        if self._opts.on_event is not None:
+            self._opts.on_event(kind, action, path)
+
     def _toggle_register(self) -> None:
         if self._tracker.is_registering():
             self._tracker.finalize_registration()
+            self._notify("model", "register")
         elif not self._tracker.has_reference():
             messagebox.showinfo("Register rat",
                                 "Grab a background first, then register the rat.")
@@ -570,6 +582,7 @@ class TrackerControlView:
             self._tracker.save_model(path)
             self._model_path = path
             self._model_status.set(f"model: saved {os.path.basename(path)}")
+            self._notify("model", "save", path)
         except Exception as e:
             messagebox.showerror("Save model", f"{type(e).__name__}: {e}")
 
@@ -591,6 +604,7 @@ class TrackerControlView:
             # load_model restored the model's saved settings; sync the controls.
             after = self._tracker.get_params()
             self._refresh_controls(after)
+            self._notify("model", "load", path)
             messagebox.showinfo("Load model",
                                 self._load_model_message(m, before, after))
         except Exception as e:
@@ -629,6 +643,7 @@ class TrackerControlView:
         self._tracker.clear_model()
         self._model_path = None
         self._model_status.set("model: none")
+        self._notify("model", "clear")
 
     def active_model_path(self) -> Optional[str]:
         """Path of the appearance model currently loaded/saved (``.npz``), or None.
@@ -670,6 +685,7 @@ class TrackerControlView:
                 "tracker sees the frame to sample.")
             return
         self._tracker.capture_blocker_sample()
+        self._notify("blocker", "capture")
 
     def _finish_blocker(self) -> None:
         registering, n = self._tracker.blocker_registration_status()
@@ -679,6 +695,7 @@ class TrackerControlView:
             return
         self._tracker.finalize_blocker_model()
         self._blocker_path = None
+        self._notify("blocker", "register")
 
     def _cancel_blocker(self) -> None:
         self._tracker.cancel_blocker_registration()
@@ -687,6 +704,7 @@ class TrackerControlView:
         self._tracker.clear_blocker_model()
         self._blocker_path = None
         self._blocker_status.set("blocker: none")
+        self._notify("blocker", "clear")
 
     def _save_blocker(self) -> None:
         if not self._tracker.has_blocker_model():
@@ -706,6 +724,7 @@ class TrackerControlView:
             self._tracker.save_blocker_model(path)
             self._blocker_path = path
             self._blocker_status.set(f"blocker: saved {os.path.basename(path)}")
+            self._notify("blocker", "save", path)
         except Exception as e:
             messagebox.showerror("Save blocker", f"{type(e).__name__}: {e}")
 
@@ -718,6 +737,7 @@ class TrackerControlView:
         try:
             self._tracker.load_blocker_model(path)
             self._blocker_path = path
+            self._notify("blocker", "load", path)
         except Exception as e:
             messagebox.showerror("Load blocker", f"{type(e).__name__}: {e}")
 
@@ -739,6 +759,7 @@ class TrackerControlView:
                 return
         if self._tracker.save_roi(path):
             self._roi_status.set(f"ROI: saved {os.path.basename(path)}")
+            self._notify("roi", "save", path)
         else:
             messagebox.showinfo("Save ROI", "No ROI to save - define a region first.")
 
@@ -751,6 +772,7 @@ class TrackerControlView:
         try:
             if self._tracker.load_roi(path):
                 self._roi_status.set(f"ROI: loaded {os.path.basename(path)}")
+                self._notify("roi", "load", path)
             else:
                 messagebox.showerror("Load ROI", "File has fewer than 3 vertices.")
         except Exception as e:
@@ -759,6 +781,7 @@ class TrackerControlView:
     def _clear_region(self) -> None:
         self._tracker.clear_roi()
         self._roi_status.set("ROI: none")
+        self._notify("roi", "clear")
 
     def _define_region(self) -> None:
         if self._camera is None:
@@ -773,6 +796,7 @@ class TrackerControlView:
     def _on_roi_committed(self, norm_verts) -> None:
         self._tracker.set_roi_polygon(norm_verts)
         self._roi_status.set(f"ROI: set ({len(norm_verts)} pts)")
+        self._notify("roi", "edit")
 
     # ----------------------------------------------- LED board search region I/O
     def _define_led_board_region(self) -> None:
@@ -826,6 +850,7 @@ class TrackerControlView:
         if not self._opts.ask_before_saving:
             self._tracker.save_landmarks(LANDMARKS_PATH)
         self._set_landmark_status()
+        self._notify("landmarks", "edit")
 
     def _save_landmarks_as(self) -> None:
         if not self._tracker.get_landmarks():
@@ -837,6 +862,7 @@ class TrackerControlView:
         try:
             self._tracker.save_landmarks(path)
             self._landmark_status.set(f"landmarks: saved {os.path.basename(path)}")
+            self._notify("landmarks", "save", path)
         except Exception as e:
             messagebox.showerror("Save landmarks", f"{type(e).__name__}: {e}")
 
@@ -849,6 +875,7 @@ class TrackerControlView:
             except OSError:
                 pass
         self._set_landmark_status()
+        self._notify("landmarks", "clear")
 
     # ----------------------------------------------------- standalone log
     def _toggle_log(self) -> None:

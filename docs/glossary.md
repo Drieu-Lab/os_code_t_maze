@@ -399,6 +399,9 @@ last time? did accuracy settle lower after a config change?). The old session's
 recorded CSV is read back into the same [snapshot](#snapshot) shape and run
 through the *same* trace computation as the live line, so the two are directly
 comparable; a caption flags any run-config differences between them. See ADR-0117.
+The offline tracker workbench uses "ghost" the same way for positions: the live
+track recorded with the video (a cyan cross) and an earlier offline run (a magenta
+circle) drawn over the frame beside the current tracking (ADR-0216).
 
 ### Retroreflective marker
 A small patch of material that bounces light straight back at its source, so it

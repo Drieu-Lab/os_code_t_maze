@@ -18,6 +18,7 @@ import shutil
 import tempfile
 import tkinter as tk
 import unittest
+from dataclasses import replace
 from unittest import mock
 
 try:
@@ -182,6 +183,22 @@ class TestTrackerTabOptions(unittest.TestCase):
         self.assertEqual(v.active_blocker_model_path(), "b.npz")
         v._clear_blocker()
         self.assertIsNone(v.active_blocker_model_path())
+
+    def test_on_event_reports_file_changes(self):
+        events = []
+        opts = replace(WORKBENCH, on_event=lambda *e: events.append(e))
+        v, _ = self._view(opts)
+        v._on_roi_committed([tuple(p) for p in _ROI])
+        v._clear_region()
+        v._on_landmarks_committed(_LM)
+        roi_chosen = os.path.join(self.tmp, "chosen_roi.json")
+        v._on_roi_committed([tuple(p) for p in _ROI])
+        with mock.patch.object(TV.filedialog, "asksaveasfilename", return_value=roi_chosen):
+            v._save_roi()
+        v._clear_blocker()
+        self.assertEqual(events, [("roi", "edit", None), ("roi", "clear", None),
+                                  ("landmarks", "edit", None), ("roi", "edit", None),
+                                  ("roi", "save", roi_chosen), ("blocker", "clear", None)])
 
 
 @unittest.skipUnless(_DEPS, "needs numpy, OpenCV")

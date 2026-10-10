@@ -125,12 +125,12 @@ criteria).
 | [FW-0071](#fw-0071-per-day-daily-water-target-override) | Per-day daily-water target override (e.g. from `daily_log.csv`) on top of the per-animal `daily_water_ml` | `core/records/{animals,daily_log}.py`, `ui/phase3_controller.py` | Proposed |
 | [FW-0072](#fw-0072-per-animal-session-cap-overrides) | Per-animal `max_trials` / `max_minutes` overrides in `animals.json` (the ADR-0186 pattern) for slow rats the clock ends early | `core/records/animals.py`, `core/phase3/session_cap.py`, `ui/phase3_controller.py` | Proposed |
 | [FW-0073](#fw-0073-stamp-the-real-animal-id-into-the-video-sidecar) | Stamp the real animal id into the video sidecar (every sidecar so far says `animal: animal`) | `ui/camera_view.py`, `ui/session_controller.py` | Proposed |
-| [FW-0074](#fw-0074-offline-tracker-workbench-window) | Offline tracker workbench: a separate Tk window to scrub a recorded video, tune every live-tab setting, register/save models, and run | new `ui/` window over `vision/offline_tracker.py` | Proposed |
 | [FW-0075](#fw-0075-beam-break-agreement-for-an-offline-run) | Score an offline run against the beam-break sensors (top-priority tracker evaluation) | `tools/offline_track.py`, `tools/maze_state_validate.py`, `core/maze_state.py` | Proposed |
 | [FW-0076](#fw-0076-overlay-snippet-export-from-the-offline-tracker) | Overlay snippet export from the offline tracker: diagnostic + task layers, clip by trials or time | new core plan + `vision/` drawing shell, `tools/offline_track.py` | Proposed |
 | [FW-0077](#fw-0077-further-offline-tracker-evaluation) | Further offline evaluation: per-run stats, A/B comparison of runs, per-frame video-quality indicators | `core/offline_track.py`, `tools/` | Proposed |
 | [FW-0078](#fw-0078-retire-the-analysis-repos-render_overlay) | Retire `drieu_lab_analysis` `render_overlay` / `video_overlay` once FW-0076 lands (the rig owns overlay clips) | `drieu_lab_analysis` | Blocked (on FW-0076) |
 | [FW-0079](#fw-0079-snapshot-the-blocker-model-into-the-bundle) | Snapshot the active blocker model into the session's `config/` at Start, like the rat model | `ui/experiment_control.py` (`config_inputs`), `ui/tracker_view.py` | Proposed |
+| [FW-0080](#fw-0080-register-rat-should-forget-the-loaded-model-path) | Live Tracking tab: "Register rat" after "Load model" still reports the loaded file, so the session snapshot copies the old model | `ui/tracker_view.py` | Proposed |
 
 ## Entries
 
@@ -3697,43 +3697,6 @@ between sessions and check one recording afterwards.
 
 **ADR needed?** No (a bug fix; reference ADR-0204).
 
-### FW-0074: Offline tracker workbench window
-
-- **Status:** Proposed
-- **Date added:** 2026-10-10
-- **Author / Agent:** Agent (Cursor) on behalf of Celine
-- **Area / modules:** new `host/tmaze/ui/offline_workbench.py` (Tk) over
-  `host/tmaze/vision/offline_tracker.py`; shared slider/tolerance widgets from
-  `host/tmaze/ui/tracker_view.py`
-- **Related ADRs:** [ADR-0211](decisions/0211-offline-tracking-of-recorded-video.md)
-
-**Motivation / context.** The offline command-line tool (ADR-0211) re-tracks
-whole videos, but developing the tracker needs an interactive view: watch a
-recorded session, change settings, see the effect, build and save models. The
-operator wants every option the live Tracking tab offers to be available here.
-It was chosen as a separate window (not an offline mode in the rig GUI) so it
-can never disturb a live session.
-
-**Sketch of approach.** Open a bundle; load its settings via
-`offline_track.resolve_settings`. A scrub bar plus frame stepping (cache recent
-frames; re-run the tracker from a warm-up point after a jump, using
-`iter_track(warmup)`); the overlay and the binary-mask view; all `TrackerParams`
-sliders and the tolerance panel (factor the widgets out of `tracker_view.py`
-rather than copy them); register/enrich/save the rat model, blocker
-registration, ROI/landmark editors (reuse `still_frame_editor`); "Run whole
-video" calls `offline_tracker.run` with the current settings and a tag.
-
-**Evaluation / acceptance.** Settings changed in the window and a CLI run with
-the same `--set` values give identical CSVs; a model saved here loads in the
-live tab.
-
-**Effort / risk.** Large (new window, frame cache, widget extraction). Risk:
-copying `tracker_view` code instead of sharing it.
-
-**Open questions.** How far back to warm up after a jump.
-
-**ADR needed?** Yes (window design, widget sharing).
-
 ### FW-0075: Beam-break agreement for an offline run
 
 - **Status:** Proposed (top priority of the evaluation items)
@@ -3900,6 +3863,37 @@ between sessions.
 
 **ADR needed?** No (extends ADR-0072).
 
+### FW-0080: Register rat should forget the loaded model path
+
+- **Status:** Proposed
+- **Date added:** 2026-10-10
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** `host/tmaze/ui/tracker_view.py` (`_toggle_register`,
+  `active_model_path`); read by `ui/experiment_control.py` (`config_inputs`)
+- **Related ADRs:** [ADR-0072](decisions/0072-per-session-config-snapshot.md),
+  [ADR-0213](decisions/0213-offline-workbench-hosts-the-tracking-tab.md)
+
+**Motivation / context.** Found while building the offline workbench. The tab
+remembers the path of the last model loaded or saved; "Register rat" replaces
+the tracker's model but does not clear that path. So after Load model ->
+Register rat, `active_model_path()` still names the loaded file and Session
+Start copies THAT file into the bundle's `config/` - the snapshot no longer
+matches the model that tracked the session (and an offline replay uses the wrong
+one). The workbench is not affected: it tracks the model's origin itself through
+the tab's `on_event` callback.
+
+**Sketch of approach.** In `_toggle_register`, when finishing a registration,
+set `self._model_path = None` (the model now exists only in memory, as after
+`_finish_blocker`). Optionally warn at Session Start when the model is unsaved.
+
+**Evaluation / acceptance.** A tab test: load a model, register, finish ->
+`active_model_path()` is None.
+
+**Effort / risk.** One line plus a test, but it changes what the rig snapshots
+at Start, so land it between sessions.
+
+**ADR needed?** No (a bug fix under ADR-0072).
+
 ## Completed
 
 Implemented items are removed from the active backlog above; their reasoning now
@@ -3909,6 +3903,7 @@ referenced from those ADRs resolve.
 | ID | Title | Implemented in |
 |----|-------|----------------|
 | FW-0004 | Position-based task-rule engine over landmarks | [ADR-0023](decisions/0023-position-based-rules-engine.md) |
+| FW-0074 | Offline tracker workbench window | [ADR-0213](decisions/0213-offline-workbench-hosts-the-tracking-tab.md), [ADR-0214](decisions/0214-workbench-settings-match-the-command-line.md), [ADR-0215](decisions/0215-workbench-video-player.md), [ADR-0216](decisions/0216-offline-workbench-window.md) |
 | FW-0026 | Mid-session gate reopen must not restart/overwrite the session | [ADR-0120](decisions/0120-gate-reopen-resumes-session.md) |
 | FW-0007 | Maze-state consumers - rule-shaping + behavior stats | [ADR-0026](decisions/0026-reward-shaping-phases.md), [ADR-0032](decisions/0032-live-behavior-readout.md) |
 | FW-0012 | Run tracking off the camera grab thread | [ADR-0040](decisions/0040-tracking-off-grab-thread.md) |
