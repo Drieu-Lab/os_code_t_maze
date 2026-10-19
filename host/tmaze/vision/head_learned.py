@@ -1,8 +1,10 @@
 """
 head_learned.py - learned head-point estimators, trained on DeepLabCut output.
 
-Two models predict where the rat's head centre, neck and tail base are,
-relative to the tracker's blob, from what the tracker already has each frame:
+Two models predict where the rat's head centre, neck, tail base, nose and
+ears are (TARGETS), relative to the tracker's blob, from what the tracker
+already has each frame; ``head_direction_deg`` turns neck + head centre into
+the direction the head points:
 
   * RidgeHead - a ridge regression (a straight-line fit with a penalty that
     keeps the weights small) on a handful of numbers describing the blob's
@@ -45,7 +47,10 @@ INPUT_VERSION = 1
 CROP_HALF_PX = 64     # proc px either side of the crop centre (128 px window)
 INPUT_PX = 64         # network input side: 2 proc px per input px
 DIFF_GAIN = 4.0       # background difference is amplified: dark-on-dark is faint
-TARGETS = ("head", "neck", "tail_base")
+TARGETS = ("head", "neck", "tail_base", "nose", "right_ear", "left_ear")
+# Targets that trade places in a mirrored image (the rat's right ear lands on
+# its left); training augmentation with flips must swap them.
+MIRROR_PAIRS = (("right_ear", "left_ear"),)
 FEATURES = ("head_far_dx", "head_far_dy", "head_dx", "head_dy",
             "tail_dx", "tail_dy", "vx", "vy", "valid")
 
@@ -189,3 +194,40 @@ def offsets_to_points(offsets: "np.ndarray", origin: Sequence[float]) -> dict:
     """``{target: (x, y)}`` from (T, 2) offsets and the point they are relative to."""
     return {t: (float(origin[0] + offsets[i, 0]), float(origin[1] + offsets[i, 1]))
             for i, t in enumerate(TARGETS)}
+
+
+def mirror_order() -> Tuple[int, ...]:
+    """TARGETS indices after a mirror: each MIRROR_PAIRS pair swapped, the rest kept."""
+    order = list(range(len(TARGETS)))
+    for a, b in MIRROR_PAIRS:
+        i, j = TARGETS.index(a), TARGETS.index(b)
+        order[i], order[j] = j, i
+    return tuple(order)
+
+
+def head_direction_deg(points, frm: str = "neck", to: str = "head") -> Optional[float]:
+    """Direction from ``frm`` to ``to`` in degrees, image axes: 0 = +x (image right),
+    90 = +y (image DOWN), range (-180, 180]. ``points``: ``{target: (x, y)}`` or a
+    (T, 2) array in TARGETS order; None when either point is missing / NaN.
+
+    The default, neck -> head centre, is the rig's head direction: on the
+    hand-labelled test frames it misses by over 45 degrees less often than
+    neck -> nose (the nose is the hardest part to place on a black head)."""
+    import math
+
+    if isinstance(points, dict):
+        a, b = points.get(frm), points.get(to)
+    else:
+        a, b = points[TARGETS.index(frm)], points[TARGETS.index(to)]
+    if a is None or b is None:
+        return None
+    dx, dy = float(b[0]) - float(a[0]), float(b[1]) - float(a[1])
+    if math.isnan(dx) or math.isnan(dy) or (dx == 0.0 and dy == 0.0):
+        return None
+    return math.degrees(math.atan2(dy, dx))
+
+
+def angle_diff_deg(a: float, b: float) -> float:
+    """Smallest absolute difference between two directions, in degrees (0..180)."""
+    d = (a - b) % 360.0
+    return min(d, 360.0 - d)

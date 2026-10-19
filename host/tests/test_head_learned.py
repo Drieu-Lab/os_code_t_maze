@@ -91,9 +91,43 @@ class TestHeadNet(unittest.TestCase):
 
     def test_offsets_to_points(self):
         np = HL.np
-        pts = HL.offsets_to_points(np.array([[1.0, 2.0], [0.0, 0.0], [-3.0, 4.0]]), (10, 20))
+        off = np.zeros((len(HL.TARGETS), 2))
+        off[HL.TARGETS.index("head")] = (1.0, 2.0)
+        off[HL.TARGETS.index("tail_base")] = (-3.0, 4.0)
+        pts = HL.offsets_to_points(off, (10, 20))
         self.assertEqual(pts["head"], (11.0, 22.0))
         self.assertEqual(pts["tail_base"], (7.0, 24.0))
+
+
+class TestDirection(unittest.TestCase):
+    def test_mirror_swaps_only_the_ears(self):
+        order = HL.mirror_order()
+        r, l = HL.TARGETS.index("right_ear"), HL.TARGETS.index("left_ear")
+        self.assertEqual((order[r], order[l]), (l, r))
+        self.assertEqual([i for i, j in enumerate(order) if i != j], sorted([r, l]))
+
+    def test_head_direction_in_image_axes(self):
+        self.assertEqual(HL.head_direction_deg({"neck": (0, 0), "head": (5, 0)}), 0.0)
+        self.assertEqual(HL.head_direction_deg({"neck": (0, 0), "head": (0, 5)}), 90.0)  # down
+        self.assertEqual(HL.head_direction_deg({"neck": (0, 0), "head": (-5, 0)}), 180.0)
+        self.assertEqual(HL.head_direction_deg({"neck": (0, 0), "nose": (0, -5)}, to="nose"), -90.0)
+        self.assertIsNone(HL.head_direction_deg({"neck": (0, 0), "nose": (5, 0)}))  # no head centre
+        self.assertIsNone(HL.head_direction_deg({"neck": (1, 1), "head": (1, 1)}))
+
+    @unittest.skipUnless(HL.np is not None, "numpy required")
+    def test_head_direction_from_an_array(self):
+        np = HL.np
+        pts = np.full((len(HL.TARGETS), 2), np.nan)
+        pts[HL.TARGETS.index("neck")] = (2, 2)
+        pts[HL.TARGETS.index("head")] = (2, -1)
+        self.assertEqual(HL.head_direction_deg(pts), -90.0)              # up the image
+        pts[HL.TARGETS.index("head")] = np.nan
+        self.assertIsNone(HL.head_direction_deg(pts))
+
+    def test_angle_difference_wraps(self):
+        self.assertEqual(HL.angle_diff_deg(170, -170), 20)
+        self.assertEqual(HL.angle_diff_deg(-90, 90), 180)
+        self.assertEqual(HL.angle_diff_deg(10, 10), 0)
 
 
 if __name__ == "__main__":

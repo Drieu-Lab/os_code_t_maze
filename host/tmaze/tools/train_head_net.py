@@ -13,8 +13,9 @@ DeepLabCut frames, never trained on):
 The last ``--val-frac`` of each training session (by frame number, so it is
 time-separated from the rest) is held out for validation. Training uses random
 flips and quarter turns of each crop with the targets transformed to match, and
-a loss that skips unknown targets (NaN). Test distances are reported in
-full-frame px, like ``head_point_eval``.
+a loss that skips unknown targets (NaN); a mirrored crop swaps the ear labels.
+Test distances are reported in full-frame px, like ``head_point_eval``, and the
+head direction (neck -> head centre) as an angle error in degrees.
 
 Runs in the DEEPLABCUT conda env (needs ``torch`` + ``onnx``; the rig env does
 not have them), from the ``host/`` folder so ``tmaze`` is importable without
@@ -39,7 +40,7 @@ import numpy as np
 from tmaze.vision import head_learned as HL
 
 RIDGE_LAMBDAS = (0.1, 1.0, 10.0, 100.0, 1000.0)
-HEAD_WEIGHT = 2.0   # the head centre matters most; neck / tail base help it learn the body axis
+HEAD_WEIGHT = 2.0   # the head centre matters most; the other targets also teach it the body axis
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -107,6 +108,24 @@ def _report(name: str, pred_from_centre: np.ndarray, d) -> dict:
     return row
 
 
+def _directions(points: np.ndarray, to: str = "head") -> np.ndarray:
+    """Neck -> ``to`` direction (degrees, image axes) per sample of (N, T, 2); NaN if unknown."""
+    out = [HL.head_direction_deg(p, to=to) for p in points]
+    return np.array([np.nan if a is None else a for a in out])
+
+
+def _direction_report(name: str, pred_deg: np.ndarray, d, to: str = "head") -> dict:
+    """Angle between a predicted direction and the labelled neck -> ``to`` direction."""
+    true = _directions(d["Y"], to)
+    m = ~(np.isnan(true) | np.isnan(pred_deg))
+    err = np.array([HL.angle_diff_deg(a, b) for a, b in zip(pred_deg[m], true[m])])
+    row = {"candidate": name, "n": int(m.sum()), "dir_median_deg": float(np.median(err)),
+           "dir_p90_deg": float(np.quantile(err, 0.9)), "dir_over_45": float((err > 45).mean())}
+    print(f"  {name:26s} n={row['n']:4d}  direction error median {row['dir_median_deg']:5.1f} deg  "
+          f"p90 {row['dir_p90_deg']:5.1f}  > 45 deg {100 * row['dir_over_45']:.0f}%")
+    return row
+
+
 def _fit_ridge(tr, va):
     best = None
     ytr, yva = _ridge_targets(tr), _ridge_targets(va)
@@ -134,16 +153,24 @@ def _build_net(torch):
 
 
 def _augment(torch, x, y):
-    """Random flips / transpose of a batch (x: B,3,H,W; y: B,T,2 normalised offsets)."""
+    """Random flips / transpose of a batch (x: B,3,H,W; y: B,T,2 normalised offsets).
+    Each of the three is a mirror; after an odd number of them the left / right
+    targets (MIRROR_PAIRS) trade places."""
+    mirrors = 0
     if torch.rand(1).item() < 0.5:
         x = x.flip(3)
         y = y * torch.tensor([-1.0, 1.0])
+        mirrors += 1
     if torch.rand(1).item() < 0.5:
         x = x.flip(2)
         y = y * torch.tensor([1.0, -1.0])
+        mirrors += 1
     if torch.rand(1).item() < 0.5:
         x = x.transpose(2, 3)
         y = y.flip(2)
+        mirrors += 1
+    if mirrors % 2:
+        y = y[:, list(HL.mirror_order())]
     return x, y
 
 
@@ -227,9 +254,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     zero = np.zeros_like(test["Y"]) + shift
     far = np.where(np.isnan(test["track_far"]), test["com_p"], test["track_far"])
     track = np.repeat((far - test["centre"])[:, None, :], len(HL.TARGETS), 1)
+    ridge_test = ridge.predict(test["F"].astype(np.float64)) + shift
+    net_test = _predict(torch, net, test["X"])
     rows = [_report("com", zero, test), _report("track:thin_end/light/far+com", track, test),
-            _report("ridge", ridge.predict(test["F"].astype(np.float64)) + shift, test),
-            _report("net", _predict(torch, net, test["X"]), test)]
+            _report("ridge", ridge_test, test), _report("net", net_test, test)]
+    print("head direction (neck -> head centre) vs the labels:")
+    body = np.degrees(np.arctan2(test["track_far"][:, 1] - test["com_p"][:, 1],
+                                 test["track_far"][:, 0] - test["com_p"][:, 0]))
+    net_dir = _directions(net_test)
+    rows += [_direction_report("body axis (com -> track)", body, test),
+             _direction_report("ridge", _directions(ridge_test), test),
+             _direction_report("net", net_dir, test),
+             _direction_report("net vs labelled neck->nose", net_dir, test, to="nose")]
 
     onnx_path = os.path.join(args.out, "head_net.onnx")
     net.eval()

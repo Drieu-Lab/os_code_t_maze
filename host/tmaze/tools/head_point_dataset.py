@@ -3,7 +3,7 @@ head_point_dataset.py - export samples for the learned head-point models.
 
 Builds the inputs ``tmaze.vision.head_learned`` models see (a 3-channel crop
 around the blob, and the ridge's shape features) together with where
-DeepLabCut put the head centre, neck and tail base, by re-tracking rig
+DeepLabCut put the head centre, neck, tail base, nose and ears, by re-tracking rig
 sessions with the same settings resolution as ``tmaze.tools.head_point_eval``:
 
   * TRAIN (``--predictions <folder>``): for each session with a DeepLabCut
@@ -18,8 +18,8 @@ sessions with the same settings resolution as ``tmaze.tools.head_point_eval``:
     a rig bundle, tracked from ``--warmup-frames`` before it.
     -> ``test_labelled.npz``
 
-Each .npz holds X (N, 3, 64, 64) uint8 crops, Y (N, 3, 2) target offsets from
-the crop centre in proc px (NaN = unknown; order head, neck, tail_base), F the
+Each .npz holds X (N, 3, 64, 64) uint8 crops, Y (N, T, 2) target offsets from
+the crop centre in proc px (NaN = unknown; in ``head_learned.TARGETS`` order), F the
 shape features, plus com_p / centre / scale / frame / session and the
 HeadTracker's thin_end/light/far point (track_far) for comparison.
 
@@ -84,7 +84,7 @@ class _Collector:
 
         s = prepared.scale
         cx, cy = HL.crop_centre(prepared.com)
-        targets = (HE.head_centre(parts), parts.get("neck"), parts.get("tail_base"))
+        targets = [HE.head_centre(parts) if t == "head" else parts.get(t) for t in HL.TARGETS]
         y = np.full((len(HL.TARGETS), 2), np.nan, np.float32)
         for i, pt in enumerate(targets):
             if pt is not None:

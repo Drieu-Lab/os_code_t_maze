@@ -215,6 +215,16 @@ A short exchange of messages by which two parties agree to switch modes or hand
 over control — here, the host and firmware swapping who owns the [DAC](#dac) at
 the start/end of a task (`CUE,VISION` … `CUE,BEAM`). See ADR-0044.
 
+### Head direction
+Which way the rat's head points, as an angle - not the same as which way its
+body points or which way it is moving (a rat can look sideways while walking
+straight). Measured from the neck to the head centre (the middle of nose and
+ears; the nose alone is harder to place on a black head, so it gives more
+large errors), in degrees, in the video image's own axes: 0 = toward the right edge of the image, 90 = toward the
+**bottom** (image rows count downward), 180 / -180 = toward the left edge.
+Angle errors are the smaller way round the circle, so 170 and -170 differ by
+20, not 340. See `tmaze.vision.head_learned.head_direction_deg`.
+
 ### Hot path
 The code that runs *most often* — here, the work done on **every camera frame**,
 tens of times per second. Anything added to the hot path (even a tiny delay)
