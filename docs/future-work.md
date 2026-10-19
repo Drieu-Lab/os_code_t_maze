@@ -59,7 +59,6 @@ criteria).
 | ID | Title | Area | Status |
 |----|-------|------|--------|
 | [FW-0001](#fw-0001-6040-sameswitch-transition-bias-in-sequence-generation) | ~60/40 same/switch transition bias | Trial-sequence generation | Deferred |
-| [FW-0002](#fw-0002-head-vs-body-orientation-heading-from-the-tracker) | Head-vs-body orientation (heading) | Markerless tracker | In progress (ADR-0219) |
 | [FW-0003](#fw-0003-multi-animal-association-and-irlow-saturation-tracking) | Multi-animal association + IR/low-saturation | Markerless tracker | Proposed |
 | [FW-0005](#fw-0005-in-gui-rat-id-entry-firmware-animal-command--logger-file-roll) | In-GUI rat id entry (firmware `ANIMAL` command + logger file-roll) | Firmware + protocol + logger + GUI | Deferred |
 | [FW-0006](#fw-0006-shared-base-class-for-still-frame-editors) | Shared base class for still-frame editors | Tracker tab UI | Done |
@@ -193,66 +192,6 @@ meaningful?
 
 **ADR needed?** Yes - it changes how trial sequences are generated and relaxes
 the per-block balance guarantee from ADR-era behavior.
-
-### FW-0002: Head-vs-body orientation (heading) from the tracker
-
-- **Status:** In progress - [ADR-0219](decisions/0219-learned-head-point.md) chose a
-  learned head direction (neck -> head centre from a small network) over the
-  body-axis approach sketched below, which misses the head's own turns (a median
-  15-37 deg from DLC's direction against 11-13 for the network). Mark Done when
-  the live tracker records it.
-- **Date added:** 2026-06-29
-- **Author / Agent:** Agent (Cursor) on behalf of Celine
-- **Area / modules:** `host/tracker.py` (`Detection`/`RatModel` already compute the
-  body axis via 2nd-moment elongation; add a heading output + disambiguation),
-  `host/blob_tracker_prototype.py` (overlay + CSV), later the GUI overlay/sidecar
-- **Related ADRs:** ADR-0014 (markerless tracking, planned in Phase 4), ADR-0037
-  (blob clustering - provides the aggregated union axis and the learned lighter-tail
-  colour this can use for disambiguation)
-
-**Motivation / context.** The cue-guided task is about reward-directed *choices*
-and the grant studies navigation/reactivation, so the animal's **head direction**
-is a valuable behavioral (and neural-correlate) variable. The blob's major axis
-is already available essentially for free from the second central moments used for
-the shape model. Note the *left/right choice* itself is better read from
-**position/ROI** (which arm the centroid enters) than from heading, so this is an
-enrichment, not a prerequisite for scoring choices.
-
-**Sketch of approach.** Emit `body_axis_deg` (0-180, from the moment
-eigenvector; take it from the **clustered union** once ADR-0037 lands, so the axis
-spans the reassembled animal rather than one fragment). Resolve the 180 deg
-head/tail ambiguity using the **Kalman velocity** (assume forward motion: pick the
-axis end aligned with travel), emitting `heading_deg` (0-360) plus a
-`heading_valid` flag that is false when the blob is near-round (eccentricity below
-a threshold -> axis ill-defined) or the speed is below a threshold (direction
-unreliable). A stronger, **motion-independent** disambiguation is now available:
-the end of the axis nearer the **lighter tail-coloured pixels** is the tail, the
-other the head - reusing the tail colour the blocker/rat clustering already learns
-(ADR-0037), which also fixes head/tail during slow turns / grooming when velocity
-is unreliable. Smooth heading **circularly** (EMA on sin/cos, after resolving
-body-axis flips), separate from the position Kalman. Heading is an OUTPUT only -
-never a model feature (it is orientation-dependent by construction). Document that
-it is in image space (post rot180 + undistort), not maze/world coordinates. (This
-is the near-term, cheap, high-value precursor to full pose estimation, FW-0010.)
-
-**Evaluation / acceptance.** Validate against **recorded real-rat video** (the
-trigger for deferring this): check `body_axis_deg` is rotation-stable on straight
-runs; that velocity-based disambiguation matches the visible nose direction on
-runs; that `heading_valid` correctly goes false during rearing/grooming and when
-stationary; and that circular smoothing has no wrap artifacts. Add the fields to
-the prototype CSV for offline scoring.
-
-**Effort / risk.** Low-medium. Body axis is nearly free; the real work and risk
-are head/tail disambiguation and validity gating, which is exactly why it waits on
-real video. Low hardware risk (output only).
-
-**Open questions.** Eccentricity/speed thresholds for `heading_valid`? Is
-velocity-only disambiguation enough, or should the tail-colour cue (ADR-0037) be
-the primary head/tail resolver, with velocity as a fallback? Should heading later
-be mapped from image space into maze coordinates?
-
-**ADR needed?** Fold into ADR-0014 (tracking architecture) when implemented, or a
-small follow-up ADR if the disambiguation strategy is non-obvious.
 
 ### FW-0003: Multi-animal association and IR/low-saturation tracking
 
@@ -3959,6 +3898,7 @@ referenced from those ADRs resolve.
 
 | ID | Title | Implemented in |
 |----|-------|----------------|
+| FW-0002 | Head-vs-body orientation (heading) from the tracker - done as a learned head direction, recorded live when head tracking is on | [ADR-0219](decisions/0219-learned-head-point.md), [ADR-0220](decisions/0220-record-head-points.md) |
 | FW-0004 | Position-based task-rule engine over landmarks | [ADR-0023](decisions/0023-position-based-rules-engine.md) |
 | FW-0074 | Offline tracker workbench window | [ADR-0213](decisions/0213-offline-workbench-hosts-the-tracking-tab.md), [ADR-0214](decisions/0214-workbench-settings-match-the-command-line.md), [ADR-0215](decisions/0215-workbench-video-player.md), [ADR-0216](decisions/0216-offline-workbench-window.md) |
 | FW-0026 | Mid-session gate reopen must not restart/overwrite the session | [ADR-0120](decisions/0120-gate-reopen-resumes-session.md) |

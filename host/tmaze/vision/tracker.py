@@ -294,6 +294,30 @@ def draw_landmarks_overlay(img_bgr, tracker) -> None:
         pass
 
 
+HEAD_COLOR = (255, 255, 255)     # white: unlike the landmark / zone / track colours
+HEAD_ARROW_PX = 40               # arrow length, full-frame px
+
+
+def draw_head_overlay(img_bgr, scale: float, sample) -> None:
+    """The learned head point (dot) and head direction (arrow from it), in place.
+
+    A trusted point is a filled dot with the arrow; a held one (status leap) is
+    a hollow dot without it. ``sample`` is a TrackResult.head (full-frame px)."""
+    if sample is None or "head" not in sample.points:
+        return
+    hx, hy = sample.points["head"]
+    p = (int(hx * scale), int(hy * scale))
+    if not sample.valid:
+        cv2.circle(img_bgr, p, 5, HEAD_COLOR, 1, cv2.LINE_AA)
+        return
+    cv2.circle(img_bgr, p, 4, HEAD_COLOR, -1, cv2.LINE_AA)
+    if sample.direction_deg is not None:
+        a = math.radians(sample.direction_deg)
+        n = max(8.0, HEAD_ARROW_PX * scale)
+        tip_pt = (int(p[0] + n * math.cos(a)), int(p[1] + n * math.sin(a)))
+        cv2.arrowedLine(img_bgr, p, tip_pt, HEAD_COLOR, 2, cv2.LINE_AA, tipLength=0.35)
+
+
 def draw_overlay(img_bgr, scale: float, tracker, result,
                  draw_landmarks: bool = True, *, draw_roi: bool = True,
                  draw_trail: bool = True, draw_candidates: bool = True) -> None:
@@ -307,6 +331,8 @@ def draw_overlay(img_bgr, scale: float, tracker, result,
     toggled separately (the Rig view tab draws them via draw_landmarks_overlay).
     ``draw_roi`` / ``draw_trail`` / ``draw_candidates`` are display toggles for the
     offline workbench; the defaults draw everything, as every live preview does.
+    The learned head point is drawn when the result has one and the tracker's
+    ``head_overlay()`` display switch is on.
     """
     if cv2 is None or np is None or img_bgr is None:
         return
@@ -342,6 +368,8 @@ def draw_overlay(img_bgr, scale: float, tracker, result,
             if result.smoothed is not None:
                 cv2.circle(img_bgr, (int(result.smoothed[0] * scale),
                                      int(result.smoothed[1] * scale)), 7, (0, 255, 0), 2)
+            if result.head is not None and tracker is not None and tracker.head_overlay():
+                draw_head_overlay(img_bgr, scale, result.head)
             cv2.putText(img_bgr, f"{result.state} {result.confidence:.2f}", (6, 16),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
     except Exception:
@@ -723,6 +751,7 @@ class RatTracker:
         # Learned head points (head_live.LiveHead; None = off). See docs/decisions/0219.
         self._head = None
         self._head_error = ""
+        self._head_overlay = True    # display only: draw the head on previews
 
         # Tracking state machine (touched only inside process()).
         self._kalman = self._make_kalman()
@@ -823,6 +852,15 @@ class RatTracker:
         """Why head tracking switched itself off ("" if it didn't)."""
         with self._lock:
             return self._head_error
+
+    def set_head_overlay(self, show: bool) -> None:
+        """Whether previews draw the head point (display only; recording unaffected)."""
+        with self._lock:
+            self._head_overlay = bool(show)
+
+    def head_overlay(self) -> bool:
+        with self._lock:
+            return self._head_overlay
 
     def reset(self) -> None:
         """Drop the current track (kalman + path) but keep reference + ROI + model."""

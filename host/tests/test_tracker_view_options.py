@@ -19,12 +19,15 @@ import tempfile
 import tkinter as tk
 import unittest
 from dataclasses import replace
+from types import SimpleNamespace
 from unittest import mock
+
+from tmaze.core.head_filter import OK, HeadSample
 
 try:
     import numpy as np
     from tmaze.ui import tracker_view as TV
-    from tmaze.vision.tracker import RatTracker, draw_overlay
+    from tmaze.vision.tracker import HEAD_COLOR, RatTracker, TrackResult, draw_overlay
     _DEPS = TV.TrackerControlView._missing_dependency() is None
 except Exception:  # pragma: no cover
     _DEPS = False
@@ -200,6 +203,55 @@ class TestTrackerTabOptions(unittest.TestCase):
                                   ("landmarks", "edit", None), ("roi", "edit", None),
                                   ("roi", "save", roi_chosen), ("blocker", "clear", None)])
 
+    def test_head_tracking_off_by_default_and_loads_the_shipped_model(self):
+        v, tr = self._view()
+        self.assertFalse(v._head_var.get())
+        self.assertIsNone(tr.get_head())
+        self.assertTrue(v._head_show_var.get())
+        v._head_var.set(True)
+        v._on_head_toggle()
+        self.assertIsNotNone(tr.get_head())
+        self.assertIn("head_net.onnx", v._head_status.get())
+        v._head_var.set(False)
+        v._on_head_toggle()
+        self.assertIsNone(tr.get_head())
+
+    def test_head_tracking_is_locked_while_recording(self):
+        v, tr = self._view()
+        v._camera = SimpleNamespace(is_recording=lambda: True)
+        v._head_var.set(True)
+        v._on_head_toggle()
+        self.assertFalse(v._head_var.get())
+        self.assertIsNone(tr.get_head())
+        v._poll_head()
+        self.assertEqual(str(v._head_cb.cget("state")), "disabled")
+
+    def test_missing_model_keeps_head_tracking_off(self):
+        v, tr = self._view()
+        from tmaze.vision import head_live
+        with mock.patch.object(head_live.LiveHead, "load", side_effect=ValueError("nope")), \
+                mock.patch.object(TV.messagebox, "showwarning") as warn:
+            v._head_var.set(True)
+            v._on_head_toggle()
+        self.assertFalse(v._head_var.get())
+        self.assertIsNone(tr.get_head())
+        self.assertIn("nope", warn.call_args[0][1])
+
+    def test_a_network_error_unticks_the_box(self):
+        v, tr = self._view()
+        v._head_var.set(True)
+        v._on_head_toggle()
+        tr._head_error = "head tracking stopped: boom"
+        v._poll_head()
+        self.assertFalse(v._head_var.get())
+        self.assertIn("boom", v._head_status.get())
+
+    def test_show_on_preview_drives_the_tracker(self):
+        v, tr = self._view()
+        v._head_show_var.set(False)
+        v._on_head_show()
+        self.assertFalse(tr.head_overlay())
+
 
 @unittest.skipUnless(_DEPS, "needs numpy, OpenCV")
 class TestDrawOverlayToggles(unittest.TestCase):
@@ -212,6 +264,19 @@ class TestDrawOverlayToggles(unittest.TestCase):
         draw_overlay(off, 1.0, tr, None, draw_roi=False)
         self.assertGreater(int(on.sum()), 0)
         self.assertEqual(int(off.sum()), 0)
+
+    def test_head_point_follows_the_display_switch(self):
+        tr = RatTracker()
+        r = TrackResult(True, "TRACKING")
+        r.head = HeadSample(True, OK, {"head": (50.0, 50.0), "neck": (40.0, 50.0)}, 0.0)
+        on = np.zeros((100, 100, 3), np.uint8)
+        draw_overlay(on, 1.0, tr, r)
+        self.assertTrue(np.all(on[50, 50] == HEAD_COLOR))
+        self.assertTrue(np.all(on[50, 80] == HEAD_COLOR))       # the arrow points right
+        tr.set_head_overlay(False)
+        off = np.zeros((100, 100, 3), np.uint8)
+        draw_overlay(off, 1.0, tr, r)
+        self.assertFalse(np.any(np.all(off == HEAD_COLOR, axis=2)))
 
 
 if __name__ == "__main__":

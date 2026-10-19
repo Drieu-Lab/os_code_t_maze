@@ -303,6 +303,24 @@ class TrackerControlView:
         clear_model_btn.pack(side=tk.LEFT, padx=2)
         tip(clear_model_btn, "tracker.clear_model")
 
+        # Learned head point (docs/decisions/0219, 0220): off by default, locked
+        # while recording so the sidecar header stays true for the whole file.
+        head = ttk.LabelFrame(controls, text="Head tracking (learned network)")
+        head.pack(side=tk.TOP, fill=tk.X, **pad)
+        self._head_var = tk.BooleanVar(value=False)
+        self._head_cb = ttk.Checkbutton(head, text="Track head", variable=self._head_var,
+                                        command=self._on_head_toggle)
+        self._head_cb.pack(side=tk.LEFT, padx=4, pady=4)
+        tip(self._head_cb, "tracker.head_track")
+        self._head_show_var = tk.BooleanVar(value=self._tracker.head_overlay())
+        head_show_cb = ttk.Checkbutton(head, text="Show on preview",
+                                       variable=self._head_show_var,
+                                       command=self._on_head_show)
+        head_show_cb.pack(side=tk.LEFT, padx=(12, 2))
+        tip(head_show_cb, "tracker.head_show")
+        self._head_status = tk.StringVar(value="head: off")
+        ttk.Label(head, textvariable=self._head_status).pack(side=tk.LEFT, padx=6)
+
         # Blocker (orange-taped obstacle): on-demand still captures across
         # placements; tracked in parallel and subtracted from the rat. ADR-0034.
         blk = ttk.LabelFrame(controls, text="Blocker (orange tape)")
@@ -925,6 +943,49 @@ class TrackerControlView:
         except tk.TclError:
             pass
 
+    # ------------------------------------------------------- head tracking
+    def _recording(self) -> bool:
+        is_rec = getattr(self._camera, "is_recording", None)
+        return bool(is_rec()) if callable(is_rec) else False
+
+    def _on_head_toggle(self) -> None:
+        want = self._head_var.get()
+        if self._recording():
+            self._head_var.set(not want)
+            self._head_status.set("head: can't change while recording")
+            return
+        if not want:
+            self._tracker.set_head(None)
+            self._head_status.set("head: off")
+            return
+        try:
+            from tmaze.vision.head_live import LiveHead
+            live = LiveHead.load()
+        except Exception as e:
+            self._head_var.set(False)
+            self._head_status.set("head: off (model not loaded)")
+            messagebox.showwarning("Head tracking", f"Head tracking stays off:\n{e}",
+                                   parent=self.frame)
+            return
+        self._tracker.set_head(live)
+        info = live.model_info
+        rats = sorted({s.split("_", 1)[0] for s in info.get("sessions", [])})
+        self._head_status.set(f"head: on - {info['file']}, trained {info.get('trained', '?')}"
+                              f" on rat {'/'.join(rats) or '?'}")
+
+    def _on_head_show(self) -> None:
+        self._tracker.set_head_overlay(self._head_show_var.get())
+
+    def _poll_head(self) -> None:
+        try:
+            self._head_cb.configure(state=(tk.DISABLED if self._recording() else tk.NORMAL))
+        except tk.TclError:
+            pass
+        err = self._tracker.head_error()
+        if err and self._head_var.get():
+            self._head_var.set(False)
+            self._head_status.set(f"head: off - {err}")
+
     # --------------------------------------------------------- poll loop
     def _on_show_mask(self) -> None:
         if not self._show_mask_var.get():
@@ -992,6 +1053,7 @@ class TrackerControlView:
                 f"sol: {result.solidity:.2f}")
         else:
             self._readout.set("state: -")
+        self._poll_head()
 
         if self._log_writer is not None and result is not None:
             self._write_log_row(result)

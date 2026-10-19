@@ -195,6 +195,14 @@ TIPS: Dict[str, Entry] = {
                           "settings are restored (except registration/enrichment "
                           "knobs); re-grab the background if proc_max_w changed.",
     "tracker.clear_model": "Discard the current appearance model.",
+    "tracker.head_track": "Run the learned head network (host/head_models) each "
+                          "frame and record head centre, neck, tail base, nose, "
+                          "ears and head direction in the video sidecar. Off by "
+                          "default; can't be changed while recording. The task "
+                          "still uses the body centre (ADR-0219, ADR-0220).",
+    "tracker.head_show": "Draw the head point (white dot) and head direction "
+                         "(arrow) on the previews. A hollow dot = a jump the "
+                         "filter is still checking. Display only.",
     "tracker.define_region": "Define the maze ROI by clicking a captured still "
                              "frame.",
     "tracker.clear_region": "Clear the maze ROI polygon.",
