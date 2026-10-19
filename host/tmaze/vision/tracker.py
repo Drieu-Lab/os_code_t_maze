@@ -78,6 +78,8 @@ from collections import deque
 from dataclasses import asdict, dataclass, field, fields, replace
 from typing import List, Optional, Tuple
 
+from tmaze.core.head_filter import HeadSample
+
 try:
     import cv2  # type: ignore
     _CV2_ERR: Optional[str] = None
@@ -638,6 +640,9 @@ class TrackResult:
     # Parallel-tracked blocker (see docs/decisions/0034).
     blocker_detected: bool = False
     blocker_centroid: Optional[Tuple[float, float]] = None  # full px
+    # Learned head points (full px), only while head tracking is on (set_head;
+    # see docs/decisions/0219). None = head tracking off, or no background yet.
+    head: Optional["HeadSample"] = None
 
 
 # Shared column set for per-frame track rows (video sidecar + standalone log).
@@ -714,6 +719,10 @@ class RatTracker:
         self._blocker_cancel_pending = False
         self._blocker_footprint: Optional["np.ndarray"] = None   # proc-res mask
         self._blocker_last: Optional[Tuple[float, float]] = None  # proc-res centroid
+
+        # Learned head points (head_live.LiveHead; None = off). See docs/decisions/0219.
+        self._head = None
+        self._head_error = ""
 
         # Tracking state machine (touched only inside process()).
         self._kalman = self._make_kalman()
@@ -794,6 +803,26 @@ class RatTracker:
     def get_roi_polygon(self) -> Optional[List[Tuple[float, float]]]:
         with self._lock:
             return list(self._roi_norm) if self._roi_norm else None
+
+    def set_head(self, live_head) -> None:
+        """Turn head tracking on with a ``head_live.LiveHead``, or off with None.
+
+        While on, every tracking-branch TrackResult carries ``head``. The tracker
+        only adds outputs: the centroid, the Kalman track and the task's position
+        are unchanged."""
+        with self._lock:
+            self._head = live_head
+            self._head_error = ""
+
+    def get_head(self):
+        """The active ``LiveHead`` (None = head tracking off)."""
+        with self._lock:
+            return self._head
+
+    def head_error(self) -> str:
+        """Why head tracking switched itself off ("" if it didn't)."""
+        with self._lock:
+            return self._head_error
 
     def reset(self) -> None:
         """Drop the current track (kalman + path) but keep reference + ROI + model."""
@@ -1059,8 +1088,11 @@ class RatTracker:
             self._blocker_sample_pending = False
             self._blocker_finalize_pending = False
             self._blocker_cancel_pending = False
+            head = self._head
             if self._reset_pending:
                 self._reset_pending = False
+                if head is not None:
+                    head.reset()
                 self._kalman = self._make_kalman()
                 self._kalman_primed = False
                 self._frames_confirmed = 0
@@ -1223,7 +1255,7 @@ class RatTracker:
                 # fall through to normal tracking this frame
             else:
                 centroid = to_full(sample.centroid) if sample is not None else None
-                return self._finish(TrackResult(
+                result = TrackResult(
                     sample is not None, STATE_REGISTERING,
                     centroid=centroid, smoothed=centroid,
                     area=sample.area if sample is not None else 0.0,
@@ -1234,7 +1266,10 @@ class RatTracker:
                     frame_size=(full_w, full_h), mask=mask,
                     chosen_contour=(sample.contour if sample is not None else None),
                     reg_accepted=self._reg_accepted_safe(),
-                    reg_target=params.reg_min_frames, **model_fields()), params)
+                    reg_target=params.reg_min_frames, **model_fields())
+                if head is not None:
+                    result.head = self._run_head(head, head.miss)
+                return self._finish(result, params)
 
         # ------------------------------------------------------ tracking branch
         predicted = None
@@ -1280,6 +1315,7 @@ class RatTracker:
                     and hsv is not None):
                 self._enrich_model(model, hsv, chosen, params)
 
+            members = self._fill_contours(chosen)
             result = TrackResult(
                 True, self._state,
                 centroid=to_full(chosen.centroid),
@@ -1289,7 +1325,11 @@ class RatTracker:
                 candidates=[to_full(d.centroid) for d in rejected],
                 frame_size=(full_w, full_h), mask=mask,
                 chosen_contour=chosen.contour,
-                chosen_members=self._fill_contours(chosen), **model_fields())
+                chosen_members=members, **model_fields())
+            if head is not None:
+                result.head = self._run_head(head, lambda: head.step(
+                    gray, diff, members, chosen.centroid, scale,
+                    params.thresh, params.morph, roi_mask))
         else:
             # No accepted blob this frame.
             self._frames_confirmed = 0
@@ -1313,6 +1353,8 @@ class RatTracker:
                 confidence=self._confidence,
                 candidates=[to_full(d.centroid) for d in rejected],
                 frame_size=(full_w, full_h), mask=mask, **model_fields())
+            if head is not None:
+                result.head = self._run_head(head, head.miss)
 
         # Attach blocker readout (last known tape position, in full-frame px).
         if blocker_model is not None and self._blocker_last is not None:
@@ -1322,6 +1364,18 @@ class RatTracker:
         return self._finish(result, params)
 
     # --------------------------------------------------------- internals
+    def _run_head(self, head, call) -> Optional[HeadSample]:
+        """``call()``'s head sample; on any error head tracking switches itself
+        off (head_error() says why) so the position track is never interrupted."""
+        try:
+            return call()
+        except Exception as e:
+            with self._lock:
+                if self._head is head:
+                    self._head = None
+                    self._head_error = f"head tracking stopped: {type(e).__name__}: {e}"
+            return None
+
     def _reg_accepted_safe(self) -> int:
         return self._reg.n if self._reg is not None else 0
 

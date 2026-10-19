@@ -56,7 +56,6 @@ from tmaze.core import offline_track as OT
 from tmaze.paths import host_dir
 
 LABEL_CSV_GLOB = "CollectedData_*.csv"
-SPINE_GROW_PX = 6   # how far (proc px) the "light" spine mask may reach past the blob
 WARMUP_FRAMES = 50  # ~2 s at 25 fps: enough for the Kalman lock and the motion cue
 MIN_LIKELIHOOD = 0.6  # DeepLabCut's usual plotting cut-off (pcutoff)
 JUMP_PX = 40.0        # a frame-to-frame move this large (~9 cm) is a flip or glitch
@@ -116,6 +115,7 @@ def proc_images(frame, background, params, roi_norm):
     the ROI."""
     import cv2
     import numpy as np
+    from tmaze.vision import head_learned as HL
 
     def prep(img):
         h, w = img.shape[:2]
@@ -130,18 +130,14 @@ def proc_images(frame, background, params, roi_norm):
 
     grey = prep(frame)
     diff = cv2.absdiff(grey, prep(background))
-    _, m = cv2.threshold(diff, params.thresh, 255, cv2.THRESH_BINARY)
-    if params.morph >= 3:
-        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (params.morph, params.morph))
-        m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, k)
+    roi = None
     if roi_norm:
-        ph, pw = m.shape[:2]
-        roi = np.zeros_like(m)
+        ph, pw = diff.shape[:2]
+        roi = np.zeros_like(diff)
         pts = np.array([[int(round(x * pw)), int(round(y * ph))] for x, y in roi_norm],
                        np.int32)
         cv2.fillPoly(roi, [pts], 255)
-        m = cv2.bitwise_and(m, roi)
-    return grey, diff, m
+    return grey, diff, HL.light_mask(diff, params.thresh, params.morph, roi)
 
 
 SPINE_MASKS = ("mask", "light")
@@ -150,6 +146,7 @@ SPINE_MASKS = ("mask", "light")
 def _spine_masks(result, frame, background, tracker) -> Optional[Prepared]:
     """The Prepared inputs for one tracked frame, or None when the tracker
     chose no blob."""
+    from tmaze.vision import head_learned as HL
     from tmaze.vision import head_point as HP
 
     if not result.detected or result.centroid is None or not result.chosen_members:
@@ -159,7 +156,7 @@ def _spine_masks(result, frame, background, tracker) -> Optional[Prepared]:
     members = result.chosen_members
     grey, diff, light = proc_images(frame, background, params, tracker.get_roi_polygon())
     masks = {"mask": HP.blob_mask_from_contours(members, result.mask.shape[:2]),
-             "light": HP.spine_mask(light, members, grow_px=SPINE_GROW_PX)}
+             "light": HP.spine_mask(light, members, grow_px=HL.LIGHT_GROW_PX)}
     com = result.centroid
     return Prepared(masks, (com[0] * scale, com[1] * scale), scale, grey, diff)
 

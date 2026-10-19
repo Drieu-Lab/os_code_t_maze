@@ -92,6 +92,38 @@ def crop_input(grey: "np.ndarray", diff: "np.ndarray", blob: "np.ndarray",
     return np.stack(chans)
 
 
+LIGHT_GROW_PX = 6     # how far (proc px) the crop's mask channel may reach past the blob
+
+
+def light_mask(diff: "np.ndarray", thresh: int, morph: int,
+               roi_mask: Optional["np.ndarray"] = None) -> "np.ndarray":
+    """The more lightly cleaned foreground mask the crop's mask channel uses.
+
+    Same threshold as RatTracker.process(), but only a morphological CLOSE (no
+    OPEN, which erodes the thin tail), then the ROI."""
+    _, m = cv2.threshold(diff, thresh, 255, cv2.THRESH_BINARY)
+    if morph >= 3:
+        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (morph, morph))
+        m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, k)
+    if roi_mask is not None:
+        m = cv2.bitwise_and(m, roi_mask)
+    return m
+
+
+def net_input(grey: "np.ndarray", diff: "np.ndarray", members: Sequence["np.ndarray"],
+              com: Tuple[float, float], thresh: int, morph: int,
+              roi_mask: Optional["np.ndarray"] = None) -> "np.ndarray":
+    """``crop_input`` for one tracked frame, built the way the training crops were.
+
+    ``members`` are the tracker's chosen-blob contours and ``com`` its raw
+    centroid, both proc px; ``thresh``/``morph`` are the tracker's settings."""
+    from tmaze.vision import head_point as HP
+
+    blob = HP.spine_mask(light_mask(diff, thresh, morph, roi_mask), members,
+                         grow_px=LIGHT_GROW_PX)
+    return crop_input(grey, diff, blob, com)
+
+
 def shape_features(est, com: Tuple[float, float],
                    velocity: Tuple[float, float]) -> "np.ndarray":
     """FEATURES for one frame: a HeadTracker estimate's head_far / head / tail
