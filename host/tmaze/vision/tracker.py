@@ -626,6 +626,9 @@ class TrackResult:
     frame_size: Tuple[int, int] = (0, 0)              # full (w, h)
     mask: Optional["np.ndarray"] = None               # proc-resolution binary mask (debug)
     chosen_contour: Optional["np.ndarray"] = None     # tracked blob outline, PROC-res (aligns with mask)
+    # The tracked blob's own fragment contours (PROC-res). For a merged cluster
+    # chosen_contour is the convex hull around them, which hides the body shape.
+    chosen_members: Optional[List["np.ndarray"]] = None
     # Registration progress (only meaningful while state == REGISTERING).
     reg_accepted: int = 0
     reg_target: int = 0
@@ -1285,7 +1288,8 @@ class RatTracker:
                 solidity=chosen.solidity, confidence=self._confidence,
                 candidates=[to_full(d.centroid) for d in rejected],
                 frame_size=(full_w, full_h), mask=mask,
-                chosen_contour=chosen.contour, **model_fields())
+                chosen_contour=chosen.contour,
+                chosen_members=self._fill_contours(chosen), **model_fields())
         else:
             # No accepted blob this frame.
             self._frames_confirmed = 0

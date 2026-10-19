@@ -273,6 +273,17 @@ animal starting to use the tone?" — the cue weight climbing above the
 history weights is the emergence signature a single accuracy number hides. See
 ADR-0112.
 
+### Medial axis / skeleton (spine)
+The centre line of a shape: the points that sit exactly midway between two
+edges, each with the radius of the largest circle that fits inside the shape
+there. For the rat's blob it is a thin line running from tail tip to front end;
+the circles are small along the tail and large over the body, which is how
+`tmaze.vision.head_point` tells which end is the tail. Computed as a 1-pixel
+*skeleton* (by repeatedly peeling pixels off the outline, "thinning") plus a
+*distance transform* (each pixel's distance to the nearest edge). The skeleton
+sprouts side branches at legs and ragged edges, so only its longest path - the
+**spine** - is kept.
+
 ### Median background
 A picture of the empty rig built from frames of a recording that has the rat in
 it: for every pixel, take the middle value (the *median*) of that pixel across
