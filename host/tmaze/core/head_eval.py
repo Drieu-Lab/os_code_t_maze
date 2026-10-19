@@ -15,6 +15,12 @@ rat, so for each body part the first individual with a value is used.
 The scoring target is the HEAD CENTRE: the mean of whichever of nose / right
 ear / left ear are labelled. A point is on the WRONG END when it is closer to
 ``tail_base`` than to the neck (or ``mid_spine_neck`` when the neck is unlabelled).
+
+For whole videos the target comes from DeepLabCut's PREDICTIONS instead
+(``read_dlc_predictions``: its standard CSV output, parts below a likelihood
+threshold dropped), scored frame by frame with ``VideoScorer``, which also
+measures how steady a point is (jumps, jitter) and how long wrong-end
+stretches last.
 """
 
 from __future__ import annotations
@@ -187,6 +193,176 @@ def format_table(summaries: Sequence[Summary], px_to_cm: Optional[float] = None)
         line = (f"{s.candidate:34s} {s.n:4d} {100 * s.valid_frac:5.0f}% "
                 f"{f(s.head_median):>9s} {f(s.head_p90):>9s} {f(s.neck_median):>9s} "
                 f"{'-' if s.wrong_end_frac is None else f'{100 * s.wrong_end_frac:.0f}%':>10s}")
+        if px_to_cm:
+            line += f" {f(None if s.head_median is None else s.head_median * px_to_cm):>12s}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def read_dlc_predictions(path: str, min_likelihood: float = 0.6
+                         ) -> Dict[int, Dict[str, Point]]:
+    """``{frame: {bodypart: (x, y)}}`` from a DeepLabCut prediction CSV.
+
+    Accepts single-animal (scorer / bodyparts / coords header rows) and
+    multi-animal (+ individuals) files; the first column is the frame index.
+    Parts with likelihood below ``min_likelihood`` (or blank) are dropped, and
+    for each part the first individual that passes is used. Frames with no
+    surviving part are left out."""
+    out: Dict[int, Dict[str, Point]] = {}
+    header: Dict[str, List[str]] = {}
+    with open(path, newline="", encoding="utf-8") as fh:
+        for row in csv.reader(fh):
+            if not row:
+                continue
+            try:
+                frame = int(row[0])
+            except ValueError:
+                header[row[0].strip()] = row
+                continue
+            bodyparts, coords = header.get("bodyparts"), header.get("coords")
+            if bodyparts is None or coords is None:
+                raise ValueError(f"{path}: no bodyparts/coords header rows")
+            individuals = header.get("individuals", [""] * len(row))
+            cells: Dict[Tuple[str, str], Dict[str, float]] = {}
+            order: List[Tuple[str, str]] = []
+            for j in range(1, min(len(row), len(bodyparts), len(coords))):
+                cell = row[j].strip()
+                if not cell:
+                    continue
+                key = (individuals[j] if j < len(individuals) else "", bodyparts[j])
+                if key not in cells:
+                    cells[key] = {}
+                    order.append(key)
+                cells[key][coords[j]] = float(cell)
+            parts: Dict[str, Point] = {}
+            for key in order:
+                c = cells[key]
+                if key[1] in parts or "x" not in c or "y" not in c:
+                    continue
+                if c.get("likelihood", 1.0) >= min_likelihood:
+                    parts[key[1]] = (c["x"], c["y"])
+            if parts:
+                out[frame] = parts
+    return out
+
+
+@dataclass
+class VideoSummary:
+    """One candidate scored over a whole video against DeepLabCut predictions."""
+    candidate: str
+    frames: int = 0                 # frames seen
+    n: int = 0                      # frames with a head-centre target
+    n_point: int = 0                # ... where the candidate gave a point
+    valid_frac: float = 0.0         # share of target frames flagged valid
+    head_median: Optional[float] = None
+    head_p90: Optional[float] = None
+    wrong_end_frac: Optional[float] = None
+    wrong_long_frac: Optional[float] = None   # share of judged frames in long wrong-end runs
+    jumps_per_min: Optional[float] = None     # frame-to-frame moves > jump_px
+    jitter_still: Optional[float] = None      # median frame-to-frame move while the head is still
+
+
+class VideoScorer:
+    """Streams one candidate's per-frame points and scores them.
+
+    ``add`` must be called in frame order. A *jump* is a move of more than
+    ``jump_px`` between consecutive frames (a flip between ends, or a glitch).
+    *Jitter* is the median move between consecutive frames on which the target
+    head centre itself moved less than ``still_px``. A wrong-end *run* is a
+    stretch of consecutive judged frames on the wrong end; runs of at least
+    ``long_run_s`` count toward ``wrong_long_frac`` (frames with no verdict
+    neither extend nor break a run)."""
+
+    def __init__(self, candidate: str, fps: float, jump_px: float = 40.0,
+                 still_px: float = 1.0, long_run_s: float = 1.0):
+        self.candidate = candidate
+        self.fps = fps
+        self.jump_px = jump_px
+        self.still_px = still_px
+        self.long_run = max(1, int(round(long_run_s * fps)))
+        self._frames = 0
+        self._dists: List[float] = []
+        self._n = 0
+        self._n_point = 0
+        self._n_valid = 0
+        self._judged = 0
+        self._wrong = 0
+        self._wrong_long = 0
+        self._run = 0
+        self._jumps = 0
+        self._still_steps: List[float] = []
+        self._prev: Optional[Tuple[int, Optional[Point], Optional[Point]]] = None
+
+    def _close_run(self) -> None:
+        if self._run >= self.long_run:
+            self._wrong_long += self._run
+        self._run = 0
+
+    def add(self, frame: int, pt: Optional[Point], valid: bool,
+            parts: Optional[Mapping[str, Point]]) -> None:
+        self._frames += 1
+        parts = parts or {}
+        target = head_centre(parts)
+        if target is not None:
+            self._n += 1
+            if pt is not None:
+                self._n_point += 1
+                self._dists.append(dist(pt, target))
+            if valid:
+                self._n_valid += 1
+        w = wrong_end(pt, parts)
+        if w is not None:
+            self._judged += 1
+            if w:
+                self._wrong += 1
+                self._run += 1
+            else:
+                self._close_run()
+        if self._prev is not None and self._prev[0] == frame - 1:
+            step = dist(self._prev[1], pt)
+            if step is not None:
+                if step > self.jump_px:
+                    self._jumps += 1
+                moved = dist(self._prev[2], target)
+                if moved is not None and moved < self.still_px:
+                    self._still_steps.append(step)
+        self._prev = (frame, pt, target)
+
+    def summary(self) -> VideoSummary:
+        self._close_run()
+        minutes = self._frames / self.fps / 60.0 if self.fps > 0 else 0.0
+        return VideoSummary(
+            candidate=self.candidate, frames=self._frames, n=self._n,
+            n_point=self._n_point,
+            valid_frac=self._n_valid / self._n if self._n else 0.0,
+            head_median=percentile(self._dists, 0.5),
+            head_p90=percentile(self._dists, 0.9),
+            wrong_end_frac=self._wrong / self._judged if self._judged else None,
+            wrong_long_frac=self._wrong_long / self._judged if self._judged else None,
+            jumps_per_min=self._jumps / minutes if minutes > 0 else None,
+            jitter_still=percentile(self._still_steps, 0.5))
+
+
+def format_video_table(summaries: Sequence[VideoSummary],
+                       px_to_cm: Optional[float] = None) -> str:
+    """Plain-text table of whole-video summaries."""
+    def f(v, nd=1):
+        return "-" if v is None else f"{v:.{nd}f}"
+
+    def pct(v):
+        return "-" if v is None else f"{100 * v:.1f}%"
+
+    head = (f"{'candidate':34s} {'target':>7s} {'valid':>6s} {'head med':>9s} "
+            f"{'head p90':>9s} {'wrong':>7s} {'wrong>1s':>9s} {'jumps/min':>10s} "
+            f"{'jitter':>7s}")
+    if px_to_cm:
+        head += f" {'head med cm':>12s}"
+    lines = [head, "-" * len(head)]
+    for s in summaries:
+        line = (f"{s.candidate:34s} {s.n:7d} {100 * s.valid_frac:5.0f}% "
+                f"{f(s.head_median):>9s} {f(s.head_p90):>9s} {pct(s.wrong_end_frac):>7s} "
+                f"{pct(s.wrong_long_frac):>9s} {f(s.jumps_per_min):>10s} "
+                f"{f(s.jitter_still, 2):>7s}")
         if px_to_cm:
             line += f" {f(None if s.head_median is None else s.head_median * px_to_cm):>12s}"
         lines.append(line)

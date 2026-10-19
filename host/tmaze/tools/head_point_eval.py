@@ -27,6 +27,18 @@ Outputs go to ``--out`` (default: <recordings parent>/_head_point_eval):
 Run (env ``drieu_t_maze``, any directory):
     python -m tmaze.tools.head_point_eval --dlc-project Z:\\Ravi\\dlc\\drieu_rat_model-Ravi-2026-10-07 \\
         --recordings-root Z:\\Ravi\\phase3_recordings --thresh 8 19
+
+WHOLE-VIDEO mode (``--predictions <folder>``): instead of the labelled images,
+tracks every frame of each session that has a DeepLabCut prediction CSV in the
+folder (file name starting with the session id; DeepLabCut's standard CSV,
+parts below ``--min-likelihood`` ignored) and scores a short list of candidates
+against the predicted head centre frame by frame, adding how often the point
+jumps, how much it jitters while the head is still, and how much wrong-end time
+falls in stretches of 1 s or more (see tmaze.core.head_eval.VideoScorer). A
+``dlc`` row scores the predictions themselves for steadiness. Writes
+``head_point_video_summary.txt`` and ``<session>_video_points.csv``:
+    python -m tmaze.tools.head_point_eval --predictions <folder> \\
+        --recordings-root Z:\\Ravi\\phase3_recordings
 """
 
 from __future__ import annotations
@@ -46,6 +58,12 @@ from tmaze.paths import host_dir
 LABEL_CSV_GLOB = "CollectedData_*.csv"
 SPINE_GROW_PX = 6   # how far (proc px) the "light" spine mask may reach past the blob
 WARMUP_FRAMES = 50  # ~2 s at 25 fps: enough for the Kalman lock and the motion cue
+MIN_LIKELIHOOD = 0.6  # DeepLabCut's usual plotting cut-off (pcutoff)
+JUMP_PX = 40.0        # a frame-to-frame move this large (~9 cm) is a flip or glitch
+VIDEO_CANDIDATES = ("com", "thin_end/light/far", "half_mean/light/far",
+                    "track:thin_end/light/far", "track:thin_end/light/edge",
+                    "track:half_mean/light/far", "track:thin_end/mask/far",
+                    "track:thin_end/light/far+com")
 
 # Overlay colours (BGR).
 _COL_LABEL = (0, 255, 0)
@@ -56,7 +74,13 @@ _COL_CAND = (255, 200, 0)
 def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="python -m tmaze.tools.head_point_eval",
                                 description=__doc__.split("\n\n")[0])
-    p.add_argument("--dlc-project", required=True, help="DeepLabCut project folder")
+    p.add_argument("--dlc-project", help="DeepLabCut project folder (labelled-image mode)")
+    p.add_argument("--predictions",
+                   help="folder of DeepLabCut prediction CSVs (whole-video mode)")
+    p.add_argument("--min-likelihood", type=float, default=MIN_LIKELIHOOD,
+                   help="whole-video mode: ignore predicted parts below this likelihood")
+    p.add_argument("--max-frames", type=int, default=0,
+                   help="whole-video mode: stop after this many frames (0 = all)")
     p.add_argument("--recordings-root", required=True,
                    help="folder holding the matching rig session bundles")
     p.add_argument("--out", default=None, help="output folder")
@@ -297,8 +321,104 @@ def _run_config(label: str, sets: Sequence[str], sessions: List[Tuple[str, str, 
     return scores
 
 
+def _run_video(sid: str, pred_csv: str, bundle: str, out: str, min_likelihood: float,
+               max_frames: int, wanted: Sequence[str]) -> List[HE.VideoSummary]:
+    """Track one whole session video and score ``wanted`` candidates (plus the
+    ``dlc`` predictions themselves) frame by frame."""
+    import time
+
+    import cv2
+    from tmaze.vision import offline_tracker as OTR
+
+    preds = HE.read_dlc_predictions(pred_csv, min_likelihood=min_likelihood)
+    settings = OT.resolve_settings(bundle, OT.Overrides(),
+                                   ratmodels_dir=str(host_dir() / "ratmodels"))
+    tracker, _, _ = OTR.build_tracker(settings)
+    background = cv2.imread(settings.background.path, cv2.IMREAD_COLOR) \
+        if settings.background.path else None
+    if background is None:
+        print(f"  {sid}: no background PNG, skipped", file=sys.stderr)
+        return []
+    OTR.install_background(tracker, background)
+    cap = cv2.VideoCapture(settings.video)
+    fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    if max_frames > 0:
+        total = min(total, max_frames)
+    names = ["dlc"] + list(wanted)
+    scorers = {n: HE.VideoScorer(n, fps, jump_px=JUMP_PX) for n in names}
+    head_trackers = _make_head_trackers()
+    t0 = time.time()
+    with open(os.path.join(out, f"{sid}_video_points.csv"), "w", newline="",
+              encoding="utf-8") as fh:
+        w = csv.writer(fh)
+        w.writerow(["frame"] + [f"{n}_{c}" for n in names for c in ("x", "y", "valid")])
+        for frame_i in range(total):
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                break
+            result = tracker.process(frame)
+            prepared = _spine_masks(result, frame, background, tracker)
+            cands = _candidates(result, prepared, _update_head_trackers(head_trackers, prepared))
+            parts = preds.get(frame_i, {})
+            dlc_head = HE.head_centre(parts)
+            cands["dlc"] = (dlc_head, dlc_head is not None)
+            row = [frame_i]
+            for n in names:
+                pt, valid = cands.get(n, (None, False))
+                scorers[n].add(frame_i, pt, valid, parts)
+                row += (["", ""] if pt is None else [f"{pt[0]:.1f}", f"{pt[1]:.1f}"]) \
+                    + [int(valid)]
+            w.writerow(row)
+            if frame_i and frame_i % 5000 == 0:
+                rate = frame_i / (time.time() - t0)
+                print(f"    {sid}: frame {frame_i}/{total} ({rate:.0f} fps)", flush=True)
+    cap.release()
+    print(f"  {sid}: {total} frames in {time.time() - t0:.0f} s")
+    return [scorers[n].summary() for n in names]
+
+
+def _main_video(args) -> int:
+    out = args.out or os.path.join(os.path.dirname(os.path.normpath(args.recordings_root)),
+                                   "_head_point_eval", "video")
+    os.makedirs(out, exist_ok=True)
+    wanted = [c for c in VIDEO_CANDIDATES
+              if not args.only or c == "com" or any(o in c for o in args.only)]
+    text: List[str] = []
+    cm = None
+    for pred_csv in sorted(glob.glob(os.path.join(args.predictions, "*.csv"))):
+        name = os.path.basename(pred_csv)
+        bundles = [d for d in glob.glob(os.path.join(args.recordings_root, "*"))
+                   if name.startswith(os.path.basename(d)) and OT.is_bundle(d)]
+        if not bundles:
+            print(f"no rig bundle matches {name}; skipped", file=sys.stderr)
+            continue
+        bundle = max(bundles, key=len)
+        sid = os.path.basename(bundle)
+        if args.sessions and sid not in args.sessions:
+            continue
+        summaries = _run_video(sid, pred_csv, bundle, out, args.min_likelihood,
+                               args.max_frames, wanted)
+        cm = cm or _cm_per_px(bundle)
+        text += [f"{sid}  (likelihood >= {args.min_likelihood}, jump > {JUMP_PX:.0f} px)",
+                 HE.format_video_table(summaries, px_to_cm=cm), ""]
+    if not text:
+        print("no prediction CSV with a matching rig bundle", file=sys.stderr)
+        return 1
+    report = "\n".join(text)
+    with open(os.path.join(out, "head_point_video_summary.txt"), "w", encoding="utf-8") as fh:
+        fh.write(report)
+    print(report)
+    print(f"wrote {out}")
+    return 0
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _parser().parse_args(argv)
+    if args.predictions:
+        return _main_video(args)
+    if not args.dlc_project:
+        _parser().error("give --dlc-project (labelled images) or --predictions (whole videos)")
     label_root = os.path.join(args.dlc_project, "labeled-data")
     sessions: List[Tuple[str, str, str]] = []
     for d in sorted(glob.glob(os.path.join(label_root, "*"))):

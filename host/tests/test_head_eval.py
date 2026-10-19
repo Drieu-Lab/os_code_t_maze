@@ -72,5 +72,69 @@ class TestHeadEval(unittest.TestCase):
         self.assertIn("com", HE.format_table([com, head], px_to_cm=0.25))
 
 
+_PRED = """scorer,R,R,R,R,R,R
+individuals,600,600,600,600,600,600
+bodyparts,nose,nose,nose,tail_base,tail_base,tail_base
+coords,x,y,likelihood,x,y,likelihood
+0,,,,,,
+1,10.0,20.0,0.9,50.0,20.0,0.3
+2,11.0,21.0,0.6,51.0,21.0,0.95
+"""
+
+_PRED_SINGLE = """scorer,R,R,R
+bodyparts,nose,nose,nose
+coords,x,y,likelihood
+5,1.5,2.5,0.99
+"""
+
+
+class TestPredictions(unittest.TestCase):
+    def _write(self, text):
+        fd, path = tempfile.mkstemp(suffix=".csv")
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        self.addCleanup(os.remove, path)
+        return path
+
+    def test_reads_multi_animal_with_likelihood_cut(self):
+        pred = HE.read_dlc_predictions(self._write(_PRED), min_likelihood=0.6)
+        self.assertEqual(set(pred), {1, 2})                 # frame 0 is blank
+        self.assertEqual(pred[1], {"nose": (10.0, 20.0)})   # tail_base 0.3 dropped
+        self.assertEqual(pred[2]["tail_base"], (51.0, 21.0))
+
+    def test_reads_single_animal(self):
+        pred = HE.read_dlc_predictions(self._write(_PRED_SINGLE))
+        self.assertEqual(pred, {5: {"nose": (1.5, 2.5)}})
+
+
+class TestVideoScorer(unittest.TestCase):
+    PARTS = {"nose": (0.0, 0.0), "neck": (10.0, 0.0), "tail_base": (50.0, 0.0)}
+
+    def test_distance_jumps_and_jitter(self):
+        sc = HE.VideoScorer("c", fps=10.0, jump_px=20.0, still_px=1.0)
+        for f, pt in enumerate([(1.0, 0.0), (2.0, 0.0), (45.0, 0.0), (3.0, 0.0)]):
+            sc.add(f, pt, True, self.PARTS)
+        sc.add(5, (3.0, 0.0), False, {})      # gap at frame 4, no target
+        s = sc.summary()
+        self.assertEqual((s.frames, s.n, s.n_point), (5, 4, 4))
+        self.assertEqual(s.valid_frac, 1.0)
+        self.assertAlmostEqual(s.head_median, 2.5)
+        self.assertEqual(sc._jumps, 2)        # 2->45 and 45->3; not across the gap
+        self.assertAlmostEqual(s.jumps_per_min, 2 / (5 / 10.0 / 60.0))
+        self.assertAlmostEqual(s.jitter_still, 42.0)   # median of 1, 43, 42
+        self.assertAlmostEqual(s.wrong_end_frac, 0.25)
+
+    def test_long_wrong_runs(self):
+        sc = HE.VideoScorer("c", fps=4.0, long_run_s=1.0)   # long run = 4 frames
+        seq = ["w"] * 5 + ["ok"] + ["w"] * 2 + [None] + ["w"]
+        for f, kind in enumerate(seq):
+            pt = None if kind is None else ((45.0, 0.0) if kind == "w" else (5.0, 0.0))
+            sc.add(f, pt, True, self.PARTS)
+        s = sc.summary()
+        self.assertAlmostEqual(s.wrong_end_frac, 8 / 9)
+        self.assertAlmostEqual(s.wrong_long_frac, 5 / 9)   # the 2+1 run spans a gap but is short
+        self.assertIn("jumps/min", HE.format_video_table([s], px_to_cm=0.2))
+
+
 if __name__ == "__main__":
     unittest.main()
