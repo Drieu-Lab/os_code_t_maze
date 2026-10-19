@@ -18,7 +18,8 @@ the direction the head points:
 
 Both are trained by ``tmaze.tools.train_head_net`` (DEEPLABCUT env) on samples
 from ``tmaze.tools.head_point_dataset``; the network is exported to ONNX and
-run here with OpenCV's ``cv2.dnn``, so the rig needs no deep-learning package.
+run here with OpenCV's ``cv2.dnn``, so the rig needs no deep-learning package
+(why a network, and the head-direction definition: docs/decisions/0219).
 Everything is in the tracker's proc-resolution pixel grid; points are offsets
 from ``crop_centre(com)`` (the network) or from the CoM itself (the ridge).
 

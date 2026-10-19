@@ -59,7 +59,7 @@ criteria).
 | ID | Title | Area | Status |
 |----|-------|------|--------|
 | [FW-0001](#fw-0001-6040-sameswitch-transition-bias-in-sequence-generation) | ~60/40 same/switch transition bias | Trial-sequence generation | Deferred |
-| [FW-0002](#fw-0002-head-vs-body-orientation-heading-from-the-tracker) | Head-vs-body orientation (heading) | Markerless tracker | Deferred |
+| [FW-0002](#fw-0002-head-vs-body-orientation-heading-from-the-tracker) | Head-vs-body orientation (heading) | Markerless tracker | In progress (ADR-0219) |
 | [FW-0003](#fw-0003-multi-animal-association-and-irlow-saturation-tracking) | Multi-animal association + IR/low-saturation | Markerless tracker | Proposed |
 | [FW-0005](#fw-0005-in-gui-rat-id-entry-firmware-animal-command--logger-file-roll) | In-GUI rat id entry (firmware `ANIMAL` command + logger file-roll) | Firmware + protocol + logger + GUI | Deferred |
 | [FW-0006](#fw-0006-shared-base-class-for-still-frame-editors) | Shared base class for still-frame editors | Tracker tab UI | Done |
@@ -195,7 +195,11 @@ the per-block balance guarantee from ADR-era behavior.
 
 ### FW-0002: Head-vs-body orientation (heading) from the tracker
 
-- **Status:** Deferred
+- **Status:** In progress - [ADR-0219](decisions/0219-learned-head-point.md) chose a
+  learned head direction (neck -> head centre from a small network) over the
+  body-axis approach sketched below, which misses the head's own turns (a median
+  15-37 deg from DLC's direction against 11-13 for the network). Mark Done when
+  the live tracker records it.
 - **Date added:** 2026-06-29
 - **Author / Agent:** Agent (Cursor) on behalf of Celine
 - **Area / modules:** `host/tracker.py` (`Detection`/`RatModel` already compute the
@@ -557,6 +561,24 @@ learned estimator is preferred; is that still the call?
 
 **ADR needed?** Yes - a major architecture + external-dependency decision (likely
 several: dependency/runtime, which keypoint feeds rules, fallback strategy).
+
+**Update 2026-10-19 ([ADR-0219](decisions/0219-learned-head-point.md)).** The lab
+now has a DLC model (`Z:\Ravi\dlc\drieu_rat_model-Ravi-2026-10-07`: ResNet-50,
+multi-animal, 9 body parts) and the rig PC has a GPU (RTX 4060 Ti). Timed with
+DLC-Live 1.1.0 on the rig PC (`dlclivegui` env, now with CUDA PyTorch): 671 ms
+per frame on the CPU and **70 ms on the GPU at full size** (14 fps, under the
+camera's 25 fps); half or quarter size fits in 40 ms (19 / 13 ms) but loses the
+head on 40-100% of frames, as the model was trained at full size. Two DLC-Live
+1.1.0 problems: its `IdentityPredictor` is never imported (a multi-animal model
+with an identity head fails to load until you import
+`dlclive.pose_estimation_pytorch.models.predictors.identity_predictor`), and FP16
+crashes in the PAF predictor (Half vs Float). Meanwhile ADR-0219 put a small
+network trained on this DLC model's predictions on the rig (1.7-1.9 cm, 0.5 ms
+per frame), which covers the head point and head direction. What would revive
+this item: a need for parts the small network does not give (the tail, or DLC's
+accuracy), plus a **smaller single-animal DLC model** (e.g. a lighter backbone,
+or top-down on a crop around the tracker's blob) timed under ~25 ms on the GPU,
+run in its own process. Timing script: `t-maze_recordings/_head_point_eval/dlclive_bench.py`.
 
 ### FW-0011: Richer colour model for clustered fragments (multimodal/per-part)
 
