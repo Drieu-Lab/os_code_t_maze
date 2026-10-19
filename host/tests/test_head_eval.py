@@ -136,5 +136,30 @@ class TestVideoScorer(unittest.TestCase):
         self.assertIn("jumps/min", HE.format_video_table([s], px_to_cm=0.2))
 
 
+class TestDirection(unittest.TestCase):
+    def test_head_direction_is_neck_to_head_centre(self):
+        parts = {"neck": (0.0, 0.0), "nose": (10.0, 0.0), "right_ear": (4.0, 3.0),
+                 "left_ear": (4.0, -3.0)}
+        self.assertAlmostEqual(HE.head_direction(parts), 0.0)
+        self.assertAlmostEqual(HE.direction_deg((0, 0), (0, 4)), 90.0)     # image down
+        self.assertIsNone(HE.head_direction({"nose": (1.0, 1.0)}))
+        self.assertEqual(HE.angle_diff(170, -170), 20)
+
+    def test_scorer_counts_error_turns_and_jitter(self):
+        sc = HE.DirectionScorer("x", fps=60.0, turn_deg=90.0, still_deg=2.0)
+        sc.add(0, 10.0, 0.0)
+        sc.add(1, 12.0, 0.5)     # target steady: 2 deg jitter
+        sc.add(2, -170.0, 1.0)   # 178 deg jump: a turn, error 171
+        sc.add(3, None, 1.0)     # no prediction
+        sc.add(5, 0.0, 1.0)      # not consecutive with frame 3's prediction anyway
+        s = sc.summary()
+        self.assertEqual(s.n, 4)
+        self.assertAlmostEqual(s.err_median, (10.0 + 11.5) / 2)
+        self.assertAlmostEqual(s.over_45, 0.25)
+        self.assertAlmostEqual(s.turns_per_min, 1 / (5 / 60.0 / 60.0))
+        self.assertAlmostEqual(s.jitter_still, (2.0 + 178.0) / 2)
+        self.assertIn("x", HE.format_direction_table([s]))
+
+
 if __name__ == "__main__":
     unittest.main()

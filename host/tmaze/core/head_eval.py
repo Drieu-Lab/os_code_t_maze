@@ -20,7 +20,9 @@ For whole videos the target comes from DeepLabCut's PREDICTIONS instead
 (``read_dlc_predictions``: its standard CSV output, parts below a likelihood
 threshold dropped), scored frame by frame with ``VideoScorer``, which also
 measures how steady a point is (jumps, jitter) and how long wrong-end
-stretches last.
+stretches last. ``DirectionScorer`` does the same for a head DIRECTION
+(neck -> head centre, degrees): error against the predictions, sudden turns,
+and jitter.
 """
 
 from __future__ import annotations
@@ -366,4 +368,96 @@ def format_video_table(summaries: Sequence[VideoSummary],
         if px_to_cm:
             line += f" {f(None if s.head_median is None else s.head_median * px_to_cm):>12s}"
         lines.append(line)
+    return "\n".join(lines)
+
+
+def direction_deg(frm: Optional[Point], to: Optional[Point]) -> Optional[float]:
+    """Direction from ``frm`` to ``to`` in degrees, image axes (0 = image right,
+    90 = image down); None when a point is missing or they coincide."""
+    if frm is None or to is None or (frm[0] == to[0] and frm[1] == to[1]):
+        return None
+    return math.degrees(math.atan2(to[1] - frm[1], to[0] - frm[0]))
+
+
+def angle_diff(a: float, b: float) -> float:
+    """Smallest absolute difference between two directions, degrees (0..180)."""
+    d = (a - b) % 360.0
+    return min(d, 360.0 - d)
+
+
+def head_direction(parts: Mapping[str, Point]) -> Optional[float]:
+    """Neck -> head centre direction of a labelled / predicted pose (the rig's
+    head direction, see ``tmaze.vision.head_learned.head_direction_deg``)."""
+    return direction_deg(parts.get("neck"), head_centre(parts))
+
+
+@dataclass
+class DirectionSummary:
+    """One head-direction candidate scored over a whole video."""
+    candidate: str
+    frames: int = 0
+    n: int = 0                          # frames with a target direction and a prediction
+    err_median: Optional[float] = None
+    err_p90: Optional[float] = None
+    over_45: Optional[float] = None     # share of those frames off by more than 45 deg
+    turns_per_min: Optional[float] = None   # frame-to-frame changes > turn_deg
+    jitter_still: Optional[float] = None    # median frame-to-frame change while the target is steady
+
+
+class DirectionScorer:
+    """Streams one candidate's per-frame head direction (degrees or None) against
+    the target direction. ``add`` in frame order. A *turn* is a change of more
+    than ``turn_deg`` between consecutive frames - far faster than a rat turns
+    its head in 40 ms, so a glitch. *Jitter* is the median change between
+    consecutive frames on which the target itself changed less than ``still_deg``."""
+
+    def __init__(self, candidate: str, fps: float, turn_deg: float = 90.0,
+                 still_deg: float = 2.0):
+        self.candidate = candidate
+        self.fps = fps
+        self.turn_deg = turn_deg
+        self.still_deg = still_deg
+        self._frames = 0
+        self._errs: List[float] = []
+        self._turns = 0
+        self._still_steps: List[float] = []
+        self._prev: Optional[Tuple[int, Optional[float], Optional[float]]] = None
+
+    def add(self, frame: int, pred: Optional[float], target: Optional[float]) -> None:
+        self._frames += 1
+        if pred is not None and target is not None:
+            self._errs.append(angle_diff(pred, target))
+        if self._prev is not None and self._prev[0] == frame - 1 and pred is not None \
+                and self._prev[1] is not None:
+            step = angle_diff(pred, self._prev[1])
+            if step > self.turn_deg:
+                self._turns += 1
+            if target is not None and self._prev[2] is not None \
+                    and angle_diff(target, self._prev[2]) < self.still_deg:
+                self._still_steps.append(step)
+        self._prev = (frame, pred, target)
+
+    def summary(self) -> DirectionSummary:
+        minutes = self._frames / self.fps / 60.0 if self.fps > 0 else 0.0
+        n = len(self._errs)
+        return DirectionSummary(
+            candidate=self.candidate, frames=self._frames, n=n,
+            err_median=percentile(self._errs, 0.5), err_p90=percentile(self._errs, 0.9),
+            over_45=sum(e > 45.0 for e in self._errs) / n if n else None,
+            turns_per_min=self._turns / minutes if minutes > 0 else None,
+            jitter_still=percentile(self._still_steps, 0.5))
+
+
+def format_direction_table(summaries: Sequence[DirectionSummary]) -> str:
+    """Plain-text table of whole-video head-direction summaries (degrees)."""
+    def f(v, nd=1):
+        return "-" if v is None else f"{v:.{nd}f}"
+
+    head = (f"{'direction candidate':34s} {'frames':>7s} {'err med':>8s} {'err p90':>8s} "
+            f"{'>45 deg':>8s} {'turns/min':>10s} {'jitter':>7s}")
+    lines = [head, "-" * len(head)]
+    for s in summaries:
+        over = "-" if s.over_45 is None else f"{100 * s.over_45:.1f}%"
+        lines.append(f"{s.candidate:34s} {s.n:7d} {f(s.err_median):>8s} {f(s.err_p90):>8s} "
+                     f"{over:>8s} {f(s.turns_per_min):>10s} {f(s.jitter_still, 2):>7s}")
     return "\n".join(lines)

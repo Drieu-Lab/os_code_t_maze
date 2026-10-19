@@ -206,6 +206,7 @@ def _candidates(result, prepared, tracked_heads=None
 
 
 LEARNED_KEY = ("thin_end", "light")   # the HeadTracker whose estimate feeds the ridge
+BODY_AXIS = "body axis (com -> track)"  # direction baseline: CoM -> that tracker's head
 
 
 class Learned:
@@ -226,22 +227,30 @@ class Learned:
         return [n for n, m in (("ridge", self.ridge), ("net", self.net)) if m is not None]
 
     def candidates(self, prepared: Optional[Prepared], est, velocity
-                   ) -> Dict[str, Tuple[Optional[HE.Point], bool]]:
+                   ) -> Tuple[Dict[str, Tuple[Optional[HE.Point], bool]],
+                              Dict[str, Optional[float]]]:
+        """(head-centre points in full-frame px, head directions in degrees) per model."""
         from tmaze.vision import head_learned as HL
 
         if prepared is None:
-            return {n: (None, False) for n in self.names()}
+            return ({n: (None, False) for n in self.names()},
+                    {n: None for n in self.names()})
         s = prepared.scale
-        out = {}
+        points, dirs = {}, {}
         if self.ridge is not None:
-            off = self.ridge.predict(HL.shape_features(est, prepared.com, velocity))[0]
-            out["ridge"] = (((prepared.com[0] + off[0]) / s, (prepared.com[1] + off[1]) / s), True)
+            off = self.ridge.predict(HL.shape_features(est, prepared.com, velocity))
+            head = off[HL.TARGETS.index("head")]
+            points["ridge"] = (((prepared.com[0] + head[0]) / s,
+                                (prepared.com[1] + head[1]) / s), True)
+            dirs["ridge"] = HL.head_direction_deg(off)
         if self.net is not None:
             cx, cy = HL.crop_centre(prepared.com)
             off = self.net.predict(HL.crop_input(prepared.grey, prepared.diff,
-                                                 prepared.masks["light"], prepared.com))[0]
-            out["net"] = (((cx + off[0]) / s, (cy + off[1]) / s), True)
-        return out
+                                                 prepared.masks["light"], prepared.com))
+            head = off[HL.TARGETS.index("head")]
+            points["net"] = (((cx + head[0]) / s, (cy + head[1]) / s), True)
+            dirs["net"] = HL.head_direction_deg(off)
+        return points, dirs
 
 
 def _update_head_trackers(head_trackers, prepared) -> Dict[Tuple[str, str], object]:
@@ -363,7 +372,7 @@ def _run_config(label: str, sets: Sequence[str], sessions: List[Tuple[str, str, 
             cands = _candidates(result, prepared, tracked_heads)
             if learned is not None:
                 est = tracked_heads.get(LEARNED_KEY) if tracked_heads else None
-                cands.update(learned.candidates(prepared, est, velocity))
+                cands.update(learned.candidates(prepared, est, velocity)[0])
             parts = labels[img_name]
             for name, (pt, valid) in cands.items():
                 scores.append(HE.score_point(f"{label}:{name}", sid,
@@ -380,9 +389,12 @@ def _run_config(label: str, sets: Sequence[str], sessions: List[Tuple[str, str, 
 
 def _run_video(sid: str, pred_csv: str, bundle: str, out: str, min_likelihood: float,
                max_frames: int, wanted: Sequence[str],
-               learned: Optional[Learned] = None) -> List[HE.VideoSummary]:
+               learned: Optional[Learned] = None
+               ) -> Tuple[List[HE.VideoSummary], List[HE.DirectionSummary]]:
     """Track one whole session video and score ``wanted`` candidates (plus the
-    ``dlc`` predictions themselves) frame by frame."""
+    ``dlc`` predictions themselves) frame by frame. With ``learned``, also
+    scores head directions (the models' neck -> head centre, and the shape
+    tracker's body axis CoM -> head as a baseline) against DeepLabCut's."""
     import time
 
     import cv2
@@ -405,12 +417,15 @@ def _run_video(sid: str, pred_csv: str, bundle: str, out: str, min_likelihood: f
         total = min(total, max_frames)
     names = ["dlc"] + list(wanted) + (learned.names() if learned else [])
     scorers = {n: HE.VideoScorer(n, fps, jump_px=JUMP_PX) for n in names}
+    dir_names = (["dlc", BODY_AXIS] + learned.names()) if learned else []
+    dir_scorers = {n: HE.DirectionScorer(n, fps) for n in dir_names}
     head_trackers = _make_head_trackers()
     t0 = time.time()
     with open(os.path.join(out, f"{sid}_video_points.csv"), "w", newline="",
               encoding="utf-8") as fh:
         w = csv.writer(fh)
-        w.writerow(["frame"] + [f"{n}_{c}" for n in names for c in ("x", "y", "valid")])
+        w.writerow(["frame"] + [f"{n}_{c}" for n in names for c in ("x", "y", "valid")]
+                   + [f"{n}_dir_deg" for n in dir_names])
         for frame_i in range(total):
             ok, frame = cap.read()
             if not ok or frame is None:
@@ -419,10 +434,17 @@ def _run_video(sid: str, pred_csv: str, bundle: str, out: str, min_likelihood: f
             prepared = _spine_masks(result, frame, background, tracker)
             tracked_heads = _update_head_trackers(head_trackers, prepared)
             cands = _candidates(result, prepared, tracked_heads)
-            if learned is not None:
-                cands.update(learned.candidates(prepared, tracked_heads[LEARNED_KEY],
-                                                head_trackers[LEARNED_KEY].velocity()))
             parts = preds.get(frame_i, {})
+            dirs: Dict[str, Optional[float]] = {}
+            if learned is not None:
+                est = tracked_heads[LEARNED_KEY]
+                points, dirs = learned.candidates(prepared, est,
+                                                  head_trackers[LEARNED_KEY].velocity())
+                cands.update(points)
+                dirs[BODY_AXIS] = HE.direction_deg(
+                    prepared.com if prepared is not None else None,
+                    est.head_far if est is not None else None)
+                dirs["dlc"] = HE.head_direction(parts)
             dlc_head = HE.head_centre(parts)
             cands["dlc"] = (dlc_head, dlc_head is not None)
             row = [frame_i]
@@ -431,13 +453,16 @@ def _run_video(sid: str, pred_csv: str, bundle: str, out: str, min_likelihood: f
                 scorers[n].add(frame_i, pt, valid, parts)
                 row += (["", ""] if pt is None else [f"{pt[0]:.1f}", f"{pt[1]:.1f}"]) \
                     + [int(valid)]
+            for n in dir_names:
+                dir_scorers[n].add(frame_i, dirs.get(n), dirs.get("dlc"))
+                row.append("" if dirs.get(n) is None else f"{dirs[n]:.1f}")
             w.writerow(row)
             if frame_i and frame_i % 5000 == 0:
                 rate = frame_i / (time.time() - t0)
                 print(f"    {sid}: frame {frame_i}/{total} ({rate:.0f} fps)", flush=True)
     cap.release()
     print(f"  {sid}: {total} frames in {time.time() - t0:.0f} s")
-    return [scorers[n].summary() for n in names]
+    return [scorers[n].summary() for n in names], [dir_scorers[n].summary() for n in dir_names]
 
 
 def _main_video(args) -> int:
@@ -460,11 +485,15 @@ def _main_video(args) -> int:
         sid = os.path.basename(bundle)
         if args.sessions and sid not in args.sessions:
             continue
-        summaries = _run_video(sid, pred_csv, bundle, out, args.min_likelihood,
-                               args.max_frames, wanted, learned)
+        summaries, dir_summaries = _run_video(sid, pred_csv, bundle, out, args.min_likelihood,
+                                              args.max_frames, wanted, learned)
         cm = cm or _cm_per_px(bundle)
         text += [f"{sid}  (likelihood >= {args.min_likelihood}, jump > {JUMP_PX:.0f} px)",
                  HE.format_video_table(summaries, px_to_cm=cm), ""]
+        if dir_summaries:
+            text += ["head direction, neck -> head centre (degrees; vs DeepLabCut's; "
+                     "turn = > 90 deg between frames)",
+                     HE.format_direction_table(dir_summaries), ""]
     if not text:
         print("no prediction CSV with a matching rig bundle", file=sys.stderr)
         return 1
