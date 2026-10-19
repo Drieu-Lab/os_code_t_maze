@@ -501,6 +501,14 @@ Matching spans rather than single edges — both ends must agree — is what tel
 apart beams crossed within a few hundred ms of each other. See
 `host/tmaze/core/sync/spans.py`.
 
+### Sidecar (camera sidecar)
+The CSV file saved next to a session's video (`video/<session_id>.csv`), one row
+per saved frame: when the frame was grabbed, the camera's own frame counter and
+clock, the tracker's latest position (`track_*`), and, when head
+tracking is on, the learned head points (`head_*`, ADR-0220). Its `#` lines at
+the top describe the recording (size, codec, background image, head model). It
+is what ties a video frame to the other streams. See ADR-0040, ADR-0182.
+
 ### Similarity transform
 The simplest way one flat shape can move in a picture without distorting: a
 rotation, a shift, and one uniform scale factor (four numbers). It is what a

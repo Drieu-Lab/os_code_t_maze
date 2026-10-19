@@ -131,6 +131,7 @@ criteria).
 | [FW-0078](#fw-0078-retire-the-analysis-repos-render_overlay) | Retire `drieu_lab_analysis` `render_overlay` / `video_overlay` once FW-0076 lands (the rig owns overlay clips) | `drieu_lab_analysis` | Blocked (on FW-0076) |
 | [FW-0079](#fw-0079-snapshot-the-blocker-model-into-the-bundle) | Snapshot the active blocker model into the session's `config/` at Start, like the rat model | `ui/experiment_control.py` (`config_inputs`), `ui/tracker_view.py` | Proposed |
 | [FW-0080](#fw-0080-register-rat-should-forget-the-loaded-model-path) | Live Tracking tab: "Register rat" after "Load model" still reports the loaded file, so the session snapshot copies the old model | `ui/tracker_view.py` | Proposed |
+| [FW-0081](#fw-0081-head-points-in-the-offline-re-track) | Offline re-track writes the learned head-point columns too | `tools/offline_track`, `vision/offline_tracker.py` | Proposed |
 
 ## Entries
 
@@ -3915,6 +3916,40 @@ set `self._model_path = None` (the model now exists only in memory, as after
 at Start, so land it between sessions.
 
 **ADR needed?** No (a bug fix under ADR-0072).
+
+### FW-0081: Head points in the offline re-track
+
+- **Status:** Proposed
+- **Date added:** 2026-10-19
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** `host/tmaze/vision/offline_tracker.py` (`CSV_COLUMNS`, the
+  per-frame writer), `host/tmaze/tools/offline_track.py` (a `--head` option),
+  `host/tmaze/vision/head_live.py`, `host/tmaze/core/head_columns.py`; the
+  analysis mirror's offline-track reader
+- **Related ADRs:** [ADR-0211](decisions/0211-offline-tracking-of-recorded-video.md),
+  [ADR-0219](decisions/0219-learned-head-point.md),
+  [ADR-0220](decisions/0220-record-head-points.md)
+
+**Motivation / context.** ADR-0220 records the learned head points only in the
+LIVE camera sidecar, and only for sessions run with head tracking on. Older
+sessions, and sessions run with it off, could get head points by re-tracking
+the video offline, and a retrained model (rats 601 / 602) could be re-applied
+to old sessions the same way.
+
+**Sketch of approach.** `offline_tracker` already drives a `RatTracker` frame by
+frame: call `set_head(LiveHead.load(path))` when asked, append
+`head_columns.HEAD_COLUMNS` (via `head_row`) after the existing columns, and
+write the `head_columns.header_fields` lines into its `#` header. Keep the
+columns off by default so existing offline files are unchanged.
+
+**Evaluation / acceptance.** On a session recorded with head tracking on,
+the offline head columns match the live ones (allowing for the live sidecar's
+track staleness, ADR-0040). A test on the golden or a synthetic video.
+
+**Effort / risk.** Small; the offline file is mirrored in the analysis repo, so
+its reader needs the same column list.
+
+**ADR needed?** Probably not (extends ADR-0220 to the offline file).
 
 ## Completed
 

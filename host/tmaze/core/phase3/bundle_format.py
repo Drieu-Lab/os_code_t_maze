@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-from tmaze.core import maze_state
+from tmaze.core import head_columns, maze_state
 from tmaze.core.phase3 import phase3_log
 from tmaze.core.phase3.phase3_task import ABANDONED, CORRECT, INCORRECT, UNCUED
 from tmaze.core.phase3.trial_sequence import HIGH, LEFT, LOW, RIGHT
@@ -44,7 +44,10 @@ from tmaze.core.phase3.trial_sequence import HIGH, LEFT, LOW, RIGHT
 # trial CSV gains a ``cue_calibration`` header line, the excursions CSV gains the
 # session_t0 header block, and this manifest gains ``stream_notes`` (S5/S6). The
 # analysis mirror localises pre-v4 naive stamps to the rig zone; see its parse_iso.
-FORMAT_VERSION = 4
+# v5 (ADR-0220): the camera sidecar gains trailing learned head-point columns
+# (head_columns.HEAD_COLUMNS; blank when head tracking is off) + ``head_*``
+# header lines, documented here as ``sidecar_head_columns``.
+FORMAT_VERSION = 5
 
 # The firmware serial protocol version at/after which the body-beam (S) and lick
 # (L) state bit is CORRECTED (1 = broken/contact); below it the recorded meaning
@@ -206,6 +209,7 @@ def format_manifest(firmware_proto: Optional[int] = None) -> Dict[str, Any]:
         "columns": _columns(),
         "stream_notes": dict(_STREAM_NOTES),
         "sync": _sync(),
+        "sidecar_head_columns": head_columns.column_doc(),
     }
 
 

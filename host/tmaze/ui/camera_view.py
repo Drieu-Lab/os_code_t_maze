@@ -49,6 +49,7 @@ from tmaze.ui.gui_deps import (  # noqa: E402
 )
 from tmaze.vision.calibration import Undistorter, load_calibration  # noqa: E402
 from tmaze.core import protocol  # noqa: E402  (shared serial-line parser; see docs/decisions/0024)
+from tmaze.core import head_columns  # noqa: E402  (learned head-point sidecar columns; ADR-0220)
 from tmaze.core.camera_health import account_block_gap, fps_measured, recording_deltas  # noqa: E402  (pure BlockID-gap accounting + per-recording deltas + measured fps; ADR-0147)
 from tmaze.core.records.animals import resources_root  # noqa: E402  (sibling resources-repo resolver)
 from tmaze.paths import camera_output_dir  # noqa: E402  (single source for the recordings root; ADR-0088)
@@ -1087,6 +1088,11 @@ class CameraView:
             "calib_rms": calib_rms,
             "background": bg_name,
         }
+        # Learned head tracking on/off + its model, as set at record start
+        # (docs/decisions/0220).
+        live_head = self._tracker.get_head() if self._tracker is not None else None
+        header.update(head_columns.header_fields(
+            live_head.model_info if live_head is not None else None))
         self._rec_params = _RecParams(
             video_path=base + ext, csv_path=base + ".csv",
             fps=self._cam_fps, size=(w, h), header=header, codec=codec, crf=crf,
@@ -1227,13 +1233,16 @@ class CameraView:
                         # attach the LATEST-available one plus the BlockID it came from
                         # (track_src_block_id) so its staleness is explicit (ADR-0040).
                         snap = self._track_pub.snapshot()
-                        track = track_row(snap[0] if snap is not None else None)
+                        result = snap[0] if snap is not None else None
+                        track = track_row(result)
                         track_src = ("" if snap is None or snap[1] is None
                                      else snap[1])
+                        head = head_columns.head_row(
+                            result.head if result is not None else None)
                         meta = (grab_wall, self._latest_rig_ms,
                                 "" if block_id is None else block_id,
                                 "" if cam_ts is None else cam_ts,
-                                track, track_src)
+                                track, track_src, head)
                         self._enqueue(frame, meta)
                 finally:
                     grab.Release()
@@ -1367,7 +1376,8 @@ class CameraView:
             for k, v in params.header.items():
                 csv_file.write(f"# {k}: {v}\n")
             csv_writer = csv.writer(csv_file)
-            csv_writer.writerow(SIDECAR_COLUMNS + TRACK_COLUMNS + TRACK_SRC_COLUMN)
+            csv_writer.writerow(SIDECAR_COLUMNS + TRACK_COLUMNS + TRACK_SRC_COLUMN
+                                + head_columns.HEAD_COLUMNS)
             self._post(self._set_conn_status,
                        f"Recording -> {os.path.basename(params.video_path)}")
             return writer, csv_file, csv_writer
@@ -1378,14 +1388,14 @@ class CameraView:
     def _write_frame(self, writer, csv_writer, idx, frame, meta) -> bool:
         try:
             writer.write(frame)
-            host_unix_s, rig_ms, block_id, cam_ts, track, track_src = meta
+            host_unix_s, rig_ms, block_id, cam_ts, track, track_src, head = meta
             # Wall time at WRITE (after processing), so grab->write latency is
             # measurable against host_unix_s (grab time); docs/decisions/0182.
             written = time.time()
             csv_writer.writerow(
                 [idx, f"{host_unix_s:.6f}", rig_ms, block_id, cam_ts,
                  f"{written:.6f}"]
-                + list(track) + [track_src])
+                + list(track) + [track_src] + list(head))
             # Track the saved-frame grab-time span for fps_measured (S5).
             if self._rec_first_hu is None:
                 self._rec_first_hu = host_unix_s

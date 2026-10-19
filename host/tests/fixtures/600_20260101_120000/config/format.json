@@ -1,5 +1,5 @@
 {
-  "format_version": 4,
+  "format_version": 5,
   "proto": 12,
   "firmware_proto": 8,
   "sensor_polarity": "corrected",
@@ -96,5 +96,22 @@
       "registration": "v1 blinking-constellation registration pose (when no fiducials)",
       "verdict": "overall fit verdict"
     }
+  },
+  "sidecar_head_columns": {
+    "head_status": "ok / leap (jump not yet confirmed; points held) / none (no tracked blob); blank = head tracking off",
+    "head_valid": "1 when the head points can be trusted (status ok), else 0",
+    "head_x": "head centre x (full-frame px, learned head network)",
+    "head_y": "head centre y (full-frame px, learned head network)",
+    "neck_x": "neck x (full-frame px, learned head network)",
+    "neck_y": "neck y (full-frame px, learned head network)",
+    "tail_base_x": "tail base x (full-frame px, learned head network)",
+    "tail_base_y": "tail base y (full-frame px, learned head network)",
+    "nose_x": "nose x (full-frame px, learned head network)",
+    "nose_y": "nose y (full-frame px, learned head network)",
+    "right_ear_x": "rat's right ear x (full-frame px, learned head network)",
+    "right_ear_y": "rat's right ear y (full-frame px, learned head network)",
+    "left_ear_x": "rat's left ear x (full-frame px, learned head network)",
+    "left_ear_y": "rat's left ear y (full-frame px, learned head network)",
+    "head_dir_deg": "head direction neck -> head centre, degrees, image axes (0 = right, 90 = down)"
   }
 }
