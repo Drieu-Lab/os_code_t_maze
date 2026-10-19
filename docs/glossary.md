@@ -98,6 +98,16 @@ persistent red/green [fiducial](#fiducial) LEDs, grown outward by a margin; the
 blinking channel LEDs are searched only inside it, so a hand or the rat moving
 elsewhere on the maze can't flood the detector. See ADR-0153.
 
+### Convolutional neural network (CNN)
+A model that learns to read pictures. It slides many small learned filters (a few
+pixels wide) over the image, combines what they find into coarser and coarser
+maps, and ends with a few numbers - here the head, neck and tail-base positions
+inside a 64x64 crop around the rat. It learns the filters from examples (frames
+where DeepLabCut found the head), so it can use cues no hand-written rule
+captures, such as the faint outline of a black head. The head-point network is
+deliberately tiny so it runs on the rig PC's processor in a few milliseconds per
+frame. See `tmaze.vision.head_learned`, and [ONNX](#onnx) for how it is shipped.
+
 ### Core (pure core) / shell (thin shell)
 The project's main code-organization pattern. A **pure core** is logic written in
 plain Python with no GUI, camera, or hardware — so it can be tested headlessly
@@ -310,6 +320,14 @@ stand clearly above it (the LEDs reach 80–190), so the LED detector reports th
 floor with every run: if a future recording setting lifts it toward the blob
 threshold, that number is the warning. See `tmaze/vision/led_detector.py`.
 
+### ONNX
+A standard file format for a trained network (`.onnx`). It lets a network be
+trained with one toolkit (here PyTorch, in the `DEEPLABCUT` conda env) and run
+with another (here OpenCV's `cv2.dnn`, already part of the rig env), so the rig
+needs no extra install to use the [CNN](#convolutional-neural-network-cnn).
+The file holds only the network; the crop settings it expects are stored next
+to it in a `.json` file and checked when it is loaded.
+
 ### One-active group (LED sync)
 A set of serial channels of which at most one can be active at a time: one rat
 cannot break two beams, or lick two ports, at the same instant, and the firmware
@@ -422,6 +440,15 @@ the LEDs' colour, and markers are colour-neutral); they are a **physical QA
 reference** — the operator eyeballs the debug overlay to confirm the LED-derived
 board ROI lands inside the marker corners. A repeatable placement scheme is
 deferred (FW-0059). See ADR-0153.
+
+### Ridge regression
+A straight-line (linear) fit from several inputs to several outputs, with a
+small penalty on large weights so it doesn't lean too hard on any one input
+when the inputs overlap or the data are noisy. The head-point ridge maps a few
+numbers about the blob's shape and motion (where the shape rule puts the head,
+the tail, which way the rat is moving) to the head position DeepLabCut found.
+It is fast and easy to inspect, but it can only combine what the shape rule
+already measured. See `tmaze.vision.head_learned`.
 
 ### Robust fit (Theil–Sen)
 A way of fitting a straight line that a few wildly wrong points cannot pull off
