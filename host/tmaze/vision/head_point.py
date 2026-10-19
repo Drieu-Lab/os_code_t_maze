@@ -113,12 +113,51 @@ def spine_mask(light_mask: "np.ndarray", contours: Sequence["np.ndarray"],
     return cv2.bitwise_or(blob, cv2.bitwise_and(light_mask, near))
 
 
-def _largest_component(mask: "np.ndarray") -> "np.ndarray":
+BRIDGE_GAP_PX = 15.0   # pieces farther than this from the main piece are left out
+BRIDGE_MIN_AREA = 15   # smaller pieces are specks, not body parts
+BRIDGE_WIDTH_PX = 3    # thickness of the line joining a piece to the main one
+
+
+def _bridged_body(mask: "np.ndarray") -> "np.ndarray":
+    """The largest connected piece of ``mask`` with the nearby pieces joined on.
+
+    The hooded rat's blob often splits in two across its dark middle (rear
+    body + tail in one piece, front body in another). A spine on the largest
+    piece alone stops at the split, whose tapered edge then looks like a tail.
+    Each other piece of at least BRIDGE_MIN_AREA px whose nearest point lies
+    within BRIDGE_GAP_PX of the growing body is joined to it by a thin line
+    between their closest points, nearest piece first."""
     n, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
     if n <= 2:
         return mask
-    biggest = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
-    return np.where(labels == biggest, 255, 0).astype(np.uint8)
+    areas = stats[1:, cv2.CC_STAT_AREA]
+    biggest = 1 + int(np.argmax(areas))
+    body = np.where(labels == biggest, 255, 0).astype(np.uint8)
+    others = [i for i in range(1, n) if i != biggest and stats[i, cv2.CC_STAT_AREA]
+              >= BRIDGE_MIN_AREA]
+
+    def outline(m):
+        cs, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+        return np.vstack([c.reshape(-1, 2) for c in cs]).astype(np.float64)
+
+    pieces = {i: outline(np.where(labels == i, 255, 0).astype(np.uint8)) for i in others}
+    while pieces:
+        body_pts = outline(body)
+        best = None
+        for i, pts in pieces.items():
+            d2 = ((pts[:, None, :] - body_pts[None, :, :]) ** 2).sum(-1)
+            k = int(np.argmin(d2))
+            gap = float(np.sqrt(d2.flat[k]))
+            if best is None or gap < best[0]:
+                a, b = divmod(k, d2.shape[1])
+                best = (gap, i, pts[a], body_pts[b])
+        gap, i, p, q = best
+        if gap > BRIDGE_GAP_PX:
+            break
+        body[labels == i] = 255
+        cv2.line(body, (int(p[0]), int(p[1])), (int(q[0]), int(q[1])), 255, BRIDGE_WIDTH_PX)
+        del pieces[i]
+    return body
 
 
 def _bfs(start: Tuple[int, int], pixels: set):
@@ -235,7 +274,8 @@ def extract_spine(mask: "np.ndarray", com: Tuple[float, float]) -> Optional[Spin
     """Spine of a blob mask (None if empty or the skeleton is a single pixel).
 
     Works in a padded crop around the blob because thinning cost scales with
-    area; the spine comes from the largest connected piece."""
+    area; the spine comes from the largest connected piece with nearby pieces
+    joined on (_bridged_body)."""
     if mask is None or not np.any(mask):
         return None
     x0, y0, bw, bh = cv2.boundingRect(cv2.findNonZero(mask))
@@ -244,7 +284,7 @@ def extract_spine(mask: "np.ndarray", com: Tuple[float, float]) -> Optional[Spin
     cx0, cy0 = max(0, x0 - pad), max(0, y0 - pad)
     cx1, cy1 = min(w, x0 + bw + pad), min(h, y0 + bh + pad)
     crop = np.where(mask[cy0:cy1, cx0:cx1] > 0, 255, 0).astype(np.uint8)
-    body = _largest_component(crop)
+    body = _bridged_body(crop)
     path = longest_skeleton_path(body)
     if len(path) < 2:
         return None
@@ -333,8 +373,11 @@ class OrientationWeights:
     motion: float = 1.5
     shape_full_margin: float = 0.5   # radius margin that counts as a full shape vote
     motion_ref_px: float = 1.5       # CoM speed (px/frame) that counts as a full motion vote
-    velocity_frames: int = 5         # CoM history used for the speed estimate
-    flip_threshold: float = 0.2      # evidence (0..1) against last frame needed to flip
+    motion_dead_px: float = 0.5      # CoM speed below this is blob flicker, not walking
+    velocity_frames: int = 10        # CoM history used for the speed estimate
+    flip_evidence: float = 1.0       # summed opposing evidence needed to flip the held end
+    flip_decay: float = 0.95         # per-frame carry-over of that sum (older frames count less)
+    min_axis_cos: float = 0.3        # |cos| between body axis and held heading to keep holding
     min_confidence: float = 0.25     # evidence (0..1) needed to call a fresh decision valid
 
 
@@ -346,15 +389,25 @@ class HeadTracker:
 
       * shape  - the chosen rule's radius margin (the tail end is thin);
       * motion - rats mostly move head-first, so the end the CoM is moving
-                 towards, scaled down when the rat is nearly still.
+                 towards, scaled down when the rat is nearly still and zero
+                 below ``motion_dead_px`` (a tail tip dropping in and out of
+                 the blob shifts the CoM a few px without the rat moving).
 
-    Continuity is hysteresis, not a third vote: when last frame's head point
-    clearly matches one end, that end stays the head unless this frame's
-    evidence points the other way by more than ``flip_threshold``. (As a vote it
-    would let one early wrong choice outvote the motion cue forever.) A held
-    orientation keeps the previous frame's validity; a fresh decision is valid
-    when its evidence clears ``min_confidence``. One instance per tracked
-    animal; call ``reset()`` when the track is lost."""
+    Continuity is hysteresis, not a third vote. The tracker remembers the
+    HEADING (unit vector from the CoM towards the head); this frame's spine end
+    on that side stays the head while opposing evidence, summed over frames
+    with ``flip_decay`` carry-over, stays below ``flip_evidence`` - so a flip
+    needs a few frames of agreement, not one noisy frame, while weak but
+    steady evidence still gets there (the sum levels off at
+    evidence / (1 - flip_decay), so the decay must stay close to 1). The heading, not the
+    old end's position, is what is matched because the spine's end point jumps
+    around (tail tip, a leg) while its direction does not. When the body axis is
+    nearly perpendicular to the heading (|cos| < ``min_axis_cos``, e.g. curled
+    up) the frame is decided fresh. (As a vote, continuity would let one early
+    wrong choice outvote the motion cue forever.) A held orientation keeps the
+    previous frame's validity; a fresh decision is valid when its evidence
+    clears ``min_confidence``. One instance per tracked animal; call
+    ``reset()`` when the track is lost."""
 
     def __init__(self, rule: str = RULE_THIN_END, params: Optional[HeadPointParams] = None,
                  weights: Optional[OrientationWeights] = None):
@@ -364,12 +417,14 @@ class HeadTracker:
         self.params = params or HeadPointParams()
         self.weights = weights or OrientationWeights()
         self._coms: deque = deque(maxlen=max(2, self.weights.velocity_frames + 1))
-        self._prev_head: Optional[Tuple[float, float]] = None
+        self._heading: Optional[Tuple[float, float]] = None
+        self._against = 0.0
         self._prev_valid = False
 
     def reset(self) -> None:
         self._coms.clear()
-        self._prev_head = None
+        self._heading = None
+        self._against = 0.0
         self._prev_valid = False
 
     def update(self, mask: "np.ndarray", com: Optional[Tuple[float, float]]) -> HeadEstimate:
@@ -397,33 +452,41 @@ class HeadTracker:
             speed = math.hypot(vx, vy)
             ax, ay = ends[1][0] - ends[0][0], ends[1][1] - ends[0][1]
             alen = math.hypot(ax, ay)
-            if speed > 0 and alen > 0 and w.motion_ref_px > 0:
+            span = w.motion_ref_px - w.motion_dead_px
+            if speed > w.motion_dead_px and alen > 0 and span > 0:
                 cos = (vx * ax + vy * ay) / (speed * alen)
-                s_motion = cos * min(1.0, speed / w.motion_ref_px)
+                s_motion = cos * min(1.0, (speed - w.motion_dead_px) / span)
 
-        # Continuity: +1 = last frame's head matches path[-1], -1 = path[0],
-        # 0 = no clear match (the ends are about equally far from it).
+        # Continuity: +1 = the held heading points at path[-1], -1 = path[0],
+        # 0 = no heading yet, or the body axis is across it.
         s_cont = 0.0
-        if self._prev_head is not None:
-            d0 = math.hypot(ends[0][0] - self._prev_head[0], ends[0][1] - self._prev_head[1])
-            d1 = math.hypot(ends[1][0] - self._prev_head[0], ends[1][1] - self._prev_head[1])
-            span = max(1.0, math.hypot(ends[1][0] - ends[0][0], ends[1][1] - ends[0][1]))
-            if abs(d0 - d1) >= 0.25 * span:
-                s_cont = 1.0 if d1 < d0 else -1.0
+        ax, ay = ends[1][0] - ends[0][0], ends[1][1] - ends[0][1]
+        alen = math.hypot(ax, ay)
+        if self._heading is not None and alen > 0:
+            cos = (ax * self._heading[0] + ay * self._heading[1]) / alen
+            if abs(cos) >= w.min_axis_cos:
+                s_cont = 1.0 if cos > 0 else -1.0
 
         wsum = w.shape + w.motion
         evidence = (w.shape * s_shape + w.motion * s_motion) / wsum if wsum > 0 else 0.0
-        if s_cont != 0.0 and evidence * s_cont > -w.flip_threshold:
-            head_last = s_cont > 0          # hold last frame's orientation
+        if s_cont != 0.0:
+            self._against = max(0.0, w.flip_decay * self._against - evidence * s_cont)
+        else:
+            self._against = 0.0
+        if s_cont != 0.0 and self._against < w.flip_evidence:
+            head_last = s_cont > 0          # hold the remembered heading
             valid = self._prev_valid or abs(evidence) >= w.min_confidence
         else:
             head_last = evidence > 0 if evidence != 0 else shape_last
             valid = abs(evidence) >= w.min_confidence
+            self._against = 0.0
         place_head(spine, head_last, p, out)
         out.margin = margin
         out.votes = {"shape": s_shape, "motion": s_motion, "continuity": s_cont}
         out.confidence = abs(evidence)
         out.valid = bool(out.spine_len >= p.min_spine_px and valid)
-        self._prev_head = ends[1] if head_last else ends[0]
+        if alen > 0:
+            sign = 1.0 if head_last else -1.0
+            self._heading = (sign * ax / alen, sign * ay / alen)
         self._prev_valid = out.valid
         return out

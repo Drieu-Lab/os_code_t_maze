@@ -3,8 +3,8 @@
 Synthetic blobs stand in for a rat: an elliptical body plus a thin tail drawn at
 several angles. Checks that both head/tail rules put the head point at the body's
 front tip (not the tail), that a tailless ellipse is flagged not-valid (nothing
-says which end is the head), that ``head_far`` reaches a detached head fragment,
-and that ``spine_mask`` recovers tail pixels the tracker's mask lost without
+says which end is the head), that the spine bridges a nearby detached head
+fragment but not a far or tiny piece, and that ``spine_mask`` recovers tail pixels the tracker's mask lost without
 picking up a far speck.
 
 Run from host/:  python -m unittest tests.test_head_point
@@ -89,12 +89,23 @@ class TestHeadPoint(unittest.TestCase):
                 est = HP.estimate_head(mask, _com(mask), rule=rule)
                 self.assertFalse(est.valid)
 
-    def test_head_far_reaches_a_detached_head_fragment(self):
+    def test_spine_bridges_a_nearby_detached_head_fragment(self):
         mask, front, _, disc_tip = _rat(60, head_fragment=True)
         est = HP.estimate_head(mask, _com(mask))
         self.assertTrue(est.valid)
-        self.assertLess(_dist(est.head, front), 6.0)      # spine ends at the body
+        self.assertLess(_dist(est.head, disc_tip), 6.0)   # spine runs into the disc
         self.assertLess(_dist(est.head_far, disc_tip), 4.0)
+
+    def test_far_or_tiny_pieces_are_not_bridged(self):
+        cv2 = HP.cv2
+        mask, front, _, _ = _rat(0)
+        u = _unit(0)
+        far = (int(front[0] + u[0] * (HP.BRIDGE_GAP_PX + 12)), int(front[1]))
+        cv2.circle(mask, far, 6, 255, -1)                            # big but far
+        cv2.circle(mask, (int(front[0]) + 5, int(front[1]) + 20), 1, 255, -1)  # near speck
+        est = HP.estimate_head(mask, _com(mask))
+        self.assertTrue(est.valid)
+        self.assertLess(_dist(est.head, front), 6.0)
 
     def test_empty_and_tiny_masks(self):
         np = HP.np
@@ -140,6 +151,21 @@ class TestHeadPoint(unittest.TestCase):
             est = tracker.update(round_mask, _com(round_mask))
         self.assertGreater(est.votes["continuity"], 0.5)
         self.assertLess(_dist(est.head, front), 6.0)
+
+    def test_tracker_needs_several_contrary_frames_to_flip(self):
+        weights = HP.OrientationWeights(motion=0.0, flip_evidence=2.0)
+        tracker = HP.HeadTracker(weights=weights)
+        mask, front, _, _ = _rat(0)                   # head on the right (+x)
+        flipped, back, _, _ = _rat(180)               # same body, tail on the right
+        self.assertGreater(front[0], CENTRE[0])
+        for _ in range(3):
+            tracker.update(mask, _com(mask))
+        one_off = tracker.update(flipped, _com(flipped))
+        self.assertGreater(one_off.head[0], CENTRE[0])     # one frame: right end held
+        tracker.update(mask, _com(mask))
+        heads = [tracker.update(flipped, _com(flipped)).head for _ in range(6)]
+        self.assertGreater(heads[0][0], CENTRE[0])
+        self.assertLess(_dist(heads[-1], back), 6.0)       # sustained: flipped left
 
     def test_tracker_resets_when_the_rat_is_lost(self):
         tracker = HP.HeadTracker()
