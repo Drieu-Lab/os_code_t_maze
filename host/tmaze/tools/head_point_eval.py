@@ -49,7 +49,7 @@ import glob
 import json
 import os
 import sys
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 from tmaze.core import head_eval as HE
 from tmaze.core import offline_track as OT
@@ -81,6 +81,8 @@ def _parser() -> argparse.ArgumentParser:
                    help="whole-video mode: ignore predicted parts below this likelihood")
     p.add_argument("--max-frames", type=int, default=0,
                    help="whole-video mode: stop after this many frames (0 = all)")
+    p.add_argument("--models", help="folder with trained head_ridge.json / head_net.onnx "
+                                    "(adds the ridge / net candidates)")
     p.add_argument("--recordings-root", required=True,
                    help="folder holding the matching rig session bundles")
     p.add_argument("--out", default=None, help="output folder")
@@ -97,11 +99,21 @@ def _parser() -> argparse.ArgumentParser:
     return p
 
 
-def _light_mask(frame, background, params, roi_norm):
-    """The tracker's foreground mask WITHOUT the morphological open step.
+class Prepared(NamedTuple):
+    """One tracked frame's inputs for the head-point candidates (proc px)."""
+    masks: Dict[str, object]       # spine masks by name (SPINE_MASKS)
+    com: Tuple[float, float]       # tracker CoM in proc px
+    scale: float                   # proc px per full-frame px
+    grey: object                   # blurred proc grey frame
+    diff: object                   # |grey - background grey|
+
+
+def proc_images(frame, background, params, roi_norm):
+    """``(grey, diff, light mask)`` at the tracker's proc resolution.
 
     Mirrors RatTracker.process() up to the threshold (downscale, grey, blur,
-    absolute difference), then only a CLOSE, then the ROI."""
+    absolute difference); the light mask then gets only a CLOSE (no OPEN) and
+    the ROI."""
     import cv2
     import numpy as np
 
@@ -116,7 +128,8 @@ def _light_mask(frame, background, params, roi_norm):
             g = cv2.GaussianBlur(g, (params.blur, params.blur), 0)
         return g
 
-    diff = cv2.absdiff(prep(frame), prep(background))
+    grey = prep(frame)
+    diff = cv2.absdiff(grey, prep(background))
     _, m = cv2.threshold(diff, params.thresh, 255, cv2.THRESH_BINARY)
     if params.morph >= 3:
         k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (params.morph, params.morph))
@@ -128,15 +141,15 @@ def _light_mask(frame, background, params, roi_norm):
                        np.int32)
         cv2.fillPoly(roi, [pts], 255)
         m = cv2.bitwise_and(m, roi)
-    return m
+    return grey, diff, m
 
 
 SPINE_MASKS = ("mask", "light")
 
 
-def _spine_masks(result, frame, background, tracker):
-    """``(masks by name, CoM in proc px, proc scale)`` for one tracked frame, or
-    None when the tracker chose no blob."""
+def _spine_masks(result, frame, background, tracker) -> Optional[Prepared]:
+    """The Prepared inputs for one tracked frame, or None when the tracker
+    chose no blob."""
     from tmaze.vision import head_point as HP
 
     if not result.detected or result.centroid is None or not result.chosen_members:
@@ -144,12 +157,11 @@ def _spine_masks(result, frame, background, tracker):
     params = tracker.get_params()
     scale = min(1.0, params.proc_max_w / float(frame.shape[1]))
     members = result.chosen_members
+    grey, diff, light = proc_images(frame, background, params, tracker.get_roi_polygon())
     masks = {"mask": HP.blob_mask_from_contours(members, result.mask.shape[:2]),
-             "light": HP.spine_mask(_light_mask(frame, background, params,
-                                                tracker.get_roi_polygon()),
-                                    members, grow_px=SPINE_GROW_PX)}
+             "light": HP.spine_mask(light, members, grow_px=SPINE_GROW_PX)}
     com = result.centroid
-    return masks, (com[0] * scale, com[1] * scale), scale
+    return Prepared(masks, (com[0] * scale, com[1] * scale), scale, grey, diff)
 
 
 def _make_head_trackers():
@@ -184,12 +196,52 @@ def _candidates(result, prepared, tracked_heads=None
             if prepared is None:
                 add(f"{rule}/{mname}", None, 1.0)
             else:
-                masks, com_p, scale = prepared
-                add(f"{rule}/{mname}", HP.estimate_head(masks[mname], com_p, rule=rule), scale)
+                add(f"{rule}/{mname}",
+                    HP.estimate_head(prepared.masks[mname], prepared.com, rule=rule),
+                    prepared.scale)
             if tracked_heads is not None:
                 est = tracked_heads[(rule, mname)] if prepared is not None else None
-                add(f"track:{rule}/{mname}", est, prepared[2] if prepared else 1.0)
+                add(f"track:{rule}/{mname}", est, prepared.scale if prepared else 1.0)
     return out
+
+
+LEARNED_KEY = ("thin_end", "light")   # the HeadTracker whose estimate feeds the ridge
+
+
+class Learned:
+    """The trained models in ``--models`` (``head_ridge.json`` / ``head_net.onnx``,
+    either may be missing) as extra ``ridge`` / ``net`` candidates."""
+
+    def __init__(self, models_dir: str):
+        from tmaze.vision import head_learned as HL
+
+        ridge = os.path.join(models_dir, "head_ridge.json")
+        net = os.path.join(models_dir, "head_net.onnx")
+        self.ridge = HL.RidgeHead.load(ridge) if os.path.exists(ridge) else None
+        self.net = HL.HeadNet(net) if os.path.exists(net) else None
+        if self.ridge is None and self.net is None:
+            raise SystemExit(f"no head_ridge.json or head_net.onnx in {models_dir}")
+
+    def names(self) -> List[str]:
+        return [n for n, m in (("ridge", self.ridge), ("net", self.net)) if m is not None]
+
+    def candidates(self, prepared: Optional[Prepared], est, velocity
+                   ) -> Dict[str, Tuple[Optional[HE.Point], bool]]:
+        from tmaze.vision import head_learned as HL
+
+        if prepared is None:
+            return {n: (None, False) for n in self.names()}
+        s = prepared.scale
+        out = {}
+        if self.ridge is not None:
+            off = self.ridge.predict(HL.shape_features(est, prepared.com, velocity))[0]
+            out["ridge"] = (((prepared.com[0] + off[0]) / s, (prepared.com[1] + off[1]) / s), True)
+        if self.net is not None:
+            cx, cy = HL.crop_centre(prepared.com)
+            off = self.net.predict(HL.crop_input(prepared.grey, prepared.diff,
+                                                 prepared.masks["light"], prepared.com))[0]
+            out["net"] = (((cx + off[0]) / s, (cy + off[1]) / s), True)
+        return out
 
 
 def _update_head_trackers(head_trackers, prepared) -> Dict[Tuple[str, str], object]:
@@ -199,8 +251,7 @@ def _update_head_trackers(head_trackers, prepared) -> Dict[Tuple[str, str], obje
         if prepared is None:
             out[(rule, mname)] = ht.update(None, None)
         else:
-            masks, com_p, _ = prepared
-            out[(rule, mname)] = ht.update(masks[mname], com_p)
+            out[(rule, mname)] = ht.update(prepared.masks[mname], prepared.com)
     return out
 
 
@@ -246,8 +297,9 @@ def _cm_per_px(bundle: str) -> Optional[float]:
 def _track_to(cap, tracker, background, target: int, warmup: int, label_png):
     """Seek to ``target - warmup``, track forward to ``target`` (resetting the
     tracker + fresh HeadTrackers first). Returns (frame, result, prepared,
-    tracked_heads), or None if the video ends early. Warns when the decoded
-    target frame does not match DeepLabCut's extracted PNG."""
+    tracked_heads, velocity of the LEARNED_KEY tracker), or None if the video
+    ends early. Warns when the decoded target frame does not match
+    DeepLabCut's extracted PNG."""
     import cv2
     import numpy as np
     from tmaze.vision import offline_tracker as OTR
@@ -268,11 +320,12 @@ def _track_to(cap, tracker, background, target: int, warmup: int, label_png):
         if diff > 1.0:
             print(f"    warning: decoded frame {target} differs from the label PNG "
                   f"(mean |diff| {diff:.1f})", file=sys.stderr)
-    return frame, result, prepared, tracked_heads
+    return frame, result, prepared, tracked_heads, head_trackers[LEARNED_KEY].velocity()
 
 
 def _run_config(label: str, sets: Sequence[str], sessions: List[Tuple[str, str, str]],
-                overlay_dir: Optional[str], n_overlays: int, warmup: int) -> List[HE.Score]:
+                overlay_dir: Optional[str], n_overlays: int, warmup: int,
+                learned: Optional[Learned] = None) -> List[HE.Score]:
     import cv2
     from tmaze.vision import offline_tracker as OTR
 
@@ -297,7 +350,7 @@ def _run_config(label: str, sets: Sequence[str], sessions: List[Tuple[str, str, 
                 tracked = _track_to(cap, tracker, background, fidx, warmup, png)
                 if tracked is None:
                     continue
-                frame, result, prepared, tracked_heads = tracked
+                frame, result, prepared, tracked_heads, velocity = tracked
             else:
                 if png is None:
                     continue
@@ -306,7 +359,11 @@ def _run_config(label: str, sets: Sequence[str], sessions: List[Tuple[str, str, 
                 result = tracker.process(frame)
                 prepared = _spine_masks(result, frame, background, tracker)
                 tracked_heads = None
+                velocity = (0.0, 0.0)
             cands = _candidates(result, prepared, tracked_heads)
+            if learned is not None:
+                est = tracked_heads.get(LEARNED_KEY) if tracked_heads else None
+                cands.update(learned.candidates(prepared, est, velocity))
             parts = labels[img_name]
             for name, (pt, valid) in cands.items():
                 scores.append(HE.score_point(f"{label}:{name}", sid,
@@ -322,7 +379,8 @@ def _run_config(label: str, sets: Sequence[str], sessions: List[Tuple[str, str, 
 
 
 def _run_video(sid: str, pred_csv: str, bundle: str, out: str, min_likelihood: float,
-               max_frames: int, wanted: Sequence[str]) -> List[HE.VideoSummary]:
+               max_frames: int, wanted: Sequence[str],
+               learned: Optional[Learned] = None) -> List[HE.VideoSummary]:
     """Track one whole session video and score ``wanted`` candidates (plus the
     ``dlc`` predictions themselves) frame by frame."""
     import time
@@ -345,7 +403,7 @@ def _run_video(sid: str, pred_csv: str, bundle: str, out: str, min_likelihood: f
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     if max_frames > 0:
         total = min(total, max_frames)
-    names = ["dlc"] + list(wanted)
+    names = ["dlc"] + list(wanted) + (learned.names() if learned else [])
     scorers = {n: HE.VideoScorer(n, fps, jump_px=JUMP_PX) for n in names}
     head_trackers = _make_head_trackers()
     t0 = time.time()
@@ -359,7 +417,11 @@ def _run_video(sid: str, pred_csv: str, bundle: str, out: str, min_likelihood: f
                 break
             result = tracker.process(frame)
             prepared = _spine_masks(result, frame, background, tracker)
-            cands = _candidates(result, prepared, _update_head_trackers(head_trackers, prepared))
+            tracked_heads = _update_head_trackers(head_trackers, prepared)
+            cands = _candidates(result, prepared, tracked_heads)
+            if learned is not None:
+                cands.update(learned.candidates(prepared, tracked_heads[LEARNED_KEY],
+                                                head_trackers[LEARNED_KEY].velocity()))
             parts = preds.get(frame_i, {})
             dlc_head = HE.head_centre(parts)
             cands["dlc"] = (dlc_head, dlc_head is not None)
@@ -384,6 +446,7 @@ def _main_video(args) -> int:
     os.makedirs(out, exist_ok=True)
     wanted = [c for c in VIDEO_CANDIDATES
               if not args.only or c == "com" or any(o in c for o in args.only)]
+    learned = Learned(args.models) if args.models else None
     text: List[str] = []
     cm = None
     for pred_csv in sorted(glob.glob(os.path.join(args.predictions, "*.csv"))):
@@ -398,7 +461,7 @@ def _main_video(args) -> int:
         if args.sessions and sid not in args.sessions:
             continue
         summaries = _run_video(sid, pred_csv, bundle, out, args.min_likelihood,
-                               args.max_frames, wanted)
+                               args.max_frames, wanted, learned)
         cm = cm or _cm_per_px(bundle)
         text += [f"{sid}  (likelihood >= {args.min_likelihood}, jump > {JUMP_PX:.0f} px)",
                  HE.format_video_table(summaries, px_to_cm=cm), ""]
@@ -443,10 +506,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     os.makedirs(overlay_dir or out, exist_ok=True)
 
     configs = [("recorded", [])] + [(f"thresh{t}", [f"thresh={t}"]) for t in args.thresh]
+    learned = Learned(args.models) if args.models else None
     scores: List[HE.Score] = []
     for i, (label, sets) in enumerate(configs):
         scores += _run_config(label, sets, sessions, overlay_dir if i == 0 else None,
-                              args.overlays, args.warmup_frames)
+                              args.overlays, args.warmup_frames, learned)
 
     with open(os.path.join(out, "head_point_scores.csv"), "w", newline="",
               encoding="utf-8") as fh:

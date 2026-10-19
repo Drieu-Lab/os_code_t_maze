@@ -11,9 +11,10 @@ Method (a *medial axis* - the blob's centre line, with the radius of the largest
 circle that fits inside the blob at each point; see docs/glossary.md):
 
   1. Distance transform of the blob mask -> circle radius at every pixel.
-  2. Thin the largest connected piece of the blob to a 1-px skeleton and keep
-     only its LONGEST path (the "spine"), which drops the side branches legs,
-     ears and ragged edges create.
+  2. Thin the blob's largest connected piece (with nearby pieces bridged on -
+     the blob often splits across the rat's dark middle) to a 1-px skeleton and
+     keep only its LONGEST path (the "spine"), which drops the side branches
+     legs, ears and ragged edges create.
   3. Decide which spine end is the head with one of two rules:
        * ``half_mean`` - split the spine at the point nearest the CoM; the side
          with the larger average radius is the head side (the tail is thin).
@@ -427,6 +428,14 @@ class HeadTracker:
         self._against = 0.0
         self._prev_valid = False
 
+    def velocity(self) -> Tuple[float, float]:
+        """CoM velocity (px/frame) over the remembered frames; (0, 0) when unknown."""
+        if len(self._coms) < 2:
+            return (0.0, 0.0)
+        first, last = self._coms[0], self._coms[-1]
+        n = len(self._coms) - 1
+        return ((last[0] - first[0]) / n, (last[1] - first[1]) / n)
+
     def update(self, mask: "np.ndarray", com: Optional[Tuple[float, float]]) -> HeadEstimate:
         out = HeadEstimate(valid=False, rule=self.rule)
         if com is None:
@@ -446,9 +455,7 @@ class HeadTracker:
 
         s_motion = 0.0
         if len(self._coms) >= 2:
-            first, last = self._coms[0], self._coms[-1]
-            n = len(self._coms) - 1
-            vx, vy = (last[0] - first[0]) / n, (last[1] - first[1]) / n
+            vx, vy = self.velocity()
             speed = math.hypot(vx, vy)
             ax, ay = ends[1][0] - ends[0][0], ends[1][1] - ends[0][1]
             alen = math.hypot(ax, ay)
