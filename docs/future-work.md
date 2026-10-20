@@ -131,6 +131,7 @@ criteria).
 | [FW-0079](#fw-0079-snapshot-the-blocker-model-into-the-bundle) | Snapshot the active blocker model into the session's `config/` at Start, like the rat model | `ui/experiment_control.py` (`config_inputs`), `ui/tracker_view.py` | Proposed |
 | [FW-0080](#fw-0080-register-rat-should-forget-the-loaded-model-path) | Live Tracking tab: "Register rat" after "Load model" still reports the loaded file, so the session snapshot copies the old model | `ui/tracker_view.py` | Proposed |
 | [FW-0081](#fw-0081-head-points-in-the-offline-re-track) | Offline re-track writes the learned head-point columns too | `tools/offline_track`, `vision/offline_tracker.py` | Proposed |
+| [FW-0082](#fw-0082-run-phase-3-with-the-amplitude-modulated-noise-cue) | Run Phase 3 with the 2 Hz / 32 Hz amplitude-modulated noise cue (firmware side done in ADR-0221): stimulus setting, seed logging, format bump in both repos | `core/phase3/*`, `ui/phase3_controller.py`, `drieu_lab_analysis` | Proposed |
 
 ## Entries
 
@@ -3889,6 +3890,55 @@ track staleness, ADR-0040). A test on the golden or a synthetic video.
 its reader needs the same column list.
 
 **ADR needed?** Probably not (extends ADR-0220 to the offline file).
+
+### FW-0082: Run Phase 3 with the amplitude-modulated noise cue
+
+- **Status:** Proposed
+- **Date added:** 2026-10-19
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** `host/phase3.json` + `core/phase3/phase3_config.py` (a
+  cue stimulus setting), `core/phase3/trial_sequence.py` / `phase3_task.py` (the
+  CHOICE/RETURN cue "frequency" becomes a modulation rate), `ui/phase3_controller.py`
+  (send `CUE_ON,<kind>,<rate>,<gain>,AM`), `core/phase3/phase3_log.py` +
+  `bundle_format.py` (record the stimulus and the echoed seed;
+  `format_version` bump), `core/protocol.py` (expose `AM`/`<seed>` from the
+  `CUE,ON` echo), `core/cue_calibration.py` + `ui/cue_calibration_view.py`
+  (noise level); in `drieu_lab_analysis`: `phase3_format`, `cue_latency`, and the
+  MATLAB `animal_progress` copy
+- **Related ADRs:** [ADR-0221](decisions/0221-am-noise-cue-live-synthesis.md),
+  [ADR-0046](decisions/0046-host-owned-phase3.md),
+  [ADR-0125](decisions/0125-per-cue-volume-calibration.md),
+  [ADR-0186](decisions/0186-per-animal-cue-side-mapping.md)
+
+**Motivation / context.** ADR-0221 put the 2 Hz / 32 Hz SAM noise cue in the
+firmware (protocol v10) and on the Setup test bar only. Phase 3 still plays
+tones, so the stimulus can be heard but not trained on.
+
+**Sketch of approach.** A `cue.stimulus` setting in `phase3.json` (`tone`
+default, or `am_noise` with `high_rate_hz: 32`, `low_rate_hz: 2`), chosen per
+session (the lab wants tones to stay selectable). The cue->side mapping keeps
+its per-animal `high_tone_is_left` meaning, read as "the faster rate is LEFT".
+The controller sends the `AM` form; `Phase3Log` records the stimulus in the CSV
+header and the per-trial seed from the echo in a new trailing column, with a
+trial-CSV `PROTO_VERSION` and bundle `format_version` bump mirrored in the
+analysis repo. Noise level: a calibration entry measured with a sound-level
+meter (FW-0066), since tone gains don't apply.
+
+**Evaluation / acceptance.** A bench session in `am_noise` mode: the right
+rate plays per trial, echoes are stamped (`choice_cue_on_fw_ms`), seeds are
+logged, and a tone session is unchanged byte for byte. Golden fixture
+regenerated; analysis tests pass.
+
+**Effort / risk.** Medium; touches the bundle format across both repos. Main
+scientific risk: the 2 Hz cue starts silent and needs ~250 ms to reach its first
+peak, so `cue_latency` and the cue-zone dwell readout must not compare it
+directly with tone sessions.
+
+**Open questions.** Is the stimulus per session or per animal? Is the RETURN cue
+also SAM noise, or tone-only? Should cue-zone geometry change to give the rat
+more time to identify the 2 Hz cue?
+
+**ADR needed?** Yes - the format bump and the rate-to-side mapping.
 
 ## Completed
 

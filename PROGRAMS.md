@@ -208,6 +208,7 @@ not answer. The console lives on the Programming port (ADR-0065).
 |--------|-------------|
 | `firmware/cue-guided-task/cue-guided-task.ino` | Production behavioral task firmware (auditory-cue T-maze). Console on the Programming port (`DUE_USE_NATIVE_USB 0`; ADR-0065). |
 | `firmware/tests/tmaze_test/tmaze_test.ino` | Hardware bring-up / diagnostic sketch (raw sensor edges + manual solenoid control). |
+| `firmware/tests/sound_test/due_am_noise_test/due_am_noise_test.ino` | Cue-engine bench test: loops a 4 kHz tone, 2 Hz and 32 Hz amplitude-modulated noise through the real `sound.h` interrupt and prints its CPU load per cue on the Programming port at 115200 baud (ADR-0221). |
 
 ## Docs / tooling
 

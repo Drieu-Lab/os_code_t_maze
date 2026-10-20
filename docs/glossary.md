@@ -20,6 +20,14 @@ reward valve, sounding a tone, sending a firmware command. In this code the
 "actuation path" is the whole chain from *rat position/lick* → *decision* →
 *hardware command*, and shortening its delay (latency) is a recurring goal.
 
+### Amplitude modulation (SAM)
+Making a sound's loudness rise and fall over time. *Sinusoidal* amplitude
+modulation (SAM) does it smoothly, like a sine wave: SAM [white
+noise](#white-noise) at 2 Hz swells and fades twice a second, at 32 Hz 32 times a
+second. The *modulation rate* (2 or 32 Hz) is what tells the two noise cues
+apart, not their pitch. *Depth* is how far the loudness dips: 100 % means it
+falls all the way to silence. See ADR-0221.
+
 ### Behavioural mode (mode decomposition)
 A named *style* of behaving that an animal falls into for a stretch of trials —
 e.g. *disengaged*, *side-bias* (keeps picking one arm), *alternating* (keeps
@@ -410,6 +418,15 @@ The agreed format of the messages between firmware and host — the
 `<ms>,<TYPE>,<payload…>` serial lines and what each field means. Parsed in one
 place (`protocol.py`). See [`firmware/PROTOCOL.md`](../firmware/PROTOCOL.md).
 
+### Pseudo-random number generator (PRNG)
+A short formula that produces a long sequence of numbers that look random but
+are fully determined by a starting value, the *seed*: the same seed always gives
+the same sequence. That is what makes a "random" trial order, or a burst of
+[white noise](#white-noise), reproducible offline from one logged number. The
+firmware uses one PRNG for the trial sequence and RETURN cue, and a separate
+*xorshift32* generator (a few bit-shifts per number, cheap enough to run 80,000
+times a second) for the noise cue. See ADR-0221.
+
 ### Queue
 A first-in-first-out hand-off buffer between threads: one thread *puts* items in,
 another *takes* them out in order. It is the thread-safe meeting point that lets
@@ -653,3 +670,11 @@ default) and a perfect rat earns exactly all of it:
 An explicit `reward_ul` (70 µL for every rat today) overrides that derived
 volume so the reward is the same size across rats. Either way the pulse width is
 read backwards off the reward calibration curve. See ADR-0191.
+
+### White noise
+A hiss made of random values, with roughly equal energy at every frequency the
+speaker can play (so it has no pitch). The rig makes it on the fly, a new random
+value each [DAC](#dac) sample from a [PRNG](#pseudo-random-number-generator-prng),
+rather than playing a stored recording, so it never repeats. Shaped by
+[amplitude modulation](#amplitude-modulation-sam) it is the alternative to a pure
+tone as a cue. See ADR-0221.

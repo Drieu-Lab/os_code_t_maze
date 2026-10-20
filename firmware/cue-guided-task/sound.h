@@ -30,11 +30,25 @@ int16_t sineDev[SINE_TABLE_SIZE];
 // the ISR does (dev * gain) >> 8, so the multiply/shift is integer-only.
 static const uint16_t TONE_GAIN_UNITY = 256;   // 256/256 == 100%
 
-// Tone control. ISR reads phaseAcc/phaseInc/tonePlaying/toneGainQ8 only.
+// Sinusoidally amplitude-modulated (SAM) white noise, the alternative cue to a
+// pure tone (proto v10). The carrier is a fresh random sample every tick from an
+// integer xorshift32 generator; the envelope is a raised cosine (1 - cos)/2 read
+// from a table by the same phase accumulator a tone uses, stepped at the
+// modulation rate. Phase 0 is the envelope's silent trough, so every SAM cue
+// starts silent and 100% modulated. Generated live, not stored: one 2 Hz period
+// is 40,000 samples (~80 KB of the Due's 96 KB RAM), and a looped buffer would
+// make the "noise" repeat at the cue rate. see docs/decisions/0221
+uint16_t envQ8[SINE_TABLE_SIZE];              // 0..TONE_GAIN_UNITY
+
+enum StimMode : uint8_t { STIM_TONE = 0, STIM_AM_NOISE = 1 };
+
+// Tone control. ISR reads stimMode/phaseAcc/phaseInc/noiseState/tonePlaying/toneGainQ8 only.
 volatile bool     tonePlaying = false;
+volatile uint8_t  stimMode    = STIM_TONE;
 volatile uint32_t phaseAcc    = 0;   // 32-bit phase accumulator (wraps == one cycle)
 volatile uint32_t phaseInc    = 0;   // per-sample phase step (set when a tone starts)
-volatile float    toneFreq    = 0;   // current tone frequency (Hz), for reference/logging
+volatile uint32_t noiseState  = 1;   // xorshift32 state (never 0); SAM carrier only
+volatile float    toneFreq    = 0;   // current tone / modulation frequency (Hz), for reference/logging
 volatile uint16_t toneGainQ8  = TONE_GAIN_UNITY;  // per-tone volume (Q8; set when a tone starts)
 
 // --- Non-blocking TTL pulse structure ---
@@ -53,6 +67,7 @@ static void buildSineTable() {
   for (uint16_t i = 0; i < SINE_TABLE_SIZE; i++) {
     float theta = (2.0f * PI * i) / SINE_TABLE_SIZE;
     sineDev[i] = (int16_t)lroundf(DAC_AMPLITUDE * sinf(theta));  // signed, +/- DAC_AMPLITUDE
+    envQ8[i]   = (uint16_t)lroundf(TONE_GAIN_UNITY * 0.5f * (1.0f - cosf(theta)));  // 0 at i == 0
   }
 }
 
@@ -85,6 +100,7 @@ void setupSound() {
 void startToneAsync(float freq, uint16_t gainQ8 = TONE_GAIN_UNITY) {
   if (tonePlaying) return;
 
+  stimMode = STIM_TONE;
   toneFreq = freq;
   toneGainQ8 = (gainQ8 > TONE_GAIN_UNITY) ? TONE_GAIN_UNITY : gainQ8;  // never boost past full
   // inc = freq * 2^32 / fs : the accumulator spans one full table cycle per 2^32.
@@ -94,6 +110,28 @@ void startToneAsync(float freq, uint16_t gainQ8 = TONE_GAIN_UNITY) {
   // Start the timer only after the state above is set, so the first interrupt
   // never samples a half-written tone. Onset costs one sample period (~12.5 us),
   // far below audibility and negligible beside the TONE_ON TTL fired just below.
+  TC_Start(TC0, 0);
+
+  ttlToneOn.startTime = millis();
+  ttlToneOn.active = true;
+  digitalWrite(ttlToneOn.pin, HIGH);
+}
+
+// --- Start a SAM white-noise cue asynchronously (proto v10) ---
+// rateHz is the envelope (modulation) rate; seed starts the noise generator, so
+// the exact waveform can be rebuilt offline from the seed alone (it is echoed on
+// the CUE,ON line). Same onset, gain and TONE_ON TTL path as a tone; stop it
+// with stopToneAsync(). see docs/decisions/0221
+void startAmNoiseAsync(float rateHz, uint16_t gainQ8, uint32_t seed) {
+  if (tonePlaying) return;
+
+  stimMode = STIM_AM_NOISE;
+  toneFreq = rateHz;
+  toneGainQ8 = (gainQ8 > TONE_GAIN_UNITY) ? TONE_GAIN_UNITY : gainQ8;
+  phaseInc = (uint32_t)(((uint64_t)((double)rateHz * 4294967296.0)) / (uint32_t)SAMPLE_RATE);
+  phaseAcc = 0;                       // envelope trough: the cue starts silent
+  noiseState = seed ? seed : 1u;      // xorshift32 is stuck at 0 forever
+  tonePlaying = true;
   TC_Start(TC0, 0);
 
   ttlToneOn.startTime = millis();
@@ -120,10 +158,24 @@ void TC0_Handler() {
   TC_GetStatus(TC0, 0);            // clear interrupt flag
   if (!tonePlaying) return;
   phaseAcc += phaseInc;
+  int32_t dev;
+  if (stimMode == STIM_AM_NOISE) {
+    // xorshift32 (Marsaglia 2003): shifts + XORs only. Its top 12 bits are a
+    // uniform -2048..2047 sample, scaled to +/- DAC_AMPLITUDE, then shaped by the
+    // envelope. see docs/decisions/0221
+    uint32_t x = noiseState;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    noiseState = x;
+    int32_t noise = (((int32_t)(x >> 20) - 2048) * (int32_t)DAC_AMPLITUDE) >> 11;
+    dev = (noise * (int32_t)envQ8[phaseAcc >> 24]) >> 8;
+  } else {
+    dev = sineDev[phaseAcc >> 24];                // top 8 bits -> 0..255
+  }
   // Scale the signed sample by the Q8 gain (integer multiply + shift), then
   // re-center. gain <= unity so the result stays within 0..4095. see docs/decisions/0125
-  int32_t sample = DAC_CENTER +
-      (((int32_t)sineDev[phaseAcc >> 24] * (int32_t)toneGainQ8) >> 8);  // top 8 bits -> 0..255
+  int32_t sample = DAC_CENTER + ((dev * (int32_t)toneGainQ8) >> 8);
   dacc_write_conversion_data(DACC, (uint16_t)sample);
 }
 

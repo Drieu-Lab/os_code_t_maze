@@ -202,6 +202,14 @@
 #define CUE_GAIN_PCT_MIN     0
 #define CUE_GAIN_PCT_MAX     100
 #define CUE_GAIN_PCT_DEFAULT 100
+/* Clamp band for the MODULATION rate of a sinusoidally amplitude-modulated
+ * white-noise cue (CUE_ON,<kind>,<hz>,<gain>,AM, v10). The planned cues are
+ * 2 Hz and 32 Hz; the band leaves room around them while keeping a typo from
+ * becoming an audio-rate "modulation" (which would sound like a tone). The
+ * envelope is a 256-step table, so it stays smooth up to roughly 300 Hz.
+ * see docs/decisions/0221 */
+#define CUE_AM_HZ_MIN        1
+#define CUE_AM_HZ_MAX        128
 
 /* DAC / audio (Arduino Due). The tone ISR is wavetable-based (integer-only, see
  * sound.h), so this is cheap. 80 kHz gives a clean sine (>=10 samples/cycle at
@@ -209,7 +217,13 @@
 #define DAC_SAMPLE_RATE      80000.0f    /* Hz */
 
 /* ================================ Protocol ============================== */
-/* v9 (Reflash A) hardens the serial link and adds firmware-clock provenance,
+/* v10 adds a second cue stimulus, sinusoidally amplitude-modulated (SAM)
+ * white noise, append-only: CUE_ON,<kind>,<hz>,<gain>,AM plays noise whose
+ * loudness rises and falls at <hz> (clamped to [CUE_AM_HZ_MIN, CUE_AM_HZ_MAX])
+ * instead of a <hz> tone, starting from silence. The echo appends the stimulus
+ * and the noise seed: CUE,ON,<type>,<hz>,<gain>,AM,<seed>. Every tone command and
+ * tone echo is byte-identical to v9. see docs/decisions/0221
+ * v9 (Reflash A) hardens the serial link and adds firmware-clock provenance,
  * all append-only / behavioural (no existing field changes meaning):
  *  - Hot-path console writes are NON-BLOCKING: each log line is written only if
  *    it fits the UART TX ring right now, else it is dropped and counted, so a
@@ -258,7 +272,7 @@
  * logging (REWARD,<port>,MANUAL), and SESSION_SUMMARY (see docs/decisions/0009);
  * plus full manual solenoid control in cue-guided-task (R<port><sol>[,<ms>] ->
  * SOL ack) and auto well-clean SOL lines at trial start (docs/decisions/0010). */
-#define PROTO_VERSION        9
+#define PROTO_VERSION        10
 
 /* Firmware build identity, reported by the VERSION command (proto v9). The
  * Arduino GUI build can't inject a git SHA automatically, so PASTE the short

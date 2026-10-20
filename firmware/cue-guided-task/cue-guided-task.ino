@@ -8,7 +8,7 @@
  *
  * Pin map and tunables live in rig_config.h, a symlink to the canonical
  * ../common/rig_config.h (see docs/decisions/0006). Serial output follows
- * protocol v9: every line is "<ms>,<TYPE>,<payload...>". See ../PROTOCOL.md.
+ * protocol v10: every line is "<ms>,<TYPE>,<payload...>". See ../PROTOCOL.md.
  */
 
 #include "rig_config.h"
@@ -75,7 +75,8 @@ unsigned long lickLastChange[3];
 
 // Serial command accumulator. Sized to hold the longest command line; the
 // v6 host-owned cue command carries an explicit frequency, e.g.
-// "CUE_ON,RETURN,20000" (19 chars), so 16 bytes is no longer enough.
+// "CUE_ON,RETURN,20000" (19 chars), so 16 bytes is no longer enough. The
+// longest today is the v10 AM cue "CUE_ON,RETURN,20000,100,AM" (26 chars).
 // see docs/decisions/0046
 char    cmdBuf[32];
 uint8_t cmdLen = 0;
@@ -226,9 +227,29 @@ void handleManualSolenoid(const char* b) {
 // firmware trial FSM is off (Free Roam) so correctArm is unset. The <hz> is
 // clamped to [CUE_HZ_MIN, CUE_HZ_MAX] so a bad value can't drive the DAC out of
 // range. see docs/decisions/0046
+//
+// v10 adds an optional 4th field: "CUE_ON,<kind>,<hz>,<gain>,AM" plays
+// sinusoidally amplitude-modulated white noise instead of a tone, and <hz> is
+// then the MODULATION rate (clamped to [CUE_AM_HZ_MIN, CUE_AM_HZ_MAX]). An AM cue
+// needs an explicit <hz>: the firmware's own hi/lo identity is tone-only.
+// see docs/decisions/0221
+uint32_t amCueCount = 0;   // AM presentations since boot; mixed into each noise seed
+
+// splitmix32-style finalizer: turns (session PRNG, presentation count) into a
+// well-spread nonzero noise seed without advancing session.rng, so enabling the
+// AM cue never changes the RETURN cue's hi/lo draws.
+static uint32_t amNoiseSeed() {
+  uint32_t z = session.rng ^ (++amCueCount * 0x9E3779B9u);
+  z = (z ^ (z >> 16)) * 0x85EBCA6Bu;
+  z = (z ^ (z >> 13)) * 0xC2B2AE35u;
+  z ^= z >> 16;
+  return z ? z : 1u;
+}
+
 void handleCueOn(const char* arg) {
-  // Split "<kind>[,<hz>[,<gain>]]" into the kind token, an optional frequency,
-  // and an optional per-cue volume percent (v7). Fields are positional.
+  // Split "<kind>[,<hz>[,<gain>[,AM]]]" into the kind token, an optional
+  // frequency, an optional per-cue volume percent (v7) and an optional stimulus
+  // token (v10). Fields are positional.
   char kind[8] = {0};
   uint8_t k = 0;
   const char* p = arg;
@@ -236,14 +257,17 @@ void handleCueOn(const char* arg) {
   kind[k] = '\0';
   long hz = 0;
   long gainPct = CUE_GAIN_PCT_DEFAULT;
+  bool amNoise = false;
   if (*p == ',') {
     const char* q = p + 1;
     while (*q >= '0' && *q <= '9') { hz = hz * 10 + (*q - '0'); q++; }
     if (*q == ',') {                      // optional volume percent (v7)
       gainPct = 0;
       for (q = q + 1; *q >= '0' && *q <= '9'; q++) gainPct = gainPct * 10 + (*q - '0');
+      if (*q == ',' && !strcmp(q + 1, "AM")) amNoise = true;   // optional stimulus (v10)
     }
   }
+  if (amNoise && hz <= 0) return;         // AM needs a host-supplied modulation rate
 
   uint16_t freq;
   const char* type;
@@ -260,7 +284,11 @@ void handleCueOn(const char* arg) {
   }
   // Explicit host-supplied identity (v6) overrides the firmware default, clamped
   // to the configured tone band. see docs/decisions/0046
-  if (hz > 0) {
+  if (amNoise) {
+    if (hz < CUE_AM_HZ_MIN) hz = CUE_AM_HZ_MIN;
+    if (hz > CUE_AM_HZ_MAX) hz = CUE_AM_HZ_MAX;
+    freq = (uint16_t)hz;
+  } else if (hz > 0) {
     if (hz < CUE_HZ_MIN) hz = CUE_HZ_MIN;
     if (hz > CUE_HZ_MAX) hz = CUE_HZ_MAX;
     freq = (uint16_t)hz;
@@ -271,12 +299,17 @@ void handleCueOn(const char* arg) {
   if (gainPct > CUE_GAIN_PCT_MAX) gainPct = CUE_GAIN_PCT_MAX;
   uint16_t gainQ8 = (uint16_t)((gainPct * TONE_GAIN_UNITY + 50) / 100);
   if (tonePlaying) return;                           // already sounding: don't relog / retrigger
+  uint32_t seed = amNoise ? amNoiseSeed() : 0;      // computed before onset: keep the ISR start tight
   unsigned long raw = millis();
-  startToneAsync((float)freq, gainQ8);               // also raises the TONE_ON TTL
+  if (amNoise) startAmNoiseAsync((float)freq, gainQ8, seed);   // also raises the TONE_ON TTL
+  else         startToneAsync((float)freq, gainQ8);
   unsigned long t = raw - session.startMs;
-  char buf[40];
-  writeLineOrDrop(buf, sizeof(buf),
-                  snprintf(buf, sizeof(buf), "%lu,CUE,ON,%s,%d,%ld\n", t, type, (int)freq, (long)gainPct));
+  char buf[64];
+  int n = amNoise
+      ? snprintf(buf, sizeof(buf), "%lu,CUE,ON,%s,%d,%ld,AM,%lu\n",
+                 t, type, (int)freq, (long)gainPct, (unsigned long)seed)
+      : snprintf(buf, sizeof(buf), "%lu,CUE,ON,%s,%d,%ld\n", t, type, (int)freq, (long)gainPct);
+  writeLineOrDrop(buf, sizeof(buf), n);
   logTTL(t, "TONE_ON");                              // firmware-clock twin of the TONE_ON TTL
 }
 
@@ -316,7 +349,7 @@ Command drainSerial() {
         if (cmdBuf[0] == 'R' && cmdBuf[1] >= '0' && cmdBuf[1] <= '2') {
           handleManualSolenoid(cmdBuf);
         } else if (!strncmp(cmdBuf, "CUE_ON,", 7)) {
-          handleCueOn(cmdBuf + 7);                 // host-driven cue on (v5/v6: optional ,<hz>)
+          handleCueOn(cmdBuf + 7);                 // host-driven cue on (v5/v6: optional ,<hz>; v10: ,AM)
         } else if (!strcmp(cmdBuf, "CUE_OFF")) {
           handleCueOff();                          // host-driven cue off (v5)
         } else if (!strcmp(cmdBuf, "CUE,VISION")) {
