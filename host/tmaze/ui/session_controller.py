@@ -1818,13 +1818,24 @@ class SessionControlView:
                 runtime_params = inputs.get("params") or None
             except Exception:
                 pass
+        # The archived phase3.json carries the reward pulse the run actually uses
+        # (a per-animal reward overrides the tab's Pulse field; docs/decisions/0223).
+        json_overrides = None
+        if self._phase3 is not None and hasattr(self._phase3, "archived_config"):
+            try:
+                archived = self._phase3.archived_config()
+                if archived is not None:
+                    json_overrides = {"phase3.json": archived}
+            except Exception:
+                pass
         try:
             from tmaze.core.phase3 import bundle_format
             result = session_config.write_config_snapshot(
                 config_dir, session_id=self._session_id,
                 extra_sources=extra_sources, runtime_params=runtime_params,
                 format_manifest=bundle_format.format_manifest(
-                    firmware_proto=self._firmware_proto))
+                    firmware_proto=self._firmware_proto),
+                json_overrides=json_overrides)
         except Exception:
             return False
         self._format_path = result["format_path"]

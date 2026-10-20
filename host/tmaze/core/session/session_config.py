@@ -93,6 +93,7 @@ def write_config_snapshot(dest_dir: str, *, session_id: str = "",
                           extra_sources: Optional[Mapping[str, str]] = None,
                           runtime_params: Optional[Mapping[str, Any]] = None,
                           format_manifest: Optional[Mapping[str, Any]] = None,
+                          json_overrides: Optional[Mapping[str, Any]] = None,
                           host_dir: str = _HOST) -> Dict[str, Any]:
     """Copy every existing config source into ``dest_dir`` and write the index.
 
@@ -107,6 +108,10 @@ def write_config_snapshot(dest_dir: str, *, session_id: str = "",
     the dict it is handed; the caller assembles it from the live cores. Creates
     ``dest_dir``. Returns a summary dict (``config_dir``, ``snapshot_path``,
     ``runtime_params_path``, ``format_path``, ``present``, ``missing``).
+    ``json_overrides`` maps a filename to the JSON object to write INSTEAD of
+    copying its source (e.g. ``phase3.json`` carrying the reward pulse the
+    session actually used; docs/decisions/0223); its index entry keeps the
+    source path, hashes the written file, and is marked ``rewritten: true``.
     Best-effort per file: a missing/unreadable source is recorded ``present:
     false`` and never raises.
     """
@@ -125,10 +130,21 @@ def write_config_snapshot(dest_dir: str, *, session_id: str = "",
             "name": name, "source": src, "present": False,
             "filename": None, "sha256": None, "bytes": None,
         }
+        dest = os.path.join(dest_dir, name)
+        written = False
+        override = (json_overrides or {}).get(name)
+        if override is not None:
+            try:
+                _atomic_json(dest, override)
+                entry["rewritten"] = True
+                written = True
+            except (OSError, TypeError, ValueError):
+                pass                 # fall back to the verbatim copy below
         try:
-            if src and os.path.isfile(src):
-                dest = os.path.join(dest_dir, name)
+            if not written and src and os.path.isfile(src):
                 shutil.copy2(src, dest)
+                written = True
+            if written:
                 entry.update(present=True, filename=name,
                              sha256=sha256_file(dest),
                              bytes=os.path.getsize(dest))

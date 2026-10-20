@@ -238,6 +238,26 @@ def save_phase3_config(path: str, config: dict) -> None:
         f.write("\n")
 
 
+def with_reward_pulse_used(config: dict, pulse_ms: int, source: str) -> dict:
+    """A copy of ``config`` whose ``reward.pulse_ms`` is the pulse the session
+    actually armed with, for the bundle's ``config/phase3.json``.
+
+    A per-animal reward in animals.json (docs/decisions/0191) overrides the tab's
+    Pulse field, so the field value alone would contradict the trial-CSV header
+    and the manifest. The ignored field value is kept as ``pulse_ms_field`` and
+    the deciding rule as ``pulse_ms_source`` ("config" when the field was used).
+    The input is not modified. See docs/decisions/0223."""
+    out = json.loads(json.dumps(config))
+    reward = out.get("reward")
+    if not isinstance(reward, dict):
+        reward = {}
+        out["reward"] = reward
+    reward["pulse_ms_field"] = reward.get("pulse_ms")
+    reward["pulse_ms"] = int(pulse_ms)
+    reward["pulse_ms_source"] = str(source)
+    return out
+
+
 # ------------------------------------------------------------------ resolvers
 # Each builds a frozen dataclass (or scalar) from the config dict, coercing types
 # and range-checking. They raise ValueError/TypeError on malformed input so a

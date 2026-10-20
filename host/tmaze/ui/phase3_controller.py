@@ -51,6 +51,7 @@ the gate closes the tone is cut and firmware autonomy is restored.
 
 from __future__ import annotations
 
+import json
 import os
 import random
 import time
@@ -72,7 +73,7 @@ from tmaze.core.phase3.debias import DebiasBlockConfig
 from tmaze.core.phase3.phase3_config import (
     DEFAULT_MAX_TOPUPS, default_config, load_phase3_config, resolve_seed,
     save_phase3_config, to_cue_stimulus, to_session_cap_config, to_trial_config,
-    validate_phase3_config)
+    validate_phase3_config, with_reward_pulse_used)
 from tmaze.core.phase3 import session_cap
 from tmaze.core.phase3.session_cap import SessionCapConfig
 from tmaze.core.phase3.trial_sequence import (
@@ -2854,6 +2855,23 @@ class Phase3ControlView(VisionActuator):
         explicit = reg.reward_ul(self._current_animal()) if reg is not None else None
         return {"pulse_ms": int(pulse_ms), "source": source,
                 "daily_water_ml": daily, "reward_ul": explicit}
+
+    def archived_config(self) -> Optional[dict]:
+        """The phase3.json content for this session's ``config/`` copy: the file
+        save-on-arm just wrote (ADR-0167), with ``reward.pulse_ms`` replaced by the
+        pulse the run actually uses - the same value the manifest's
+        ``reward_policy`` records - so the bundle never contradicts itself
+        (docs/decisions/0223). None if the file can't be read; the snapshot then
+        copies it verbatim. Read on the Tk thread at Start."""
+        try:
+            with open(self._config_path, "r", encoding="utf-8") as fh:
+                raw = json.load(fh)
+        except (OSError, ValueError):
+            return None
+        if not isinstance(raw, dict):
+            return None
+        policy = self.resolved_reward_policy()
+        return with_reward_pulse_used(raw, policy["pulse_ms"], policy["source"])
 
     def water_target(self) -> Optional[dict]:
         """Earned task water (this run's prime + top-up pulses, since arm) vs the

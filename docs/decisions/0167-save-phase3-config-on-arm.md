@@ -9,7 +9,8 @@
   config snapshot), `host/tests/`.
 - **Refs:** review finding **P2** (provenance); builds on ADR-0070 (host-owned
   `phase3.json`), ADR-0072/0073 (per-session `config/` snapshot), ADR-0060 (arm
-  before Start).
+  before Start). Refined by ADR-0223 (the bundle's copy records the reward
+  pulse actually used, not the ignored Pulse field).
 
 ## Context
 

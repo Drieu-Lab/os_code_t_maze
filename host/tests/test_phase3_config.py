@@ -22,7 +22,7 @@ from tmaze.core.phase3.phase3_config import (
     DEFAULT_MAX_TOPUPS, default_config, load_phase3_config, resolve_seed,
     reward_max_topups, save_phase3_config, to_cue_params, to_cue_stimulus,
     to_phase3_config, to_session_cap_config, to_trial_config,
-    validate_phase3_config)
+    validate_phase3_config, with_reward_pulse_used)
 from tmaze.core.phase3.session_cap import SessionCapConfig
 from tmaze.core.phase3.phase3_task import Phase3Config
 from tmaze.core.phase3.trial_sequence import TrialConfig
@@ -114,6 +114,21 @@ class TestLoadMerge(unittest.TestCase):
         again = load_phase3_config(path)
         self.assertEqual(again["reward"]["pulse_ms"], 333)
         self.assertIn("_schema", again)          # doc block survived the write
+
+    def test_with_reward_pulse_used(self):
+        """docs/decisions/0223: the bundle copy records the pulse used, keeps the
+        ignored field value beside it, still validates, and leaves the input
+        alone."""
+        cfg = default_config()
+        cfg["reward"]["pulse_ms"] = 470
+        out = with_reward_pulse_used(cfg, 365, "animals.json:reward_ul")
+        self.assertEqual(out["reward"]["pulse_ms"], 365)
+        self.assertEqual(out["reward"]["pulse_ms_field"], 470)
+        self.assertEqual(out["reward"]["pulse_ms_source"], "animals.json:reward_ul")
+        self.assertEqual(cfg["reward"]["pulse_ms"], 470)
+        self.assertNotIn("pulse_ms_source", cfg["reward"])
+        validate_phase3_config(out)
+        self.assertEqual(to_phase3_config(out).reward_pulse_ms, 365)
 
 
 class TestSeedPolicy(unittest.TestCase):

@@ -67,6 +67,39 @@ class SnapshotTest(unittest.TestCase):
         self.assertFalse(by_name["landmarks.json"]["present"])
         self.assertIsNone(by_name["landmarks.json"]["sha256"])
 
+    def test_json_override_replaces_the_copy_and_is_indexed(self):
+        """docs/decisions/0223: an override is written instead of the source,
+        hashed as written, and flagged; the host file is left untouched."""
+        src = os.path.join(self.host, "phase3.json")
+        _write(src, '{"reward": {"pulse_ms": 470}}')
+        dest = os.path.join(self.root, "config")
+        override = {"reward": {"pulse_ms": 365, "pulse_ms_field": 470}}
+        out = session_config.write_config_snapshot(
+            dest, host_dir=self.host, json_overrides={"phase3.json": override})
+        self.assertIn("phase3.json", out["present"])
+        with open(os.path.join(dest, "phase3.json"), encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh), override)
+        with open(src, encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh)["reward"]["pulse_ms"], 470)
+        with open(os.path.join(dest, "config_snapshot.json"), encoding="utf-8") as fh:
+            entry = {e["name"]: e for e in json.load(fh)["files"]}["phase3.json"]
+        self.assertTrue(entry["rewritten"])
+        self.assertEqual(entry["source"], src)
+        self.assertEqual(entry["sha256"], session_config.sha256_file(
+            os.path.join(dest, "phase3.json")))
+
+    def test_unwritable_override_falls_back_to_the_verbatim_copy(self):
+        src = os.path.join(self.host, "phase3.json")
+        _write(src, '{"reward": {"pulse_ms": 470}}')
+        dest = os.path.join(self.root, "config")
+        session_config.write_config_snapshot(
+            dest, host_dir=self.host, json_overrides={"phase3.json": {"x": object()}})
+        with open(os.path.join(dest, "phase3.json"), encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh), {"reward": {"pulse_ms": 470}})
+        with open(os.path.join(dest, "config_snapshot.json"), encoding="utf-8") as fh:
+            entry = {e["name"]: e for e in json.load(fh)["files"]}["phase3.json"]
+        self.assertNotIn("rewritten", entry)
+
     def test_extra_sources_and_runtime_params(self):
         # An "extra" file living outside the host dir (e.g. lens calibration).
         cal = os.path.join(self.root, "camera_calibration.json")

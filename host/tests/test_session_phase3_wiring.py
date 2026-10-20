@@ -272,6 +272,32 @@ class SessionPhase3WiringTest(unittest.TestCase):
         self.assertIn("_schema", saved)
         self.assertIn("max_trials", saved["sequence"])
 
+    def test_bundle_config_records_the_reward_pulse_actually_used(self):
+        """docs/decisions/0223: with a per-animal reward the tab's Pulse field is
+        ignored, so the bundle's config/phase3.json (and the summary that reads
+        it) carry the pulse the run used - matching the trial-CSV header and the
+        manifest - while host/phase3.json keeps the field as the fallback."""
+        cfg_path = os.path.join(self.recordings, "phase3_live.json")
+        self.phase3._config_path = cfg_path
+        self.phase3._pulse_var.set("470")
+        self.phase3._animal_registry = AnimalRegistry(
+            [{"id": "600", "daily_water_ml": 8.0, "reward_ul": 70.0}])
+        self._arm()
+        session_dir = self._start_session()
+
+        with open(os.path.join(session_dir, "config", "phase3.json"),
+                  encoding="utf-8") as fh:
+            reward = json.load(fh)["reward"]
+        self.assertEqual(reward["pulse_ms"], 365)
+        self.assertEqual(reward["pulse_ms_source"], "animals.json:reward_ul")
+        self.assertEqual(reward["pulse_ms_field"], 470)
+        self.assertEqual(
+            self.session._manifest.provenance["reward_policy"]["pulse_ms"], 365)
+        self.assertIn("reward_pulse_ms=365", self.phase3._log.render_csv())
+        with open(cfg_path, encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh)["reward"]["pulse_ms"], 470)
+        self.assertEqual(self.session._task_params()["reward_pulse_ms"], 365)
+
     def test_persist_live_config_skips_write_on_invalid_edit(self):
         """Best-effort: an invalid live edit (min_errors > window) writes nothing
         and returns a note, so save-on-arm can never corrupt phase3.json or break
