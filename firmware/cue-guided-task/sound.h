@@ -118,17 +118,19 @@ void startToneAsync(float freq, uint16_t gainQ8 = TONE_GAIN_UNITY) {
 }
 
 // --- Start a SAM white-noise cue asynchronously (proto v10) ---
-// rateHz is the envelope (modulation) rate; seed starts the noise generator, so
-// the exact waveform can be rebuilt offline from the seed alone (it is echoed on
-// the CUE,ON line). Same onset, gain and TONE_ON TTL path as a tone; stop it
-// with stopToneAsync(). see docs/decisions/0221
-void startAmNoiseAsync(float rateHz, uint16_t gainQ8, uint32_t seed) {
+// rateMilliHz is the envelope (modulation) rate in thousandths of a Hz, so a
+// fractional rate like 2.5 Hz is exact (v11, docs/decisions/0222); seed starts
+// the noise generator, so the exact waveform can be rebuilt offline from the
+// seed alone (it is echoed on the CUE,ON line). Same onset, gain and TONE_ON TTL
+// path as a tone; stop it with stopToneAsync(). see docs/decisions/0221
+void startAmNoiseAsync(uint32_t rateMilliHz, uint16_t gainQ8, uint32_t seed) {
   if (tonePlaying) return;
 
   stimMode = STIM_AM_NOISE;
-  toneFreq = rateHz;
+  toneFreq = rateMilliHz / 1000.0f;
   toneGainQ8 = (gainQ8 > TONE_GAIN_UNITY) ? TONE_GAIN_UNITY : gainQ8;
-  phaseInc = (uint32_t)(((uint64_t)((double)rateHz * 4294967296.0)) / (uint32_t)SAMPLE_RATE);
+  // inc = rate * 2^32 / fs, with rate in milli-Hz; 64-bit integer math, once per cue.
+  phaseInc = (uint32_t)(((uint64_t)rateMilliHz << 32) / (1000ull * (uint32_t)SAMPLE_RATE));
   phaseAcc = 0;                       // envelope trough: the cue starts silent
   noiseState = seed ? seed : 1u;      // xorshift32 is stuck at 0 forever
   tonePlaying = true;

@@ -217,7 +217,11 @@
 #define DAC_SAMPLE_RATE      80000.0f    /* Hz */
 
 /* ================================ Protocol ============================== */
-/* v10 adds a second cue stimulus, sinusoidally amplitude-modulated (SAM)
+/* v11 lets the AM cue's modulation rate carry up to 3 decimals
+ * (CUE_ON,<kind>,2.5,<gain>,AM), so Phase 3 can use fractional rates from
+ * phase3.json. The echo prints the rate trimmed ("32", "2.5"), so whole-Hz echoes
+ * are identical to v10; tones are unchanged. see docs/decisions/0222
+ * v10 adds a second cue stimulus, sinusoidally amplitude-modulated (SAM)
  * white noise, append-only: CUE_ON,<kind>,<hz>,<gain>,AM plays noise whose
  * loudness rises and falls at <hz> (clamped to [CUE_AM_HZ_MIN, CUE_AM_HZ_MAX])
  * instead of a <hz> tone, starting from silence. The echo appends the stimulus
@@ -272,7 +276,7 @@
  * logging (REWARD,<port>,MANUAL), and SESSION_SUMMARY (see docs/decisions/0009);
  * plus full manual solenoid control in cue-guided-task (R<port><sol>[,<ms>] ->
  * SOL ack) and auto well-clean SOL lines at trial start (docs/decisions/0010). */
-#define PROTO_VERSION        10
+#define PROTO_VERSION        11
 
 /* Firmware build identity, reported by the VERSION command (proto v9). The
  * Arduino GUI build can't inject a git SHA automatically, so PASTE the short

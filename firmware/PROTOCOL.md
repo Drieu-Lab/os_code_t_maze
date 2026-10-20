@@ -1,7 +1,13 @@
-# Rig serial protocol v10
+# Rig serial protocol v11
 
 Both firmware sketches (`cue-guided-task`, `tmaze_test`) and the host tools
 (`maze_gui.py`, `lick_tuner.py`, `rig_logger.py`) speak this protocol.
+
+v11 lets the amplitude-modulated noise cue's modulation rate carry up to three
+decimals, `CUE_ON,<kind>,2.5,<gain>,AM`, so Phase 3 can use fractional rates from
+`phase3.json`. The rate is held in milli-Hz and the echo prints it with trailing
+zeros trimmed (`32`, `2.5`, `2.125`), so a whole-Hz echo is identical to v10.
+Tones still take whole Hz and are unchanged. see docs/decisions/0222
 
 v10 adds a second cue **stimulus**: white noise whose loudness rises and falls
 sinusoidally (sinusoidal amplitude modulation, SAM), as an alternative to a pure
@@ -122,7 +128,7 @@ Emitted at boot, in order, before the session begins:
 
 | Line | Meaning |
 |------|---------|
-| `0,PROTO,10` | protocol version (assert this on the client) |
+| `0,PROTO,11` | protocol version (assert this on the client) |
 | `0,ANIMAL,<id>` | configured animal id |
 
 The firmware then starts in its default **training mode** (Free Roam unless
@@ -168,7 +174,7 @@ marker.
 | `SOL` | `<port>,<sol>,<dur_ms>` | a solenoid was pulsed for `<dur_ms>` ms: a manual `R<port><sol>` fire, or the automatic well-clean (`SOL,2,4,<rinse_ms>` rinse then `SOL,2,3,<drain_ms>` drain) at trial start. Drives the Rig-view marker flash. |
 | `RETURN_ARM` | `ENTRY` | return-arm beam entered; trial advances |
 | `CUE` | `ON,<CHOICE\|RETURN>,<freq_hz>[,<gain_pct>]` | a host-driven cue tone started (v5): `<type>` is the cue, `<freq_hz>` the tone actually played (CHOICE = the trial's `correctArm` mapping; RETURN = a random hi/lo). v7 appends `<gain_pct>`, the volume applied (0-100 % of full amplitude; 100 when none was sent). Emitted only on a real onset, not a no-op. The `TONE_ON` TTL marks the acoustic onset. A parser that only reads the first three fields is unaffected by the appended gain. see docs/decisions/0044, docs/decisions/0125 |
-| `CUE` | `ON,<CHOICE\|RETURN>,<rate_hz>,<gain_pct>,AM,<seed>` | (v10) a host-driven amplitude-modulated white-noise cue started: `<rate_hz>` is the modulation rate actually played (after clamping), `<gain_pct>` the volume, `<seed>` the unsigned 32-bit noise-generator seed for this presentation (fresh each time). The first three fields read as for a tone. see docs/decisions/0221 |
+| `CUE` | `ON,<CHOICE\|RETURN>,<rate_hz>,<gain_pct>,AM,<seed>` | (v10) a host-driven amplitude-modulated white-noise cue started: `<rate_hz>` is the modulation rate actually played (after clamping; from v11 it may carry up to 3 decimals, trailing zeros trimmed, e.g. `2.5`), `<gain_pct>` the volume, `<seed>` the unsigned 32-bit noise-generator seed for this presentation (fresh each time). The first three fields read as for a tone. see docs/decisions/0221 |
 | `CUE` | `OFF` | a host-driven cue tone stopped (v5). Emitted only when a tone was actually playing. The `TONE_OFF` TTL marks the acoustic offset. |
 | `SESSION_SUMMARY` | `<trials>,<correct>,<incorrect>` | emitted before `SESSION_COMPLETE` for a Full task session |
 | `STATUS` | `<count>,<index>,<active>` | reply to `STATUS` command |
@@ -224,7 +230,7 @@ Commands are newline-terminated and are NOT part of the `ms,TYPE` line schema.
 | `STATUS` | cue-guided-task | -> `STATUS,<count>,<index>,<active>` followed by `<ms>,TXDROP,<n>` (v9, the dropped-line count). Answered in any session state; after completion `<active>` reports `0` (see docs/decisions/0123). |
 | `VERSION` | cue-guided-task | (v9) -> `<ms>,VERSION,<proto>,<fw_git_sha>,<build>`. Firmware build identity for the bundle provenance; answered in any session state. The host sends it at session start (right after `PING`). see docs/decisions/0193 |
 | `CUE_ON,CHOICE[,<hz>[,<gain>]]` / `CUE_ON,RETURN[,<hz>[,<gain>]]` | cue-guided-task | start the host-driven cue tone. Without `<hz>` (v5) the frequency is chosen in firmware: `CHOICE` from the current trial's `correctArm` (`cueFor`), `RETURN` a random hi/lo from the session PRNG. With an explicit `<hz>` (v6) the host supplies identity directly, clamped to `[CUE_HZ_MIN, CUE_HZ_MAX]` - used by the host-owned Phase 3 (Free Roam, no firmware trial), see docs/decisions/0046. A trailing `<gain>` (v7) sets the playback volume as a percent 0-100 of full amplitude (clamped to `[CUE_GAIN_PCT_MIN, CUE_GAIN_PCT_MAX]`; absent == 100), applied by scaling the wavetable in the ISR - used to equalize HIGH/LOW on a non-flat speaker, see docs/decisions/0125. Session-independent (works in any mode; in Free Roam `CHOICE` without `<hz>` falls back to the low tone). Fires the `TONE_ON` TTL and emits `CUE,ON,<type>,<freq>,<gain>` (the tone actually played). No-op if a tone is already playing. see docs/decisions/0044 |
-| `CUE_ON,CHOICE,<hz>,<gain>,AM` / `CUE_ON,RETURN,<hz>,<gain>,AM` | cue-guided-task | (v10) start an amplitude-modulated white-noise cue instead of a tone. `<hz>` is the modulation rate, clamped to `[CUE_AM_HZ_MIN, CUE_AM_HZ_MAX]` (1-128); `<hz>` and `<gain>` are both required (a bare `CUE_ON,<kind>,,,AM` is ignored). Starts silent, 100 % modulated, fresh noise each time. Fires the `TONE_ON` TTL and emits `CUE,ON,<type>,<hz>,<gain>,AM,<seed>`; stop it with `CUE_OFF`. No-op if a cue is already playing. see docs/decisions/0221 |
+| `CUE_ON,CHOICE,<hz>,<gain>,AM` / `CUE_ON,RETURN,<hz>,<gain>,AM` | cue-guided-task | (v10) start an amplitude-modulated white-noise cue instead of a tone. `<hz>` is the modulation rate, clamped to `[CUE_AM_HZ_MIN, CUE_AM_HZ_MAX]` (1-128), whole Hz or (v11) up to 3 decimals such as `2.5`; `<hz>` and `<gain>` are both required (a bare `CUE_ON,<kind>,,,AM` is ignored). Starts silent, 100 % modulated, fresh noise each time. Fires the `TONE_ON` TTL and emits `CUE,ON,<type>,<hz>,<gain>,AM,<seed>`; stop it with `CUE_OFF`. No-op if a cue is already playing. see docs/decisions/0221 |
 | `CUE_OFF` | cue-guided-task | stop the host-driven cue tone (v5). Fires the `TONE_OFF` TTL and emits `CUE,OFF`. No-op if no tone is playing. |
 | `CUE,VISION` / `CUE,BEAM` | cue-guided-task | select the cue source (v5). `VISION`: the host drives the tone via `CUE_ON`/`CUE_OFF` and the firmware suppresses its `CueRunning` beam auto-tone (single DAC authority). `BEAM` (default): the v4 beam-driven auto-tone. All other trial FSM / scoring / reward / TTL behavior is unchanged. |
 
@@ -240,7 +246,8 @@ Commands are newline-terminated and are NOT part of the `ms,TYPE` line schema.
 - An amplitude-modulated noise cue (v10) is rebuilt sample by sample from its
   `CUE,ON,...,AM,<seed>` echo, at `DAC_SAMPLE_RATE` (80 kHz) from the `TONE_ON`
   onset, all arithmetic 32-bit with arithmetic right shifts:
-  `inc = floor(rate * 2^32 / 80000)`, `acc = 0`, `x = seed`; then per sample
+  `inc = floor(rate_mHz * 2^32 / (1000 * 80000))` (`rate_mHz` = the echoed rate
+  x 1000), `acc = 0`, `x = seed`; then per sample
   `acc += inc`; `x ^= x << 13; x ^= x >> 17; x ^= x << 5` (xorshift32);
   `noise = ((x >> 20) - 2048) * 2000 >> 11`;
   `env = round(256 * (1 - cos(2*pi*(acc >> 24) / 256)) / 2)`;

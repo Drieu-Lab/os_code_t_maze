@@ -3,11 +3,11 @@
  * here, with rig_config.h, the same way the task sketch shares its config; see
  * docs/decisions/0006). Plays the REAL interrupt-driven cues on DAC0 in a loop:
  *
- *   4 kHz tone (reference) -> 2 Hz SAM noise -> 32 Hz SAM noise, 3 s each,
+ *   4 kHz tone (reference) -> 2 Hz -> 2.5 Hz -> 32 Hz SAM noise, 3 s each,
  *   with 1 s of silence between them.
  *
- * Listen (or scope DAC0): each noise cue should start silent and swell, at 2 or
- * 32 loudness peaks per second. The TONE_ON / TONE_OFF TTL pins pulse at each
+ * Listen (or scope DAC0): each noise cue should start silent and swell, at 2,
+ * 2.5 or 32 loudness peaks per second (2.5 Hz checks the fractional rate, v11). The TONE_ON / TONE_OFF TTL pins pulse at each
  * onset / offset as in the task.
  *
  * CPU cost of the interrupt, measured without touching it: loop() spins a
@@ -50,9 +50,9 @@ void report(const char* label, uint32_t count) {
   Serial.println(" us per sample");
 }
 
-void playAm(const char* label, float rateHz) {
+void playAm(const char* label, uint32_t rateMilliHz) {
   uint32_t seed = 0x9E3779B9u * ++seedCounter;
-  startAmNoiseAsync(rateHz, TONE_GAIN_UNITY, seed);
+  startAmNoiseAsync(rateMilliHz, TONE_GAIN_UNITY, seed);
   uint32_t n = spinCount(CUE_MS);
   stopToneAsync();
   Serial.print(label);
@@ -79,9 +79,12 @@ void loop() {
   report("tone 4 kHz", n);
   spinCount(SILENCE_MS);
 
-  playAm("AM noise 2 Hz", 2.0f);
+  playAm("AM noise 2 Hz", 2000);
   spinCount(SILENCE_MS);
 
-  playAm("AM noise 32 Hz", 32.0f);
+  playAm("AM noise 2.5 Hz", 2500);
+  spinCount(SILENCE_MS);
+
+  playAm("AM noise 32 Hz", 32000);
   spinCount(SILENCE_MS);
 }

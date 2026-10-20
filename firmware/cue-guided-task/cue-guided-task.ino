@@ -8,7 +8,7 @@
  *
  * Pin map and tunables live in rig_config.h, a symlink to the canonical
  * ../common/rig_config.h (see docs/decisions/0006). Serial output follows
- * protocol v10: every line is "<ms>,<TYPE>,<payload...>". See ../PROTOCOL.md.
+ * protocol v11: every line is "<ms>,<TYPE>,<payload...>". See ../PROTOCOL.md.
  */
 
 #include "rig_config.h"
@@ -233,6 +233,9 @@ void handleManualSolenoid(const char* b) {
 // then the MODULATION rate (clamped to [CUE_AM_HZ_MIN, CUE_AM_HZ_MAX]). An AM cue
 // needs an explicit <hz>: the firmware's own hi/lo identity is tone-only.
 // see docs/decisions/0221
+// v11 lets that modulation rate carry up to 3 decimals ("2.5"), parsed into
+// milli-Hz; tones still use whole Hz. see docs/decisions/0222
+static const uint32_t MHZ_PER_HZ = 1000;
 uint32_t amCueCount = 0;   // AM presentations since boot; mixed into each noise seed
 
 // splitmix32-style finalizer: turns (session PRNG, presentation count) into a
@@ -256,18 +259,27 @@ void handleCueOn(const char* arg) {
   while (*p && *p != ',' && k < sizeof(kind) - 1) kind[k++] = *p++;
   kind[k] = '\0';
   long hz = 0;
+  long fracMilli = 0;                     // decimals of <hz> in milli units (v11, AM only)
   long gainPct = CUE_GAIN_PCT_DEFAULT;
   bool amNoise = false;
   if (*p == ',') {
     const char* q = p + 1;
     while (*q >= '0' && *q <= '9') { hz = hz * 10 + (*q - '0'); q++; }
+    if (*q == '.') {                      // up to 3 decimals; further digits are ignored
+      long scale = 100;
+      for (q = q + 1; *q >= '0' && *q <= '9'; q++) {
+        fracMilli += (*q - '0') * scale;
+        scale /= 10;
+      }
+    }
     if (*q == ',') {                      // optional volume percent (v7)
       gainPct = 0;
       for (q = q + 1; *q >= '0' && *q <= '9'; q++) gainPct = gainPct * 10 + (*q - '0');
       if (*q == ',' && !strcmp(q + 1, "AM")) amNoise = true;   // optional stimulus (v10)
     }
   }
-  if (amNoise && hz <= 0) return;         // AM needs a host-supplied modulation rate
+  uint32_t rateMilliHz = (uint32_t)hz * MHZ_PER_HZ + (uint32_t)fracMilli;
+  if (amNoise && rateMilliHz == 0) return;   // AM needs a host-supplied modulation rate
 
   uint16_t freq;
   const char* type;
@@ -285,9 +297,8 @@ void handleCueOn(const char* arg) {
   // Explicit host-supplied identity (v6) overrides the firmware default, clamped
   // to the configured tone band. see docs/decisions/0046
   if (amNoise) {
-    if (hz < CUE_AM_HZ_MIN) hz = CUE_AM_HZ_MIN;
-    if (hz > CUE_AM_HZ_MAX) hz = CUE_AM_HZ_MAX;
-    freq = (uint16_t)hz;
+    if (rateMilliHz < CUE_AM_HZ_MIN * MHZ_PER_HZ) rateMilliHz = CUE_AM_HZ_MIN * MHZ_PER_HZ;
+    if (rateMilliHz > CUE_AM_HZ_MAX * MHZ_PER_HZ) rateMilliHz = CUE_AM_HZ_MAX * MHZ_PER_HZ;
   } else if (hz > 0) {
     if (hz < CUE_HZ_MIN) hz = CUE_HZ_MIN;
     if (hz > CUE_HZ_MAX) hz = CUE_HZ_MAX;
@@ -301,14 +312,24 @@ void handleCueOn(const char* arg) {
   if (tonePlaying) return;                           // already sounding: don't relog / retrigger
   uint32_t seed = amNoise ? amNoiseSeed() : 0;      // computed before onset: keep the ISR start tight
   unsigned long raw = millis();
-  if (amNoise) startAmNoiseAsync((float)freq, gainQ8, seed);   // also raises the TONE_ON TTL
+  if (amNoise) startAmNoiseAsync(rateMilliHz, gainQ8, seed);   // also raises the TONE_ON TTL
   else         startToneAsync((float)freq, gainQ8);
   unsigned long t = raw - session.startMs;
-  char buf[64];
-  int n = amNoise
-      ? snprintf(buf, sizeof(buf), "%lu,CUE,ON,%s,%d,%ld,AM,%lu\n",
-                 t, type, (int)freq, (long)gainPct, (unsigned long)seed)
-      : snprintf(buf, sizeof(buf), "%lu,CUE,ON,%s,%d,%ld\n", t, type, (int)freq, (long)gainPct);
+  char buf[72];
+  int n;
+  if (amNoise) {
+    // Echo the rate as played, with trailing zeros trimmed: "32", "2.5", "2.125".
+    char rate[16];
+    unsigned long whole = rateMilliHz / MHZ_PER_HZ, milli = rateMilliHz % MHZ_PER_HZ;
+    if (milli == 0)           snprintf(rate, sizeof(rate), "%lu", whole);
+    else if (milli % 100 == 0) snprintf(rate, sizeof(rate), "%lu.%lu", whole, milli / 100);
+    else if (milli % 10 == 0)  snprintf(rate, sizeof(rate), "%lu.%02lu", whole, milli / 10);
+    else                       snprintf(rate, sizeof(rate), "%lu.%03lu", whole, milli);
+    n = snprintf(buf, sizeof(buf), "%lu,CUE,ON,%s,%s,%ld,AM,%lu\n",
+                 t, type, rate, (long)gainPct, (unsigned long)seed);
+  } else {
+    n = snprintf(buf, sizeof(buf), "%lu,CUE,ON,%s,%d,%ld\n", t, type, (int)freq, (long)gainPct);
+  }
   writeLineOrDrop(buf, sizeof(buf), n);
   logTTL(t, "TONE_ON");                              // firmware-clock twin of the TONE_ON TTL
 }
