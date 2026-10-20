@@ -174,6 +174,14 @@ class TestCue(unittest.TestCase):
     def test_on_tolerates_whitespace_and_case(self):
         self.assertEqual(cue_info("1,CUE, on , choice , 8000 "), ("ON", "CHOICE", 8000))
 
+    def test_on_ignores_appended_fields(self):
+        # v7 appends <gain>; v10 appends AM,<seed> for the modulated-noise cue,
+        # whose <hz> is the modulation rate (docs/decisions/0221).
+        self.assertEqual(cue_info("120,CUE,ON,CHOICE,8000,85"), ("ON", "CHOICE", 8000))
+        self.assertEqual(cue_info("120,CUE,ON,CHOICE,32,100,AM,2654435769"),
+                         ("ON", "CHOICE", 32))
+        self.assertEqual(cue_info("120,CUE,ON,RETURN,2,100,AM,1"), ("ON", "RETURN", 2))
+
     def test_off(self):
         self.assertEqual(cue_info("999,CUE,OFF"), ("OFF", None, None))
 

@@ -78,6 +78,10 @@ TIPS: Dict[str, Entry] = {
     "cue.custom": "Frequency (Hz) for the Play button (500-20000).",
     "cue.play": "Play the custom-frequency tone (auto-stops after the burst).",
     "cue.stop": "Stop any playing test tone now (sends CUE_OFF).",
+    "cue.am": "Play white noise whose loudness rises and falls at this rate "
+              "(sends CUE_ON,...,AM; needs firmware protocol v10). It starts "
+              "silent, so a 2 Hz cue needs a burst of at least 500 ms to be "
+              "heard through one full swell.",
     "cue.kind": "Which cue this test tone counts as - fires the matching Open "
                 "Ephys tone TTL. The audible tone is set by the frequency, not "
                 "the kind.",

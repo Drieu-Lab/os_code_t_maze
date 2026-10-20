@@ -197,6 +197,11 @@ CUE_TEST_HIGH_HZ = 8000   # TONE_HIGH_HZ
 CUE_TEST_LOW_HZ = 4000    # TONE_LOW_HZ
 CUE_HZ_MIN, CUE_HZ_MAX = 500, 20000
 DEFAULT_CUE_BURST_MS = 500
+# Modulation rates of the two planned amplitude-modulated noise cues (protocol
+# v10, CUE_ON,<kind>,<hz>,<gain>,AM). Played at full level: the per-tone volume
+# and frequency calibration are keyed by tone frequency and don't apply.
+# see docs/decisions/0221
+CUE_TEST_AM_RATES_HZ = (2, 32)
 
 # Firmware pin map (single source of truth) - used to label the lick counters by
 # port role. Degrades gracefully if the header can't be parsed. NOTE: trusts
@@ -373,6 +378,8 @@ def build_cue_panel(parent: tk.Misc, client: RigClient) -> None:
     tone through the rig speakers so the speakers (and the matching Open Ephys
     tone TTL) can be checked without running a trial. Uses PROTOCOL v6's
     host-supplied tone identity (CUE_ON,<kind>,<hz>), which works in any mode.
+    The "AM noise" buttons play the v10 amplitude-modulated noise cue instead
+    (ADR-0221).
     """
     cue_frame = ttk.LabelFrame(
         parent,
@@ -402,6 +409,14 @@ def build_cue_panel(parent: tk.Misc, client: RigClient) -> None:
         stop()
         cf = cue_calibration.commanded_hz_for(hz) or hz
         client.send(f"CUE_ON,{kind_var.get()},{cf},{cue_calibration.gain_pct_for(hz)}")
+        schedule_stop()
+
+    def play_am(rate_hz: int) -> None:
+        stop()
+        client.send(f"CUE_ON,{kind_var.get()},{rate_hz},100,AM")
+        schedule_stop()
+
+    def schedule_stop() -> None:
         raw = burst_var.get().strip()
         try:
             ms = int(raw)
@@ -433,6 +448,11 @@ def build_cue_panel(parent: tk.Misc, client: RigClient) -> None:
     stop_btn = ttk.Button(cue_frame, text="Stop", command=stop)
     stop_btn.grid(row=0, column=2, padx=4, pady=(4, 2))
     tip(stop_btn, "cue.stop")
+    for col, rate in enumerate(CUE_TEST_AM_RATES_HZ, start=3):
+        am_btn = ttk.Button(cue_frame, text=f"AM noise {rate} Hz",
+                            command=lambda r=rate: play_am(r))
+        am_btn.grid(row=0, column=col, padx=4, pady=(4, 2))
+        tip(am_btn, "cue.am")
 
     # Row 1: custom frequency.
     ttk.Label(cue_frame, text="Custom (Hz):").grid(
