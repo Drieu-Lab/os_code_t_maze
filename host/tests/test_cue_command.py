@@ -10,8 +10,9 @@ from __future__ import annotations
 import unittest
 
 from tmaze.core.cue_command import (
-    STIM_AM_NOISE, STIM_TONE, CueStimulus, arm_block_reason, cue_label,
-    cue_on_command, describe, format_rate, make_stimulus, short_cue_label)
+    STIM_AM_NOISE, STIM_TONE, CueStimulus, am_cue_on, arm_block_reason,
+    cue_label, cue_on_command, describe, format_rate, make_stimulus,
+    parse_am_rate, short_cue_label)
 from tmaze.core.phase3.trial_sequence import HIGH, LOW
 
 AM = CueStimulus(kind=STIM_AM_NOISE, am_fast_hz=32.0, am_slow_hz=2.0)
@@ -31,6 +32,25 @@ class TestMakeStimulus(unittest.TestCase):
 
     def test_edges_allowed(self):
         make_stimulus(STIM_AM_NOISE, 128, 1)
+
+
+class TestTypedRate(unittest.TestCase):
+    """The Rig View "Custom AM" box: typed text -> a rate the firmware takes."""
+
+    def test_parse_clamps_and_rounds(self):
+        self.assertEqual(parse_am_rate("2.5", 2), 2.5)
+        self.assertEqual(parse_am_rate(" 2.12549 ", 2), 2.125)
+        self.assertEqual(parse_am_rate("0.2", 2), 1.0)
+        self.assertEqual(parse_am_rate("500", 2), 128.0)
+
+    def test_parse_falls_back_on_garbage(self):
+        for text in ("", "abc", "nan"):
+            with self.subTest(text=text):
+                self.assertEqual(parse_am_rate(text, 2), 2.0)
+
+    def test_am_cue_on(self):
+        self.assertEqual(am_cue_on("CHOICE", 2.5, 40), "CUE_ON,CHOICE,2.5,40,AM")
+        self.assertEqual(am_cue_on("RETURN", 32.0, 100), "CUE_ON,RETURN,32,100,AM")
 
 
 class TestFormatRate(unittest.TestCase):

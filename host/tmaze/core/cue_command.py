@@ -90,6 +90,25 @@ def format_rate(hz: float) -> str:
     return text or "0"
 
 
+def parse_am_rate(text: str, default: float) -> float:
+    """A typed modulation rate, clamped to [AM_HZ_MIN, AM_HZ_MAX] and rounded
+    to AM_RATE_DECIMALS (``default`` when it isn't a number). For test entry
+    boxes, which correct a value rather than refuse it."""
+    try:
+        hz = float(str(text).strip())
+    except ValueError:
+        hz = default
+    if hz != hz:  # NaN
+        hz = default
+    return round(max(AM_HZ_MIN, min(AM_HZ_MAX, hz)), AM_RATE_DECIMALS)
+
+
+def am_cue_on(kind: str, rate_hz: float, noise_gain_pct: int) -> str:
+    """The ``CUE_ON`` line that plays AM noise at ``rate_hz`` (any rate, e.g.
+    from a test box; a trial's rate comes from `cue_on_command`)."""
+    return f"CUE_ON,{kind},{format_rate(rate_hz)},{int(noise_gain_pct)},AM"
+
+
 def cue_on_command(kind: str, label: str, stimulus: CueStimulus, *,
                    tone_commanded_hz: Optional[int], tone_gain_pct: int,
                    noise_gain_pct: int) -> Optional[str]:
@@ -103,8 +122,7 @@ def cue_on_command(kind: str, label: str, stimulus: CueStimulus, *,
     if label not in (HIGH, LOW):
         return None
     if stimulus.is_am:
-        return (f"CUE_ON,{kind},{format_rate(stimulus.rate_for(label))},"
-                f"{int(noise_gain_pct)},AM")
+        return am_cue_on(kind, stimulus.rate_for(label), noise_gain_pct)
     if tone_commanded_hz is None:
         return None
     return f"CUE_ON,{kind},{int(tone_commanded_hz)},{int(tone_gain_pct)}"

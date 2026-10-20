@@ -38,7 +38,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 from tmaze.core import cue_calibration
 from tmaze.core.cue_command import (
-    FAST_LABEL, SLOW_LABEL, CueStimulus, format_rate)
+    FAST_LABEL, SLOW_LABEL, CueStimulus, am_cue_on, format_rate)
 from tmaze.core.phase3.phase3_config import load_phase3_config, to_cue_stimulus
 from tmaze.paths import host_dir
 
@@ -78,7 +78,7 @@ def _phase3_cue_freqs() -> List[Tuple[str, int]]:
     return [("HIGH", hi), ("LOW", lo)]
 
 
-def _phase3_am_rates() -> Tuple[float, float]:
+def phase3_am_rates() -> Tuple[float, float]:
     """(fast, slow) AM modulation rates from phase3.json (defaults on error)."""
     try:
         st = to_cue_stimulus(load_phase3_config(str(host_dir() / "phase3.json")))
@@ -118,7 +118,7 @@ class CueCalibrationView:
         except (OSError, ValueError):
             saved_noise = cue_calibration.DEFAULT_GAIN_PCT
         self._noise_var = tk.IntVar(value=int(saved_noise))
-        self._am_rates = _phase3_am_rates()
+        self._am_rates = phase3_am_rates()
 
         frame = ttk.LabelFrame(
             parent, text="Cue calibration  -  balance volume + correct frequency, then Save")
@@ -335,8 +335,7 @@ class CueCalibrationView:
         # AM-noise preview at the live noise level (needs firmware protocol 10+,
         # 11+ for a fractional rate).
         self._stop()
-        self._send(f"CUE_ON,{_TEST_KIND},{format_rate(rate_hz)},"
-                   f"{self._noise_pct()},AM")
+        self._send(am_cue_on(_TEST_KIND, rate_hz, self._noise_pct()))
         self._after_id = self._frame.after(_AM_TEST_BURST_MS, self._stop)
 
     # ----- save -----

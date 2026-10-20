@@ -78,10 +78,17 @@ TIPS: Dict[str, Entry] = {
     "cue.custom": "Frequency (Hz) for the Play button (500-20000).",
     "cue.play": "Play the custom-frequency tone (auto-stops after the burst).",
     "cue.stop": "Stop any playing test tone now (sends CUE_OFF).",
-    "cue.am": "Play white noise whose loudness rises and falls at this rate "
-              "(sends CUE_ON,...,AM; needs firmware protocol v10). It starts "
-              "silent, so a 2 Hz cue needs a burst of at least 500 ms to be "
-              "heard through one full swell.",
+    "cue.am": "Play white noise whose loudness rises and falls at the FAST or "
+              "SLOW rate from phase3.json (cue.am_fast_hz / am_slow_hz, re-read "
+              "on each press), at the noise level saved in Cue calibration. It "
+              "starts silent, so a 2 Hz cue needs a burst of at least 500 ms to "
+              "be heard through one full swell. Needs firmware protocol 11 for "
+              "a rate with decimals.",
+    "cue.am_custom": "Any modulation rate to try, 1-128 Hz, up to 3 decimals "
+                     "(e.g. 2.5). Out-of-range values are clamped. Decimals need "
+                     "firmware protocol 11.",
+    "cue.am_play": "Play the AM noise at the typed rate, at the saved noise "
+                   "level, for the burst length below.",
     "cue.noise_volume": "Loudness of the amplitude-modulated noise cue, as a "
                         "percent of full volume. One level for both rates (they "
                         "are the same noise, only the rhythm differs). Saved with "
