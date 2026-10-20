@@ -11,7 +11,10 @@ A cheap speaker is imperfect in two ways this tab corrects, per cue:
     computes a corrected commanded value (commanded x target / measured) so the
     speaker emits the target. Re-play and re-measure to refine.
 
-Both are saved to ``host/cue_calibration.json`` (pure core
+A third row sets the level of the amplitude-modulated NOISE cue - one percent for
+both modulation rates, since they are the same noise (docs/decisions/0222).
+
+All are saved to ``host/cue_calibration.json`` (pure core
 ``tmaze.core.cue_calibration``) and auto-applied wherever a cue is sent - the
 Phase 3 task and the Rig-view speaker test - so calibrating here changes what the
 rat hears. See docs/decisions/0125 (volume) and 0148 (frequency).
@@ -34,7 +37,9 @@ from tkinter import ttk
 from typing import Callable, Dict, List, Optional, Tuple
 
 from tmaze.core import cue_calibration
-from tmaze.core.phase3.phase3_config import load_phase3_config
+from tmaze.core.cue_command import (
+    FAST_LABEL, SLOW_LABEL, CueStimulus, format_rate)
+from tmaze.core.phase3.phase3_config import load_phase3_config, to_cue_stimulus
 from tmaze.paths import host_dir
 
 try:
@@ -50,6 +55,9 @@ _DEFAULT_LOW_HZ = 4000
 # How long a test tone plays before the host sends CUE_OFF (so a preview doesn't
 # sound forever); the operator re-presses Play to hear it again.
 _TEST_BURST_MS = 700
+# The AM noise starts silent and swells once per cycle, so its preview runs long
+# enough for at least two swells of a 2 Hz cue.
+_AM_TEST_BURST_MS = 1500
 # Cue kind sent for the test. Identity does not affect the tone when the host
 # supplies the frequency (it only labels the log line / TTL), so CHOICE is fine.
 _TEST_KIND = "CHOICE"
@@ -68,6 +76,15 @@ def _phase3_cue_freqs() -> List[Tuple[str, int]]:
     except Exception:
         pass
     return [("HIGH", hi), ("LOW", lo)]
+
+
+def _phase3_am_rates() -> Tuple[float, float]:
+    """(fast, slow) AM modulation rates from phase3.json (defaults on error)."""
+    try:
+        st = to_cue_stimulus(load_phase3_config(str(host_dir() / "phase3.json")))
+    except Exception:
+        st = CueStimulus()
+    return st.am_fast_hz, st.am_slow_hz
 
 
 class CueCalibrationView:
@@ -96,6 +113,12 @@ class CueCalibrationView:
             saved_cmd = cue_calibration.load_commanded(self._path)
         except (OSError, ValueError):
             saved_cmd = {}
+        try:
+            saved_noise = cue_calibration.load_noise_gain(self._path)
+        except (OSError, ValueError):
+            saved_noise = cue_calibration.DEFAULT_GAIN_PCT
+        self._noise_var = tk.IntVar(value=int(saved_noise))
+        self._am_rates = _phase3_am_rates()
 
         frame = ttk.LabelFrame(
             parent, text="Cue calibration  -  balance volume + correct frequency, then Save")
@@ -139,8 +162,32 @@ class CueCalibrationView:
             play.grid(row=row, column=4, padx=6, pady=3)
             tip(play, "cue.volume.play")
 
+        # AM noise level (docs/decisions/0222): one percent for both rates.
+        noise_row = len(self._cues) + 2
+        ttk.Label(frame, text="Noise (AM)", width=14).grid(
+            row=noise_row, column=0, sticky="w", padx=(6, 4), pady=3)
+        nscale = ttk.Scale(frame, from_=cue_calibration.GAIN_PCT_MIN,
+                           to=cue_calibration.GAIN_PCT_MAX, orient="horizontal",
+                           length=200, command=self._on_noise_scale)
+        nscale.set(self._noise_var.get())
+        nscale.grid(row=noise_row, column=1, sticky="we", padx=4, pady=3)
+        tip(nscale, "cue.noise_volume")
+        nspin = ttk.Spinbox(frame, from_=cue_calibration.GAIN_PCT_MIN,
+                            to=cue_calibration.GAIN_PCT_MAX, increment=1, width=5,
+                            textvariable=self._noise_var,
+                            command=lambda sc=nscale: sc.set(self._noise_pct()))
+        nspin.grid(row=noise_row, column=2, sticky="w", padx=4, pady=3)
+        ttk.Label(frame, text="%").grid(row=noise_row, column=3, sticky="w")
+        for col, (word, rate) in enumerate(((FAST_LABEL, self._am_rates[0]),
+                                            (SLOW_LABEL, self._am_rates[1]))):
+            btn = ttk.Button(frame, text=f"Play {word} {format_rate(rate)} Hz",
+                             command=lambda r=rate: self._play_noise(r))
+            btn.grid(row=noise_row, column=4 + col, padx=(6 if col == 0 else 2, 2),
+                     pady=3)
+            tip(btn, "cue.noise_volume.play")
+
         # ---- Frequency section ----
-        freq_row0 = len(self._cues) + 2
+        freq_row0 = len(self._cues) + 3
         ttk.Separator(frame, orient="horizontal").grid(
             row=freq_row0, column=0, columnspan=8, sticky="we", padx=6, pady=(8, 4))
         ttk.Label(frame, text="Frequency", font=("TkDefaultFont", 8, "bold")).grid(
@@ -210,6 +257,18 @@ class CueCalibrationView:
         except (TypeError, ValueError):
             pass
 
+    def _on_noise_scale(self, raw: str) -> None:
+        try:
+            self._noise_var.set(int(round(float(raw))))
+        except (TypeError, ValueError):
+            pass
+
+    def _noise_pct(self) -> int:
+        try:
+            return cue_calibration.clamp_gain_pct(self._noise_var.get())
+        except tk.TclError:
+            return cue_calibration.DEFAULT_GAIN_PCT
+
     def _sync_scale(self, hz: int, scale: ttk.Scale) -> None:
         try:
             scale.set(self._pct_vars[hz].get())
@@ -272,16 +331,25 @@ class CueCalibrationView:
         self._send(f"CUE_ON,{_TEST_KIND},{cf},{self._pct(hz)}")
         self._after_id = self._frame.after(_TEST_BURST_MS, self._stop)
 
+    def _play_noise(self, rate_hz: float) -> None:
+        # AM-noise preview at the live noise level (needs firmware protocol 10+,
+        # 11+ for a fractional rate).
+        self._stop()
+        self._send(f"CUE_ON,{_TEST_KIND},{format_rate(rate_hz)},"
+                   f"{self._noise_pct()},AM")
+        self._after_id = self._frame.after(_AM_TEST_BURST_MS, self._stop)
+
     # ----- save -----
     def _save(self) -> None:
         gains = {hz: self._pct(hz) for hz in self._pct_vars}
         commanded = {hz: int(self._commanded[hz]) for hz in self._commanded}
         try:
-            cue_calibration.save_calibration(self._path, gains, commanded)
+            cue_calibration.save_calibration(self._path, gains, commanded,
+                                             noise_gain=self._noise_pct())
             cue_calibration.reload_calibration(self._path)
         except OSError as e:
             self._status.set(f"Save failed: {e}")
             return
         vol = ", ".join(f"{lbl} {self._pct(hz)}%" for lbl, hz in self._cues)
         frq = ", ".join(f"{lbl} {self._commanded[hz]}Hz" for lbl, hz in self._cues)
-        self._status.set(f"Saved (vol: {vol}; freq: {frq}).")
+        self._status.set(f"Saved (vol: {vol}, noise {self._noise_pct()}%; freq: {frq}).")

@@ -82,6 +82,13 @@ TIPS: Dict[str, Entry] = {
               "(sends CUE_ON,...,AM; needs firmware protocol v10). It starts "
               "silent, so a 2 Hz cue needs a burst of at least 500 ms to be "
               "heard through one full swell.",
+    "cue.noise_volume": "Loudness of the amplitude-modulated noise cue, as a "
+                        "percent of full volume. One level for both rates (they "
+                        "are the same noise, only the rhythm differs). Saved with "
+                        "the tone levels and used by Phase 3 AM-noise sessions.",
+    "cue.noise_volume.play": "Play the noise at this rate and level for 1.5 s "
+                             "(rates come from phase3.json cue.am_fast_hz / "
+                             "am_slow_hz). Needs firmware protocol 11.",
     "cue.kind": "Which cue this test tone counts as - fires the matching Open "
                 "Ephys tone TTL. The audible tone is set by the frequency, not "
                 "the kind.",
@@ -334,6 +341,13 @@ TIPS: Dict[str, Entry] = {
                   "starts a fresh run from the current seed and settings; "
                   "during a recording it resumes the same run (use Restart to "
                   "apply edits). See docs/decisions/0046, 0210.",
+    "phase3.cue_stimulus": "What the choice and return cues sound like this "
+                           "session: pure tones (HIGH / LOW frequency) or white "
+                           "noise whose loudness swells FAST or SLOW (rates from "
+                           "phase3.json cue.am_fast_hz / am_slow_hz). FAST takes "
+                           "the HIGH tone's side, and the data file still says "
+                           "HIGH / LOW. Locked while armed. AM noise needs firmware "
+                           "protocol 11 - Phase 3 won't arm on older firmware.",
     "phase3.choice": "Play the CHOICE tone while the rat is in the central-stem "
                      "zone, on a trip that set OFF up the stem from the hub "
                      "(ADR-0067) - a lap run backwards, out along a return arm, "

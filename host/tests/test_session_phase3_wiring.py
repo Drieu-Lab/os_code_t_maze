@@ -195,12 +195,15 @@ class SessionPhase3WiringTest(unittest.TestCase):
         self.phase3.apply(protocol.classify("12550,SOL,2,1"))
         self.phase3.apply(protocol.classify("13000,REWARD,CENTER,500"))
         self.phase3.apply(protocol.classify("13500,CUE,ON,RETURN,8000"))
-        self.assertIn(("cue_ack", 12100), captured)
+        # An AM-noise echo also carries its noise seed (docs/decisions/0222).
+        self.phase3.apply(protocol.classify("14000,CUE,ON,CHOICE,2.5,100,AM,77"))
+        self.assertIn(("cue_ack", 12100, None), captured)
         self.assertIn(("reward_ack", 12550), captured)
         self.assertIn(("reward_ack", 13000), captured)
         # A RETURN cue echo feeds the return-cue stamp, not the choice one.
-        self.assertIn(("return_cue_ack", 13500), captured)
-        self.assertNotIn(("cue_ack", 13500), captured)
+        self.assertIn(("return_cue_ack", 13500, None), captured)
+        self.assertNotIn(("cue_ack", 13500, None), captured)
+        self.assertIn(("cue_ack", 14000, 77), captured)
 
     def test_firmware_echoes_stamp_the_trial_fw_ms_cells(self):
         """End of the wiring: the actuation thread binds the echo ms to the pending
@@ -730,6 +733,30 @@ class SessionPhase3WiringTest(unittest.TestCase):
             return True
         self.phase3._send = _send
         return sends
+
+    def test_am_noise_session_blocks_on_old_firmware_then_sends_am_cues(self):
+        """docs/decisions/0222: an AM-noise run keeps the gate closed until the
+        board reports protocol 11+, the choice is greyed while armed, and once
+        armed the cue goes out as CUE_ON,<kind>,<rate>,<gain>,AM with HIGH = fast."""
+        sends = self._record_sends()
+        self.phase3._stimulus_var.set("am_noise")
+        self._open_gate()
+        self.assertFalse(self.phase3._gate_open())          # protocol unknown
+        self.assertIn("reflash", self.phase3._gate_reason())
+        self.phase3.apply(protocol.classify("0,PROTO,10"))
+        self.assertFalse(self.phase3._gate_open())          # too old
+        self.phase3.apply(protocol.classify("0,PROTO,11"))
+        self.assertTrue(self.phase3._gate_open())
+        self.phase3._sync_stimulus_lock()
+        self.assertEqual(str(self.phase3._stimulus_radios[0].cget("state")), "disabled")
+
+        self._run_full_trial("left")
+        choice = [s for s in sends if s.startswith("CUE_ON,CHOICE,")]
+        self.assertTrue(choice, "expected a choice cue")
+        label = self.phase3._seq.choice_cue(0)
+        rate = "32" if label == "HIGH" else "2"
+        self.assertRegex(choice[0], rf"^CUE_ON,CHOICE,{rate},\d+,AM$")
+        self.assertTrue(self.phase3.published_state().stimulus.is_am)
 
     def test_trial_cap_stops_cueing_and_scoring_and_is_recorded(self):
         """docs/decisions/0190: after ``max_trials`` SCORED trials since Session

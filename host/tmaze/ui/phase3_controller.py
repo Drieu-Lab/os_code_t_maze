@@ -62,6 +62,8 @@ from typing import Callable, Optional
 
 from tmaze.core import protocol
 from tmaze.core import cue_calibration
+from tmaze.core import cue_command
+from tmaze.core.cue_command import CueStimulus
 from tmaze.core.records import animals
 from tmaze.core.timeutil import now_iso
 from tmaze.core.cue_gate import CHOICE, RETURN, CueGate, CueParams
@@ -69,7 +71,7 @@ from tmaze.core.phase3.alternation import AlternationBlockConfig
 from tmaze.core.phase3.debias import DebiasBlockConfig
 from tmaze.core.phase3.phase3_config import (
     DEFAULT_MAX_TOPUPS, default_config, load_phase3_config, resolve_seed,
-    save_phase3_config, to_session_cap_config, to_trial_config,
+    save_phase3_config, to_cue_stimulus, to_session_cap_config, to_trial_config,
     validate_phase3_config)
 from tmaze.core.phase3 import session_cap
 from tmaze.core.phase3.session_cap import SessionCapConfig
@@ -91,7 +93,7 @@ from tmaze.core.reward.reward_volume import (
 from tmaze.core.rig_config import load_rig_config
 from tmaze.paths import host_dir
 from tmaze.ui.trial_ribbon_view import (
-    _ARM_SHORT, _CELL_CURRENT_BG, _CUE_SHORT, _UNSET, TrialRibbonView,
+    _ARM_SHORT, _CELL_CURRENT_BG, _UNSET, TrialRibbonView,
     progress_signature)
 from tmaze.core.phase3.trial_sequence import LEFT, RIGHT, TrialConfig, TrialSequence
 from tmaze.io.vision_actuator import VisionActuator
@@ -113,6 +115,7 @@ except Exception:  # pragma: no cover
 FREEROAM_TOKENS = ("FREEROAM", "FREE")
 
 POLL_INTERVAL_MS = 100          # snapshot publish + status refresh (Tk)
+VERSION_QUERY_INTERVAL_S = 5.0  # re-ask VERSION while an AM run waits on the board
 SEED_MASK = 0xFFFFFFFF          # normalise a pinned seed to a stable 32-bit range
                                 # (the sequence PRNG accepts any int; see ADR-0140)
 
@@ -188,6 +191,8 @@ class _Phase3Snapshot:
     # per-animal value disagreed with phase3.json (surfaced to the operator).
     cue_mapping_source: str = "config"
     cue_mapping_overrides: bool = False
+    # Tone or AM noise for this session (docs/decisions/0222); fixed at arm.
+    stimulus: CueStimulus = field(default_factory=CueStimulus)
     animal: str = ""
     session_id: str = ""
     session_out_dir: str = ""
@@ -262,6 +267,11 @@ class Phase3ControlView(VisionActuator):
         # after we've seen a running clock (>0) is a firmware reset (S8,
         # docs/decisions/0184). None until the first timed line arrives.
         self._last_fw_ms: Optional[int] = None
+        # Firmware serial protocol from the ``0,PROTO`` handshake or a VERSION
+        # reply (reader thread writes, Tk reads a plain int). An AM-noise session
+        # will not arm until this is known and new enough (docs/decisions/0222).
+        self._fw_proto: Optional[int] = None
+        self._version_asked_mono = 0.0
         self._closed = False
 
         # State owned by the actuation thread.
@@ -271,6 +281,8 @@ class Phase3ControlView(VisionActuator):
         self._task_events = TaskEvents() if TaskEvents is not None else None
         self._gate_was_open = False
         self._last_fw_cue = ""            # last firmware CUE echo (for status)
+        # The armed run's cue stimulus (docs/decisions/0222), fixed at arm.
+        self._stimulus = CueStimulus()
         # Trial index awaiting a firmware-clock echo (docs/decisions/0165): set on
         # the actuation thread when the CHOICE cue / prime reward is COMMANDED, then
         # bound to the trial's *_fw_ms cell when the firmware CUE,ON / SOL,REWARD
@@ -456,27 +468,35 @@ class Phase3ControlView(VisionActuator):
         # carry the last ms seen before the reset. Guard on _last_fw_ms > 0 so the
         # INITIAL startup handshake (clock still 0) is not mistaken for a reset.
         if protocol.is_boot_handshake(info.raw):
+            self._fw_proto = protocol.proto_version_from(info.parsed)
             if self._last_fw_ms is not None and self._last_fw_ms > 0:
                 self._enqueue_act(("firmware_reset", self._last_fw_ms, _now_iso()))
             self._last_fw_ms = 0
             return
         if info.parsed is not None:
             self._last_fw_ms = info.parsed.ms
+        if info.version is not None:
+            self._fw_proto = info.version[0]
+            return
         if info.mode is not None:
             self._mode = info.mode.upper()
             return
         if info.cue is not None:
             state, kind, freq = info.cue
-            self._last_fw_cue = f"fw: {kind} @ {freq} Hz" if state == "ON" else "fw: off"
+            seed = protocol.cue_seed_from(info.parsed)
+            am = " AM" if seed is not None else ""
+            self._last_fw_cue = (f"fw: {kind} @ {freq} Hz{am}" if state == "ON"
+                                 else "fw: off")
             # The firmware's cue-on echo carries the cue onset on the firmware
             # clock; route its ms to the actuation thread (sole log writer) to
             # stamp the trial's choice_cue_on_fw_ms (docs/decisions/0165) or
-            # return_cue_on_fw_ms (docs/decisions/0166).
+            # return_cue_on_fw_ms (docs/decisions/0166), plus the AM noise seed
+            # (docs/decisions/0222).
             if state == "ON" and info.parsed is not None:
                 if kind == CHOICE:
-                    self._enqueue_act(("cue_ack", info.parsed.ms))
+                    self._enqueue_act(("cue_ack", info.parsed.ms, seed))
                 elif kind == RETURN:
-                    self._enqueue_act(("return_cue_ack", info.parsed.ms))
+                    self._enqueue_act(("return_cue_ack", info.parsed.ms, seed))
             return
         # A solenoid / reward echo carries the reward pulse on the firmware clock
         # (docs/decisions/0165); route its ms to stamp the trial's reward_cmd_fw_ms.
@@ -756,9 +776,9 @@ class Phase3ControlView(VisionActuator):
         elif item[0] == "cmd":
             self._process_command(item[1], snap)
         elif item[0] == "cue_ack":
-            self._process_cue_ack(item[1])
+            self._process_cue_ack(item[1], item[2] if len(item) > 2 else None)
         elif item[0] == "return_cue_ack":
-            self._process_return_cue_ack(item[1])
+            self._process_return_cue_ack(item[1], item[2] if len(item) > 2 else None)
         elif item[0] == "reward_ack":
             self._process_reward_ack(item[1])
         elif item[0] == "firmware_reset":
@@ -794,6 +814,7 @@ class Phase3ControlView(VisionActuator):
              "lick_debounce_ms": PHASE3_LICK_DEBOUNCE_MS, "prime_on": "credential"},
             default_topup_cooldown_ms=PHASE3_TOPUP_COOLDOWN_MS, rule_id="phase3")
         self._reward_trial_index = None
+        self._stimulus = snap.stimulus
         self._active_seed = snap.seed
         self._armed_disarm_count = snap.disarm_count
         self._armed_settings = self._plan_settings(snap)
@@ -841,7 +862,9 @@ class Phase3ControlView(VisionActuator):
                               high_tone_is_left_source=snap.cue_mapping_source,
                               session_cap=snap.session_cap,
                               reward_pulse_source=snap.reward_pulse_source,
-                              daily_water_ml=snap.daily_water_ml)
+                              daily_water_ml=snap.daily_water_ml,
+                              stimulus=snap.stimulus,
+                              noise_gain_pct=cue_calibration.noise_gain_pct())
         # Bind + write into the session's task/ folder ONLY when armed via a
         # session (docs/decisions/0049). When armed WITHOUT one (the ADR-0060
         # arm-before-Start order, or a standalone tab), keep the planned matrix IN
@@ -884,6 +907,9 @@ class Phase3ControlView(VisionActuator):
             return
         if name == "rebind":
             self._rebind_session_output(snap)
+            return
+        if name == "version":
+            self._send_cmd("VERSION")
             return
         if self._task is None or self._seq is None or self._log is None:
             return
@@ -1133,7 +1159,7 @@ class Phase3ControlView(VisionActuator):
         """The settings a run applies only at arm (sequence + reward), compared on a
         resume to tell the operator when an edit was not applied (ADR-0210)."""
         return (snap.seed, snap.trial_config, snap.reward_incorrect,
-                snap.reward_pulse_ms, snap.max_topups)
+                snap.reward_pulse_ms, snap.max_topups, snap.stimulus)
 
     def _resume_after_reopen(self, snap) -> None:
         """Resume the SAME session after a gate reopen instead of re-arming it
@@ -1151,10 +1177,10 @@ class Phase3ControlView(VisionActuator):
         idx = self._task.index if self._task is not None else 0
         text = "tracking reopened mid-session - resumed (data preserved)"
         if self._plan_settings(snap) != self._armed_settings:
-            # Seed / sequence / reward edits only apply at arm (ADR-0210).
+            # Seed / sequence / reward / cue-type edits only apply at arm (ADR-0210).
             self._unapplied_settings = True
-            text += ("; seed/sequence/reward settings changed while disarmed were "
-                     "NOT applied - use Restart to apply them")
+            text += ("; seed/sequence/reward/cue-type settings changed while "
+                     "disarmed were NOT applied - use Restart to apply them")
         self._emit_intervention(AUTO_RESUME, text, idx, _now_iso())
         self._publish_state(armed=True)
 
@@ -1285,13 +1311,9 @@ class Phase3ControlView(VisionActuator):
             # play its full-volume LOW-tone fallback (cueFor(-1)) with no calibrated
             # gain, so a completed session would blast a wrong cue on every
             # excursion (docs/decisions/0150).
-            if freq is not None:
-                # Command the frequency-corrected tone so the speaker EMITS the
-                # target, but key the volume balance to the TARGET freq (ADR-0148
-                # extends 0125).
-                cf = cue_calibration.commanded_hz_for(freq)
-                sent = self._send_cmd(
-                    f"CUE_ON,CHOICE,{cf},{cue_calibration.gain_pct_for(freq)}")
+            cmd = self._cue_cmd("CHOICE", self._seq.choice_cue(idx), freq)
+            if cmd is not None:
+                sent = self._send_cmd(cmd)
                 # Record the cue as sounding ONLY when the command reached the wire
                 # (docs/decisions/0173). A dropped send stamps nothing: no onset row,
                 # no firmware-ack wait, and _choice_cue_on_iso stays None so the trip
@@ -1318,10 +1340,9 @@ class Phase3ControlView(VisionActuator):
             cue = self._seq.return_cue(side, idx) if side is not None else None
             # Same guard as CHOICE: no valid return identity => start no cue rather
             # than a full-volume bare "CUE_ON,RETURN" (docs/decisions/0150).
-            if freq is not None:
-                cf = cue_calibration.commanded_hz_for(freq)
-                sent = self._send_cmd(
-                    f"CUE_ON,RETURN,{cf},{cue_calibration.gain_pct_for(freq)}")
+            cmd = self._cue_cmd("RETURN", cue, freq)
+            if cmd is not None:
+                sent = self._send_cmd(cmd)
                 # Same rule as CHOICE (docs/decisions/0173): log the return cue only
                 # when it reached the wire; a dropped send records nothing and just
                 # notes the failure.
@@ -1555,19 +1576,20 @@ class Phase3ControlView(VisionActuator):
             self._write_log()
             self._publish_state(armed=True)
 
-    def _process_cue_ack(self, fw_ms) -> None:
-        """Bind a firmware CHOICE cue-on echo's ms to the pending trial's
-        choice_cue_on_fw_ms (docs/decisions/0165). First echo wins (the pending
-        index is cleared once bound); an echo with no pending cue is ignored."""
+    def _process_cue_ack(self, fw_ms, seed=None) -> None:
+        """Bind a firmware CHOICE cue-on echo's ms (and AM noise seed) to the
+        pending trial's choice_cue_on_fw_ms (docs/decisions/0165, 0222). First echo
+        wins (the pending index is cleared once bound); an echo with no pending cue
+        is ignored."""
         idx = self._pending_cue_ack_index
         if idx is None:
             return
         self._pending_cue_ack_index = None
         if self._log is not None:
-            self._log.cue_acked(idx, fw_ms)
+            self._log.cue_acked(idx, fw_ms, seed)
             self._write_log()
 
-    def _process_return_cue_ack(self, fw_ms) -> None:
+    def _process_return_cue_ack(self, fw_ms, seed=None) -> None:
         """Bind a firmware RETURN cue-on echo's ms to the pending trial's
         return_cue_on_fw_ms (docs/decisions/0166). First echo wins; an echo with no
         pending return cue is ignored (e.g. the return cue is disabled)."""
@@ -1576,7 +1598,7 @@ class Phase3ControlView(VisionActuator):
             return
         self._pending_return_cue_ack_index = None
         if self._log is not None:
-            self._log.return_cue_acked(idx, fw_ms)
+            self._log.return_cue_acked(idx, fw_ms, seed)
             self._write_log()
 
     def _process_reward_ack(self, fw_ms) -> None:
@@ -1836,7 +1858,8 @@ class Phase3ControlView(VisionActuator):
         if snap.cue_mapping_source == "animals.json":
             side = "L" if snap.trial_config.high_tone_is_left else "R"
             flag = "!" if snap.cue_mapping_overrides else ""
-            extra += f"  cue:H->{side}(animals.json{flag})"
+            hi = "FAST" if self._stimulus.is_am else "H"
+            extra += f"  cue:{hi}->{side}(animals.json{flag})"
         # Per-animal reward volume (ADR-0191): show the width the run armed with
         # and that it came from animals.json, not the Pulse field.
         if snap.reward_pulse_source != session_cap.SOURCE_CONFIG:
@@ -1863,6 +1886,22 @@ class Phase3ControlView(VisionActuator):
             f"correct:{self._correct}/{done} ({acc:.0f}%)  "
             f"rewards:{self._reward_count} ({format_volume(self._reward_ul)}){probe}  "
             f"{self._last_fw_cue}{extra}")
+
+    def _cue_cmd(self, kind: str, label: Optional[str],
+                 freq: Optional[int]) -> Optional[str]:
+        """The ``CUE_ON`` line for this run's stimulus, or None (no cue to play).
+
+        A tone sends the frequency-corrected command so the speaker EMITS the
+        target, with the volume balance keyed to the TARGET freq (ADR-0148 extends
+        0125); an AM-noise run sends the label's modulation rate at the shared
+        noise level (docs/decisions/0222)."""
+        if freq is None:
+            return None
+        return cue_command.cue_on_command(
+            kind, label, self._stimulus,
+            tone_commanded_hz=cue_calibration.commanded_hz_for(freq),
+            tone_gain_pct=cue_calibration.gain_pct_for(freq),
+            noise_gain_pct=cue_calibration.noise_gain_pct())
 
     def _send_cmd(self, cmd: str) -> bool:
         """Send one command to the broker; return whether it reached the wire.
@@ -1909,11 +1948,20 @@ class Phase3ControlView(VisionActuator):
         return bool(self._enable_var.get() and self._tracking_running()
                     and self._mode_is_freeroam()
                     and self._pipeline is not None
-                    and self._pipeline.zones_valid())
+                    and self._pipeline.zones_valid()
+                    and self._stimulus_block() is None)
+
+    def _stimulus_block(self) -> Optional[str]:
+        """Why the chosen cue stimulus can't play on this board, else None
+        (an AM-noise run needs firmware protocol 11+; docs/decisions/0222)."""
+        return cue_command.arm_block_reason(self._current_stimulus(), self._fw_proto)
 
     def _gate_reason(self) -> str:
         if not self._enable_var.get():
             return "not armed"
+        block = self._stimulus_block()
+        if block:
+            return block
         if self._pipeline is None or not self._pipeline.zones_valid():
             return "no maze zone map (zones.json)"
         if not self._tracking_running():
@@ -1932,6 +1980,29 @@ class Phase3ControlView(VisionActuator):
             return_enabled=bool(self._return_var.get()),
             min_confidence=conf,
             require_up_stem=bool(self._up_stem_var.get()))
+
+    def _current_stimulus(self) -> CueStimulus:
+        """The cue stimulus for the NEXT arm: the tab's Tone / AM-noise choice with
+        the rates from phase3.json (docs/decisions/0222). Falls back to tones if
+        the file's rates are invalid (already reported by validation on load)."""
+        kind = (self._stimulus_var.get() if hasattr(self, "_stimulus_var")
+                else self._config["cue"].get("stimulus", cue_command.STIM_TONE))
+        try:
+            return to_cue_stimulus({"cue": {**self._config["cue"], "stimulus": kind}})
+        except (TypeError, ValueError):
+            return CueStimulus()
+
+    def _maybe_ask_version(self) -> None:
+        """Tk poll: when an AM-noise run is chosen but the board's protocol is
+        still unknown (no ``0,PROTO`` seen since the host connected), ask it with
+        ``VERSION`` every few seconds so the arm block can lift on its own."""
+        if self._fw_proto is not None or not self._current_stimulus().is_am:
+            return
+        now = time.monotonic()
+        if now - self._version_asked_mono < VERSION_QUERY_INTERVAL_S:
+            return
+        self._version_asked_mono = now
+        self._enqueue_act(("cmd", "version"))
 
     def _current_seed(self) -> int:
         try:
@@ -2064,6 +2135,8 @@ class Phase3ControlView(VisionActuator):
         self._reward_incorrect_var.set(bool(r["reward_incorrect"]))
         self._choice_var.set(bool(c["choice_enabled"]))
         self._return_var.set(bool(c["return_enabled"]))
+        if not self._enable_var.get():       # the cue type is locked while armed
+            self._stimulus_var.set(c.get("stimulus", cue_command.STIM_TONE))
         self._up_stem_var.set(bool(c["require_up_stem"]))
         self._conf_var.set(str(c["min_confidence"]))
         seed = resolve_seed(self._config)
@@ -2111,6 +2184,7 @@ class Phase3ControlView(VisionActuator):
         cfg["cue"]["return_enabled"] = p.return_enabled
         cfg["cue"]["require_up_stem"] = p.require_up_stem
         cfg["cue"]["min_confidence"] = p.min_confidence
+        cfg["cue"]["stimulus"] = self._stimulus_var.get()
         # Debias generator + block params are the GUI-editable slice of the
         # otherwise file-only ``sequence`` section (ADR-0070 carve-out); persist
         # them too, leaving the scientific schedule params untouched.
@@ -2223,11 +2297,26 @@ class Phase3ControlView(VisionActuator):
                        f"{cap.max_minutes:g} min")
         else:
             cap_txt = " \u00b7 cap off"
+        # In an AM-noise run HIGH plays as the FAST rate (docs/decisions/0222).
+        st = self._current_stimulus()
+        if st.is_am:
+            cue_txt = (f"AM noise {cue_command.format_rate(st.am_fast_hz)}/"
+                       f"{cue_command.format_rate(st.am_slow_hz)} Hz "
+                       f"({cue_command.FAST_LABEL}={left})")
+        else:
+            cue_txt = f"tones {s['high_tone_hz']}/{s['low_tone_hz']} Hz (HIGH={left})"
         self._seq_info_var.set(
             f"trials {s['max_trials']} \u00b7 block {s['block_size']} \u00b7 "
-            f"max-run {s['max_same_run']} \u00b7 tones {s['high_tone_hz']}/"
-            f"{s['low_tone_hz']} Hz (HIGH={left}) \u00b7 seed {seed_txt}{probe_txt}"
-            f"{cap_txt}")
+            f"max-run {s['max_same_run']} \u00b7 {cue_txt} \u00b7 seed {seed_txt}"
+            f"{probe_txt}{cap_txt}")
+
+    def _sync_stimulus_lock(self) -> None:
+        """Tk poll: the cue-type choice is fixed for an armed run, so grey it out
+        while the Arm box is ticked (docs/decisions/0222)."""
+        state = "disabled" if self._enable_var.get() else "normal"
+        for rb in getattr(self, "_stimulus_radios", []):
+            if str(rb.cget("state")) != state:
+                rb.configure(state=state)
 
     def _sync_debias_enabled(self) -> None:
         """Enable each intervention's controls to match the generator + its enable
@@ -2288,11 +2377,27 @@ class Phase3ControlView(VisionActuator):
         arm.grid(row=0, column=0, columnspan=2, sticky="w", **pad)
         tip(arm, "phase3.arm")
 
+        cue_row = ttk.Frame(root)
+        cue_row.grid(row=1, column=0, columnspan=2, sticky="w", **pad)
         self._choice_var = tk.BooleanVar(value=self._config["cue"]["choice_enabled"])
-        c = ttk.Checkbutton(root, text="Choice cue (central stem, up-stem)",
+        c = ttk.Checkbutton(cue_row, text="Choice cue (central stem, up-stem)",
                             variable=self._choice_var)
-        c.grid(row=1, column=0, columnspan=2, sticky="w", **pad)
+        c.pack(side=tk.LEFT)
         tip(c, "phase3.choice")
+        # Session cue type (docs/decisions/0222): tones or AM noise, for both the
+        # choice and return cues. Locked while armed (see _sync_stimulus_lock).
+        ttk.Label(cue_row, text="    Cue type:").pack(side=tk.LEFT)
+        self._stimulus_var = tk.StringVar(
+            value=self._config["cue"].get("stimulus", cue_command.STIM_TONE))
+        self._stimulus_radios = []
+        for value, text in ((cue_command.STIM_TONE, "Tone"),
+                            (cue_command.STIM_AM_NOISE, "AM noise")):
+            rb = ttk.Radiobutton(cue_row, text=text, value=value,
+                                 variable=self._stimulus_var,
+                                 command=self._refresh_seq_info)
+            rb.pack(side=tk.LEFT, padx=(4, 0))
+            tip(rb, "phase3.cue_stimulus")
+            self._stimulus_radios.append(rb)
 
         self._up_stem_var = tk.BooleanVar(
             value=self._config["cue"]["require_up_stem"])
@@ -2600,6 +2705,8 @@ class Phase3ControlView(VisionActuator):
             return
         try:
             self._publish_snapshot()
+            self._maybe_ask_version()
+            self._sync_stimulus_lock()
             self._status_var.set(self._status_text)
             self._refresh_reward_readout()
             self._refresh_progress()
@@ -2628,6 +2735,7 @@ class Phase3ControlView(VisionActuator):
             trial_config=self._current_trial_config(),
             cue_mapping_source=cue_source,
             cue_mapping_overrides=cue_overrides,
+            stimulus=self._current_stimulus(),
             animal=self._current_animal(),
             session_id=self._session_id,
             session_out_dir=self._session_out_dir,
@@ -2781,17 +2889,21 @@ class Phase3ControlView(VisionActuator):
             return
         current = max(0, min(state.current_index, state.total - 1))
         for row in state.rows:
-            lb.insert(tk.END, self._seq_line(row, current, state.return_enabled))
+            lb.insert(tk.END, self._seq_line(row, current, state.return_enabled,
+                                             state.stimulus))
         if 0 <= current < lb.size():
             lb.itemconfig(current, background=_CELL_CURRENT_BG)
             lb.see(current)                  # keep the current trial in view
 
     @staticmethod
-    def _seq_line(row, current: int, return_enabled: bool = True) -> str:
+    def _seq_line(row, current: int, return_enabled: bool = True,
+                  stimulus: Optional[CueStimulus] = None) -> str:
         """One monospace planned-trial row for the scrollable list. ``row`` is a
         phase3_log.Phase3RowView; ``correct_arm`` is the arm the choice cue maps
         to (identity checked in test_phase3_ribbon). The return-cue segment is
-        dropped when ``return_enabled`` is False (nothing is actually cued)."""
+        dropped when ``return_enabled`` is False (nothing is actually cued). An
+        AM-noise ``stimulus`` shows FAST/SLOW for HIGH/LOW (docs/decisions/0222)."""
+        st = stimulus if stimulus is not None else CueStimulus()
         mark = ">" if (row.trial - 1) == current else " "
         arm = _ARM_SHORT.get(row.correct_arm, "?")
         if row.outcome == ABANDONED:
@@ -2807,10 +2919,11 @@ class Phase3ControlView(VisionActuator):
         # runtime, so they only appear once committed (docs/decisions/0115-probe).
         tag = " PROBE" if row.probe == "1" else ""
         if return_enabled:
-            left = _CUE_SHORT.get(row.return_cue_left, "?")
-            right = _CUE_SHORT.get(row.return_cue_right, "?")
+            left = cue_command.letter_cue_label(row.return_cue_left, st)
+            right = cue_command.letter_cue_label(row.return_cue_right, st)
             ret = f"ret L:{left} R:{right}"
         else:
             ret = ""
-        return (f"{mark}{row.trial:>4}  {row.choice_cue:<4}->{arm}  "
+        choice = cue_command.short_cue_label(row.choice_cue, st)
+        return (f"{mark}{row.trial:>4}  {choice:<4}->{arm}  "
                 f"{ret}{tag}   {result}")

@@ -131,7 +131,8 @@ criteria).
 | [FW-0079](#fw-0079-snapshot-the-blocker-model-into-the-bundle) | Snapshot the active blocker model into the session's `config/` at Start, like the rat model | `ui/experiment_control.py` (`config_inputs`), `ui/tracker_view.py` | Proposed |
 | [FW-0080](#fw-0080-register-rat-should-forget-the-loaded-model-path) | Live Tracking tab: "Register rat" after "Load model" still reports the loaded file, so the session snapshot copies the old model | `ui/tracker_view.py` | Proposed |
 | [FW-0081](#fw-0081-head-points-in-the-offline-re-track) | Offline re-track writes the learned head-point columns too | `tools/offline_track`, `vision/offline_tracker.py` | Proposed |
-| [FW-0082](#fw-0082-run-phase-3-with-the-amplitude-modulated-noise-cue) | Run Phase 3 with the 2 Hz / 32 Hz amplitude-modulated noise cue (firmware side done in ADR-0221): stimulus setting, seed logging, format bump in both repos | `core/phase3/*`, `ui/phase3_controller.py`, `drieu_lab_analysis` | Proposed |
+| [FW-0083](#fw-0083-give-the-slow-am-cue-enough-time-in-the-cue-zone) | Give the slow (2 Hz) AM-noise cue enough time: measure cue-zone dwell vs the cue's first loudness peak, and lengthen the zone or hold the choice if needed | `zones.json`, `core/phase3/*`, `drieu_lab_analysis.cue_latency` | Proposed |
+| [FW-0084](#fw-0084-neutral-cue-a--cue-b-names-across-both-repos) | Replace HIGH/LOW (and `high_tone_is_left`) with neutral cue A / cue B names across both repos, so the data no longer names a tone | `core/phase3/*`, `animals.json`, `drieu_lab_analysis` | Proposed |
 
 ## Entries
 
@@ -3891,54 +3892,75 @@ its reader needs the same column list.
 
 **ADR needed?** Probably not (extends ADR-0220 to the offline file).
 
-### FW-0082: Run Phase 3 with the amplitude-modulated noise cue
+### FW-0083: Give the slow AM cue enough time in the cue zone
 
 - **Status:** Proposed
-- **Date added:** 2026-10-19
+- **Date added:** 2026-10-20
 - **Author / Agent:** Agent (Cursor) on behalf of Celine
-- **Area / modules:** `host/phase3.json` + `core/phase3/phase3_config.py` (a
-  cue stimulus setting), `core/phase3/trial_sequence.py` / `phase3_task.py` (the
-  CHOICE/RETURN cue "frequency" becomes a modulation rate), `ui/phase3_controller.py`
-  (send `CUE_ON,<kind>,<rate>,<gain>,AM`), `core/phase3/phase3_log.py` +
-  `bundle_format.py` (record the stimulus and the echoed seed;
-  `format_version` bump), `core/protocol.py` (expose `AM`/`<seed>` from the
-  `CUE,ON` echo), `core/cue_calibration.py` + `ui/cue_calibration_view.py`
-  (noise level); in `drieu_lab_analysis`: `phase3_format`, `cue_latency`, and the
-  MATLAB `animal_progress` copy
+- **Area / modules:** `host/zones.json` (cue-zone polygon), `core/phase3/*` /
+  `ui/phase3_controller.py` (if a minimum cue time is enforced instead),
+  `drieu_lab_analysis` `cue_latency` (the measurement)
 - **Related ADRs:** [ADR-0221](decisions/0221-am-noise-cue-live-synthesis.md),
-  [ADR-0046](decisions/0046-host-owned-phase3.md),
-  [ADR-0125](decisions/0125-per-cue-volume-calibration.md),
+  [ADR-0222](decisions/0222-phase3-cue-type-per-session.md),
+  [ADR-0045](decisions/0045-vision-cue-zone-gate.md),
+  [ADR-0108](decisions/0108-cue-zone-dwell-readout.md)
+
+**Motivation / context.** The AM-noise cue starts silent and swells; at 2 Hz its
+first loudness peak comes ~250 ms after onset, and the rats recently crossed the
+cue zone in about a second. A rat running fast may reach the choice point having
+heard less than one full cycle of the slow cue, while the 32 Hz cue is clear
+within ~100 ms - so the two cues would not be equally identifiable.
+
+**Sketch of approach.** First measure: in AM sessions, the distribution of
+cue-on -> choice time (the ADR-0108 dwell, and `cue_latency` in the analysis
+repo) split by FAST / SLOW. If many SLOW trials end before ~0.5 s, either move
+the cue-zone start earlier along the stem (a `zones.json` edit, no code) or
+start the cue earlier in the trial. Changing geometry for AM sessions only
+would need a per-stimulus zone, which is more code; try the shared change first.
+
+**Evaluation / acceptance.** After the change, nearly all SLOW-cue trials give
+at least one full 2 Hz cycle (500 ms) before the choice, and tone-session dwell
+is not made worse.
+
+**Effort / risk.** Small if it is a zone edit; the risk is changing the task
+for the tone rats too, so record it in the experiment timeline.
+
+**ADR needed?** Yes if the zone or cue timing changes (a deliberate task value).
+
+### FW-0084: Neutral cue A / cue B names across both repos
+
+- **Status:** Proposed
+- **Date added:** 2026-10-20
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** `core/phase3/trial_sequence.py` (`HIGH` / `LOW`),
+  `phase3_log.py` (cue columns + header), `core/records/animals.py` +
+  `os_code_t_maze_resources/records/animal/animals.json` (`high_tone_is_left`),
+  `phase3_config.py`, every UI label; in `drieu_lab_analysis`: `phase3_format`
+  tokens, `bundle_reader`, strategy / alternation modules, the MATLAB copy
+- **Related ADRs:** [ADR-0222](decisions/0222-phase3-cue-type-per-session.md),
   [ADR-0186](decisions/0186-per-animal-cue-side-mapping.md)
 
-**Motivation / context.** ADR-0221 put the 2 Hz / 32 Hz SAM noise cue in the
-firmware (protocol v10) and on the Setup test bar only. Phase 3 still plays
-tones, so the stimulus can be heard but not trained on.
+**Motivation / context.** ADR-0222 kept the stored cue names `HIGH` / `LOW`
+and read `HIGH` as "the FAST rate" in AM-noise sessions, with FAST / SLOW shown
+only on screen. That works, but the data now names a tone even when no tone
+played, and a future cue pair (e.g. a different noise band) would stretch it
+further.
 
-**Sketch of approach.** A `cue.stimulus` setting in `phase3.json` (`tone`
-default, or `am_noise` with `high_rate_hz: 32`, `low_rate_hz: 2`), chosen per
-session (the lab wants tones to stay selectable). The cue->side mapping keeps
-its per-animal `high_tone_is_left` meaning, read as "the faster rate is LEFT".
-The controller sends the `AM` form; `Phase3Log` records the stimulus in the CSV
-header and the per-trial seed from the echo in a new trailing column, with a
-trial-CSV `PROTO_VERSION` and bundle `format_version` bump mirrored in the
-analysis repo. Noise level: a calibration entry measured with a sound-level
-meter (FW-0066), since tone gains don't apply.
+**Sketch of approach.** Introduce neutral cue identities `A` / `B` with a
+per-stimulus description of what each is (A = 8 kHz tone or FAST AM, ...), and a
+per-animal `cue_a_is_left` replacing `high_tone_is_left`. Bump the trial-CSV
+proto and bundle format; readers in both repos map old `HIGH` -> `A`,
+`LOW` -> `B` so old sessions keep working. Land the analysis mirror in the same
+change.
 
-**Evaluation / acceptance.** A bench session in `am_noise` mode: the right
-rate plays per trial, echoes are stamped (`choice_cue_on_fw_ms`), seeds are
-logged, and a tone session is unchanged byte for byte. Golden fixture
-regenerated; analysis tests pass.
+**Evaluation / acceptance.** Old and new bundles load to the same tidy frames;
+golden fixture regenerated; all accuracy/strategy results unchanged on old data.
 
-**Effort / risk.** Medium; touches the bundle format across both repos. Main
-scientific risk: the 2 Hz cue starts silent and needs ~250 ms to reach its first
-peak, so `cue_latency` and the cue-zone dwell readout must not compare it
-directly with tone sessions.
+**Effort / risk.** Large and cross-repo; the main risk is a missed
+`HIGH`/`LOW` comparison silently scoring nothing. The user plans to handle this
+in a dedicated change.
 
-**Open questions.** Is the stimulus per session or per animal? Is the RETURN cue
-also SAM noise, or tone-only? Should cue-zone geometry change to give the rat
-more time to identify the 2 Hz cue?
-
-**ADR needed?** Yes - the format bump and the rate-to-side mapping.
+**ADR needed?** Yes - a vocabulary and format change in both repos.
 
 ## Completed
 
@@ -3949,6 +3971,7 @@ referenced from those ADRs resolve.
 | ID | Title | Implemented in |
 |----|-------|----------------|
 | FW-0002 | Head-vs-body orientation (heading) from the tracker - done as a learned head direction, recorded live when head tracking is on | [ADR-0219](decisions/0219-learned-head-point.md), [ADR-0220](decisions/0220-record-head-points.md) |
+| FW-0082 | Run Phase 3 with the amplitude-modulated noise cue - per-session cue type, fractional rates, seed logging, format 6 in both repos | [ADR-0222](decisions/0222-phase3-cue-type-per-session.md) |
 | FW-0004 | Position-based task-rule engine over landmarks | [ADR-0023](decisions/0023-position-based-rules-engine.md) |
 | FW-0074 | Offline tracker workbench window | [ADR-0213](decisions/0213-offline-workbench-hosts-the-tracking-tab.md), [ADR-0214](decisions/0214-workbench-settings-match-the-command-line.md), [ADR-0215](decisions/0215-workbench-video-player.md), [ADR-0216](decisions/0216-offline-workbench-window.md) |
 | FW-0026 | Mid-session gate reopen must not restart/overwrite the session | [ADR-0120](decisions/0120-gate-reopen-resumes-session.md) |

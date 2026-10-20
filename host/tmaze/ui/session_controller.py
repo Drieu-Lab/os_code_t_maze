@@ -1900,6 +1900,13 @@ class SessionControlView:
             "high_tone_hz": snap.high_tone_hz,
             "low_tone_hz": snap.low_tone_hz,
         }
+        # Tone or AM noise (docs/decisions/0222); in an AM run HIGH = the fast rate.
+        st = getattr(snap, "stimulus", None)
+        if st is not None:
+            tones["cue_stimulus"] = st.kind
+            if st.is_am:
+                tones["am_fast_hz"] = st.am_fast_hz
+                tones["am_slow_hz"] = st.am_slow_hz
         return phase3_stats.compute(snap), snap.seed, tones
 
     def _session_cap_block(self):

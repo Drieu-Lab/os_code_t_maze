@@ -26,7 +26,9 @@ modulation (SAM) does it smoothly, like a sine wave: SAM [white
 noise](#white-noise) at 2 Hz swells and fades twice a second, at 32 Hz 32 times a
 second. The *modulation rate* (2 or 32 Hz) is what tells the two noise cues
 apart, not their pitch. *Depth* is how far the loudness dips: 100 % means it
-falls all the way to silence. See ADR-0221.
+falls all the way to silence. See ADR-0221. In Phase 3 the faster rate is
+called FAST and the slower SLOW on screen, while the data still records them as
+HIGH and LOW (FAST takes the HIGH tone's side; ADR-0222).
 
 ### Behavioural mode (mode decomposition)
 A named *style* of behaving that an animal falls into for a stretch of trials —

@@ -30,6 +30,7 @@ import tkinter as tk
 from tkinter import ttk
 from typing import Callable, Optional
 
+from tmaze.core.cue_command import letter_cue_label, short_cue_label
 from tmaze.core.phase3.phase3_ribbon import (
     RIBBON_AFTER, RIBBON_BEFORE, RibbonRow, all_ribbon_rows, ribbon_rows)
 from tmaze.core.phase3.phase3_log import Phase3StateSnapshot
@@ -59,9 +60,9 @@ _CORRECTIVE_OUTLINE = "#8a2be2"
 # outline. See docs/decisions/0115-probe.
 _PROBE_BG = "#cdeede"
 
-# Compact one-letter labels for the strip (arms and cue tones).
+# Compact one-letter labels for the strip's arms (cue letters come from
+# cue_command.letter_cue_label, which knows the session's stimulus).
 _ARM_SHORT = {"LEFT": "L", "RIGHT": "R"}
-_CUE_SHORT = {"HIGH": "H", "LOW": "L"}
 
 # How often the pull-mode self-poll checks the published snapshot (matches the
 # Phase 3 controller's Tk poll cadence).
@@ -382,16 +383,19 @@ class TrialRibbonView:
             cell["trial"].configure(text=f"#{row.trial} blk")
         else:
             cell["trial"].configure(text=f"#{row.trial}")
+        # An AM-noise run shows FAST/SLOW (F/S) for HIGH/LOW (docs/decisions/0222).
+        st = row.stimulus
         cell["choice"].configure(
-            text=f"{row.choice_cue}->{_ARM_SHORT.get(row.choice_side, '?')}")
+            text=f"{short_cue_label(row.choice_cue, st)}->"
+                 f"{_ARM_SHORT.get(row.choice_side, '?')}")
         # Show the planned return-arm cues only when the return cue is actually
         # played this run; otherwise drop the line (pack_forget shrinks the cell).
         # Cells are reused across renders, so this toggles on every fill.
         # See docs/decisions/0141.
         if row.return_enabled:
             cell["ret"].configure(
-                text=f"ret L:{_CUE_SHORT.get(row.return_cue_left, '?')} "
-                     f"R:{_CUE_SHORT.get(row.return_cue_right, '?')}")
+                text=f"ret L:{letter_cue_label(row.return_cue_left, st)} "
+                     f"R:{letter_cue_label(row.return_cue_right, st)}")
             cell["ret"].pack(anchor="w", before=cell["outcome"])
         else:
             cell["ret"].pack_forget()
