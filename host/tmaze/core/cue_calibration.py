@@ -15,7 +15,12 @@ A cheap speaker is imperfect in two ways this module corrects, per cue:
      FREQ_HZ_MAX], so we just send a corrected frequency (no reflash, no protocol
      change; see docs/decisions/0148, extends 0125).
 
-Both corrections are keyed by the TARGET cue frequency (4000 / 8000). Volume can
+A third, separate value is the amplitude-modulated NOISE cue's level
+(``noise_gain_pct``; docs/decisions/0222): one percent shared by both modulation
+rates, since the two noise cues are the same broadband noise and differ only in
+rhythm. It is not keyed by frequency and has no frequency correction.
+
+Both tone corrections are keyed by the TARGET cue frequency (4000 / 8000). Volume can
 only ATTENUATE (100 = full, the default); the louder cue is turned down to match
 the quieter one and overall level is restored with the speaker's own gain
 potentiometer. Frequency correction defaults to identity (command == target).
@@ -44,11 +49,13 @@ __all__ = [
     "clamp_gain_pct", "clamp_freq_hz", "default_calibration_path",
     "load_gains", "load_commanded", "save_gains", "save_commanded",
     "save_calibration", "gain_pct_for", "commanded_hz_for", "reload_calibration",
+    "load_noise_gain", "save_noise_gain", "noise_gain_pct",
 ]
 
 # Bump if the on-disk layout changes so an older reader can branch. v2 adds the
-# ``commanded_hz`` block alongside v1's ``gain_pct`` (docs/decisions/0148).
-SCHEMA_VERSION = 2
+# ``commanded_hz`` block alongside v1's ``gain_pct`` (docs/decisions/0148); v3
+# adds the scalar ``noise_gain_pct`` for the AM noise cue (docs/decisions/0222).
+SCHEMA_VERSION = 3
 
 # Percent of full DAC amplitude. 100 == the firmware's full level (the default
 # when no gain is sent); it can only be turned DOWN (see module docstring and
@@ -166,16 +173,33 @@ def load_commanded(path=None) -> Dict[int, int]:
     return out
 
 
+def load_noise_gain(path=None) -> int:
+    """Read the AM noise cue's level percent from ``path`` (default: host JSON).
+
+    A missing file or key means full volume (:data:`DEFAULT_GAIN_PCT`); the
+    value is clamped into range."""
+    raw = _read_raw(path)
+    if "noise_gain_pct" not in raw:
+        return DEFAULT_GAIN_PCT
+    return clamp_gain_pct(raw["noise_gain_pct"])
+
+
 def save_calibration(path, gains: Dict[int, int],
-                     commanded: Dict[int, int]) -> None:
-    """Write BOTH the ``gain_pct`` and ``commanded_hz`` maps to ``path`` (pretty
-    JSON, schema-versioned).
+                     commanded: Dict[int, int],
+                     noise_gain: Optional[int] = None) -> None:
+    """Write the ``gain_pct`` and ``commanded_hz`` maps and the noise level to
+    ``path`` (pretty JSON, schema-versioned).
 
     Frequencies are normalized/sorted, gains clamped, and commanded values
     clamped into range, so the file is always a valid, round-trippable
-    calibration.
+    calibration. ``noise_gain`` None keeps the level already on disk.
     """
     p = Path(path) if path is not None else default_calibration_path()
+    if noise_gain is None:
+        try:
+            noise_gain = load_noise_gain(p)
+        except (OSError, ValueError):
+            noise_gain = DEFAULT_GAIN_PCT
 
     clean_gain: Dict[str, int] = {}
     for hz, pct in gains.items():
@@ -196,6 +220,7 @@ def save_calibration(path, gains: Dict[int, int],
         "_schema": SCHEMA_VERSION,
         "gain_pct": ordered_gain,
         "commanded_hz": ordered_cmd,
+        "noise_gain_pct": clamp_gain_pct(noise_gain),
     }
     with p.open("w", encoding="utf-8") as fh:
         json.dump(obj, fh, indent=2, ensure_ascii=False)
@@ -222,23 +247,39 @@ def save_commanded(path, commanded: Dict[int, int]) -> None:
     save_calibration(path, gains, commanded)
 
 
+def save_noise_gain(path, pct: int) -> None:
+    """Write the AM noise level, PRESERVING the tone ``gain_pct`` and
+    ``commanded_hz`` blocks on disk."""
+    try:
+        gains = load_gains(path)
+    except (OSError, ValueError):
+        gains = {}
+    try:
+        commanded = load_commanded(path)
+    except (OSError, ValueError):
+        commanded = {}
+    save_calibration(path, gains, commanded, noise_gain=pct)
+
+
 # Cached calibration maps, loaded lazily on first use and re-loadable via
 # reload_calibration() (e.g. after the Setup subtab rewrites the file, or to
 # point a test at a temp file). Mirrors reward_volume's cache.
 _GAINS: Optional[Dict[int, int]] = None
 _COMMANDED: Optional[Dict[int, int]] = None
+_NOISE_GAIN: Optional[int] = None
 _GAINS_PATH = None  # None -> the default host/cue_calibration.json
 
 
 def reload_calibration(path=None) -> None:
-    """(Re)load BOTH calibration maps from ``path`` (default: the host JSON).
+    """(Re)load the calibration maps and noise level from ``path`` (default: the
+    host JSON).
 
     Call after the calibration file is rewritten, or from a test to point at a
     temporary file. Passing a path makes it the source for subsequent lookups. A
     malformed file leaves the previous (or empty) maps in place so a bad save
     can't crash the cue path mid-session.
     """
-    global _GAINS, _COMMANDED, _GAINS_PATH
+    global _GAINS, _COMMANDED, _NOISE_GAIN, _GAINS_PATH
     if path is not None:
         _GAINS_PATH = path
     src = _GAINS_PATH or default_calibration_path()
@@ -252,6 +293,11 @@ def reload_calibration(path=None) -> None:
     except (OSError, ValueError):
         if _COMMANDED is None:
             _COMMANDED = {}
+    try:
+        _NOISE_GAIN = load_noise_gain(src)
+    except (OSError, ValueError):
+        if _NOISE_GAIN is None:
+            _NOISE_GAIN = DEFAULT_GAIN_PCT
 
 
 def _gains() -> Dict[int, int]:
@@ -290,3 +336,10 @@ def commanded_hz_for(target_hz) -> Optional[int]:
     if f is None:
         return None
     return _commanded().get(f, f)
+
+
+def noise_gain_pct() -> int:
+    """Playback volume percent (0..100) for the AM noise cue (both rates)."""
+    if _NOISE_GAIN is None:
+        reload_calibration()
+    return DEFAULT_GAIN_PCT if _NOISE_GAIN is None else _NOISE_GAIN

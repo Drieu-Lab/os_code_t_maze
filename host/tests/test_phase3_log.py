@@ -16,6 +16,7 @@ import io
 import unittest
 from dataclasses import fields
 
+from tmaze.core.cue_command import STIM_AM_NOISE, CueStimulus
 from tmaze.core.phase3.debias import DebiasBlockConfig
 from tmaze.core.phase3.phase3_log import (COLUMNS, Phase3Log, Phase3RowView, Phase3StateSnapshot,
                         _Row)
@@ -38,12 +39,14 @@ class TestColumns(unittest.TestCase):
     def test_columns_align_with_row_fields(self):
         # COLUMNS is "trial" + the _Row fields + the trial-edit lifecycle columns
         # (attempt/superseded/edit are row metadata, not _Row trial data;
-        # docs/decisions/0119), in order; guards drift between the header and the
-        # rendered cells.
+        # docs/decisions/0119), in order, then the proto-13 seed fields appended
+        # after them (docs/decisions/0222); guards drift between the header and
+        # the rendered cells.
+        trailing = ["choice_cue_seed", "return_cue_seed"]
         self.assertEqual(
             list(COLUMNS),
-            ["trial"] + [f.name for f in fields(_Row)]
-            + ["attempt", "superseded", "edit"])
+            ["trial"] + [f.name for f in fields(_Row) if f.name not in trailing]
+            + ["attempt", "superseded", "edit"] + trailing)
 
 
 class TestPlan(unittest.TestCase):
@@ -231,6 +234,42 @@ class TestFirmwareClockAcks(unittest.TestCase):
             self.assertIsNone(r.choice_cue_on_fw_ms)
             self.assertIsNone(r.reward_cmd_fw_ms)
             self.assertIsNone(r.return_cue_on_fw_ms)
+
+
+class TestCueStimulus(unittest.TestCase):
+    """Proto 13: the session's cue stimulus header + per-cue noise seeds
+    (docs/decisions/0222)."""
+
+    def _rows(self, log):
+        body = [ln for ln in log.render_csv().split("\n") if ln and not ln.startswith("#")]
+        return list(csv.DictReader(io.StringIO("\n".join(body))))
+
+    def test_tone_session_header_and_blank_seeds(self):
+        log = _log()
+        log.cue_acked(0, 100)
+        header = [ln for ln in log.render_csv().split("\n") if ln.startswith("#")]
+        self.assertIn("# cue_stimulus cue_stimulus=tone cue_am_fast_hz= "
+                      "cue_am_slow_hz= cue_am_gain_pct=", header)
+        self.assertEqual(self._rows(log)[0]["choice_cue_seed"], "")
+        self.assertEqual(log.snapshot(0, armed=True).stimulus, CueStimulus())
+
+    def test_am_session_header_seeds_and_snapshot(self):
+        st = CueStimulus(STIM_AM_NOISE, 32.0, 2.5)
+        log = Phase3Log(_seq(), animal="R", session_start_iso="t",
+                        stimulus=st, noise_gain_pct=60)
+        log.cue_acked(0, 100, seed=2654435769)
+        log.cue_acked(0, 200, seed=5)                  # first echo wins
+        log.return_cue_acked(0, 800, seed=7)
+        header = [ln for ln in log.render_csv().split("\n") if ln.startswith("#")]
+        self.assertIn("# cue_stimulus cue_stimulus=am_noise cue_am_fast_hz=32 "
+                      "cue_am_slow_hz=2.5 cue_am_gain_pct=60", header)
+        row = self._rows(log)[0]
+        self.assertEqual((row["choice_cue_seed"], row["return_cue_seed"]),
+                         ("2654435769", "7"))
+        self.assertEqual(row["edit"], "")               # v12 columns unmoved
+        snap = log.snapshot(0, armed=True)
+        self.assertEqual(snap.stimulus, st)
+        self.assertEqual(snap.rows[0].choice_cue_seed, "2654435769")
 
 
 class TestRender(unittest.TestCase):
@@ -433,18 +472,20 @@ class TestDebiasLogging(unittest.TestCase):
         # (docs/decisions/0110), then the unrewarded-probe markers (probe +
         # probe_trigger; docs/decisions/0115-probe, 0134), then the firmware-clock
         # cue/reward twins (docs/decisions/0165 choice+reward, 0166 return), then
-        # the trial-edit lifecycle columns (docs/decisions/0119), in order.
-        self.assertEqual(COLUMNS[-16:],
+        # the trial-edit lifecycle columns (docs/decisions/0119), then the AM
+        # noise seeds (docs/decisions/0222), in order.
+        self.assertEqual(COLUMNS[-18:],
                          ("sched_state", "block_id", "block_trigger", "bias",
                           "block_kind", "alt_rate", "prime_ms", "topup_ms_total",
                           "probe", "probe_trigger",
                           "choice_cue_on_fw_ms", "reward_cmd_fw_ms",
                           "return_cue_on_fw_ms",
-                          "attempt", "superseded", "edit"))
+                          "attempt", "superseded", "edit",
+                          "choice_cue_seed", "return_cue_seed"))
 
-    def test_header_bumped_to_proto12_with_generator(self):
+    def test_header_bumped_to_proto13_with_generator(self):
         header = [ln for ln in _log().render_csv().split("\n") if ln.startswith("#")]
-        self.assertTrue(any("proto=12" in ln for ln in header))
+        self.assertTrue(any("proto=13" in ln for ln in header))
         self.assertTrue(any("generator=balanced" in ln for ln in header))
         # A balanced session records no closed-loop params.
         self.assertFalse(any("debias_blocks" in ln for ln in header))

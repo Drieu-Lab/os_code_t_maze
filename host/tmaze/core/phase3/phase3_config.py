@@ -17,8 +17,10 @@ applying the resolved values on arm.
 
 Division of the sections (see docs/decisions/0070):
   - ``reward`` (port, pulse_ms, max_topups, reward_incorrect) and ``cue``
-    (choice/return enabled, require_up_stem, min_confidence) are operator knobs,
-    editable from the tab and persisted by Save.
+    (choice/return enabled, require_up_stem, min_confidence, and the session's
+    cue ``stimulus`` - tone or AM noise - with its two AM rates; ADR-0222) are
+    operator knobs, editable from the tab and persisted by Save. The AM rates
+    themselves are hand-edited here (shown in the tab's labels).
   - ``sequence`` (max_trials, block_size, max_same_run, tone Hz, high_tone_is_left,
     seed) holds the SCIENTIFIC schedule parameters. These are hand-edited in
     `phase3.json` only (shown read-only in the tab) so the balancing / tone
@@ -42,6 +44,7 @@ from __future__ import annotations
 import json
 from typing import Optional
 
+from tmaze.core.cue_command import CueStimulus, make_stimulus
 from tmaze.core.cue_gate import CueParams
 from tmaze.core.phase3.alternation import AlternationBlockConfig
 from tmaze.core.phase3.debias import DebiasBlockConfig
@@ -91,7 +94,12 @@ _SCHEMA = {
              "Session Start, whichever comes first (soft stop: the operator still "
              "clicks Stop; docs/decisions/0190); water_at_chance_fraction sizes the "
              "per-animal reward from animals.json daily_water_ml "
-             "(docs/decisions/0191). Hand-edit here only."),
+             "(docs/decisions/0191). Hand-edit here only. cue.stimulus: 'tone' "
+             "(HIGH/LOW tones from sequence.high_tone_hz/low_tone_hz) or "
+             "'am_noise' (amplitude-modulated white noise; HIGH = cue.am_fast_hz, "
+             "LOW = cue.am_slow_hz, 1-128 Hz, up to 3 decimals; needs firmware "
+             "protocol 11+). Chosen per session on the Phase 3 tab, locked while "
+             "armed (docs/decisions/0222)."),
 }
 
 
@@ -108,6 +116,7 @@ def default_config() -> dict:
     al = AlternationBlockConfig()
     pb = ProbeBlockConfig()
     sc = SessionCapConfig()
+    st = CueStimulus()
     return {
         "_schema": dict(_SCHEMA),
         "reward": {
@@ -121,6 +130,11 @@ def default_config() -> dict:
             "return_enabled": cp.return_enabled,
             "require_up_stem": cp.require_up_stem,
             "min_confidence": cp.min_confidence,
+            # Cue stimulus for the session (docs/decisions/0222): "tone" or
+            # "am_noise". The two AM rates stand in for HIGH (fast) / LOW (slow).
+            "stimulus": st.kind,
+            "am_fast_hz": st.am_fast_hz,
+            "am_slow_hz": st.am_slow_hz,
         },
         "sequence": {
             "max_trials": tc.max_trials,
@@ -258,6 +272,16 @@ def to_cue_params(config: dict) -> CueParams:
                      return_enabled=bool(c.get("return_enabled", True)),
                      min_confidence=mc,
                      require_up_stem=bool(c.get("require_up_stem", True)))
+
+
+def to_cue_stimulus(config: dict) -> CueStimulus:
+    """Build + validate the session's `CueStimulus` from the ``cue`` section
+    (missing keys fall back to tones at 32 / 2 Hz; docs/decisions/0222)."""
+    c = config.get("cue", {})
+    d = CueStimulus()
+    return make_stimulus(str(c.get("stimulus", d.kind)),
+                         c.get("am_fast_hz", d.am_fast_hz),
+                         c.get("am_slow_hz", d.am_slow_hz))
 
 
 def _to_debias_config(d: dict) -> DebiasBlockConfig:
@@ -448,6 +472,7 @@ def validate_phase3_config(config: dict) -> None:
     to_phase3_config(config)
     reward_max_topups(config)
     to_cue_params(config)
+    to_cue_stimulus(config)
     to_trial_config(config)
     resolve_seed(config)
     to_session_cap_config(config)

@@ -15,6 +15,7 @@ from __future__ import annotations
 import unittest
 from datetime import datetime, timedelta
 
+from tmaze.core.cue_command import STIM_AM_NOISE, CueStimulus
 from tmaze.core.phase3.phase3_log import Phase3Log
 from tmaze.core.phase3.phase3_task import CORRECT, INCORRECT
 from tmaze.core.phase3.phase3_log_reader import (
@@ -178,6 +179,33 @@ class TestConfigMismatch(unittest.TestCase):
         self.assertIn("generator balanced→intervention_blocks", joined)
         self.assertIn("cue map HIGH=L→HIGH=R", joined)
         self.assertIn("probe absent→present", joined)
+
+    def test_cue_type_difference(self):
+        diffs = describe_config_mismatch(self._cfg(), self._cfg(stimulus="am_noise"))
+        self.assertIn("cue type tone→am_noise", "; ".join(diffs))
+
+
+class TestCueStimulus(unittest.TestCase):
+    """Proto 13 ``# cue_stimulus`` header (docs/decisions/0222)."""
+
+    def test_am_session_round_trips(self):
+        seq = TrialSequence(TrialConfig(max_trials=4, block_size=30, max_same_run=3),
+                            seed=1)
+        st = CueStimulus(STIM_AM_NOISE, 32.0, 2.5)
+        log = Phase3Log(seq, animal="600", session_start_iso=_BASE.isoformat(),
+                        stimulus=st, noise_gain_pct=70)
+        log.cue_acked(0, 10, seed=99)
+        snap, cfg = parse_csv_text(log.render_csv())
+        self.assertEqual(snap.stimulus, st)
+        self.assertEqual(cfg.stimulus, STIM_AM_NOISE)
+        self.assertEqual(snap.rows[0].choice_cue_seed, "99")
+
+    def test_tone_and_old_files_read_as_tone(self):
+        snap, cfg = parse_csv_text(_log(n=2).render_csv())
+        self.assertEqual(snap.stimulus, CueStimulus())
+        old = "# phase3_session animal=600 proto=12\ntrial,correct_arm\n1,LEFT\n"
+        snap, cfg = parse_csv_text(old)
+        self.assertEqual(cfg.stimulus, "tone")
 
 
 class TestDiscovery(unittest.TestCase):

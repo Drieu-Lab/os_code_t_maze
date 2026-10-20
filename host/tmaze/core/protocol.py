@@ -39,7 +39,7 @@ Headless tests: python -m unittest test_protocol   (from host/)
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 
 
 @dataclass(frozen=True)
@@ -230,7 +230,20 @@ def reward_info(line: str) -> Optional[Tuple[bool, Optional[int]]]:
 
 # --------------------------------- CUE lines ---------------------------------
 
-def cue_info_from(p: Optional[ParsedLine]) -> Optional[Tuple[str, Optional[str], Optional[int]]]:
+def _cue_rate(text: str) -> Optional[Union[int, float]]:
+    """The CUE echo's <hz>: an int, or (protocol v11 AM rate) a float with at
+    most 3 decimals. None if it is neither."""
+    whole, dot, frac = text.partition(".")
+    if not whole.lstrip("+-").isdigit():
+        return None
+    if not dot:
+        return int(whole)
+    if not frac.isdigit() or len(frac) > 3:
+        return None
+    return float(text)
+
+
+def cue_info_from(p: Optional[ParsedLine]) -> Optional[Tuple[str, Optional[str], Optional[Union[int, float]]]]:
     """(state, kind, freq_hz) for a pre-parsed "<ms>,CUE,..." line, else None
     (see cue_info)."""
     if p is None or p.type != "CUE" or not p.fields:
@@ -242,14 +255,14 @@ def cue_info_from(p: Optional[ParsedLine]) -> Optional[Tuple[str, Optional[str],
         if len(p.fields) < 3:
             return None
         kind = p.fields[1].strip().upper()
-        freq_s = p.fields[2].strip()
-        if kind not in ("CHOICE", "RETURN") or not freq_s.lstrip("+-").isdigit():
+        freq = _cue_rate(p.fields[2].strip())
+        if kind not in ("CHOICE", "RETURN") or freq is None:
             return None
-        return ("ON", kind, int(freq_s))
+        return ("ON", kind, freq)
     return None
 
 
-def cue_info(line: str) -> Optional[Tuple[str, Optional[str], Optional[int]]]:
+def cue_info(line: str) -> Optional[Tuple[str, Optional[str], Optional[Union[int, float]]]]:
     """(state, kind, freq_hz) for a "<ms>,CUE,..." line (protocol v5), else None.
 
     The firmware emits this for the host-driven positional cue, reflecting the
@@ -258,11 +271,29 @@ def cue_info(line: str) -> Optional[Tuple[str, Optional[str], Optional[int]]]:
       - "<ms>,CUE,ON,<CHOICE|RETURN>,<freq_hz>" -> ("ON", "CHOICE"|"RETURN", freq)
       - "<ms>,CUE,OFF"                          -> ("OFF", None, None)
 
+    For the AM noise cue (v10+) ``freq`` is the modulation rate, which from v11
+    may be fractional ("2.5") - then it comes back as a float
+    (docs/decisions/0222).
+
     The TONE_ON/TONE_OFF TTLs (not serial) carry the hardware-synchronous onset
     mark; this line is the behavioral-record companion (which cue, what tone).
     As of protocol v9 those TTLs also emit a serial TTL twin (see ttl_edge).
     """
     return cue_info_from(parse(line))
+
+
+def cue_seed_from(p: Optional[ParsedLine]) -> Optional[int]:
+    """The noise seed of an AM cue-on echo
+    ("<ms>,CUE,ON,<kind>,<hz>,<gain>,AM,<seed>", protocol v10+), else None.
+
+    The seed is what lets analysis rebuild the exact noise the rat heard
+    (docs/decisions/0221)."""
+    if p is None or p.type != "CUE" or len(p.fields) < 6:
+        return None
+    if p.fields[0].strip().upper() != "ON" or p.fields[4].strip().upper() != "AM":
+        return None
+    seed = p.fields[5].strip()
+    return int(seed) if seed.isdigit() else None
 
 
 # --------------------------------- TTL lines ---------------------------------

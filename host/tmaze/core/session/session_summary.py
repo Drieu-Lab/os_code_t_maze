@@ -65,6 +65,8 @@ from datetime import datetime
 from tmaze.core.timeutil import now_iso
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
+from tmaze.core.cue_command import (
+    FAST_LABEL, SLOW_LABEL, STIM_AM_NOISE, format_rate)
 from tmaze.core.reward import reward_volume
 
 if TYPE_CHECKING:  # type-only imports - no runtime coupling to the stats cores
@@ -302,7 +304,7 @@ class SessionSummary:
             lines.append(f"Seed:     {self.seed}")
         tone_line = _tone_line(self.tones)
         if tone_line:
-            lines.append(f"Tones:    {tone_line}")
+            lines.append(f"{'Cues:' if _is_am(self.tones) else 'Tones:':<10}{tone_line}")
         lines.append(f"Start:    {_iso_of(self.t0)}")
         lines.append(f"End:      {_iso_of(self.t_end)}")
         lines.append(f"Duration: {_duration(self.duration_s)}")
@@ -326,7 +328,7 @@ class SessionSummary:
         lines.append("")
         lines.append("Cued task")
         lines.append("-" * 40)
-        lines.extend(_cued_lines(self.cued))
+        lines.extend(_cued_lines(self.cued, _cue_words(self.tones)))
         lines.append(f"  Water (est): {_water_str(self.estimated_water)}")
         manual = self.manual_water
         if manual["pulses"]:
@@ -613,6 +615,17 @@ def _duration(seconds: Optional[float]) -> str:
     return f"{h}:{m:02d}:{s:02d}"
 
 
+def _is_am(tones: Dict[str, Any]) -> bool:
+    return (bool(tones) and tones.get("cue_stimulus") == STIM_AM_NOISE
+            and tones.get("am_fast_hz") is not None
+            and tones.get("am_slow_hz") is not None)
+
+
+def _cue_words(tones: Dict[str, Any]) -> tuple:
+    """What HIGH / LOW are called in this session: HIGH/LOW, or FAST/SLOW."""
+    return (FAST_LABEL, SLOW_LABEL) if _is_am(tones) else ("HIGH", "LOW")
+
+
 def _tone_line(tones: Dict[str, Any]) -> str:
     """A one-line cue->side mapping, or "" when the tone info is absent."""
     if not tones:
@@ -620,11 +633,19 @@ def _tone_line(tones: Dict[str, Any]) -> str:
     high_hz = tones.get("high_tone_hz")
     low_hz = tones.get("low_tone_hz")
     high_is_left = tones.get("high_tone_is_left")
+    # An AM-noise session plays the fast rate for HIGH and the slow one for LOW
+    # (docs/decisions/0222); show those instead of the unused tone frequencies.
+    if _is_am(tones):
+        high_hz, low_hz = (format_rate(tones["am_fast_hz"]),
+                           format_rate(tones["am_slow_hz"]))
     if high_is_left is None or high_hz is None or low_hz is None:
         return ""
     high_side = "LEFT" if high_is_left else "RIGHT"
     low_side = "RIGHT" if high_is_left else "LEFT"
-    line = f"HIGH {high_hz} Hz -> {high_side}   LOW {low_hz} Hz -> {low_side}"
+    hi, lo = _cue_words(tones)
+    line = f"{hi} {high_hz} Hz -> {high_side}   {lo} {low_hz} Hz -> {low_side}"
+    if _is_am(tones):
+        line += "   [AM noise]"
     # Note a per-animal override so the summary shows the mapping came from
     # animals.json, not just phase3.json (ADR-0186).
     if str(tones.get("high_tone_is_left_source") or "config") == "animals.json":
@@ -658,7 +679,8 @@ def _dwell_str(st) -> str:
     return f"med {med:.2f}s  mean {mean:.2f}s   [n={n}; relative, host-clock]"
 
 
-def _cued_lines(st: Optional["Phase3Stats"]) -> list:
+def _cued_lines(st: Optional["Phase3Stats"],
+                cue_words: tuple = ("HIGH", "LOW")) -> list:
     """Human-readable Phase 3 cued-task lines (docs/decisions/0052 measures).
 
     For a closed-loop debias session the learning measures above are over the
@@ -681,8 +703,8 @@ def _cued_lines(st: Optional["Phase3Stats"]) -> list:
         f"  Accuracy:    {_pct(st.accuracy_cum)}  "
         f"(last {n}: {_pct(st.accuracy_win)})   "
         f"[{st.oob_correct}/{st.oob_completed}]",
-        f"  By cue:      HIGH {_pct(st.high_accuracy)} [{st.high_completed}]   "
-        f"LOW {_pct(st.low_accuracy)} [{st.low_completed}]",
+        f"  By cue:      {cue_words[0]} {_pct(st.high_accuracy)} [{st.high_completed}]   "
+        f"{cue_words[1]} {_pct(st.low_accuracy)} [{st.low_completed}]",
         f"  Side bias:   {_lr(st.lr_bias)}   "
         f"[{st.left_choices}L/{st.right_choices}R]",
     ]

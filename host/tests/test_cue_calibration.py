@@ -38,6 +38,7 @@ class _CalFile(unittest.TestCase):
         cc._GAINS_PATH = None
         cc._GAINS = None
         cc._COMMANDED = None
+        cc._NOISE_GAIN = None
         shutil.rmtree(self.dir, ignore_errors=True)
 
 
@@ -203,6 +204,34 @@ class ReloadToleranceTests(_CalFile):
         cc.reload_calibration()                             # same path, now corrupt
         self.assertEqual(cc.gain_pct_for(8000), 82)
         self.assertEqual(cc.commanded_hz_for(8000), 8100)
+
+
+class NoiseGainTests(_CalFile):
+    """The shared AM-noise level (schema v3; docs/decisions/0222)."""
+
+    def test_missing_is_full_volume(self):
+        self.assertEqual(cc.load_noise_gain(self.path), cc.DEFAULT_GAIN_PCT)
+        cc.reload_calibration(self.path)
+        self.assertEqual(cc.noise_gain_pct(), cc.DEFAULT_GAIN_PCT)
+
+    def test_save_noise_preserves_tone_blocks(self):
+        cc.save_calibration(self.path, {8000: 82}, {8000: 8100})
+        cc.save_noise_gain(self.path, 55)
+        self.assertEqual(cc.load_noise_gain(self.path), 55)
+        self.assertEqual(cc.load_gains(self.path), {8000: 82})
+        self.assertEqual(cc.load_commanded(self.path), {8000: 8100})
+        cc.reload_calibration(self.path)
+        self.assertEqual(cc.noise_gain_pct(), 55)
+
+    def test_tone_saves_preserve_noise(self):
+        cc.save_noise_gain(self.path, 40)
+        cc.save_gains(self.path, {8000: 50})
+        cc.save_commanded(self.path, {8000: 8200})
+        self.assertEqual(cc.load_noise_gain(self.path), 40)
+
+    def test_clamped(self):
+        cc.save_noise_gain(self.path, 150)
+        self.assertEqual(cc.load_noise_gain(self.path), 100)
 
 
 if __name__ == "__main__":

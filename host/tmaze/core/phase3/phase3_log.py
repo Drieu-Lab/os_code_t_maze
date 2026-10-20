@@ -58,6 +58,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, fields, replace
 from typing import Any, Dict, List, Optional, Tuple
 
+from tmaze.core.cue_command import CueStimulus, format_rate
 from tmaze.core.phase3.phase3_task import ABANDONED, UNCUED
 from tmaze.core.phase3.trial_sequence import HIGH, LEFT, LOW, RIGHT, TrialSequence
 
@@ -75,7 +76,16 @@ _ARM_LABEL = {LEFT: "LEFT", RIGHT: "RIGHT", "left": "LEFT", "right": "RIGHT"}
 # v12 (docs/decisions/0166): added ``return_cue_on_fw_ms``, the firmware-clock
 # twin of ``return_cue_on_iso`` (append-only), so the return cue gets the same
 # treatment as the choice cue if/when it is enabled.
-PROTO_VERSION = 12
+# v13 (docs/decisions/0222): the session may play amplitude-modulated noise
+# instead of tones. A ``# cue_stimulus`` header line records which (and the two
+# rates + noise level), and ``choice_cue_seed`` / ``return_cue_seed`` are appended
+# LAST (after the lifecycle columns, so every v12 column keeps its position):
+# the noise seed the firmware echoed for that cue, blank for a tone.
+PROTO_VERSION = 13
+
+# ``_Row`` fields written AFTER the attempt/superseded/edit lifecycle columns
+# (added in proto 13, appended so earlier column positions never move).
+_TRAILING_FIELDS = ("choice_cue_seed", "return_cue_seed")
 
 # CSV column order. The planned block is the "Nx3 cue matrix" (choice + the two
 # return arms) plus the explicit correct_arm; the rest is filled live.
@@ -121,6 +131,10 @@ COLUMNS = (
     # "back"; blank on the natural first attempt). These are lifecycle metadata,
     # not trial data, so they live on the row here rather than in ``_Row``.
     "attempt", "superseded", "edit",
+    # Per-cue noise seed (proto 13, docs/decisions/0222): from the firmware's AM
+    # ``CUE,ON`` echo, so analysis can rebuild the exact noise the rat heard.
+    # Blank on a tone session. Rendered after the lifecycle columns.
+    *_TRAILING_FIELDS,
 )
 
 
@@ -180,6 +194,10 @@ class _Row:
     choice_cue_on_fw_ms: Optional[str] = None
     reward_cmd_fw_ms: Optional[str] = None
     return_cue_on_fw_ms: Optional[str] = None
+    # AM noise seed echoed for the choice / return cue (docs/decisions/0222);
+    # None on a tone session or until the echo is seen.
+    choice_cue_seed: Optional[str] = None
+    return_cue_seed: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -223,6 +241,8 @@ class Phase3RowView:
     choice_cue_on_fw_ms: Optional[str]
     reward_cmd_fw_ms: Optional[str]
     return_cue_on_fw_ms: Optional[str]
+    choice_cue_seed: Optional[str] = None
+    return_cue_seed: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -330,6 +350,9 @@ class Phase3StateSnapshot:
     # "remove rat, Stop session" banner is stale then, so the publisher gates this
     # on an active session (docs/decisions/0192).
     cap_reached: Optional[Dict[str, Any]] = None
+    # The session's cue stimulus (tone or AM noise + its rates; docs/decisions/
+    # 0222), so panels can show FAST / SLOW instead of HIGH / LOW.
+    stimulus: CueStimulus = CueStimulus()
 
 
 @dataclass(frozen=True)
@@ -368,8 +391,14 @@ class Phase3Log:
                  cue_calibration: Optional[Dict[str, Any]] = None,
                  high_tone_is_left_source: str = "config",
                  session_cap=None, reward_pulse_source: str = "config",
-                 daily_water_ml: Optional[float] = None) -> None:
+                 daily_water_ml: Optional[float] = None,
+                 stimulus: Optional[CueStimulus] = None,
+                 noise_gain_pct: Optional[int] = None) -> None:
         self.animal = animal
+        # The cue stimulus this run plays + the AM noise level sent (docs/
+        # decisions/0222); recorded in the header and the snapshot.
+        self.stimulus = stimulus if stimulus is not None else CueStimulus()
+        self.noise_gain_pct = noise_gain_pct
         self.seed = sequence.seed
         self.cfg = sequence.cfg
         # Where ``reward_pulse_ms`` came from (docs/decisions/0191): "config" or
@@ -520,16 +549,22 @@ class Phase3Log:
         if r is not None:
             r.choice_cue_off_iso = iso
 
-    def cue_acked(self, index: int, fw_ms: Optional[int]) -> None:
+    def cue_acked(self, index: int, fw_ms: Optional[int],
+                  seed: Optional[int] = None) -> None:
         """Record the firmware hardware-clock ms of the CHOICE cue ONSET for
         ``index``, taken from the firmware's ``CUE,ON`` echo (docs/decisions/0165).
 
         First echo wins (idempotent for the trial); a missing/None ms leaves the
         cell blank - the honest signal that no echo was captured. This is the
-        firmware-clock twin of ``choice_cue_on_iso`` (a host decision-time stamp)."""
+        firmware-clock twin of ``choice_cue_on_iso`` (a host decision-time stamp).
+        ``seed`` is the AM noise seed from the same echo (docs/decisions/0222)."""
         r = self._row(index)
-        if r is not None and r.choice_cue_on_fw_ms is None and fw_ms is not None:
+        if r is None:
+            return
+        if r.choice_cue_on_fw_ms is None and fw_ms is not None:
             r.choice_cue_on_fw_ms = str(int(fw_ms))
+        if r.choice_cue_seed is None and seed is not None:
+            r.choice_cue_seed = str(int(seed))
 
     def choice_scored(self, index: int, chosen_arm: str, outcome: str,
                       iso: str) -> None:
@@ -599,17 +634,22 @@ class Phase3Log:
         if r is not None:
             r.return_cue_off_iso = iso
 
-    def return_cue_acked(self, index: int, fw_ms: Optional[int]) -> None:
+    def return_cue_acked(self, index: int, fw_ms: Optional[int],
+                         seed: Optional[int] = None) -> None:
         """Record the firmware hardware-clock ms of the RETURN cue ONSET for
         ``index``, from the firmware's ``CUE,ON`` return echo (docs/decisions/0166).
 
         The return-cue twin of :meth:`cue_acked`: first echo wins, a missing/None
         ms leaves the cell blank (and it stays blank on a run with the return cue
         disabled, like ``return_cue_on_iso``). Firmware-clock twin of
-        ``return_cue_on_iso``."""
+        ``return_cue_on_iso``. ``seed`` as in :meth:`cue_acked`."""
         r = self._row(index)
-        if r is not None and r.return_cue_on_fw_ms is None and fw_ms is not None:
+        if r is None:
+            return
+        if r.return_cue_on_fw_ms is None and fw_ms is not None:
             r.return_cue_on_fw_ms = str(int(fw_ms))
+        if r.return_cue_seed is None and seed is not None:
+            r.return_cue_seed = str(int(seed))
 
     def trial_ended(self, index: int, iso: str) -> None:
         r = self._row(index)
@@ -785,7 +825,7 @@ class Phase3Log:
             intervention_next=seq.intervention_will_continue(),
             probe_upcoming=seq.probe_upcoming(),
             uncued=uncued, superseded_rows=superseded_rows,
-            cap_reached=cap_reached)
+            cap_reached=cap_reached, stimulus=self.stimulus)
 
     # ------------------------------------------------------------- render
     def _header_comment(self) -> List[str]:
@@ -809,6 +849,17 @@ class Phase3Log:
                 f"high_gain_pct={cc.get('high_gain_pct', '')} "
                 f"low_cmd_hz={cc.get('low_cmd_hz', '')} "
                 f"low_gain_pct={cc.get('low_gain_pct', '')}")
+        # Which cue stimulus played (proto 13, docs/decisions/0222). In an AM
+        # session HIGH = the fast rate and LOW = the slow one; the am_* cells are
+        # blank for a tone session. Keys are cue_-prefixed like the line above.
+        st = self.stimulus
+        am = st.is_am
+        gain = "" if (not am or self.noise_gain_pct is None) else int(self.noise_gain_pct)
+        lines.append(
+            f"# cue_stimulus cue_stimulus={st.kind} "
+            f"cue_am_fast_hz={format_rate(st.am_fast_hz) if am else ''} "
+            f"cue_am_slow_hz={format_rate(st.am_slow_hz) if am else ''} "
+            f"cue_am_gain_pct={gain}")
         lines += [
             f"# block_size={c.block_size} max_same_run={c.max_same_run} "
             f"max_alt_run={c.max_alt_run} "
@@ -893,7 +944,7 @@ class Phase3Log:
         every preserved (superseded) attempt from the archive, ordered by
         (trial, attempt) so a reader sees a trial's attempts together with the
         current one last (docs/decisions/0119)."""
-        data_fields = [f.name for f in fields(_Row)]
+        data_fields = [f.name for f in fields(_Row) if f.name not in _TRAILING_FIELDS]
         # (trial_no, attempt, superseded, edit, row): the current live attempts...
         entries: List[Tuple[int, int, str, str, _Row]] = [
             (i + 1, self._attempt[i], "", self._edit[i], r)
@@ -912,5 +963,7 @@ class Phase3Log:
                 for name in data_fields
             ]
             cells += [str(attempt), superseded, edit or ""]
+            cells += [("" if getattr(r, name) is None else str(getattr(r, name)))
+                      for name in _TRAILING_FIELDS]
             lines.append(",".join(cells))
         return "\n".join(lines) + "\n"

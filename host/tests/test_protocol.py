@@ -13,7 +13,8 @@ import unittest
 import dataclasses
 
 from tmaze.core import protocol
-from tmaze.core.protocol import (animal_id, classify, cue_info, leading_ms, lick_edge,
+from tmaze.core.protocol import (animal_id, classify, cue_info, cue_seed_from,
+                      leading_ms, lick_edge,
                       mode_name, parse, reward_info, sanitize_animal_id,
                       sensor_edge, sol_pulse, ttl_edge, tx_dropped, version_info)
 
@@ -181,6 +182,22 @@ class TestCue(unittest.TestCase):
         self.assertEqual(cue_info("120,CUE,ON,CHOICE,32,100,AM,2654435769"),
                          ("ON", "CHOICE", 32))
         self.assertEqual(cue_info("120,CUE,ON,RETURN,2,100,AM,1"), ("ON", "RETURN", 2))
+
+    def test_on_fractional_am_rate(self):
+        # v11: the AM rate may carry up to 3 decimals (docs/decisions/0222).
+        self.assertEqual(cue_info("1,CUE,ON,CHOICE,2.5,100,AM,7"), ("ON", "CHOICE", 2.5))
+        self.assertEqual(cue_info("1,CUE,ON,CHOICE,2.125,100,AM,7"),
+                         ("ON", "CHOICE", 2.125))
+        self.assertIsNone(cue_info("1,CUE,ON,CHOICE,2.1255,100,AM,7"))
+        self.assertIsNone(cue_info("1,CUE,ON,CHOICE,2.,100,AM,7"))
+
+    def test_seed(self):
+        self.assertEqual(cue_seed_from(parse("1,CUE,ON,CHOICE,32,100,AM,2654435769")),
+                         2654435769)
+        self.assertIsNone(cue_seed_from(parse("1,CUE,ON,CHOICE,8000,85")))
+        self.assertIsNone(cue_seed_from(parse("1,CUE,OFF")))
+        self.assertIsNone(cue_seed_from(parse("1,CUE,ON,CHOICE,32,100,AM,x")))
+        self.assertIsNone(cue_seed_from(None))
 
     def test_off(self):
         self.assertEqual(cue_info("999,CUE,OFF"), ("OFF", None, None))

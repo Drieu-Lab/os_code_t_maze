@@ -12,7 +12,10 @@
     "choice_enabled": true,
     "return_enabled": false,
     "require_up_stem": false,
-    "min_confidence": 0.0
+    "min_confidence": 0.0,
+    "stimulus": "tone",
+    "am_fast_hz": 32.0,
+    "am_slow_hz": 2.0
   },
   "sequence": {
     "max_trials": 200,

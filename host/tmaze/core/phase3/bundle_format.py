@@ -27,6 +27,7 @@ from __future__ import annotations
 from typing import Any, Dict, Optional
 
 from tmaze.core import head_columns, maze_state
+from tmaze.core.cue_command import STIMULI
 from tmaze.core.phase3 import phase3_log
 from tmaze.core.phase3.phase3_task import ABANDONED, CORRECT, INCORRECT, UNCUED
 from tmaze.core.phase3.trial_sequence import HIGH, LEFT, LOW, RIGHT
@@ -47,7 +48,11 @@ from tmaze.core.phase3.trial_sequence import HIGH, LEFT, LOW, RIGHT
 # v5 (ADR-0220): the camera sidecar gains trailing learned head-point columns
 # (head_columns.HEAD_COLUMNS; blank when head tracking is off) + ``head_*``
 # header lines, documented here as ``sidecar_head_columns``.
-FORMAT_VERSION = 5
+# v6 (ADR-0222): a session may play amplitude-modulated noise cues instead of
+# tones. The trial CSV (proto 13) gains a ``# cue_stimulus`` header line and the
+# trailing ``choice_cue_seed`` / ``return_cue_seed`` columns; this manifest gains
+# ``cue_stimuli``. HIGH/LOW keep their meaning: in an AM session HIGH = the fast rate.
+FORMAT_VERSION = 6
 
 # The firmware serial protocol version at/after which the body-beam (S) and lick
 # (L) state bit is CORRECTED (1 = broken/contact); below it the recorded meaning
@@ -117,6 +122,10 @@ _COLUMN_DOC: Dict[str, str] = {
     "attempt": "1-based attempt number for this trial (append-only edits)",
     "superseded": "1 on a preserved attempt a later Repeat/Back replaced",
     "edit": "action that created a >1 attempt: operator repeat/back, or 'uncued' (auto: no cue that trip; see docs/decisions/0171)",
+    "choice_cue_seed": "noise seed of the AM choice cue, from its CUE,ON echo (blank "
+                       "for a tone; see docs/decisions/0221, 0222)",
+    "return_cue_seed": "noise seed of the AM return cue, from its CUE,ON echo (blank "
+                       "for a tone or no return cue; see docs/decisions/0222)",
 }
 
 
@@ -204,6 +213,7 @@ def format_manifest(firmware_proto: Optional[int] = None) -> Dict[str, Any]:
         "zones_version": maze_state.ZONES_VERSION,
         "outcome_labels": [CORRECT, INCORRECT, ABANDONED, UNCUED],
         "cue_labels": [HIGH, LOW],
+        "cue_stimuli": list(STIMULI),
         "arm_labels": [phase3_log._ARM_LABEL[LEFT], phase3_log._ARM_LABEL[RIGHT]],
         "zone_names": list(maze_state.EDITABLE_ZONES),
         "columns": _columns(),

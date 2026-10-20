@@ -16,11 +16,13 @@ import os
 import tempfile
 import unittest
 
+from tmaze.core.cue_command import STIM_AM_NOISE, STIM_TONE, CueStimulus
 from tmaze.core.cue_gate import CueParams
 from tmaze.core.phase3.phase3_config import (
     DEFAULT_MAX_TOPUPS, default_config, load_phase3_config, resolve_seed,
-    reward_max_topups, save_phase3_config, to_cue_params, to_phase3_config,
-    to_session_cap_config, to_trial_config, validate_phase3_config)
+    reward_max_topups, save_phase3_config, to_cue_params, to_cue_stimulus,
+    to_phase3_config, to_session_cap_config, to_trial_config,
+    validate_phase3_config)
 from tmaze.core.phase3.session_cap import SessionCapConfig
 from tmaze.core.phase3.phase3_task import Phase3Config
 from tmaze.core.phase3.trial_sequence import TrialConfig
@@ -168,6 +170,15 @@ class TestValidation(unittest.TestCase):
     def test_bad_tone(self):
         self._bad("sequence", "high_tone_hz", -1)
 
+    def test_bad_cue_stimulus(self):
+        # docs/decisions/0222: unknown kind, out-of-range / over-precise rates, and
+        # fast <= slow are rejected - even for a tone session.
+        self._bad("cue", "stimulus", "chirp")
+        self._bad("cue", "am_fast_hz", 200)
+        self._bad("cue", "am_slow_hz", 0.5)
+        self._bad("cue", "am_slow_hz", 2.0005)
+        self._bad("cue", "am_fast_hz", 2)
+
     def test_non_numeric_pulse_raises(self):
         self._bad("reward", "pulse_ms", "abc")
 
@@ -183,6 +194,25 @@ class TestValidation(unittest.TestCase):
         cfg["session_cap"]["max_trials"] = -1
         with self.assertRaises(ValueError):
             validate_phase3_config(cfg)
+
+
+class TestCueStimulus(unittest.TestCase):
+    def test_default_is_tone_at_32_and_2(self):
+        st = to_cue_stimulus(default_config())
+        self.assertEqual(st, CueStimulus())
+        self.assertEqual((st.kind, st.am_fast_hz, st.am_slow_hz), (STIM_TONE, 32.0, 2.0))
+
+    def test_missing_keys_mean_tone(self):
+        # An older phase3.json without the new keys keeps today's behaviour.
+        self.assertEqual(to_cue_stimulus({"cue": {"choice_enabled": True}}), CueStimulus())
+
+    def test_am_with_fractional_rates(self):
+        cfg = default_config()
+        cfg["cue"].update(stimulus=STIM_AM_NOISE, am_fast_hz=32.5, am_slow_hz=2.125)
+        validate_phase3_config(cfg)
+        st = to_cue_stimulus(cfg)
+        self.assertTrue(st.is_am)
+        self.assertEqual((st.am_fast_hz, st.am_slow_hz), (32.5, 2.125))
 
 
 if __name__ == "__main__":

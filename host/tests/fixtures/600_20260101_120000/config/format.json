@@ -1,6 +1,6 @@
 {
-  "format_version": 5,
-  "proto": 12,
+  "format_version": 6,
+  "proto": 13,
   "firmware_proto": 8,
   "sensor_polarity": "corrected",
   "zones_version": 1,
@@ -13,6 +13,10 @@
   "cue_labels": [
     "HIGH",
     "LOW"
+  ],
+  "cue_stimuli": [
+    "tone",
+    "am_noise"
   ],
   "arm_labels": [
     "LEFT",
@@ -64,7 +68,9 @@
     "return_cue_on_fw_ms": "firmware hardware-clock ms of the return cue onset, from the CUE,ON echo (blank when the return cue is disabled; see docs/decisions/0166)",
     "attempt": "1-based attempt number for this trial (append-only edits)",
     "superseded": "1 on a preserved attempt a later Repeat/Back replaced",
-    "edit": "action that created a >1 attempt: operator repeat/back, or 'uncued' (auto: no cue that trip; see docs/decisions/0171)"
+    "edit": "action that created a >1 attempt: operator repeat/back, or 'uncued' (auto: no cue that trip; see docs/decisions/0171)",
+    "choice_cue_seed": "noise seed of the AM choice cue, from its CUE,ON echo (blank for a tone; see docs/decisions/0221, 0222)",
+    "return_cue_seed": "noise seed of the AM return cue, from its CUE,ON echo (blank for a tone or no return cue; see docs/decisions/0222)"
   },
   "stream_notes": {
     "camera_video": "container timestamps are nominal-rate (pts += 1 at round(fps)); use the sidecar host_unix_s / cam_timestamp for time (see camera_stats fps_measured; docs/decisions/0181)",

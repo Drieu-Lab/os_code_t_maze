@@ -29,6 +29,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import List, Optional
 
+from tmaze.core.cue_command import CueStimulus
 from tmaze.core.phase3.phase3_log import Phase3StateSnapshot
 from tmaze.core.phase3.trial_sequence import HIGH
 
@@ -58,6 +59,9 @@ class RibbonRow:
     corrective: bool = False       # part of a closed-loop debias corrective block
     probe: bool = False            # part of an unrewarded probe block (probe_blocks.py)
     return_enabled: bool = True    # is the return cue played? False -> hide ret info
+    # Tone or AM noise this run, so the view can show FAST/SLOW for an AM session
+    # while the cue fields above stay HIGH/LOW (docs/decisions/0222).
+    stimulus: CueStimulus = CueStimulus()
 
 
 def cue_side(cue: str, high_tone_is_left: bool) -> str:
@@ -109,6 +113,7 @@ def _make_row(state: Phase3StateSnapshot, i: int, current: int) -> RibbonRow:
         corrective=corrective,
         probe=probe,
         return_enabled=state.return_enabled,
+        stimulus=getattr(state, "stimulus", CueStimulus()),
     )
 
 

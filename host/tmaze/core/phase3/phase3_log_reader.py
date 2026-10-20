@@ -31,6 +31,7 @@ import os
 from dataclasses import dataclass, fields
 from typing import Dict, Iterable, List, Optional, Tuple
 
+from tmaze.core.cue_command import STIM_TONE, CueStimulus, make_stimulus
 from tmaze.core.phase3.phase3_log import Phase3RowView, Phase3StateSnapshot
 from tmaze.core.records import session_ignore
 from tmaze.core.session import session_registry
@@ -63,6 +64,8 @@ class SessionConfig:
     low_tone_hz: Optional[int]
     uses_return_cue: bool
     has_probe: bool
+    # "tone" / "am_noise" (docs/decisions/0222); a pre-proto-13 file is "tone".
+    stimulus: str = STIM_TONE
 
 
 # --------------------------------------------------------------- header parsing
@@ -101,6 +104,20 @@ def _to_int(val: Optional[str]) -> Optional[int]:
         return int(str(val).strip())
     except (TypeError, ValueError):
         return None
+
+
+def _stimulus(header: Dict[str, str]) -> CueStimulus:
+    """The session's cue stimulus from the proto-13 ``# cue_stimulus`` line; an
+    older file (or an unreadable line) is a tone session."""
+    kind = header.get("cue_stimulus") or STIM_TONE
+    if kind == STIM_TONE:
+        return CueStimulus()
+    d = CueStimulus()
+    try:
+        return make_stimulus(kind, header.get("cue_am_fast_hz") or d.am_fast_hz,
+                             header.get("cue_am_slow_hz") or d.am_slow_hz)
+    except (TypeError, ValueError):
+        return CueStimulus()
 
 
 # --------------------------------------------------------------- row mapping
@@ -159,6 +176,7 @@ def parse_csv_text(text: str) -> Tuple[Phase3StateSnapshot, SessionConfig]:
         high_tone_hz=_to_int(header.get("high_tone_hz")) or 0,
         low_tone_hz=_to_int(header.get("low_tone_hz")) or 0,
         generator=header.get("generator", "") or "",
+        stimulus=_stimulus(header),
     )
     return snapshot, session_config_from_snapshot(snapshot)
 
@@ -276,6 +294,7 @@ def session_config_from_snapshot(snapshot: Phase3StateSnapshot) -> SessionConfig
         low_tone_hz=snapshot.low_tone_hz or None,
         uses_return_cue=uses_return_cue,
         has_probe=has_probe,
+        stimulus=snapshot.stimulus.kind,
     )
 
 
@@ -300,6 +319,8 @@ def describe_config_mismatch(current: SessionConfig,
     generator, tone frequencies, return-cue usage, and probe presence.
     """
     diffs: List[str] = []
+    if current.stimulus != reference.stimulus:
+        diffs.append(f"cue type {current.stimulus}→{reference.stimulus}")
     if current.high_tone_is_left != reference.high_tone_is_left:
         diffs.append(f"cue map {_cue_map(current)}→{_cue_map(reference)}")
     if (current.generator or "") != (reference.generator or ""):

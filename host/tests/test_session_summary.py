@@ -388,6 +388,22 @@ class TestRenderText(unittest.TestCase):
                    "low_tone_hz": 2000, "high_tone_is_left_source": "config"})
         self.assertNotIn("per-animal", plain.render_text())
 
+    def test_text_names_fast_slow_for_an_am_session(self):
+        """An AM-noise run shows its modulation rates as FAST / SLOW in place of
+        the unused tones (docs/decisions/0222)."""
+        cued, _ = _cued_stats()
+        summ = session_summary.build_summary(
+            session_id="s1", animal="RAT600", t0=_T0, t_end=_T_END,
+            cued=cued, locomotor=_locomotor_snapshot(), seed=7,
+            tones={"high_tone_is_left": False, "high_tone_hz": 8000,
+                   "low_tone_hz": 2000, "cue_stimulus": "am_noise",
+                   "am_fast_hz": 32.0, "am_slow_hz": 2.5})
+        text = summ.render_text()
+        self.assertIn("Cues:     FAST 32 Hz -> RIGHT   SLOW 2.5 Hz -> LEFT   [AM noise]",
+                      text)
+        self.assertIn("By cue:      FAST", text)
+        self.assertNotIn("8000", text)
+
     def test_text_placeholders_when_empty(self):
         summ = session_summary.build_summary(
             session_id="s", animal="a", t0=_T0, t_end=None)
