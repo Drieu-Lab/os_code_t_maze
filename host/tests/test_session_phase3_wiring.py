@@ -134,6 +134,10 @@ class SessionPhase3WiringTest(unittest.TestCase):
         self.addCleanup(self.root.destroy)
         self.addCleanup(self.session.close)
         self.addCleanup(self.phase3.close)
+        # Start persists the tab's live fields to the tab's config file (save-on-
+        # arm, ADR-0167); without this a test that sets a field and Starts would
+        # overwrite the rig's real host/phase3.json, which the rig then loads.
+        self.phase3._config_path = os.path.join(self.recordings, "phase3_test.json")
 
     # ------------------------------------------------------------- helpers
     def _open_gate(self):
