@@ -12,6 +12,7 @@ Run from host/:  python -m unittest tests.test_tracker_view_options
 """
 from __future__ import annotations
 
+import gc
 import json
 import os
 import shutil
@@ -97,6 +98,11 @@ class TestTrackerTabOptions(unittest.TestCase):
         for p in self.patches:
             p.stop()
         self.root.destroy()
+        self.views = []
+        # Free the views' Tk variables NOW, on the main thread: left to a later
+        # garbage collection they can be freed on another test's worker thread,
+        # which aborts the whole run ("Tcl_AsyncDelete: ... wrong thread").
+        gc.collect()
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def _view(self, options=None, tracker=None):
@@ -277,6 +283,34 @@ class TestDrawOverlayToggles(unittest.TestCase):
         off = np.zeros((100, 100, 3), np.uint8)
         draw_overlay(off, 1.0, tr, r)
         self.assertFalse(np.any(np.all(off == HEAD_COLOR, axis=2)))
+
+    def test_dlc_head_point_follows_its_display_switch(self):
+        from tmaze.core.dlc_head import DlcHeadSample
+        from tmaze.vision.tracker import DLC_HEAD_COLOR
+        tr = RatTracker()
+        s = DlcHeadSample(1, "ok", points={"head_center": (50.0, 50.0, 0.9),
+                                           "nose": (70.0, 50.0, 0.9), "neck": (30.0, 50.0, 0.9)})
+        tr.set_dlc_head(SimpleNamespace(latest=lambda: s))
+        r = TrackResult(True, "TRACKING")
+        on = np.zeros((100, 100, 3), np.uint8)
+        draw_overlay(on, 1.0, tr, r)
+        self.assertTrue(np.all(on[50, 50] == DLC_HEAD_COLOR))
+        b, g, r_ = on[50, 65]                                    # nose-to-neck line
+        self.assertTrue(b > 0 and r_ > 0 and g == 0)            # (anti-aliased magenta)
+        tr.set_dlc_head_overlay(False)
+        off = np.zeros((100, 100, 3), np.uint8)
+        draw_overlay(off, 1.0, tr, r)
+        self.assertFalse(np.any(np.all(off == DLC_HEAD_COLOR, axis=2)))
+
+    def test_dlc_parts_dlc_could_not_place_are_skipped(self):
+        from tmaze.core.dlc_head import DlcHeadSample
+        from tmaze.vision.tracker import DLC_HEAD_COLOR, draw_dlc_head
+        nan = float("nan")
+        img = np.zeros((100, 100, 3), np.uint8)
+        draw_dlc_head(img, 1.0, DlcHeadSample(1, "low", points={"head_center": (nan, nan, 0.0)}))
+        draw_dlc_head(img, 1.0, DlcHeadSample(1, "ok", points={
+            "head_center": (50.0, 50.0, 0.9), "nose": (nan, nan, 0.0), "neck": (30.0, 50.0, 0.9)}))
+        self.assertTrue(np.all(img[50, 50] == DLC_HEAD_COLOR))
 
 
 if __name__ == "__main__":

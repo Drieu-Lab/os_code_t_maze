@@ -15,7 +15,8 @@ On Start it creates a per-session folder tree under the recordings root
 
     <session_id>/
         session_<session_id>.json     the manifest (correlation index)
-        video/   <session_id>.<mkv|mp4> + sidecar .csv (+ _background.png)
+        video/   <session_id>.<mkv|mp4> + sidecar .csv (+ _background.png,
+                 + _dlc_head.csv when the DLC-Live preview is on; ADR-0224)
         task/    phase3_<session_id>.csv
         serial/  serial_<session_id>.csv    (complete raw serial - see below)
         config/  the definitions that shaped the run (zones/ROI/landmarks/scale,

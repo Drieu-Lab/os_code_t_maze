@@ -221,6 +221,15 @@ TIPS: Dict[str, Entry] = {
     "tracker.head_show": "Draw the head point (white dot) and head direction "
                          "(arrow) on the previews. A hollow dot = a jump the "
                          "filter is still checking. Display only.",
+    "tracker.dlc_head_track": "Run the DeepLabCut-Live network (full model, 448 px "
+                              "crop around the body centre) in a helper program "
+                              "and record its body parts to <session>_dlc_head.csv. "
+                              "Takes up to ~2 min to start; can't be changed while "
+                              "recording. Preview only: the task still uses the "
+                              "body centre (ADR-0224).",
+    "tracker.dlc_head_show": "Draw the DeepLabCut-Live head centre (magenta dot) "
+                             "and a nose-to-neck line on the previews. A hollow "
+                             "dot = likelihood below the cutoff. Display only.",
     "tracker.define_region": "Define the maze ROI by clicking a captured still "
                              "frame.",
     "tracker.clear_region": "Clear the maze ROI polygon.",

@@ -33,6 +33,7 @@ from __future__ import annotations
 import csv
 import json
 import os
+import threading
 import time
 import tkinter as tk
 from dataclasses import dataclass
@@ -320,6 +321,25 @@ class TrackerControlView:
         tip(head_show_cb, "tracker.head_show")
         self._head_status = tk.StringVar(value="head: off")
         ttk.Label(head, textvariable=self._head_status).pack(side=tk.LEFT, padx=6)
+
+        # DeepLabCut-Live head preview (docs/decisions/0224): a helper process in
+        # the dlclivegui env; display + its own file only, never the task's position.
+        dlc = ttk.LabelFrame(controls, text="Head tracking (DeepLabCut-Live preview)")
+        dlc.pack(side=tk.TOP, fill=tk.X, **pad)
+        self._dlc_client = None
+        self._dlc_var = tk.BooleanVar(value=False)
+        self._dlc_cb = ttk.Checkbutton(dlc, text="Track head (DLC-Live)",
+                                       variable=self._dlc_var, command=self._on_dlc_toggle)
+        self._dlc_cb.pack(side=tk.LEFT, padx=4, pady=4)
+        tip(self._dlc_cb, "tracker.dlc_head_track")
+        self._dlc_show_var = tk.BooleanVar(value=True)
+        dlc_show_cb = ttk.Checkbutton(dlc, text="Show on preview",
+                                      variable=self._dlc_show_var,
+                                      command=self._on_dlc_show)
+        dlc_show_cb.pack(side=tk.LEFT, padx=(12, 2))
+        tip(dlc_show_cb, "tracker.dlc_head_show")
+        self._dlc_status = tk.StringVar(value="dlc: off")
+        ttk.Label(dlc, textvariable=self._dlc_status).pack(side=tk.LEFT, padx=6)
 
         # Blocker (orange-taped obstacle): on-demand still captures across
         # placements; tracked in parallel and subtracted from the rat. ADR-0034.
@@ -985,6 +1005,64 @@ class TrackerControlView:
         if err and self._head_var.get():
             self._head_var.set(False)
             self._head_status.set(f"head: off - {err}")
+        self._poll_dlc()
+
+    # --------------------------------------------- DeepLabCut-Live head preview
+    def _on_dlc_toggle(self) -> None:
+        want = self._dlc_var.get()
+        if self._recording():
+            self._dlc_var.set(not want)
+            self._dlc_status.set("dlc: can't change while recording")
+            return
+        if not want:
+            self._stop_dlc("dlc: off")
+            return
+        try:
+            from tmaze.io.dlc_head_client import DlcHeadClient, load_config
+            client = DlcHeadClient(load_config())
+        except Exception as e:
+            self._dlc_var.set(False)
+            self._dlc_status.set("dlc: off (settings not loaded)")
+            messagebox.showwarning("DLC-Live head", f"DLC-Live stays off:\n{e}",
+                                   parent=self.frame)
+            return
+        self._dlc_client = client
+        client.start()
+        self._tracker.set_dlc_head(client)
+        self._dlc_status.set("dlc: starting helper (up to ~2 min)...")
+
+    def _on_dlc_show(self) -> None:
+        self._tracker.set_dlc_head_overlay(self._dlc_show_var.get())
+
+    def _stop_dlc(self, status: str) -> None:
+        client, self._dlc_client = self._dlc_client, None
+        self._tracker.set_dlc_head(None)
+        if client is not None:   # close() can wait seconds for the helper to exit
+            threading.Thread(target=client.close, daemon=True).start()
+        self._dlc_var.set(False)
+        self._dlc_status.set(status)
+
+    def _poll_dlc(self) -> None:
+        try:
+            self._dlc_cb.configure(state=(tk.DISABLED if self._recording() else tk.NORMAL))
+        except tk.TclError:
+            pass
+        client = self._dlc_client
+        if client is None:
+            return
+        if client.state == "error":
+            err = client.error.splitlines()[0] if client.error else "unknown error"
+            self._stop_dlc(f"dlc: off - {err}")
+            messagebox.showwarning("DLC-Live head", f"DLC-Live switched off:\n{client.error}",
+                                   parent=self.frame)
+        elif client.state == "starting":
+            self._dlc_status.set("dlc: starting helper (up to ~2 min)...")
+        elif client.ready:
+            st = client.stats()
+            lat = "-" if st["latency_ms"] is None else f"{st['latency_ms']:.0f} ms"
+            rec = " - recording" if client.recording else ""
+            self._dlc_status.set(f"dlc: ready - {lat}/frame, "
+                                 f"{100 * st['skipped_frac']:.0f}% frames skipped (helper busy){rec}")
 
     # --------------------------------------------------------- poll loop
     def _on_show_mask(self) -> None:

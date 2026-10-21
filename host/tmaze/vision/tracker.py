@@ -318,6 +318,39 @@ def draw_head_overlay(img_bgr, scale: float, sample) -> None:
         cv2.arrowedLine(img_bgr, p, tip_pt, HEAD_COLOR, 2, cv2.LINE_AA, tipLength=0.35)
 
 
+DLC_HEAD_COLOR = (255, 0, 255)   # magenta: tells the DLC-Live head from the white one
+
+
+def dlc_head_of(tracker):
+    """The tracker's attached DlcHeadClient, or None (also for stand-in
+    trackers without the DLC hooks, e.g. in tests)."""
+    get = getattr(tracker, "get_dlc_head", None)
+    return get() if callable(get) else None
+
+
+def draw_dlc_head(img_bgr, scale: float, sample) -> None:
+    """The DeepLabCut-Live head_center (dot) and a nose-to-neck line, in place.
+
+    Filled when the head point is trusted (likelihood >= pcutoff), hollow when
+    not. ``sample`` is a ``dlc_head.DlcHeadSample`` (full-frame px). See
+    docs/decisions/0224."""
+    def finite(pt):   # DLC reports NaN for a part it couldn't place
+        return pt is not None and math.isfinite(pt[0]) and math.isfinite(pt[1])
+
+    if sample is None or not finite(sample.head_center):
+        return
+    hx, hy = sample.head_center
+    p = (int(hx * scale), int(hy * scale))
+    if not sample.valid:
+        cv2.circle(img_bgr, p, 5, DLC_HEAD_COLOR, 1, cv2.LINE_AA)
+        return
+    nose, neck = sample.points.get("nose"), sample.points.get("neck")
+    if finite(nose) and finite(neck):
+        cv2.line(img_bgr, (int(neck[0] * scale), int(neck[1] * scale)),
+                 (int(nose[0] * scale), int(nose[1] * scale)), DLC_HEAD_COLOR, 1, cv2.LINE_AA)
+    cv2.circle(img_bgr, p, 4, DLC_HEAD_COLOR, -1, cv2.LINE_AA)
+
+
 def draw_overlay(img_bgr, scale: float, tracker, result,
                  draw_landmarks: bool = True, *, draw_roi: bool = True,
                  draw_trail: bool = True, draw_candidates: bool = True) -> None:
@@ -370,6 +403,9 @@ def draw_overlay(img_bgr, scale: float, tracker, result,
                                      int(result.smoothed[1] * scale)), 7, (0, 255, 0), 2)
             if result.head is not None and tracker is not None and tracker.head_overlay():
                 draw_head_overlay(img_bgr, scale, result.head)
+            dlc = dlc_head_of(tracker)
+            if dlc is not None and tracker.dlc_head_overlay():
+                draw_dlc_head(img_bgr, scale, dlc.latest())
             cv2.putText(img_bgr, f"{result.state} {result.confidence:.2f}", (6, 16),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
     except Exception:
@@ -752,6 +788,11 @@ class RatTracker:
         self._head = None
         self._head_error = ""
         self._head_overlay = True    # display only: draw the head on previews
+        # DeepLabCut-Live head preview (dlc_head_client.DlcHeadClient; None = off).
+        # Held here only so the camera's track worker and the previews share one;
+        # process() never calls it. See docs/decisions/0224.
+        self._dlc_head = None
+        self._dlc_head_overlay = True
 
         # Tracking state machine (touched only inside process()).
         self._kalman = self._make_kalman()
@@ -861,6 +902,24 @@ class RatTracker:
     def head_overlay(self) -> bool:
         with self._lock:
             return self._head_overlay
+
+    def set_dlc_head(self, client) -> None:
+        """Attach a running ``DlcHeadClient`` (or None). The camera's track worker
+        feeds it a crop after each process(); nothing here changes the track."""
+        with self._lock:
+            self._dlc_head = client
+
+    def get_dlc_head(self):
+        with self._lock:
+            return self._dlc_head
+
+    def set_dlc_head_overlay(self, show: bool) -> None:
+        with self._lock:
+            self._dlc_head_overlay = bool(show)
+
+    def dlc_head_overlay(self) -> bool:
+        with self._lock:
+            return self._dlc_head_overlay
 
     def reset(self) -> None:
         """Drop the current track (kalman + path) but keep reference + ROI + model."""

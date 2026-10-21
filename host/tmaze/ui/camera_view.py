@@ -56,7 +56,7 @@ from tmaze.paths import camera_output_dir  # noqa: E402  (single source for the 
 from tmaze.core.maze_state import IN_WELL as _IN_WELL  # noqa: E402  (HUB well substate label)
 from tmaze.ui.preview import render_bgr_to_label, safe_after  # noqa: E402
 from tmaze.ui.tooltips import add_dynamic_tooltip, tip  # noqa: E402
-from tmaze.vision.tracker import TRACK_COLUMNS, track_row  # noqa: E402
+from tmaze.vision.tracker import TRACK_COLUMNS, dlc_head_of, track_row  # noqa: E402
 from tmaze.vision.track_worker import LatestFrameSlot, TrackPublisher  # noqa: E402
 
 # Shared tracking-overlay drawing (also used by the Tracking tab so previews
@@ -480,6 +480,15 @@ class CameraView:
         for t in (self._grab_thread, self._encode_thread, self._track_thread):
             if t is not None and t.is_alive():
                 t.join(timeout=3.0)
+        dlc = dlc_head_of(self._tracker)
+        if dlc is not None:   # stop the helper process with the app
+            self._tracker.set_dlc_head(None)
+            dlc.close()
+
+    def _stop_dlc_head_file(self) -> None:
+        dlc = dlc_head_of(self._tracker)
+        if dlc is not None:
+            dlc.stop_recording()
 
     # -------------------------------------------------- tracking integration
     def get_latest_frame(self):
@@ -968,6 +977,7 @@ class CameraView:
         if not self._recording.is_set():
             return
         self._recording.clear()
+        self._stop_dlc_head_file()
         try:
             self._record_btn.configure(text="Start recording")
         except (tk.TclError, AttributeError):
@@ -1097,6 +1107,14 @@ class CameraView:
             video_path=base + ext, csv_path=base + ".csv",
             fps=self._cam_fps, size=(w, h), header=header, codec=codec, crf=crf,
             stats_path=base + "_camera_stats.json")
+        # DeepLabCut-Live head points go to their own file, joined to the
+        # sidecar by cam_block_id (docs/decisions/0224).
+        dlc = dlc_head_of(self._tracker)
+        if dlc is not None:
+            try:
+                dlc.start_recording(base + "_dlc_head.csv")
+            except OSError as e:
+                self._show_warning(f"DLC head file not opened: {e}")
 
         # Clear any stale frames so frame_idx starts clean at 0.
         self._drain_queue()
@@ -1276,6 +1294,15 @@ class CameraView:
             with self._counters_lock:
                 self._counters.note_track_ms((time.perf_counter() - t0) * 1000.0)
             self._track_pub.publish(result, block_id, mono_ts)
+            # DeepLabCut-Live head preview: hand the helper a crop around the
+            # rat; returns at once (docs/decisions/0224).
+            dlc = dlc_head_of(tracker)
+            if dlc is not None:
+                try:
+                    dlc.submit(block_id, frame,
+                               result.centroid if result is not None else None)
+                except Exception:
+                    pass
 
     def _enqueue(self, frame, meta) -> None:
         try:
@@ -1326,6 +1353,7 @@ class CameraView:
                             }
                         if writer is None:
                             self._recording.clear()  # open failed; bail cleanly
+                            self._stop_dlc_head_file()
                             self._post(self._reset_record_button)
                             self._post(self._set_format_locked, False)
 
@@ -1359,6 +1387,7 @@ class CameraView:
                         # Surface the failure and stop cleanly rather than
                         # silently producing an empty video + header-only CSV.
                         self._recording.clear()
+                        self._stop_dlc_head_file()
                         self._post(self._reset_record_button)
                         self._post(self._set_format_locked, False)
         finally:
