@@ -51,6 +51,10 @@ docs/notes/.obsidian/
 # see docs/decisions/0128
 host/notebooks/grant_figures/outputs/
 
+# Exported DeepLabCut-Live models for the head preview (~115 MB each; rebuilt
+# with tmaze.tools.export_dlc_live from the DLC project). see docs/decisions/0224
+host/head_models/dlc/
+
 # Anaconda / anaconda-project local scratch (per-machine tool state DB).
 anaconda_projects/
 
