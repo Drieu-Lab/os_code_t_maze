@@ -153,6 +153,15 @@ e.g. the rat must be seen in a new zone for several frames before the display
 commits to it, so a single noisy position estimate doesn't make the readout
 jump. Contrast the [fast view](#fast-view-vs-debounced-view). See ADR-0042.
 
+### DeepLabCut / DeepLabCut-Live
+DeepLabCut (DLC) is a toolkit for training a network to find hand-labelled body
+parts (nose, ears, head centre, neck, tail...) in video. Here it is trained
+offline on frames labelled in the lab's DLC project. DeepLabCut-Live is its
+companion library for running a trained network on frames as they arrive. It
+needs older Python / numpy than the rig env, so on the rig it runs in a
+separate [helper process](#helper-process) in the `dlclivegui` env (ADR-0224).
+Each point it returns comes with a [likelihood](#likelihood-pcutoff).
+
 ### Edge (rising / falling edge)
 The *moment a state changes*, as opposed to the state itself. A "rising edge" is
 the transition from off→on (e.g. a lick beam just became blocked; the gate just
@@ -235,6 +244,14 @@ large errors), in degrees, in the video image's own axes: 0 = toward the right e
 Angle errors are the smaller way round the circle, so 170 and -170 differ by
 20, not 340. See `tmaze.vision.head_learned.head_direction_deg`.
 
+### Helper process
+A second program the rig GUI starts and talks to over a local network
+connection (127.0.0.1, i.e. this PC only), used when some work needs software
+that can't live in the rig env. The [DeepLabCut-Live](#deeplabcut--deeplabcut-live)
+head preview runs this way: the GUI sends each frame's crop and gets the body
+parts back. If the helper crashes or stops answering, only that feature
+switches off; the GUI and the task carry on. See ADR-0224.
+
 ### Hot path
 The code that runs *most often* — here, the work done on **every camera frame**,
 tens of times per second. Anything added to the hot path (even a tiny delay)
@@ -277,6 +294,13 @@ records a `+1`). See ADR-0074.
 ### Latency
 The delay between a cause and its effect — e.g. between the rat entering a zone
 and the reward firing. A lot of the design exists to reduce actuation latency.
+
+### Likelihood (pcutoff)
+[DeepLabCut](#deeplabcut--deeplabcut-live)'s own confidence (0 to 1) that a
+body part is where it put it. The *pcutoff* is the value below which a point is
+not trusted; the rig uses DeepLabCut's usual 0.6. In the DLC head file a frame
+is `ok` when the head centre's likelihood is at least the pcutoff, `low` when
+it is below (the point is still written, so it can be judged later).
 
 ### Liveness probe
 A message sent *just to check the other side is still alive*, when silence alone

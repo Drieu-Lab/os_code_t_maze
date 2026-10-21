@@ -133,6 +133,8 @@ criteria).
 | [FW-0081](#fw-0081-head-points-in-the-offline-re-track) | Offline re-track writes the learned head-point columns too | `tools/offline_track`, `vision/offline_tracker.py` | Proposed |
 | [FW-0083](#fw-0083-give-the-slow-am-cue-enough-time-in-the-cue-zone) | Give the slow (2 Hz) AM-noise cue enough time: measure cue-zone dwell vs the cue's first loudness peak, and lengthen the zone or hold the choice if needed | `zones.json`, `core/phase3/*`, `drieu_lab_analysis.cue_latency` | Proposed |
 | [FW-0084](#fw-0084-neutral-cue-a--cue-b-names-across-both-repos) | Replace HIGH/LOW (and `high_tone_is_left`) with neutral cue A / cue B names across both repos, so the data no longer names a tone | `core/phase3/*`, `animals.json`, `drieu_lab_analysis` | Proposed |
+| [FW-0085](#fw-0085-trigger-the-cue-from-deeplabcut-lives-head-centre) | Trigger the cue from DeepLabCut-Live's head centre: read the preview files, then a `position_source` setting with a CoM fallback | `io/dlc_head_client`, `core/maze_state`, `drieu_lab_analysis.cue_latency` | Proposed |
+| [FW-0086](#fw-0086-check-whether-windows-power-throttling-slows-the-rig-gui) | Check whether Windows power throttling slows the rig GUI when its window is in the background | `ui/experiment_control.py` | Proposed |
 
 ## Entries
 
@@ -3961,6 +3963,65 @@ golden fixture regenerated; all accuracy/strategy results unchanged on old data.
 in a dedicated change.
 
 **ADR needed?** Yes - a vocabulary and format change in both repos.
+
+### FW-0085: Trigger the cue from DeepLabCut-Live's head centre
+
+- **Status:** Proposed
+- **Date added:** 2026-10-20
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** `io/dlc_head_client.py`, `core/maze_state.py` / `core/cue_gate.py`
+  (the position the cue rule reads), `ui/camera_view.py` (track worker); in
+  `drieu_lab_analysis`: a reader for `<session>_dlc_head.csv` and
+  `tmaze_analysis.cue_latency` (its replay of the cue rule)
+- **Related ADRs:** [ADR-0224](decisions/0224-dlc-live-head-preview.md),
+  [ADR-0219](decisions/0219-learned-head-point.md), ADR-0045 (vision cue)
+
+**Motivation / context.** ADR-0224 runs DLC-Live as a preview only; the lab's
+next step is to fire the CHOICE cue when the HEAD, not the body centre, enters
+the cue zone.
+
+**Sketch of approach.** First read the preview sessions' `_dlc_head.csv` in the
+analysis repo (join on `cam_block_id`) and compare head-centre zone entries with
+the CoM's. Then add a `position_source` setting (CoM / DLC head) that feeds the
+chosen point into the maze-state estimator, with a fallback to the CoM for
+`low` / `skipped` / `no_blob` frames, recorded in the trial-CSV header. The
+answer arrives ~20 ms after its frame; the half-size model (12 ms) is the option
+if that matters.
+
+**Evaluation / acceptance.** On recorded sessions: cue-onset latency relative
+to the head's zone entry, how often the fallback is used, and no change to the
+CoM path when the setting is off.
+
+**Effort / risk.** Medium; touches the task's trigger, so it needs a bench test
+before a real session.
+
+**ADR needed?** Yes - it changes what triggers the task.
+
+### FW-0086: Check whether Windows power throttling slows the rig GUI
+
+- **Status:** Proposed
+- **Date added:** 2026-10-20
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** `ui/experiment_control.py` (process start-up), the camera
+  tab's `track: <avg>/<peak> ms` readout
+- **Related ADRs:** [ADR-0224](decisions/0224-dlc-live-head-preview.md), ADR-0040
+
+**Motivation / context.** Windows 11 slowed the windowless DLC-Live helper
+(48 ms instead of ~20 ms per crop at 25 fps) until it opted out of power
+throttling ("EcoQoS"). The rig GUI could be throttled the same way when its
+window is minimised or behind another program during a session; in offline
+replays the tracker's time varied 3-6 ms between runs.
+
+**Sketch of approach.** Watch the camera tab's track ms (and the grab/encode
+counters) with the GUI in front, behind another window, and minimised. If it
+rises, call the same `SetProcessInformation` opt-out
+(`tmaze.tools.dlc_head_server.no_power_throttling`) at GUI start-up.
+
+**Evaluation / acceptance.** Track ms the same in all three window states.
+
+**Effort / risk.** Small.
+
+**ADR needed?** Only if the GUI opts out (a process-wide setting).
 
 ## Completed
 
