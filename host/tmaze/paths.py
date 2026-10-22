@@ -215,6 +215,34 @@ def phase3_recordings_roots() -> list[Path]:
 
 
 # --------------------------------------------------------------------------- #
+# Derived-data root (host/derivatives_root.json)
+#
+# Where pipelines write results computed from the bundles (docs/decisions/0226).
+# Tracked project config like recordings_roots.json; the TMAZE_DERIVATIVES_DIR
+# env var overrides it per process (tests, other machines).
+_DERIVATIVES_ENV = "TMAZE_DERIVATIVES_DIR"
+_DERIVATIVES_CONFIG_FILENAME = "derivatives_root.json"
+
+
+def derivatives_root() -> Path:
+    """The derived-data root. Raises RuntimeError if neither the env var nor
+    ``host/derivatives_root.json`` names one."""
+    env = os.environ.get(_DERIVATIVES_ENV, "").strip()
+    if env:
+        return Path(env)
+    try:
+        with open(host_dir() / _DERIVATIVES_CONFIG_FILENAME, "r", encoding="utf-8") as fh:
+            raw = json.load(fh)
+        root = raw.get("root") if isinstance(raw, dict) else None
+    except (OSError, ValueError):
+        root = None
+    if not isinstance(root, str) or not root.strip():
+        raise RuntimeError(f"no derived-data root: set {_DERIVATIVES_ENV} or 'root' in "
+                           f"host/{_DERIVATIVES_CONFIG_FILENAME}")
+    return Path(root.strip())
+
+
+# --------------------------------------------------------------------------- #
 # Machine-local GUI preferences (rig_prefs.json)
 #
 # A small git-ignored file next to the other host/*.json config that remembers

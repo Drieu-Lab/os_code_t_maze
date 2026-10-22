@@ -162,6 +162,17 @@ needs older Python / numpy than the rig env, so on the rig it runs in a
 separate [helper process](#helper-process) in the `dlclivegui` env (ADR-0224).
 Each point it returns comes with a [likelihood](#likelihood-pcutoff).
 
+### Derived data (pipeline, manifest, stale)
+Results computed from the session bundles after the fact, such as DeepLabCut
+tracking or movement measures. They live in their own folder tree
+(`Z:\Ravi\derivatives\<pipeline>\<session_id>\`), never inside the bundles. A
+*pipeline* is one tool with fixed settings; its name carries a version
+(`dlc_full_iter1`), so a new model writes a new folder. Each session folder
+holds a *manifest* (`manifest.json`), written last, that lists what went in
+(the input files' sizes and dates) and what came out. A result is *stale*
+when its inputs have changed since; *partial* when a run stopped before writing
+the manifest. See ADR-0226 and `docs/derivatives_format.md`.
+
 ### Edge (rising / falling edge)
 The *moment a state changes*, as opposed to the state itself. A "rising edge" is
 the transition from off→on (e.g. a lick beam just became blocked; the gate just

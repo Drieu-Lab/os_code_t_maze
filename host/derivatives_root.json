@@ -1,0 +1,7 @@
+{
+  "_schema": {
+    "note": "Where derived data (results computed from the session bundles: DeepLabCut tracking, movement measures, ...) is written, one folder per pipeline then one per session: <root>/<pipeline>/<session_id>/ (docs/decisions/0226, docs/derivatives_format.md). Kept off the rig PC so it survives it and has room. Read by tmaze.paths.derivatives_root(); the TMAZE_DERIVATIVES_DIR env var overrides it for one process. drieu_lab_analysis reads the same folder via TMAZE_DERIVATIVES_DIR (same default)."
+  },
+  "schema_version": 1,
+  "root": "Z:\\Ravi\\derivatives"
+}
