@@ -135,6 +135,7 @@ criteria).
 | [FW-0084](#fw-0084-neutral-cue-a--cue-b-names-across-both-repos) | Replace HIGH/LOW (and `high_tone_is_left`) with neutral cue A / cue B names across both repos, so the data no longer names a tone | `core/phase3/*`, `animals.json`, `drieu_lab_analysis` | Proposed |
 | [FW-0085](#fw-0085-trigger-the-cue-from-deeplabcut-lives-head-centre) | Trigger the cue from DeepLabCut-Live's head centre: read the preview files, then a `position_source` setting with a CoM fallback | `io/dlc_head_client`, `core/maze_state`, `drieu_lab_analysis.cue_latency` | Proposed |
 | [FW-0086](#fw-0086-check-whether-windows-power-throttling-slows-the-rig-gui) | Check whether Windows power throttling slows the rig GUI when its window is in the background | `ui/experiment_control.py` | Proposed |
+| [FW-0087](#fw-0087-warn-live-when-the-camera-starts-losing-frames) | Warn live when the camera starts losing frames (incomplete frames / packet resends climbing), instead of leaving the operator to infer it from the fps number | `ui/camera_view.py` | Proposed |
 
 ## Entries
 
@@ -4022,6 +4023,43 @@ rises, call the same `SetProcessInformation` opt-out
 **Effort / risk.** Small.
 
 **ADR needed?** Only if the GUI opts out (a process-wide setting).
+
+### FW-0087: Warn live when the camera starts losing frames
+
+- **Status:** Proposed
+- **Date added:** 2026-10-21
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** `ui/camera_view.py` (`_net_token`, the status line,
+  `_refresh_transport_stats`), a small pure rate check in `core/`
+- **Related ADRs:** ADR-0147 (transport stats), ADR-0040, ADR-0224
+
+**Motivation / context.** In `602_20261021_142829` the camera lost 541 frames,
+all "incomplete": GigE packets went missing and the driver waited ~320 ms for
+resends before giving up on each frame. That was ~60 frames per 30 s in the first ten
+minutes, against 33-65 per whole session the day before. The operator saw only
+the fps number wobbling, the video stuttering and tracking dropping on the
+midstem, and had to guess the cause. The status line already shows a tiny
+cumulative `net: <resends>r/<underruns>u` token and the hover tooltip shows the
+full Basler counters, but neither says "this is happening now". The losses
+stopped when a browser on the rig PC was closed. An idle browser with the
+20 MB dashboard open did not reproduce it (9 incomplete frames in 3 min vs 2
+in 2 min without), so the trigger is not yet known.
+
+**Sketch of approach.** A pure helper that takes the incomplete-frame count
+(and resend count) sampled once a second and returns a level (ok / warn / bad)
+from the rate over the last ~30 s (e.g. warn at > 2 lost frames per 30 s, bad
+at > 10). The camera tab colours the status line / shows a short banner
+("camera losing frames: N in the last 30 s - close other programs") while
+the rate is high, and the moment it starts is written to the session notes as
+an `auto:` note so analysis can find it.
+
+**Evaluation / acceptance.** Replay the 2026-10-21 counters: the warning would
+have shown within ~30 s of 602's session start and cleared at ~14:38; it stays
+silent on the 2026-10-20 sessions.
+
+**Effort / risk.** Small; display + one auto note.
+
+**ADR needed?** Yes, for the thresholds.
 
 ## Completed
 
