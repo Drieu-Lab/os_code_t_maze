@@ -32,6 +32,73 @@ class TestCropBox(unittest.TestCase):
         self.assertEqual(DH.crop_box(100, 100, 448, 320, 240), (0, 0))
 
 
+# The rig's ROI (roi_polygon.json, 2026-10-21) - its box is ~736 x 949 px.
+RIG_ROI = [(0.20625, 0.09375), (0.78125, 0.06901), (0.63542, 0.73698),
+           (0.63542, 0.99349), (0.359375, 0.99609), (0.36042, 0.74479)]
+
+
+class TestRoiBox(unittest.TestCase):
+    def test_rig_roi(self):
+        self.assertEqual(DH.roi_box(RIG_ROI, 1280, 1024), (264, 70, 736, 950))
+
+    def test_clipped_to_frame(self):
+        self.assertEqual(DH.roi_box([(-0.1, -0.1), (1.2, 0.0), (0.5, 1.5)], 100, 50),
+                         (0, 0, 100, 50))
+
+    def test_unusable_polygons(self):
+        self.assertIsNone(DH.roi_box(None, 1280, 1024))
+        self.assertIsNone(DH.roi_box([(0.1, 0.1), (0.2, 0.2)], 1280, 1024))
+        self.assertIsNone(DH.roi_box([(0.5, 0.1), (0.5, 0.5), (0.5, 0.9)], 1280, 1024))
+
+
+class TestCropPlanner(unittest.TestCase):
+    W, H = 1280, 1024
+
+    def plan(self, planner, now, com, roi=RIG_ROI):
+        return planner.plan(now, com, self.W, self.H, roi)
+
+    def test_com_gives_a_square_around_it(self):
+        p = self.plan(DH.CropPlanner(448), 0.0, (640, 512))
+        self.assertEqual(p, DH.CropPlan(416, 288, 448, 448, DH.SRC_COM))
+
+    def test_hold_then_roi_then_back_to_com(self):
+        pl = DH.CropPlanner(448, hold_s=1.0)
+        self.plan(pl, 10.0, (640, 512))
+        held = self.plan(pl, 10.9, None)
+        self.assertEqual((held.x0, held.y0, held.source), (416, 288, DH.SRC_HOLD))
+        self.assertEqual(self.plan(pl, 11.0, None).source, DH.SRC_HOLD)
+        roi = self.plan(pl, 11.01, None)
+        self.assertEqual(roi, DH.CropPlan(264, 70, 736, 950, DH.SRC_ROI))
+        self.assertEqual(self.plan(pl, 12.0, (300, 300)).source, DH.SRC_COM)
+        self.assertEqual(self.plan(pl, 12.5, None).source, DH.SRC_HOLD)
+
+    def test_hold_measured_from_the_last_com(self):
+        pl = DH.CropPlanner(448, hold_s=1.0)
+        self.plan(pl, 0.0, (640, 512))
+        self.plan(pl, 0.5, (700, 512))
+        held = self.plan(pl, 1.4, None)
+        self.assertEqual((held.x0, held.source), (476, DH.SRC_HOLD))
+
+    def test_no_com_ever_goes_straight_to_roi(self):
+        self.assertEqual(self.plan(DH.CropPlanner(448), 0.0, None).source, DH.SRC_ROI)
+
+    def test_nothing_without_roi_or_with_fallback_off(self):
+        self.assertIsNone(self.plan(DH.CropPlanner(448), 0.0, None, roi=None))
+        pl = DH.CropPlanner(448, roi_fallback=False)
+        self.plan(pl, 0.0, (640, 512))
+        self.assertEqual(self.plan(pl, 0.5, None).source, DH.SRC_HOLD)
+        self.assertIsNone(self.plan(pl, 2.0, None))
+
+    def test_hold_zero_disables_hold(self):
+        pl = DH.CropPlanner(448, hold_s=0.0)
+        self.plan(pl, 0.0, (640, 512))
+        self.assertEqual(self.plan(pl, 0.04, None).source, DH.SRC_ROI)
+
+    def test_frame_smaller_than_square(self):
+        p = DH.CropPlanner(448).plan(0.0, (100, 100), 320, 240)
+        self.assertEqual((p.w, p.h), (320, 240))
+
+
 class TestSampleAndFile(unittest.TestCase):
     def test_status_from_head_likelihood(self):
         self.assertEqual(DH.status_for({"head_center": (1, 2, 0.6)}, 0.6), DH.STATUS_OK)
@@ -47,15 +114,18 @@ class TestSampleAndFile(unittest.TestCase):
 
     def test_columns_and_row(self):
         cols = DH.columns(PARTS)
-        self.assertEqual(cols[:5], list(DH.FIXED_COLUMNS))
-        self.assertEqual(cols[5:8], ["nose_x", "nose_y", "nose_likelihood"])
-        self.assertEqual(len(cols), 5 + 3 * len(PARTS))
+        n = len(DH.FIXED_COLUMNS)
+        self.assertEqual(cols[:n], list(DH.FIXED_COLUMNS))
+        self.assertEqual(cols[n:n + 3], ["nose_x", "nose_y", "nose_likelihood"])
+        self.assertEqual(len(cols), n + 3 * len(PARTS))
         s = DH.DlcHeadSample(12, DH.STATUS_OK, 16.25, 100, 200,
-                             {"nose": (101.234, 202.5, 0.98765)})
+                             {"nose": (101.234, 202.5, 0.98765)},
+                             crop_w=448, crop_h=448, crop_src=DH.SRC_HOLD)
         r = dict(zip(cols, DH.row(s, PARTS)))
         self.assertEqual((r["cam_block_id"], r["dlc_status"], r["dlc_latency_ms"]),
                          ("12", "ok", "16.25"))
-        self.assertEqual((r["crop_x0"], r["crop_y0"]), ("100", "200"))
+        self.assertEqual((r["crop_x0"], r["crop_y0"], r["crop_w"], r["crop_h"], r["crop_src"]),
+                         ("100", "200", "448", "448", "hold"))
         self.assertEqual((r["nose_x"], r["nose_y"], r["nose_likelihood"]),
                          ("101.23", "202.50", "0.988"))
         self.assertEqual(r["neck_x"], "")
@@ -66,8 +136,11 @@ class TestSampleAndFile(unittest.TestCase):
         self.assertTrue(all(v == "" for v in r[2:]))
 
     def test_header_lines(self):
-        lines = DH.header_lines({"model_file": "m.pt", "model_sha256": "abc"}, 448, 0.6)
+        lines = DH.header_lines({"model_file": "m.pt", "model_sha256": "abc"}, 448, 0.6,
+                                hold_s=1.0, roi_fallback=False)
         self.assertIn("# crop_px: 448", lines)
+        self.assertIn("# hold_s: 1.0", lines)
+        self.assertIn("# roi_fallback: off", lines)
         self.assertIn("# model_file: m.pt", lines)
         self.assertIn("# torch_version: ", lines)
         self.assertTrue(all(l.startswith("# ") for l in lines))
