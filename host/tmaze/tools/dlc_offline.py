@@ -6,6 +6,8 @@ Each session's result lands in ``<derivatives root>/<pipeline>/<session_id>/``:
 ``<session_id>_dlc.csv`` (DeepLabCut's standard CSV; its first column is the
 video frame index, the same number as the video sidecar's ``frame_idx``),
 ``<session_id>_dlc.h5`` (the same table), and ``manifest.json`` (written last).
+A video in which DeepLabCut finds no animal at all gets only the manifest,
+with ``params.no_animal: true``, so it counts as done and is not retried.
 
     python -m tmaze.tools.dlc_offline --dry-run          what would run
     python -m tmaze.tools.dlc_offline                    run everything not done
@@ -317,7 +319,11 @@ def run_session(cfg: OfflineConfig, root: str, sid: str, bundle: str, video: str
                "extra_site_packages": cfg.extra_site_packages}
         log_path = os.path.join(logs, f"{sid}_{datetime.now():%Y%m%d_%H%M%S}.log")
         info = run_job(cfg, job, work, log_path, stop_file, launch, rig)
-        outputs = finish(folder, sid, work, keep_raw)
+        if info.get("no_animal"):
+            shutil.rmtree(work, ignore_errors=True)
+            outputs = []
+        else:
+            outputs = finish(folder, sid, work, keep_raw)
         DIO.write_manifest(folder, _manifest(cfg, sid, bundle, inputs, outputs, started,
                                              model, info, adopted=False))
 
@@ -327,7 +333,8 @@ def _manifest(cfg: OfflineConfig, sid: str, bundle: str, inputs: List[dict],
               adopted: bool) -> dict:
     params = {"shuffle": cfg.shuffle, "snapshot_index": cfg.snapshot_index,
               "device": cfg.device, "auto_track": True, "n_tracks": cfg.n_tracks,
-              "frames": info.get("rows"), "sidecar_rows": sidecar_rows(bundle, sid)}
+              "frames": info.get("rows"), "sidecar_rows": sidecar_rows(bundle, sid),
+              "no_animal": bool(info.get("no_animal"))}
     software = {k: info[k] for k in ("deeplabcut", "torch", "gpu") if info.get(k)}
     return D.new_manifest(cfg.pipeline, sid, inputs=inputs, outputs=outputs,
                           started_at=started, finished_at=DIO.now_iso(), params=params,
@@ -513,7 +520,10 @@ def _run_all(cfg, root, todo, sessions, model, logs, stop_file, keep_raw) -> int
         print(f"[{i}/{len(todo)}] {sid}: start {datetime.now():%H:%M:%S}", flush=True)
         try:
             run_session(cfg, root, sid, bundle, video, model, logs, stop_file, keep_raw)
-            print(f"[{i}/{len(todo)}] {sid}: done in {(time.time() - t0) / 60:.0f} min", flush=True)
+            m = DIO.read_manifest(D.session_dir(root, cfg.pipeline, sid)) or {}
+            note = " (no animal found)" if m.get("params", {}).get("no_animal") else ""
+            print(f"[{i}/{len(todo)}] {sid}: done in {(time.time() - t0) / 60:.0f} min{note}",
+                  flush=True)
         except Stopped as e:
             print(f"[{i}/{len(todo)}] {sid}: stopped ({e}); it will be redone next run")
             return EXIT_STOPPED

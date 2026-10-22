@@ -13,7 +13,9 @@ JOB.json: ``{"video", "dest", "dlc_config", "shuffle", "snapshot_index",
 "device", "n_tracks", "extra_site_packages"}``. Writes DeepLabCut's own files
 into ``dest``, then ``dest/<video stem>.csv`` (the stitched track in
 DeepLabCut's standard CSV layout) and ``dest/worker_info.json`` (software
-versions), and exits 0. Any failure exits non-zero.
+versions), and exits 0. When DeepLabCut finds no animal in the whole video
+it writes only the info file, with ``"no_animal": true``, and still exits 0.
+Any other failure exits non-zero.
 
 A job with ``"h5"`` (a stitched ``_sk.h5`` from an earlier run) instead of
 ``"video"`` skips the analysis and only writes ``dest/<stem>.csv`` + the
@@ -26,6 +28,10 @@ import glob
 import json
 import os
 import sys
+
+# What DeepLabCut's track stitching raises when the network found no animal
+# in the whole video (e.g. a short test clip of the empty maze).
+NO_ANIMAL_MESSAGE = "Tracklets are empty"
 
 
 def main(job_path: str) -> int:
@@ -47,10 +53,17 @@ def main(job_path: str) -> int:
         video = job["video"]
         stem = os.path.splitext(os.path.basename(video))[0]
         print(f"torch {torch.__version__}, cuda {torch.cuda.is_available()}", flush=True)
-        deeplabcut.analyze_videos(
-            job["dlc_config"], [video], shuffle=int(job["shuffle"]),
-            snapshot_index=job["snapshot_index"], device=job["device"],
-            destfolder=dest, auto_track=True, n_tracks=int(job["n_tracks"]))
+        try:
+            deeplabcut.analyze_videos(
+                job["dlc_config"], [video], shuffle=int(job["shuffle"]),
+                snapshot_index=job["snapshot_index"], device=job["device"],
+                destfolder=dest, auto_track=True, n_tracks=int(job["n_tracks"]))
+        except OSError as e:
+            if NO_ANIMAL_MESSAGE not in str(e):
+                raise
+            print(f"no animal found: {e}", flush=True)
+            _write_info(dest, deeplabcut, torch, {"no_animal": True, "rows": 0})
+            return 0
         h5s = sorted(glob.glob(os.path.join(dest, f"{stem}DLC*_sk.h5")))
         if not h5s:
             print("no stitched _sk.h5 was written", flush=True)
@@ -59,16 +72,19 @@ def main(job_path: str) -> int:
     df = pd.read_hdf(h5)
     df.index.name = None
     df.to_csv(os.path.join(dest, stem + ".csv"))
+    _write_info(dest, deeplabcut, torch, {"h5": os.path.basename(h5), "rows": int(len(df))})
+    return 0
+
+
+def _write_info(dest: str, deeplabcut, torch, extra: dict) -> None:
     info = {
         "deeplabcut": getattr(deeplabcut, "__version__", ""),
         "torch": torch.__version__,
         "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "",
-        "h5": os.path.basename(h5),
-        "rows": int(len(df)),
     }
+    info.update(extra)
     with open(os.path.join(dest, "worker_info.json"), "w", encoding="utf-8") as fh:
         json.dump(info, fh, indent=2)
-    return 0
 
 
 if __name__ == "__main__":

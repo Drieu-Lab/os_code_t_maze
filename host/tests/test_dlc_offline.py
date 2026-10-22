@@ -143,6 +143,21 @@ class TestRunSession(unittest.TestCase):
         pdir = D.pipeline_dir(self.root, "dlc_full_iter1")
         self.assertEqual(prediction_csvs(pdir), [os.path.join(self.folder, f"{SID}_dlc.csv")])
 
+    def test_no_animal_is_done_with_no_files(self):
+        class NoAnimal(FakeWorker):
+            def wait(self, timeout=None):
+                with open(os.path.join(self.job["dest"], "worker_info.json"), "w") as fh:
+                    json.dump({"no_animal": True, "rows": 0}, fh)
+                self.returncode = 0
+                return 0
+        self._run(lambda cfg, job, log: NoAnimal(job))
+        self.assertEqual(os.listdir(self.folder), ["manifest.json"])
+        m = DIO.read_manifest(self.folder)
+        self.assertTrue(m["params"]["no_animal"])
+        self.assertEqual(m["outputs"], [])
+        self.assertEqual(D.classify(True, m, "dlc_full_iter1", SID,
+                                    O.current_inputs(self.bundle, self.video)), D.STATE_DONE)
+
     def test_keep_raw(self):
         self._run(lambda cfg, job, log: FakeWorker(job), keep_raw=True)
         self.assertEqual(len(os.listdir(os.path.join(self.folder, "raw"))), 2)
