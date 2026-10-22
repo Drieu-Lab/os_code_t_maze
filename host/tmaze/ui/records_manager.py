@@ -118,6 +118,7 @@ _BUILDER_TIMEOUT_S = 180
 # LEDs out of each session's video, so a whole-history pass can be minutes; give
 # it a generous ceiling before we call the subprocess hung (docs/decisions/0188).
 _FIT_ALL_TIMEOUT_S = 3600
+_DLC_STATUS_MS = 5 * 60 * 1000
 
 # How often the UI thread checks the background-result queue (ms). 100 ms is
 # imperceptible to the operator but keeps the poll loop cheap (docs/decisions/0163).
@@ -459,6 +460,13 @@ class RecordsManager:
         b_fit = ttk.Button(bar, text="Fit pending sessions",
                            command=self._on_fit_pending)
         b_fit.pack(side="left", padx=(6, 0))
+        # Offline DeepLabCut over all sessions (docs/decisions/0227). It runs
+        # for hours as its own process, so it is not tied to this window.
+        ttk.Button(bar, text="Run DLC", command=self._on_run_dlc).pack(side="left", padx=(14, 0))
+        ttk.Button(bar, text="Stop DLC", command=self._on_stop_dlc).pack(side="left", padx=(6, 0))
+        self.dlc_var = tk.StringVar(value="DLC: ...")
+        ttk.Label(bar, textvariable=self.dlc_var).pack(side="left", padx=(6, 0))
+        self.root.after(1000, self._refresh_dlc_status)
         # These are the buttons locked while a build runs (Reload stays live).
         self._toolbar_buttons = [b_generate, b_import, b_integrity, b_fit]
         # Operator: WHO is editing. Required before any save/import; every
@@ -3023,6 +3031,91 @@ class RecordsManager:
         self._show_result_dialog(
             text + "\n\nRun 'Generate files' to refresh the registry's sync "
             "columns.", ok)
+
+    def _refresh_dlc_status(self) -> None:
+        """Update the DLC status label off the UI thread (scanning the bundles
+        on Z: takes seconds), then again every few minutes."""
+        if getattr(self, "_dlc_status_running", False):
+            return
+        self._dlc_status_running = True
+        result: "queue.Queue" = queue.Queue()
+
+        def worker():
+            try:
+                from tmaze.paths import derivatives_root
+                from tmaze.tools import dlc_offline as DO
+                counts, pid = DO.status(DO.load_config(), str(derivatives_root()))
+                result.put(DO.status_text(counts, pid))
+            except Exception as e:  # a missing share or config must not break the window
+                result.put(f"DLC: status unavailable ({type(e).__name__})")
+
+        def drain():
+            try:
+                text = result.get_nowait()
+            except queue.Empty:
+                self.root.after(_ASYNC_POLL_MS, drain)
+                return
+            self._dlc_status_running = False
+            self.dlc_var.set(text)
+            self.root.after(_DLC_STATUS_MS, self._refresh_dlc_status)
+
+        threading.Thread(target=worker, daemon=True).start()
+        self.root.after(_ASYNC_POLL_MS, drain)
+
+    def _on_run_dlc(self) -> None:
+        """Start ``tmaze.tools.dlc_offline`` as a separate background process,
+        its output in the pipeline's ``_logs/`` (docs/decisions/0227)."""
+        from tmaze.core import derivatives as D
+        from tmaze.paths import derivatives_root, host_dir
+        from tmaze.tools import dlc_offline as DO
+        try:
+            cfg = DO.load_config()
+            root = str(derivatives_root())
+            pdir = D.pipeline_dir(root, cfg.pipeline)
+            running = DO.running_pid(pdir)
+            rig = DO.rig_running()
+        except Exception as e:
+            messagebox.showwarning("Run DLC", f"Could not check the DLC setup:\n{e}")
+            return
+        if running:
+            messagebox.showinfo("Run DLC", f"DLC is already running (pid {running}).")
+            return
+        if rig:
+            messagebox.showinfo("Run DLC", "The rig GUI is open. DLC only runs while the "
+                                "rig is not in use; close the rig GUI first.")
+            return
+        if not messagebox.askyesno(
+                "Run DLC", "Run DeepLabCut on every session that has no result yet, "
+                "newest first?\n\nIt takes about an hour per session on the GPU and keeps "
+                "going after this window is closed. It stops by itself if the rig GUI "
+                "is opened (that session is redone next time); 'Stop DLC' stops it too."):
+            return
+        logs = os.path.join(pdir, DO.LOGS_NAME)
+        try:
+            os.makedirs(logs, exist_ok=True)
+            log_path = os.path.join(logs, f"run_{dt.datetime.now():%Y%m%d_%H%M%S}.log")
+            with open(log_path, "w", encoding="utf-8") as log:
+                flags = (getattr(subprocess, "DETACHED_PROCESS", 0)
+                         | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+                subprocess.Popen([sys.executable, "-u", "-m", "tmaze.tools.dlc_offline"],
+                                 stdout=log, stderr=subprocess.STDOUT, cwd=str(host_dir()),
+                                 creationflags=flags)
+        except OSError as e:
+            messagebox.showwarning("Run DLC", f"Could not start DLC:\n{e}")
+            return
+        self._set_status(f"DLC started; log: {log_path}")
+        self.root.after(5000, self._refresh_dlc_status)
+
+    def _on_stop_dlc(self) -> None:
+        from tmaze.paths import derivatives_root
+        from tmaze.tools import dlc_offline as DO
+        try:
+            DO.request_stop(DO.load_config(), str(derivatives_root()))
+        except Exception as e:
+            messagebox.showwarning("Stop DLC", f"Could not ask DLC to stop:\n{e}")
+            return
+        self._set_status("Asked DLC to stop; it stops within about 30 s "
+                         "(the session it was on is redone next time).")
 
     def _on_close(self) -> None:
         """Window-close guard: warn on a running build or unsaved edits (#3)."""
