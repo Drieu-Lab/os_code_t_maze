@@ -1295,12 +1295,15 @@ class CameraView:
                 self._counters.note_track_ms((time.perf_counter() - t0) * 1000.0)
             self._track_pub.publish(result, block_id, mono_ts)
             # DeepLabCut-Live head preview: hand the helper a crop around the
-            # rat; returns at once (docs/decisions/0224).
+            # rat, or the ROI box when the tracker has lost it; returns at once
+            # (docs/decisions/0224, 0225).
             dlc = dlc_head_of(tracker)
             if dlc is not None:
                 try:
+                    get_roi = getattr(tracker, "get_roi_polygon", None)
                     dlc.submit(block_id, frame,
-                               result.centroid if result is not None else None)
+                               result.centroid if result is not None else None,
+                               get_roi() if get_roi is not None else None)
                 except Exception:
                     pass
 

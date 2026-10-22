@@ -4,10 +4,12 @@ dlc_head_client.py - the rig's side of the DeepLabCut-Live head preview.
 ``DlcHeadClient`` starts the helper process (``tmaze.tools.dlc_head_server``,
 in the ``dlclivegui`` env), connects to it on 127.0.0.1, and from then on:
 
-- ``submit(block_id, frame, com)`` (called by the camera's track worker after
-  the tracker has found the rat) cuts a fixed-size crop around the centre of
-  mass and sends it. It never waits: only one crop is in flight, and a frame
-  that arrives while the helper is still busy is marked ``skipped``.
+- ``submit(block_id, frame, com, roi_norm)`` (called by the camera's track
+  worker after every tracker step) cuts a fixed-size crop around the centre of
+  mass and sends it; with no CoM it uses the last good one for up to
+  ``hold_s``, then the ROI's bounding box (docs/decisions/0225). It never
+  waits: only one crop is in flight, and a frame that arrives while the helper
+  is still busy is marked ``skipped``.
 - a background thread receives each answer, keeps the newest for the preview
   overlay (``latest``) and, while a recording is open, writes it to the
   session's ``<session>_dlc_head.csv`` (``start_recording`` / ``stop_recording``).
@@ -56,6 +58,8 @@ class DlcHeadConfig:
     pcutoff: float = DH.DEFAULT_PCUTOFF
     start_timeout_s: float = 120.0
     cpu_threads: int = 0
+    hold_s: float = DH.DEFAULT_HOLD_S
+    roi_fallback: bool = True
 
 
 def load_config(path: Optional[str] = None) -> DlcHeadConfig:
@@ -151,7 +155,8 @@ class DlcHeadClient:
         self.error = ""
         self.info: dict = {}
         self.parts: list = []
-        self._in_flight: Optional[Tuple[Optional[int], int, int, float]] = None
+        self._planner = DH.CropPlanner(cfg.crop_px, cfg.hold_s, cfg.roi_fallback)
+        self._in_flight: Optional[Tuple[Optional[int], DH.CropPlan, float]] = None
         self._latest: Optional[DH.DlcHeadSample] = None
         self._latest_mono = 0.0
         self._latency: Deque[float] = deque(maxlen=100)
@@ -265,25 +270,30 @@ class DlcHeadClient:
         return self.state == STATE_READY
 
     # ------------------------------------------------------------- per frame
-    def submit(self, block_id: Optional[int], frame, com: Optional[Tuple[float, float]]) -> None:
-        """Send the crop around ``com`` (full-frame px) unless the helper is
-        busy. ``frame`` is the full BGR frame. Never blocks on the helper."""
+    def submit(self, block_id: Optional[int], frame, com: Optional[Tuple[float, float]],
+               roi_norm=None) -> None:
+        """Send this frame's crop (see ``DH.CropPlanner``) unless the helper is
+        busy. ``frame`` is the full BGR frame, ``com`` the tracker's CoM in
+        full-frame px or None, ``roi_norm`` the tracker's normalised ROI
+        polygon or None. Never blocks on the helper."""
         if self.state != STATE_READY:
             return
-        if com is None:
+        now = time.monotonic()
+        h, w = frame.shape[:2]
+        plan = self._planner.plan(now, com, w, h, roi_norm)
+        if plan is None:
             return self._record(DH.DlcHeadSample(block_id, DH.STATUS_NO_BLOB))
         flight = self._in_flight
         if flight is not None:
-            if time.monotonic() - flight[3] > HUNG_AFTER_S:
+            if now - flight[2] > HUNG_AFTER_S:
                 return self._fail(f"helper stopped answering (no reply in {HUNG_AFTER_S:.0f} s)")
             self._skipped += 1
-            return self._record(DH.DlcHeadSample(block_id, DH.STATUS_SKIPPED))
-        h, w = frame.shape[:2]
-        size = self.cfg.crop_px
-        x0, y0 = DH.crop_box(com[0], com[1], size, w, h)
-        crop = frame[y0:y0 + size, x0:x0 + size]
-        msg = P.encode_crop(block_id, x0, y0, crop.shape[0], crop.shape[1], crop.tobytes())
-        self._in_flight = (block_id, x0, y0, time.monotonic())
+            return self._record(DH.DlcHeadSample(block_id, DH.STATUS_SKIPPED,
+                                                 crop_src=plan.source))
+        crop = frame[plan.y0:plan.y0 + plan.h, plan.x0:plan.x0 + plan.w]
+        msg = P.encode_crop(block_id, plan.x0, plan.y0, crop.shape[0], crop.shape[1],
+                            crop.tobytes())
+        self._in_flight = (block_id, plan, now)
         try:
             with self._send_lock:
                 sock = self._sock
@@ -309,7 +319,9 @@ class DlcHeadClient:
                 return
             flight = self._in_flight
             if flight is not None:
-                sample.crop_x0, sample.crop_y0 = flight[1], flight[2]
+                plan = flight[1]
+                sample.crop_x0, sample.crop_y0 = plan.x0, plan.y0
+                sample.crop_w, sample.crop_h, sample.crop_src = plan.w, plan.h, plan.source
             self._in_flight = None
             self._latest = sample
             self._latest_mono = time.monotonic()
@@ -339,7 +351,8 @@ class DlcHeadClient:
         self.stop_recording()
         if self.state != STATE_READY:
             return None
-        header = DH.header_lines(self.info, self.cfg.crop_px, self.cfg.pcutoff)
+        header = DH.header_lines(self.info, self.cfg.crop_px, self.cfg.pcutoff,
+                                 self.cfg.hold_s, self.cfg.roi_fallback)
         self._recorder = _Recorder(path, header, self.parts)
         return path
 

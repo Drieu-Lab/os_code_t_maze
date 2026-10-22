@@ -104,28 +104,51 @@ class TestClientAgainstHelper(unittest.TestCase):
 
     def test_busy_helper_skips_instead_of_waiting(self):
         frame = np.zeros((480, 640, 3), np.uint8)
-        self.client._in_flight = (1, 0, 0, time.monotonic())   # pretend one is pending
+        pending = DH.CropPlan(0, 0, 64, 64, DH.SRC_COM)
+        self.client._in_flight = (1, pending, time.monotonic())   # pretend one is pending
         t0 = time.perf_counter()
         self.client.submit(2, frame, (100.0, 100.0))
         self.assertLess(time.perf_counter() - t0, 0.05)
         self.assertEqual(self.client.stats()["skipped"], 1)
 
+    def _answered(self, block_id, frame, com, roi=None):
+        sent = self.client.stats()["sent"]
+        self.client.submit(block_id, frame, com, roi)
+        self.assertTrue(_wait(lambda: self.client.stats()["sent"] == sent + 1 and
+                              self.client._in_flight is None))
+        return self.client.latest()
+
+    def test_lost_rat_holds_last_com_then_uses_roi(self):
+        frame = np.full((480, 640, 3), 255, np.uint8)
+        roi = [(0.25, 0.25), (0.75, 0.25), (0.5, 0.75)]
+        first = self._answered(1, frame, (320.0, 240.0), roi)
+        self.assertEqual(first.crop_src, DH.SRC_COM)
+        held = self._answered(2, frame, None, roi)
+        self.assertEqual((held.crop_src, held.crop_x0, held.crop_y0),
+                         (DH.SRC_HOLD, first.crop_x0, first.crop_y0))
+        self.client._planner._last_com_t -= 2.0          # the hold has run out
+        box = self._answered(3, frame, None, roi)
+        self.assertEqual((box.crop_src, box.crop_x0, box.crop_y0, box.crop_w, box.crop_h),
+                         (DH.SRC_ROI, 160, 120, 320, 240))
+        self.assertAlmostEqual(box.head_center[0], 160 + 30)
+
     def test_recording_writes_every_frame_status(self):
         path = os.path.join(tempfile.mkdtemp(), "s_dlc_head.csv")
         self.assertEqual(self.client.start_recording(path), path)
         frame = np.full((480, 640, 3), 255, np.uint8)
-        self.client.submit(1, frame, (320.0, 240.0))
-        self.assertTrue(_wait(lambda: self.client.stats()["sent"] == 1 and
-                              self.client._in_flight is None))
-        self.client.submit(2, frame, None)                   # tracker lost the rat
+        self._answered(1, frame, (320.0, 240.0))
+        self.client._planner._last_com_t -= 2.0
+        self.client.submit(2, frame, None)                   # lost, no ROI set
         self.client.stop_recording()
         with open(path, encoding="utf-8") as fh:
             lines = fh.read().splitlines()
         body = [l for l in lines if not l.startswith("#")]
         self.assertEqual(body[0].split(","), DH.columns(PARTS))
         self.assertTrue(body[1].startswith("1,ok,"))
+        self.assertTrue(body[1].split(",")[7] == DH.SRC_COM)
         self.assertTrue(body[2].startswith("2,no_blob,"))
         self.assertTrue(any(l.startswith("# model_file") for l in lines))
+        self.assertIn("# roi_fallback: on", lines)
 
 
 class TestFailures(unittest.TestCase):
@@ -183,6 +206,7 @@ class TestConfig(unittest.TestCase):
         cfg = C.load_config()
         self.assertEqual(cfg.crop_px, 448)
         self.assertTrue(os.path.isabs(cfg.model_path))
+        self.assertEqual((cfg.hold_s, cfg.roi_fallback), (1.0, True))
 
 
 if __name__ == "__main__":

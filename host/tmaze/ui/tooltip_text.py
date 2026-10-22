@@ -224,9 +224,12 @@ TIPS: Dict[str, Entry] = {
     "tracker.dlc_head_track": "Run the DeepLabCut-Live network (full model, 448 px "
                               "crop around the body centre) in a helper program "
                               "and record its body parts to <session>_dlc_head.csv. "
+                              "If the tracker loses the rat it crops around the last "
+                              "body centre for 1 s, then the whole ROI (about half "
+                              "the frame rate). "
                               "Takes up to ~2 min to start; can't be changed while "
                               "recording. Preview only: the task still uses the "
-                              "body centre (ADR-0224).",
+                              "body centre (ADR-0224, ADR-0225).",
     "tracker.dlc_head_show": "Draw the DeepLabCut-Live head centre (magenta dot) "
                              "and a nose-to-neck line on the previews. A hollow "
                              "dot = likelihood below the cutoff. Display only.",
