@@ -7,7 +7,8 @@ DeepLabCut put the head centre, neck, tail base, nose and ears, by re-tracking r
 sessions with the same settings resolution as ``tmaze.tools.head_point_eval``:
 
   * TRAIN (``--predictions <folder>``): for each session with a DeepLabCut
-    prediction CSV in the folder (file name starting with the session id),
+    prediction CSV in the folder (file name starting with the session id; or
+    a ``dlc_offline`` pipeline folder such as Z:\\Ravi\\derivatives\\dlc_full_iter1),
     tracks the whole video and keeps every ``--stride``-th frame on which the
     tracker has a blob and DeepLabCut predicts at least two of nose / right ear
     / left ear above ``--min-likelihood``. With ``--dlc-project`` too, frames
@@ -53,7 +54,8 @@ def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="python -m tmaze.tools.head_point_dataset",
                                 description=__doc__.split("\n\n")[0])
     p.add_argument("--recordings-root", required=True)
-    p.add_argument("--predictions", help="folder of DeepLabCut prediction CSVs (train)")
+    p.add_argument("--predictions", help="folder of DeepLabCut prediction CSVs, or a "
+                                         "dlc_offline pipeline folder (train)")
     p.add_argument("--dlc-project", help="DeepLabCut project (test set + train exclusion)")
     p.add_argument("--out", required=True)
     p.add_argument("--what", nargs="+", choices=("train", "test"), default=["train", "test"])
@@ -248,6 +250,19 @@ def _track_one(cap, tracker, background, target: int, warmup: int):
     return prepared, est, ht.velocity()
 
 
+def prediction_csvs(folder: str) -> List[str]:
+    """The prediction CSVs in ``folder``: loose ``*.csv`` files, plus - when it
+    is a ``dlc_offline`` pipeline folder - each finished session's
+    ``<session>/<session>_dlc.csv`` (docs/decisions/0226)."""
+    from tmaze.io import derivatives_io as DIO
+
+    out = glob.glob(os.path.join(folder, "*.csv"))
+    for csv in glob.glob(os.path.join(folder, "*", "*_dlc.csv")):
+        if DIO.read_manifest(os.path.dirname(csv)) is not None:
+            out.append(csv)
+    return sorted(out)
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _parser().parse_args(argv)
     os.makedirs(args.out, exist_ok=True)
@@ -258,7 +273,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if "train" in args.what:
         if not args.predictions:
             _parser().error("the training set needs --predictions")
-        for pred_csv in sorted(glob.glob(os.path.join(args.predictions, "*.csv"))):
+        for pred_csv in prediction_csvs(args.predictions):
             name = os.path.basename(pred_csv)
             bundles = [d for d in glob.glob(os.path.join(args.recordings_root, "*"))
                        if name.startswith(os.path.basename(d)) and OT.is_bundle(d)]

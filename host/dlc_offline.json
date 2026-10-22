@@ -1,0 +1,14 @@
+{
+  "_schema": "Settings for python -m tmaze.tools.dlc_offline (docs/decisions/0227). pipeline must end in _iter<N> matching the DLC project's iteration, so a retrained model writes a new pipeline folder instead of mixing results. python is the env that has DeepLabCut; extra_site_packages is put first on its path (the GPU torch build).",
+  "schema_version": 1,
+  "pipeline": "dlc_full_iter1",
+  "python": "C:\\Users\\Celine\\anaconda3\\envs\\DEEPLABCUT\\python.exe",
+  "extra_site_packages": "C:\\Users\\Celine\\venvs\\dlc_gpu\\Lib\\site-packages",
+  "dlc_config": "Z:\\Ravi\\dlc\\drieu_rat_model-Ravi-2026-10-07\\config.yaml",
+  "shuffle": 1,
+  "snapshot_index": "best",
+  "device": "cuda",
+  "n_tracks": 1,
+  "rig_check_s": 30,
+  "avoid_cpus": [10, 11]
+}

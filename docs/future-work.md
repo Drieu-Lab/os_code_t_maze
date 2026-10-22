@@ -136,6 +136,7 @@ criteria).
 | [FW-0085](#fw-0085-trigger-the-cue-from-deeplabcut-lives-head-centre) | Trigger the cue from DeepLabCut-Live's head centre: read the preview files, then a `position_source` setting with a CoM fallback | `io/dlc_head_client`, `core/maze_state`, `drieu_lab_analysis.cue_latency` | Proposed |
 | [FW-0086](#fw-0086-check-whether-windows-power-throttling-slows-the-rig-gui) | Check whether Windows power throttling slows the rig GUI when its window is in the background | `ui/experiment_control.py` | Proposed |
 | [FW-0087](#fw-0087-warn-live-when-the-camera-starts-losing-frames) | Warn live when the camera starts losing frames (incomplete frames / packet resends climbing), instead of leaving the operator to infer it from the fps number | `ui/camera_view.py` | Proposed |
+| [FW-0088](#fw-0088-give-the-rigs-head-direction-the-analysis-convention) | Give the rig's live `head_dir_deg` (image axes, clockwise, 0 = image right) the analysis convention (counter-clockwise, 0 = along the stem hub -> junction) | `core/head_columns.py`, bundle format, `drieu_lab_analysis` | Proposed |
 
 ## Entries
 
@@ -4060,6 +4061,41 @@ silent on the 2026-10-20 sessions.
 **Effort / risk.** Small; display + one auto note.
 
 **ADR needed?** Yes, for the thresholds.
+
+### FW-0088: Give the rig's head direction the analysis convention
+
+- **Status:** Proposed
+- **Date added:** 2026-10-21
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** `core/head_columns.py` (`head_dir_deg`), `tools/head_point_eval.py`,
+  `tools/train_head_net.py` (angle reports), the bundle `format_version`, and
+  `drieu_lab_analysis`'s reader
+- **Related ADRs:** ADR-0219, ADR-0220, ADR-0226; `drieu_lab_analysis` movement_derivatives
+
+**Motivation / context.** The sidecar's `head_dir_deg` (ADR-0220) is in image
+axes: 0 = image right, 90 = image DOWN (clockwise on screen, because image
+rows count downward). The `movement_derivatives_v1` pipeline in
+`drieu_lab_analysis` reports head direction the way the analysis reads
+it: counter-clockwise as seen on the video, 0 = along the stem from the hub
+toward the junction (the analysis repo's `stem_axis`), -180..180. Two
+conventions for the same quantity invite sign and offset mistakes when
+someone compares the live value with the offline one.
+
+**Sketch of approach.** Add a second sidecar column (`head_dir_stem_deg`) in
+the analysis convention, computed from the session's `landmarks.json` stem
+axis. Keep `head_dir_deg` unchanged for old bundles, bump `format_version`,
+and document both in the glossary's "Head direction" entry. Alternatively
+convert only at read time in the analysis repo and leave the rig as is.
+
+**Evaluation / acceptance.** On a session with both, the live
+`head_dir_stem_deg` and the offline `movement_derivatives_v1` head direction
+agree to within the head network's angle error (`train_head_net`'s test
+table) on frames where both are valid.
+
+**Effort / risk.** Small code; the risk is a format change that both repos
+must take together.
+
+**ADR needed?** Yes (format change).
 
 ## Completed
 
