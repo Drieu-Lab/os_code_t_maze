@@ -1,25 +1,26 @@
 """
-dlc_offline_worker - runs DeepLabCut on ONE video (docs/decisions/0227).
+dlc_offline_worker - runs DeepLabCut on ONE video (docs/decisions/0227, 0229).
 
 Started by ``tmaze.tools.dlc_offline`` in its own process, in the
 ``DEEPLABCUT`` env, so the parent can stop it cleanly when the rig is needed.
-Not meant to be run by hand. It imports only the standard library and
-DeepLabCut, because the ``DEEPLABCUT`` env does not have the rig's other
-dependencies.
+Not meant to be run by hand. It imports only the standard library,
+DeepLabCut and the pure ``tmaze.core.dlc_best``, because the ``DEEPLABCUT``
+env does not have the rig's other dependencies.
 
     python -m tmaze.tools.dlc_offline_worker JOB.json
 
 JOB.json: ``{"video", "dest", "dlc_config", "shuffle", "snapshot_index",
-"device", "n_tracks", "extra_site_packages"}``. Writes DeepLabCut's own files
-into ``dest``, then ``dest/<video stem>.csv`` (the stitched track in
-DeepLabCut's standard CSV layout) and ``dest/worker_info.json`` (software
-versions), and exits 0. When DeepLabCut finds no animal in the whole video
-it writes only the info file, with ``"no_animal": true``, and still exits 0.
-Any other failure exits non-zero.
+"device", "extra_site_packages"}``. Runs DeepLabCut's pose step only (no
+tracking / stitching), which leaves its per-frame candidates in
+``dest/<stem>DLC..._assemblies.pickle``; then writes ``dest/<stem>.csv`` (the
+best candidate on each frame, DeepLabCut's standard CSV layout) and
+``dest/worker_info.json`` (software versions, frame counts), and exits 0.
+When no frame has any body part found it writes only the info file, with
+``"no_animal": true``, and still exits 0. Any other failure exits non-zero.
 
-A job with ``"h5"`` (a stitched ``_sk.h5`` from an earlier run) instead of
-``"video"`` skips the analysis and only writes ``dest/<stem>.csv`` + the
-info file - how ``dlc_offline --adopt`` takes over earlier results.
+A job with ``"assemblies"`` (a candidates pickle from an earlier run of the same
+model) instead of ``"video"`` skips the analysis and only builds the CSV - how
+``dlc_offline --adopt`` takes over earlier results.
 """
 
 from __future__ import annotations
@@ -27,11 +28,12 @@ from __future__ import annotations
 import glob
 import json
 import os
+import pickle
 import sys
 
-# What DeepLabCut's track stitching raises when the network found no animal
-# in the whole video (e.g. a short test clip of the empty maze).
-NO_ANIMAL_MESSAGE = "Tracklets are empty"
+from tmaze.core import dlc_best
+
+ASSEMBLIES_SUFFIX = "_assemblies.pickle"
 
 
 def main(job_path: str) -> int:
@@ -42,37 +44,43 @@ def main(job_path: str) -> int:
         sys.path.insert(0, extra)
 
     import deeplabcut
-    import pandas as pd
     import torch
+    from deeplabcut.utils import auxiliaryfunctions
 
     dest = job["dest"]
-    if job.get("h5"):
-        h5 = job["h5"]
-        stem = os.path.basename(h5).split("DLC", 1)[0]
+    if job.get("assemblies"):
+        path = job["assemblies"]
+        stem = os.path.basename(path).split("DLC", 1)[0]
     else:
         video = job["video"]
         stem = os.path.splitext(os.path.basename(video))[0]
         print(f"torch {torch.__version__}, cuda {torch.cuda.is_available()}", flush=True)
-        try:
-            deeplabcut.analyze_videos(
-                job["dlc_config"], [video], shuffle=int(job["shuffle"]),
-                snapshot_index=job["snapshot_index"], device=job["device"],
-                destfolder=dest, auto_track=True, n_tracks=int(job["n_tracks"]))
-        except OSError as e:
-            if NO_ANIMAL_MESSAGE not in str(e):
-                raise
-            print(f"no animal found: {e}", flush=True)
-            _write_info(dest, deeplabcut, torch, {"no_animal": True, "rows": 0})
-            return 0
-        h5s = sorted(glob.glob(os.path.join(dest, f"{stem}DLC*_sk.h5")))
-        if not h5s:
-            print("no stitched _sk.h5 was written", flush=True)
+        deeplabcut.analyze_videos(
+            job["dlc_config"], [video], shuffle=int(job["shuffle"]),
+            snapshot_index=job["snapshot_index"], device=job["device"],
+            destfolder=dest, auto_track=False)
+        found = sorted(glob.glob(os.path.join(dest, f"{stem}DLC*{ASSEMBLIES_SUFFIX}")))
+        if not found:
+            print(f"no {ASSEMBLIES_SUFFIX} was written", flush=True)
             return 2
-        h5 = h5s[-1]
-    df = pd.read_hdf(h5)
-    df.index.name = None
-    df.to_csv(os.path.join(dest, stem + ".csv"))
-    _write_info(dest, deeplabcut, torch, {"h5": os.path.basename(h5), "rows": int(len(df))})
+        path = found[-1]
+
+    bodyparts = auxiliaryfunctions.read_config(job["dlc_config"])["multianimalbodyparts"]
+    with open(path, "rb") as fh:
+        raw = pickle.load(fh)
+    frames = {k: v.tolist() for k, v in raw.items() if isinstance(k, int)}
+    n_frames = max(frames) + 1 if frames else 0
+    rows = dlc_best.track(frames, n_frames, len(bodyparts))
+    found_frames = dlc_best.found_frames(rows)
+    info = {"assemblies": os.path.basename(path), "rows": n_frames, "found_frames": found_frames}
+    if found_frames == 0:
+        print("no animal found on any frame", flush=True)
+        info["no_animal"] = True
+    else:
+        scorer = os.path.basename(path)[len(stem):-len(ASSEMBLIES_SUFFIX)]
+        with open(os.path.join(dest, stem + ".csv"), "w", encoding="utf-8", newline="") as fh:
+            fh.write(dlc_best.dlc_csv(scorer, stem.split("_")[0], bodyparts, rows))
+    _write_info(dest, deeplabcut, torch, info)
     return 0
 
 

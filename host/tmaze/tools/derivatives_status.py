@@ -9,7 +9,7 @@ each manifest says which inputs it used, and those are re-checked against the
 bundles as they are now. Read-only.
 
     python -m tmaze.tools.derivatives_status
-    python -m tmaze.tools.derivatives_status --pipeline dlc_full_iter1 --list stale
+    python -m tmaze.tools.derivatives_status --pipeline dlc_best_iter1 --list stale
 
 "No result" counts every session bundle; a pipeline that only applies to some
 sessions (e.g. DLC needs a video) reports its own pending list

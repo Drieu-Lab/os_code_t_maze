@@ -8,7 +8,7 @@ sessions with the same settings resolution as ``tmaze.tools.head_point_eval``:
 
   * TRAIN (``--predictions <folder>``): for each session with a DeepLabCut
     prediction CSV in the folder (file name starting with the session id; or
-    a ``dlc_offline`` pipeline folder such as Z:\\Ravi\\derivatives\\dlc_full_iter1),
+    a ``dlc_offline`` pipeline folder such as Z:\\Ravi\\derivatives\\dlc_best_iter1),
     tracks the whole video and keeps every ``--stride``-th frame on which the
     tracker has a blob and DeepLabCut predicts at least two of nose / right ear
     / left ear above ``--min-likelihood``. With ``--dlc-project`` too, frames

@@ -17,7 +17,7 @@ The root comes from the `TMAZE_DERIVATIVES_DIR` environment variable, else
 
 ```text
 <root>/
-  <pipeline>/                     e.g. dlc_full_iter1, movement_derivatives_v1
+  <pipeline>/                     e.g. dlc_best_iter1, movement_derivatives_v1
     <session_id>/                 e.g. 602_20260916_145627 (the bundle folder's name)
       manifest.json               written LAST
       <session_id>_<what>.<ext>   the pipeline's own files
@@ -61,7 +61,7 @@ so an interrupted re-run shows as partial, not as done with mixed files.
 ```json
 {
   "derivatives_format_version": 1,
-  "pipeline": "dlc_full_iter1",
+  "pipeline": "dlc_best_iter1",
   "session_id": "602_20260915_151743",
   "status": "complete",
   "adopted": false,
@@ -70,8 +70,8 @@ so an interrupted re-run shows as partial, not as done with mixed files.
      "path": "Z:\\Ravi\\phase3_recordings\\602_20260915_151743\\video\\602_20260915_151743.mp4",
      "bundle_rel": "video/602_20260915_151743.mp4",
      "size": 14404165837, "mtime_s": 1789503470.669},
-    {"role": "upstream:dlc_full_iter1", "kind": "upstream",
-     "pipeline": "dlc_full_iter1", "session_id": "602_20260915_151743",
+    {"role": "upstream:dlc_best_iter1", "kind": "upstream",
+     "pipeline": "dlc_best_iter1", "session_id": "602_20260915_151743",
      "finished_at": "2026-10-21T23:05:31-04:00"}
   ],
   "outputs": [{"file": "602_20260915_151743_dlc.csv", "size": 48162855}],
@@ -120,4 +120,6 @@ delete it by hand once that run is known to be dead.
 
 | Pipeline | Written by | Files per session |
 | --- | --- | --- |
-| `dlc_full_iter1` | `python -m tmaze.tools.dlc_offline` (ADR-0227) | `<sid>_dlc.csv` (DeepLabCut's standard CSV: four header rows - scorer, individuals, bodyparts, coords - then one row per video frame; the first column is the frame index = the sidecar's `frame_idx`), `<sid>_dlc.h5` (the same table). The stitched track can end before the video does (e.g. after the rat is lifted out), so the table may stop short of the last frame: join on the frame index and treat missing frames as not detected (`params.frames` vs `params.sidecar_rows` in the manifest shows how many). A video with no animal in it is done with no files, only the manifest, with `params.no_animal: true` (ADR-0228) |
+| `dlc_best_iter1` | `python -m tmaze.tools.dlc_offline` (ADR-0227, 0229) | `<sid>_dlc.csv` (DeepLabCut's standard CSV: four header rows - scorer, individuals, bodyparts, coords - then one row per video frame, the first column is the frame index = the sidecar's `frame_idx`; each row is the best-scoring candidate skeleton on that frame, blank when none; no likelihood cut-off applied). `raw/` holds DeepLabCut's `_full`, `_meta` and `_assemblies` pickles unless the run used `--no-raw`. `params.found_frames` counts frames with any body part found. A video with no animal in it is done with no CSV, only the manifest, with `params.no_animal: true` (ADR-0228) |
+| `dlc_full_iter1` | `dlc_offline` before ADR-0229 (no longer written; kept for comparison) | `<sid>_dlc.csv` + `<sid>_dlc.h5`: DeepLabCut's stitched track, same CSV layout. It drops many frames where the rat was found (ADR-0229) and can stop before the last frame; join on the frame index |
+| `movement_derivatives_v1` | `python -m tmaze_analysis.movement_derivatives` (`drieu_lab_analysis`, its ADR-0172) | `<sid>_movement.csv`: per camera frame, the smoothed head / body position, direction, speed and turning rate, in pixels and maze centimetres; upstream `dlc_best_iter1` |

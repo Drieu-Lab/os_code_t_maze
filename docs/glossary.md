@@ -167,7 +167,7 @@ Results computed from the session bundles after the fact, such as DeepLabCut
 tracking or movement measures. They live in their own folder tree
 (`Z:\Ravi\derivatives\<pipeline>\<session_id>\`), never inside the bundles. A
 *pipeline* is one tool with fixed settings; its name carries a version
-(`dlc_full_iter1`), so a new model writes a new folder. Each session folder
+(`dlc_best_iter1`), so a new model writes a new folder. Each session folder
 holds a *manifest* (`manifest.json`), written last, that lists what went in
 (the input files' sizes and dates) and what came out. A result is *stale*
 when its inputs have changed since; *partial* when a run stopped before writing

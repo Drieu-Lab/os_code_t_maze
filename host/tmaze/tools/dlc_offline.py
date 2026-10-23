@@ -1,19 +1,21 @@
 """
 dlc_offline - DeepLabCut (the full model) over every session bundle's video,
-into the derived-data folder (docs/decisions/0226, 0227).
+into the derived-data folder (docs/decisions/0226, 0227, 0229).
 
 Each session's result lands in ``<derivatives root>/<pipeline>/<session_id>/``:
-``<session_id>_dlc.csv`` (DeepLabCut's standard CSV; its first column is the
-video frame index, the same number as the video sidecar's ``frame_idx``),
-``<session_id>_dlc.h5`` (the same table), and ``manifest.json`` (written last).
-A video in which DeepLabCut finds no animal at all gets only the manifest,
-with ``params.no_animal: true``, so it counts as done and is not retried.
+``<session_id>_dlc.csv`` (DeepLabCut's standard CSV, one row per video frame;
+its first column is the frame index, the same number as the video sidecar's
+``frame_idx``; each row is the best-scoring candidate skeleton on that frame),
+``raw/`` (DeepLabCut's own pickles, unless ``keep_raw`` is off), and
+``manifest.json`` (written last). A video in which DeepLabCut finds no animal
+at all gets only the manifest, with ``params.no_animal: true``, so it counts as
+done and is not retried.
 
     python -m tmaze.tools.dlc_offline --dry-run          what would run
     python -m tmaze.tools.dlc_offline                    run everything not done
     python -m tmaze.tools.dlc_offline --limit 1 --session 602_20260916_145627
     python -m tmaze.tools.dlc_offline --stop             ask a running job to stop
-    python -m tmaze.tools.dlc_offline --adopt DIR        take over earlier results
+    python -m tmaze.tools.dlc_offline --adopt DIR        build from earlier pickles
 
 Runs newest session first, is safe to interrupt (a session stopped half-way
 is redone next time), and never runs while the rig GUI
@@ -53,6 +55,7 @@ RIG_MARKER = "experiment_control"
 STOP_NAME = "_stop"
 LOGS_NAME = "_logs"
 WORK_NAME = "_work"
+RAW_KINDS = ("full", "meta", "assemblies")
 EXIT_OK, EXIT_FAILED, EXIT_NOSTART, EXIT_STOPPED = 0, 1, 2, 3
 
 
@@ -65,7 +68,7 @@ class OfflineConfig:
     shuffle: int = 1
     snapshot_index: str = "best"
     device: str = "cuda"
-    n_tracks: int = 1
+    keep_raw: bool = True
     rig_check_s: float = 30.0
     avoid_cpus: List[int] = field(default_factory=lambda: [10, 11])
 
@@ -221,25 +224,22 @@ def csv_name(sid: str) -> str:
     return f"{sid}_dlc.csv"
 
 
-def h5_name(sid: str) -> str:
-    return f"{sid}_dlc.h5"
-
-
-def finish(folder: str, sid: str, work: str, keep_raw: bool = False) -> List[dict]:
+def finish(folder: str, sid: str, work: str, keep_raw: bool = True,
+           no_animal: bool = False) -> List[dict]:
     """Move the worker's results from ``_work/`` into the session folder under
-    their fixed names, drop the rest (unless ``keep_raw``), and return the
-    manifest's ``outputs``."""
-    h5s = sorted(glob.glob(os.path.join(work, f"{sid}DLC*_sk.h5")))
-    csv = os.path.join(work, sid + ".csv")
-    if not h5s or not os.path.isfile(csv):
-        raise RuntimeError(f"worker left no {sid}.csv / _sk.h5 in {work}")
-    os.replace(csv, os.path.join(folder, csv_name(sid)))
-    shutil.copyfile(h5s[-1], os.path.join(folder, h5_name(sid)))
-    names = [csv_name(sid), h5_name(sid)]
+    their fixed names, keep DeepLabCut's pickles under ``raw/`` (or drop
+    them), and return the manifest's ``outputs``."""
+    names = []
+    if not no_animal:
+        csv = os.path.join(work, sid + ".csv")
+        if not os.path.isfile(csv):
+            raise RuntimeError(f"worker left no {sid}.csv in {work}")
+        os.replace(csv, os.path.join(folder, csv_name(sid)))
+        names.append(csv_name(sid))
     if keep_raw:
         raw = os.path.join(folder, "raw")
-        os.makedirs(raw, exist_ok=True)
-        for p in glob.glob(os.path.join(work, f"{sid}DLC*")):
+        for p in sorted(glob.glob(os.path.join(work, f"{sid}DLC*"))):
+            os.makedirs(raw, exist_ok=True)
             os.replace(p, os.path.join(raw, os.path.basename(p)))
             names.append("raw/" + os.path.basename(p))
     shutil.rmtree(work, ignore_errors=True)
@@ -303,8 +303,7 @@ def run_job(cfg: OfflineConfig, job: dict, work: str, log_path: str, stop_file: 
 
 
 def run_session(cfg: OfflineConfig, root: str, sid: str, bundle: str, video: str, model: dict,
-                logs: str, stop_file: str, keep_raw: bool = False,
-                launch: Launcher = launch_worker,
+                logs: str, stop_file: str, launch: Launcher = launch_worker,
                 rig: Callable[[], Optional[int]] = rig_running) -> None:
     folder = D.session_dir(root, cfg.pipeline, sid)
     with DIO.SessionLock(folder):
@@ -315,15 +314,10 @@ def run_session(cfg: OfflineConfig, root: str, sid: str, bundle: str, video: str
         started = DIO.now_iso()
         job = {"video": video, "dest": work, "dlc_config": cfg.dlc_config,
                "shuffle": cfg.shuffle, "snapshot_index": cfg.snapshot_index,
-               "device": cfg.device, "n_tracks": cfg.n_tracks,
-               "extra_site_packages": cfg.extra_site_packages}
+               "device": cfg.device, "extra_site_packages": cfg.extra_site_packages}
         log_path = os.path.join(logs, f"{sid}_{datetime.now():%Y%m%d_%H%M%S}.log")
         info = run_job(cfg, job, work, log_path, stop_file, launch, rig)
-        if info.get("no_animal"):
-            shutil.rmtree(work, ignore_errors=True)
-            outputs = []
-        else:
-            outputs = finish(folder, sid, work, keep_raw)
+        outputs = finish(folder, sid, work, cfg.keep_raw, bool(info.get("no_animal")))
         DIO.write_manifest(folder, _manifest(cfg, sid, bundle, inputs, outputs, started,
                                              model, info, adopted=False))
 
@@ -332,8 +326,9 @@ def _manifest(cfg: OfflineConfig, sid: str, bundle: str, inputs: List[dict],
               outputs: List[dict], started: str, model: dict, info: dict,
               adopted: bool) -> dict:
     params = {"shuffle": cfg.shuffle, "snapshot_index": cfg.snapshot_index,
-              "device": cfg.device, "auto_track": True, "n_tracks": cfg.n_tracks,
-              "frames": info.get("rows"), "sidecar_rows": sidecar_rows(bundle, sid),
+              "device": cfg.device, "track": "best_per_frame",
+              "frames": info.get("rows"), "found_frames": info.get("found_frames"),
+              "sidecar_rows": sidecar_rows(bundle, sid),
               "no_animal": bool(info.get("no_animal"))}
     software = {k: info[k] for k in ("deeplabcut", "torch", "gpu") if info.get(k)}
     return D.new_manifest(cfg.pipeline, sid, inputs=inputs, outputs=outputs,
@@ -401,8 +396,10 @@ def adopt_dir(cfg: OfflineConfig, root: str, src: str, sessions: Dict[str, Tuple
               model: dict, logs: str, stop_file: str, launch: Launcher = launch_worker) -> int:
     snap_tag = "snapshot_" + model["snapshot"][len("snapshot-"):-len(".pt")]
     failed = 0
-    for h5 in sorted(glob.glob(os.path.join(src, f"*DLC*shuffle{cfg.shuffle}_{snap_tag}_sk.h5"))):
-        sid = os.path.basename(h5).split("DLC", 1)[0]
+    pattern = f"*DLC*shuffle{cfg.shuffle}_{snap_tag}_assemblies.pickle"
+    for asm in sorted(glob.glob(os.path.join(src, pattern))):
+        sid = os.path.basename(asm).split("DLC", 1)[0]
+        prefix = os.path.basename(asm)[:-len("_assemblies.pickle")]
         if sid not in sessions:
             print(f"  {sid}: no bundle with a video - skipped")
             continue
@@ -418,10 +415,14 @@ def adopt_dir(cfg: OfflineConfig, root: str, src: str, sessions: Dict[str, Tuple
                 work = os.path.join(folder, WORK_NAME)
                 shutil.rmtree(work, ignore_errors=True)
                 os.makedirs(work)
-                shutil.copyfile(h5, os.path.join(work, os.path.basename(h5)))
+                for kind in RAW_KINDS:
+                    p = os.path.join(src, f"{prefix}_{kind}.pickle")
+                    if os.path.isfile(p):
+                        shutil.copyfile(p, os.path.join(work, os.path.basename(p)))
                 log_path = os.path.join(logs, f"{sid}_adopt_{datetime.now():%Y%m%d_%H%M%S}.log")
-                info = run_job(cfg, {"h5": os.path.join(work, os.path.basename(h5)),
-                                     "dest": work, "extra_site_packages": cfg.extra_site_packages},
+                info = run_job(cfg, {"assemblies": os.path.join(work, os.path.basename(asm)),
+                                     "dest": work, "dlc_config": cfg.dlc_config,
+                                     "extra_site_packages": cfg.extra_site_packages},
                                work, log_path, stop_file, launch, rig=lambda: None)
                 why = adopt_problem(info.get("rows"), sidecar_rows(bundle, sid),
                                     os.path.getsize(proj) if os.path.isfile(proj) else None,
@@ -429,9 +430,9 @@ def adopt_dir(cfg: OfflineConfig, root: str, src: str, sessions: Dict[str, Tuple
                 if why:
                     refused = why
                     raise RuntimeError(why)
-                started = datetime.fromtimestamp(os.path.getmtime(h5)).astimezone() \
+                started = datetime.fromtimestamp(os.path.getmtime(asm)).astimezone() \
                     .isoformat(timespec="seconds")
-                outputs = finish(folder, sid, work)
+                outputs = finish(folder, sid, work, cfg.keep_raw, bool(info.get("no_animal")))
                 DIO.write_manifest(folder, _manifest(cfg, sid, bundle, current_inputs(bundle, video),
                                                      outputs, started, model, info, adopted=True))
             print(f"  {sid}: adopted")
@@ -453,14 +454,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--limit", type=int, help="at most this many sessions")
     ap.add_argument("--no-stale", action="store_true",
                     help="skip sessions whose video changed since their result")
-    ap.add_argument("--keep-raw", action="store_true",
-                    help="also keep DeepLabCut's pickles (large) under raw/")
+    ap.add_argument("--no-raw", action="store_true",
+                    help="delete DeepLabCut's pickles instead of keeping them under raw/")
     ap.add_argument("--stop", action="store_true", help="ask a running job to stop, then exit")
     ap.add_argument("--adopt", metavar="DIR",
-                    help="take over stitched _sk.h5 results made earlier by the same model")
+                    help="build results from _assemblies.pickle files made earlier by the same model")
     a = ap.parse_args(argv)
 
     cfg = load_config(a.config)
+    if a.no_raw:
+        cfg.keep_raw = False
     root = a.root or str(derivatives_root())
     pdir = D.pipeline_dir(root, cfg.pipeline)
     stop_file = os.path.join(pdir, STOP_NAME)
@@ -499,13 +502,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         with DIO.SessionLock(pdir):
             if a.adopt:
                 return adopt_dir(cfg, root, a.adopt, sessions, model, logs, stop_file)
-            return _run_all(cfg, root, todo, sessions, model, logs, stop_file, a.keep_raw)
+            return _run_all(cfg, root, todo, sessions, model, logs, stop_file)
     except DIO.LockedError as e:
         print(f"another run is active: {e}")
         return EXIT_NOSTART
 
 
-def _run_all(cfg, root, todo, sessions, model, logs, stop_file, keep_raw) -> int:
+def _run_all(cfg, root, todo, sessions, model, logs, stop_file) -> int:
     failed = 0
     for i, sid in enumerate(todo, 1):
         if os.path.exists(stop_file):
@@ -519,7 +522,7 @@ def _run_all(cfg, root, todo, sessions, model, logs, stop_file, keep_raw) -> int
         t0 = time.time()
         print(f"[{i}/{len(todo)}] {sid}: start {datetime.now():%H:%M:%S}", flush=True)
         try:
-            run_session(cfg, root, sid, bundle, video, model, logs, stop_file, keep_raw)
+            run_session(cfg, root, sid, bundle, video, model, logs, stop_file)
             m = DIO.read_manifest(D.session_dir(root, cfg.pipeline, sid)) or {}
             note = " (no animal found)" if m.get("params", {}).get("no_animal") else ""
             print(f"[{i}/{len(todo)}] {sid}: done in {(time.time() - t0) / 60:.0f} min{note}",

@@ -5,7 +5,8 @@
 - **Author / Agent:** Agent (Cursor) on behalf of Celine
 - **Affects:** `host/tmaze/tools/dlc_offline.py`, `host/tmaze/tools/dlc_offline_worker.py`,
   `host/dlc_offline.json`, `host/tmaze/tools/head_point_dataset.py` (`prediction_csvs`)
-- **Supersedes / Superseded by:** — (uses [ADR-0226](0226-derived-data-folder.md))
+- **Supersedes / Superseded by:** — (uses [ADR-0226](0226-derived-data-folder.md)); the
+  stitched track and the deleted pickles are superseded by [ADR-0229](0229-dlc-offline-best-skeleton-per-frame.md)
 
 ## Context
 

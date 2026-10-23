@@ -14,8 +14,12 @@ from tmaze.tools import dlc_offline as O
 SID = "602_20260916_145627"
 
 
+PIPE = "dlc_best_iter1"
+PREFIX = f"{SID}DLC_Resnet50_mShuffle1_snapshot_best-140"
+
+
 def _cfg(**kw):
-    base = dict(pipeline="dlc_full_iter1", python="python", dlc_config="cfg.yaml",
+    base = dict(pipeline=PIPE, python="python", dlc_config="cfg.yaml",
                 rig_check_s=0.01, avoid_cpus=[])
     base.update(kw)
     return O.OfflineConfig(**base)
@@ -33,14 +37,13 @@ class FakeWorker:
         if not self.finish:
             raise subprocess.TimeoutExpired("worker", timeout)
         dest = self.job["dest"]
-        with open(os.path.join(dest, f"{SID}DLC_Resnet50_mShuffle1_snapshot_best-140_sk.h5"), "wb") as fh:
-            fh.write(b"h5")
-        with open(os.path.join(dest, f"{SID}DLC_Resnet50_mShuffle1_snapshot_best-140_full.pickle"), "wb") as fh:
-            fh.write(b"big")
+        for kind in ("full", "assemblies"):
+            with open(os.path.join(dest, f"{PREFIX}_{kind}.pickle"), "wb") as fh:
+                fh.write(b"big")
         with open(os.path.join(dest, SID + ".csv"), "w") as fh:
             fh.write("scorer,x\n0,1\n")
         with open(os.path.join(dest, "worker_info.json"), "w") as fh:
-            json.dump({"deeplabcut": "3.0", "torch": "2.5", "rows": 3}, fh)
+            json.dump({"deeplabcut": "3.0", "torch": "2.5", "rows": 3, "found_frames": 2}, fh)
         self.returncode = 0
         return 0
 
@@ -52,6 +55,11 @@ class TestChecks(unittest.TestCase):
         self.assertIsNone(O.pipeline_problem("dlc_full_iter1", 1))
         self.assertIn("iteration 2", O.pipeline_problem("dlc_full_iter1", 2))
         self.assertIn("_iter<N>", O.pipeline_problem("dlc_full", 1))
+
+    def test_config_file_loads(self):
+        cfg = O.load_config()
+        self.assertTrue(cfg.keep_raw)
+        self.assertIsNone(O.pipeline_problem(cfg.pipeline, 1))
 
     def test_find_snapshot_picks_best_of_the_shuffle(self):
         root = tempfile.mkdtemp()
@@ -116,31 +124,35 @@ class TestRunSession(unittest.TestCase):
         self.logs = os.path.join(self.root, "logs")
         os.makedirs(self.logs)
         self.stop = os.path.join(self.root, "_stop")
-        self.folder = D.session_dir(self.root, "dlc_full_iter1", SID)
+        self.folder = D.session_dir(self.root, PIPE, SID)
 
-    def _run(self, launch, **kw):
-        O.run_session(_cfg(), self.root, SID, self.bundle, self.video, {"snapshot": "s.pt"},
-                      self.logs, self.stop, launch=launch, rig=lambda: None, **kw)
+    def _run(self, launch, cfg=None):
+        O.run_session(cfg or _cfg(), self.root, SID, self.bundle, self.video, {"snapshot": "s.pt"},
+                      self.logs, self.stop, launch=launch, rig=lambda: None)
 
     def test_done_session_has_fixed_names_and_a_manifest(self):
         self._run(lambda cfg, job, log: FakeWorker(job))
-        self.assertEqual(sorted(os.listdir(self.folder)),
-                         [f"{SID}_dlc.csv", f"{SID}_dlc.h5", "manifest.json"])
+        self.assertEqual(sorted(os.listdir(self.folder)), [f"{SID}_dlc.csv", "manifest.json", "raw"])
+        self.assertEqual(sorted(os.listdir(os.path.join(self.folder, "raw"))),
+                         [f"{PREFIX}_assemblies.pickle", f"{PREFIX}_full.pickle"])
         m = DIO.read_manifest(self.folder)
-        self.assertEqual(D.manifest_problems(m, "dlc_full_iter1", SID), [])
+        self.assertEqual(D.manifest_problems(m, PIPE, SID), [])
+        self.assertEqual(m["params"]["track"], "best_per_frame")
         self.assertEqual(m["params"]["frames"], 3)
+        self.assertEqual(m["params"]["found_frames"], 2)
         self.assertEqual(m["params"]["sidecar_rows"], 3)
         self.assertEqual(m["inputs"][0]["bundle_rel"], f"video/{SID}.mp4")
-        self.assertEqual(D.classify(True, m, "dlc_full_iter1", SID,
+        self.assertIn(f"raw/{PREFIX}_full.pickle", [o["file"] for o in m["outputs"]])
+        self.assertEqual(D.classify(True, m, PIPE, SID,
                                     O.current_inputs(self.bundle, self.video)), D.STATE_DONE)
 
     def test_head_point_dataset_reads_finished_sessions_only(self):
         from tmaze.tools.head_point_dataset import prediction_csvs
         self._run(lambda cfg, job, log: FakeWorker(job))
-        half = D.session_dir(self.root, "dlc_full_iter1", "600_20260901_100000")
+        half = D.session_dir(self.root, PIPE, "600_20260901_100000")
         os.makedirs(half)
         open(os.path.join(half, "600_20260901_100000_dlc.csv"), "w").close()
-        pdir = D.pipeline_dir(self.root, "dlc_full_iter1")
+        pdir = D.pipeline_dir(self.root, PIPE)
         self.assertEqual(prediction_csvs(pdir), [os.path.join(self.folder, f"{SID}_dlc.csv")])
 
     def test_no_animal_is_done_with_no_files(self):
@@ -155,12 +167,12 @@ class TestRunSession(unittest.TestCase):
         m = DIO.read_manifest(self.folder)
         self.assertTrue(m["params"]["no_animal"])
         self.assertEqual(m["outputs"], [])
-        self.assertEqual(D.classify(True, m, "dlc_full_iter1", SID,
+        self.assertEqual(D.classify(True, m, PIPE, SID,
                                     O.current_inputs(self.bundle, self.video)), D.STATE_DONE)
 
-    def test_keep_raw(self):
-        self._run(lambda cfg, job, log: FakeWorker(job), keep_raw=True)
-        self.assertEqual(len(os.listdir(os.path.join(self.folder, "raw"))), 2)
+    def test_no_raw(self):
+        self._run(lambda cfg, job, log: FakeWorker(job), cfg=_cfg(keep_raw=False))
+        self.assertEqual(sorted(os.listdir(self.folder)), [f"{SID}_dlc.csv", "manifest.json"])
 
     def test_stop_kills_and_leaves_partial(self):
         open(self.stop, "w").close()
