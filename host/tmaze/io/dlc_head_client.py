@@ -32,13 +32,13 @@ import sys
 import tempfile
 import threading
 import time
-from collections import deque
 from dataclasses import dataclass
-from typing import Callable, Deque, Optional, Tuple
+from typing import Callable, Optional, Tuple
 
 from tmaze.core import dlc_head as DH
 from tmaze.core import dlc_head_protocol as P
 from tmaze.core import task_position as TP
+from tmaze.core.recent_tally import RecentTally
 from tmaze.paths import host_dir
 
 CONFIG_FILE = "dlc_head.json"
@@ -49,6 +49,10 @@ LOG_NAME = "tmaze_dlc_head_server.log"
 AVOID_CPUS = (10, 11)
 
 STATE_OFF, STATE_STARTING, STATE_READY, STATE_ERROR = "off", "starting", "ready", "error"
+
+# Tally keys, and what the totals in stats() count from.
+EV_SENT, EV_SKIPPED, EV_ANSWER = "sent", "skipped", "answer"
+SINCE_HELPER, SINCE_RECORDING = "helper", "recording"
 
 
 @dataclass
@@ -165,9 +169,10 @@ class DlcHeadClient:
         self._in_flight: Optional[Tuple[Optional[int], DH.CropPlan, float]] = None
         self._latest: Optional[DH.DlcHeadSample] = None
         self._latest_mono = 0.0
-        self._latency: Deque[float] = deque(maxlen=100)
-        self._sent = 0
-        self._skipped = 0
+        # Crops sent / skipped (helper busy) and each answer's delay, over the
+        # last few seconds and since the helper started or recording began.
+        self._tally = RecentTally()
+        self._tally_since = SINCE_HELPER
         self._recorder: Optional[_Recorder] = None
         self.log_path = os.path.join(tempfile.gettempdir(), LOG_NAME)
 
@@ -293,7 +298,7 @@ class DlcHeadClient:
         if flight is not None:
             if now - flight[2] > HUNG_AFTER_S:
                 return self._fail(f"helper stopped answering (no reply in {HUNG_AFTER_S:.0f} s)")
-            self._skipped += 1
+            self._tally.add(now, EV_SKIPPED)
             return self._record(DH.DlcHeadSample(block_id, DH.STATUS_SKIPPED,
                                                  crop_src=plan.source))
         crop = frame[plan.y0:plan.y0 + plan.h, plan.x0:plan.x0 + plan.w]
@@ -306,7 +311,7 @@ class DlcHeadClient:
                 if sock is None:
                     return
                 sock.sendall(msg)
-            self._sent += 1
+            self._tally.add(now, EV_SENT)
         except OSError as e:
             self._fail(f"lost the helper connection: {e}")
 
@@ -332,7 +337,7 @@ class DlcHeadClient:
             self._latest = sample
             self._latest_mono = time.monotonic()
             if sample.latency_ms is not None:
-                self._latency.append(sample.latency_ms)
+                self._tally.add(self._latest_mono, EV_ANSWER, sample.latency_ms)
             self._record(sample)
 
     def latest(self, max_age_s: float = 0.5) -> Optional[DH.DlcHeadSample]:
@@ -349,14 +354,22 @@ class DlcHeadClient:
             return None
         return self._latest
 
-    def stats(self) -> dict:
-        """Recent helper latency (ms, median of the last 100) and the share of
-        submitted frames skipped because the helper was busy."""
-        lat = sorted(self._latency)
-        total = self._sent + self._skipped
-        return {"latency_ms": lat[len(lat) // 2] if lat else None,
-                "skipped_frac": (self._skipped / total) if total else 0.0,
-                "sent": self._sent, "skipped": self._skipped}
+    def stats(self, now: Optional[float] = None) -> dict:
+        """The helper's answer time (ms) and the share of frames skipped because
+        it was busy, twice: ``recent`` (the last ``window_s``; median time) and
+        ``total`` (since ``since``; mean time). ``since`` is ``helper`` (it
+        started) or ``recording`` (the last recording started)."""
+        snap = self._tally.snapshot(time.monotonic() if now is None else now)
+
+        def part(counts: dict, latency_ms: Optional[float]) -> dict:
+            sent, skipped = counts.get(EV_SENT, 0), counts.get(EV_SKIPPED, 0)
+            n = sent + skipped
+            return {"latency_ms": latency_ms, "skipped_frac": skipped / n if n else 0.0,
+                    "sent": sent, "skipped": skipped}
+
+        return {"recent": part(snap.recent, snap.recent_median),
+                "total": part(snap.total, snap.total_mean),
+                "window_s": self._tally.window_s, "since": self._tally_since}
 
     # ------------------------------------------------------------ recording
     def start_recording(self, path: str) -> Optional[str]:
@@ -368,6 +381,8 @@ class DlcHeadClient:
         header = DH.header_lines(self.info, self.cfg.crop_px, self.cfg.pcutoff,
                                  self.cfg.hold_s, self.cfg.roi_fallback)
         self._recorder = _Recorder(path, header, self.parts)
+        self._tally.reset()
+        self._tally_since = SINCE_RECORDING
         return path
 
     @property

@@ -313,5 +313,31 @@ class TestDrawOverlayToggles(unittest.TestCase):
         self.assertTrue(np.all(img[50, 50] == DLC_HEAD_COLOR))
 
 
+@unittest.skipUnless(_DEPS, "needs numpy, OpenCV, Pillow")
+class TestDlcStatusText(unittest.TestCase):
+    STATS = {"window_s": 10.0, "since": "recording",
+             "recent": {"latency_ms": 21.4, "skipped_frac": 0.11, "sent": 8, "skipped": 1},
+             "total": {"latency_ms": None, "skipped_frac": 0.0, "sent": 0, "skipped": 0}}
+
+    def test_three_lines_recent_and_total(self):
+        from tmaze.core.recent_tally import TallySnapshot
+        task = TallySnapshot(recent={"dlc": 3, "com_fallback": 1},
+                             total={"dlc": 8, "dlc_hold": 2})
+        lines = TV.dlc_status_text(self.STATS, task, recording=True).splitlines()
+        self.assertEqual(lines, [
+            "dlc: ready - recording - task on head",
+            "last 10 s: 21 ms/frame (median), 11% skipped (helper busy) "
+            "| task: dlc 75%, com_fallback 25%",
+            "since recording started: -/frame (mean), 0% skipped (helper busy) "
+            "| task: dlc 80%, dlc_hold 20%"])
+
+    def test_task_on_com_has_no_task_shares(self):
+        stats = dict(self.STATS, since="helper")
+        lines = TV.dlc_status_text(stats, None, recording=False).splitlines()
+        self.assertEqual(lines[0], "dlc: ready - task on CoM")
+        self.assertTrue(lines[2].startswith("since DLC started:"))
+        self.assertNotIn("task:", lines[1] + lines[2])
+
+
 if __name__ == "__main__":
     unittest.main()

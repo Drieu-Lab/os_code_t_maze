@@ -32,6 +32,7 @@ from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 
 from tmaze.core.dlc_head import HEAD_PART
+from tmaze.core.recent_tally import RecentTally, TallySnapshot
 
 SRC_COM = "com"
 SRC_DLC = "dlc"
@@ -111,7 +112,8 @@ class TaskPositionSelector:
         self.hold_s = float(hold_s)
         self._held: Optional[Tuple[float, float, float]] = None   # x, y, likelihood
         self._held_t = 0.0
-        self._counts: Dict[str, int] = {s: 0 for s in SOURCES}
+        # Frames per source, over the last few seconds and since reset_counts.
+        self._tally = RecentTally()
 
     # ------------------------------------------------------------ settings
     @property
@@ -134,12 +136,16 @@ class TaskPositionSelector:
             self.hold_s = max(0.0, float(hold_s))
 
     def counts(self) -> Dict[str, int]:
-        with self._lock:
-            return dict(self._counts)
+        """Frames per source since the last ``reset_counts``."""
+        total = self._tally.total()
+        return {s: total.get(s, 0) for s in SOURCES}
+
+    def tally(self, now: float) -> TallySnapshot:
+        """Frames per source over the last ``window_s`` and since the reset."""
+        return self._tally.snapshot(now)
 
     def reset_counts(self) -> None:
-        with self._lock:
-            self._counts = {s: 0 for s in SOURCES}
+        self._tally.reset()
 
     # ------------------------------------------------------------ per frame
     def select(self, block_id: Optional[int], now: float, com: Optional[Point],
@@ -163,8 +169,8 @@ class TaskPositionSelector:
                 else:
                     self._held = None
                     point = _com_point(com, SRC_COM_FALLBACK)
-            self._counts[point.source] += 1
-            return point
+        self._tally.add(now, point.source)
+        return point
 
     def _fresh_head(self, block_id, sample) -> Optional[Tuple[float, float, float]]:
         if sample is None or block_id is None or sample.block_id is None:

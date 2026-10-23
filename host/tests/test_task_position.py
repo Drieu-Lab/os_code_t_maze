@@ -96,6 +96,9 @@ class TestSelector(unittest.TestCase):
         sel.select(12, 9.0, None, None)
         c = sel.counts()
         self.assertEqual((c[TP.SRC_DLC], c[TP.SRC_DLC_HOLD], c[TP.SRC_COM_FALLBACK]), (1, 1, 1))
+        tally = sel.tally(11.0)
+        self.assertEqual(tally.recent, {TP.SRC_COM_FALLBACK: 1})   # the 0.0 frames aged out
+        self.assertEqual(sum(tally.total.values()), 3)
         sel.reset_counts()
         self.assertEqual(sum(sel.counts().values()), 0)
 

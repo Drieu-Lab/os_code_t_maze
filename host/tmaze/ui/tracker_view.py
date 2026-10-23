@@ -48,6 +48,37 @@ from tmaze.ui.still_frame_editor import _StillFrameEditorBase
 from tmaze.ui.tooltips import tip
 from tmaze.vision.tracker import TRACK_COLUMNS, track_row
 
+
+def _share(counts: dict) -> str:
+    n = sum(counts.values())
+    if not n:
+        return "-"
+    return ", ".join(f"{src} {100 * k / n:.0f}%" for src, k in counts.items() if k)
+
+
+def _dlc_line(label: str, part: dict, task_counts, how: str) -> str:
+    lat = part["latency_ms"]
+    text = (f"{label}: {'-' if lat is None else f'{lat:.0f} ms'}/frame ({how}), "
+            f"{100 * part['skipped_frac']:.0f}% skipped (helper busy)")
+    if task_counts is not None:
+        text += f" | task: {_share(task_counts)}"
+    return text
+
+
+def dlc_status_text(stats: dict, task, recording: bool) -> str:
+    """The DLC panel's three status lines: state, the last ``window_s``, and the
+    totals. ``stats`` is ``DlcHeadClient.stats()``; ``task`` the task-position
+    selector's ``tally()`` when the head drives the task, else None."""
+    since = ("since recording started" if stats["since"] == "recording"
+             else "since DLC started")
+    head = "dlc: ready" + (" - recording" if recording else "")
+    head += " - task on head" if task is not None else " - task on CoM"
+    recent = _dlc_line(f"last {stats['window_s']:g} s", stats["recent"],
+                       task.recent if task is not None else None, "median")
+    total = _dlc_line(since, stats["total"],
+                      task.total if task is not None else None, "mean")
+    return "\n".join((head, recent, total))
+
 # Shared tracking-overlay drawing (so this preview matches the camera tab's).
 try:
     from tmaze.vision.tracker import draw_overlay as _draw_overlay  # noqa: E402
@@ -327,14 +358,16 @@ class TrackerControlView:
         # when "Use head for task" is on (docs/decisions/0230).
         dlc = ttk.LabelFrame(controls, text="Head tracking (DeepLabCut-Live)")
         dlc.pack(side=tk.TOP, fill=tk.X, **pad)
+        dlc_row = ttk.Frame(dlc)   # the switches; the status goes on lines below
+        dlc_row.pack(side=tk.TOP, fill=tk.X)
         self._dlc_client = None
         self._dlc_var = tk.BooleanVar(value=False)
-        self._dlc_cb = ttk.Checkbutton(dlc, text="Track head (DLC-Live)",
+        self._dlc_cb = ttk.Checkbutton(dlc_row, text="Track head (DLC-Live)",
                                        variable=self._dlc_var, command=self._on_dlc_toggle)
         self._dlc_cb.pack(side=tk.LEFT, padx=4, pady=4)
         tip(self._dlc_cb, "tracker.dlc_head_track")
         self._dlc_show_var = tk.BooleanVar(value=True)
-        dlc_show_cb = ttk.Checkbutton(dlc, text="Show on preview",
+        dlc_show_cb = ttk.Checkbutton(dlc_row, text="Show on preview",
                                       variable=self._dlc_show_var,
                                       command=self._on_dlc_show)
         dlc_show_cb.pack(side=tk.LEFT, padx=(12, 2))
@@ -342,14 +375,15 @@ class TrackerControlView:
         # The task's position: DLC's head_center with a CoM fallback, instead of
         # the CoM (docs/decisions/0230).
         self._dlc_task_var = tk.BooleanVar(value=False)
-        self._dlc_task_cb = ttk.Checkbutton(dlc, text="Use head for task (CoM fallback)",
+        self._dlc_task_cb = ttk.Checkbutton(dlc_row, text="Use head for task (CoM fallback)",
                                             variable=self._dlc_task_var,
                                             command=self._on_dlc_task_toggle,
                                             state=tk.DISABLED)
         self._dlc_task_cb.pack(side=tk.LEFT, padx=(12, 2))
         tip(self._dlc_task_cb, "tracker.dlc_head_task")
         self._dlc_status = tk.StringVar(value="dlc: off")
-        ttk.Label(dlc, textvariable=self._dlc_status).pack(side=tk.LEFT, padx=6)
+        ttk.Label(dlc, textvariable=self._dlc_status, justify=tk.LEFT,
+                  anchor="w").pack(side=tk.TOP, fill=tk.X, padx=6, pady=(0, 4))
 
         # Blocker (orange-taped obstacle): on-demand still captures across
         # placements; tracked in parallel and subtracted from the rat. ADR-0034.
@@ -1088,18 +1122,6 @@ class TrackerControlView:
             sel.reset_counts()
         self._dlc_task_var.set(on and sel is not None)
 
-    def _task_position_text(self) -> str:
-        sel = self._task_selector()
-        if sel is None or not sel.enabled:
-            return ""
-        counts = sel.counts()
-        total = sum(counts.values())
-        if not total:
-            return " | task: head"
-        share = ", ".join(f"{src} {100 * n / total:.0f}%"
-                          for src, n in counts.items() if n)
-        return f" | task: head ({share})"
-
     def _poll_dlc(self) -> None:
         recording = self._recording()
         client = self._dlc_client
@@ -1129,12 +1151,11 @@ class TrackerControlView:
         elif client.state == "starting":
             self._dlc_status.set("dlc: starting helper (up to ~2 min)...")
         elif client.ready:
-            st = client.stats()
-            lat = "-" if st["latency_ms"] is None else f"{st['latency_ms']:.0f} ms"
-            rec = " - recording" if client.recording else ""
-            self._dlc_status.set(f"dlc: ready - {lat}/frame, "
-                                 f"{100 * st['skipped_frac']:.0f}% frames skipped (helper busy){rec}"
-                                 f"{self._task_position_text()}")
+            now = time.monotonic()
+            sel = self._task_selector()
+            task = sel.tally(now) if sel is not None and sel.enabled else None
+            self._dlc_status.set(dlc_status_text(client.stats(now), task,
+                                                 client.recording))
 
     # --------------------------------------------------------- poll loop
     def _on_show_mask(self) -> None:

@@ -109,12 +109,17 @@ class TestClientAgainstHelper(unittest.TestCase):
         t0 = time.perf_counter()
         self.client.submit(2, frame, (100.0, 100.0))
         self.assertLess(time.perf_counter() - t0, 0.05)
-        self.assertEqual(self.client.stats()["skipped"], 1)
+        st = self.client.stats()
+        self.assertEqual((st["total"]["skipped"], st["recent"]["skipped"]), (1, 1))
+        self.assertEqual(st["total"]["skipped_frac"], 1.0)
+        # Ten seconds on, the skip has left the recent window but not the total.
+        later = self.client.stats(now=time.monotonic() + st["window_s"] + 1)
+        self.assertEqual((later["total"]["skipped"], later["recent"]["skipped"]), (1, 0))
 
     def _answered(self, block_id, frame, com, roi=None):
-        sent = self.client.stats()["sent"]
+        sent = self.client.stats()["total"]["sent"]
         self.client.submit(block_id, frame, com, roi)
-        self.assertTrue(_wait(lambda: self.client.stats()["sent"] == sent + 1 and
+        self.assertTrue(_wait(lambda: self.client.stats()["total"]["sent"] == sent + 1 and
                               self.client._in_flight is None))
         return self.client.latest()
 
