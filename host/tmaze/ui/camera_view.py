@@ -50,6 +50,8 @@ from tmaze.ui.gui_deps import (  # noqa: E402
 from tmaze.vision.calibration import Undistorter, load_calibration  # noqa: E402
 from tmaze.core import protocol  # noqa: E402  (shared serial-line parser; see docs/decisions/0024)
 from tmaze.core import head_columns  # noqa: E402  (learned head-point sidecar columns; ADR-0220)
+from tmaze.core import task_position  # noqa: E402  (the task's point + its sidecar columns; ADR-0230)
+from tmaze.core.task_position import com_of  # noqa: E402
 from tmaze.core.camera_health import account_block_gap, fps_measured, recording_deltas  # noqa: E402  (pure BlockID-gap accounting + per-recording deltas + measured fps; ADR-0147)
 from tmaze.core.records.animals import resources_root  # noqa: E402  (sibling resources-repo resolver)
 from tmaze.paths import camera_output_dir  # noqa: E402  (single source for the recordings root; ADR-0088)
@@ -500,6 +502,16 @@ class CameraView:
         with self._latest_lock:
             frame = self._latest_frame
         return None if frame is None else frame.copy()
+
+    def _task_position_selector(self):
+        get = getattr(self._tracker, "task_position", None)
+        return get() if callable(get) else None
+
+    def task_position_mode(self) -> str:
+        """``dlc_head`` when the task uses the DLC head point, else ``com``
+        (for the trial-CSV header; docs/decisions/0230)."""
+        selector = self._task_position_selector()
+        return selector.mode if selector is not None else task_position.MODE_COM
 
     def subscribe_track(self, cb) -> None:
         """Register a callback invoked on the track worker for each published
@@ -1103,13 +1115,20 @@ class CameraView:
         live_head = self._tracker.get_head() if self._tracker is not None else None
         header.update(head_columns.header_fields(
             live_head.model_info if live_head is not None else None))
+        # Which point the task uses for this recording; the switch is locked
+        # while recording (docs/decisions/0230).
+        selector = self._task_position_selector()
+        dlc = dlc_head_of(self._tracker)
+        header.update(task_position.header_fields(
+            selector, dlc.cfg.pcutoff if dlc is not None else None))
+        if selector is not None:
+            selector.reset_counts()
         self._rec_params = _RecParams(
             video_path=base + ext, csv_path=base + ".csv",
             fps=self._cam_fps, size=(w, h), header=header, codec=codec, crf=crf,
             stats_path=base + "_camera_stats.json")
         # DeepLabCut-Live head points go to their own file, joined to the
         # sidecar by cam_block_id (docs/decisions/0224).
-        dlc = dlc_head_of(self._tracker)
         if dlc is not None:
             try:
                 dlc.start_recording(base + "_dlc_head.csv")
@@ -1257,10 +1276,12 @@ class CameraView:
                                      else snap[1])
                         head = head_columns.head_row(
                             result.head if result is not None else None)
+                        task = task_position.task_row(
+                            getattr(result, "task_point", None))
                         meta = (grab_wall, self._latest_rig_ms,
                                 "" if block_id is None else block_id,
                                 "" if cam_ts is None else cam_ts,
-                                track, track_src, head)
+                                track, track_src, head, task)
                         self._enqueue(frame, meta)
                 finally:
                     grab.Release()
@@ -1293,11 +1314,22 @@ class CameraView:
                 result = None
             with self._counters_lock:
                 self._counters.note_track_ms((time.perf_counter() - t0) * 1000.0)
+            dlc = dlc_head_of(tracker)
+            # The task's point for this frame: the CoM, or the newest DLC head
+            # centre with a CoM fallback; it reaches every maze-state consumer
+            # and the sidecar on the result (docs/decisions/0230).
+            selector = getattr(tracker, "task_position", None)
+            if result is not None and selector is not None:
+                try:
+                    result.task_point = selector().select(
+                        block_id, mono_ts, com_of(result),
+                        dlc.newest() if dlc is not None else None)
+                except Exception:
+                    pass
             self._track_pub.publish(result, block_id, mono_ts)
             # DeepLabCut-Live head preview: hand the helper a crop around the
             # rat, or the ROI box when the tracker has lost it; returns at once
             # (docs/decisions/0224, 0225).
-            dlc = dlc_head_of(tracker)
             if dlc is not None:
                 try:
                     get_roi = getattr(tracker, "get_roi_polygon", None)
@@ -1409,7 +1441,7 @@ class CameraView:
                 csv_file.write(f"# {k}: {v}\n")
             csv_writer = csv.writer(csv_file)
             csv_writer.writerow(SIDECAR_COLUMNS + TRACK_COLUMNS + TRACK_SRC_COLUMN
-                                + head_columns.HEAD_COLUMNS)
+                                + head_columns.HEAD_COLUMNS + task_position.TASK_COLUMNS)
             self._post(self._set_conn_status,
                        f"Recording -> {os.path.basename(params.video_path)}")
             return writer, csv_file, csv_writer
@@ -1420,14 +1452,14 @@ class CameraView:
     def _write_frame(self, writer, csv_writer, idx, frame, meta) -> bool:
         try:
             writer.write(frame)
-            host_unix_s, rig_ms, block_id, cam_ts, track, track_src, head = meta
+            host_unix_s, rig_ms, block_id, cam_ts, track, track_src, head, task = meta
             # Wall time at WRITE (after processing), so grab->write latency is
             # measurable against host_unix_s (grab time); docs/decisions/0182.
             written = time.time()
             csv_writer.writerow(
                 [idx, f"{host_unix_s:.6f}", rig_ms, block_id, cam_ts,
                  f"{written:.6f}"]
-                + list(track) + [track_src] + list(head))
+                + list(track) + [track_src] + list(head) + list(task))
             # Track the saved-frame grab-time span for fps_measured (S5).
             if self._rec_first_hu is None:
                 self._rec_first_hu = host_unix_s
@@ -1517,6 +1549,9 @@ class CameraView:
             "fps_nominal": params.header.get("fps", ""),
             "fps_measured": fps_measured(
                 counters["saved"], self._rec_first_hu, self._rec_last_hu),
+            # Tracked frames per task-position source while this recording ran
+            # (docs/decisions/0230); the per-frame source is the sidecar's task_src.
+            "task_position": self._task_position_counts(),
             "written_wall_clock": time.strftime("%Y-%m-%d %H:%M:%S"),
         }
         try:
@@ -1525,6 +1560,12 @@ class CameraView:
         except Exception as e:  # provenance is best-effort; never break a recording
             print(f"[camera_view] camera stats write failed: {e}",
                   file=sys.stderr, flush=True)
+
+    def _task_position_counts(self) -> dict:
+        selector = self._task_position_selector()
+        if selector is None:
+            return {}
+        return {"mode": selector.mode, "frames": selector.counts()}
 
     def _set_conn_status_keep(self, video_or_csv_path: str):
         name = os.path.basename(video_or_csv_path).rsplit(".", 1)[0] if video_or_csv_path else ""

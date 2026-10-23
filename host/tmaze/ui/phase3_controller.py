@@ -194,6 +194,9 @@ class _Phase3Snapshot:
     cue_mapping_overrides: bool = False
     # Tone or AM noise for this session (docs/decisions/0222); fixed at arm.
     stimulus: CueStimulus = field(default_factory=CueStimulus)
+    # Which point the task uses as the rat's position, "com" or "dlc_head"
+    # (the Tracking tab switch; docs/decisions/0230).
+    position_source: str = "com"
     animal: str = ""
     session_id: str = ""
     session_out_dir: str = ""
@@ -865,7 +868,8 @@ class Phase3ControlView(VisionActuator):
                               reward_pulse_source=snap.reward_pulse_source,
                               daily_water_ml=snap.daily_water_ml,
                               stimulus=snap.stimulus,
-                              noise_gain_pct=cue_calibration.noise_gain_pct())
+                              noise_gain_pct=cue_calibration.noise_gain_pct(),
+                              position_source=snap.position_source)
         # Bind + write into the session's task/ folder ONLY when armed via a
         # session (docs/decisions/0049). When armed WITHOUT one (the ADR-0060
         # arm-before-Start order, or a standalone tab), keep the planned matrix IN
@@ -1097,6 +1101,10 @@ class Phase3ControlView(VisionActuator):
         """
         if self._log is None or not snap.session_id or not snap.session_out_dir:
             return
+        # The position switch locks once recording starts at Start, so take its
+        # value now in case it changed after arming (docs/decisions/0230).
+        source_changed = self._log.position_source != snap.position_source
+        self._log.position_source = snap.position_source
         # The session's task/ folder starts empty, so this run takes the plain name
         # and the restart counter restarts with it: a later Restart appends _r1
         # without clobbering this file, exactly as ADR-0058 intends.
@@ -1108,6 +1116,8 @@ class Phase3ControlView(VisionActuator):
             # canonical anchor if it only just arrived, then re-render (ADR-0124).
             if snap.session_t0 and self._log.session_t0 != snap.session_t0:
                 self._log.session_t0 = snap.session_t0
+                self._write_log()
+            elif source_changed:
                 self._write_log()
             return
         self._restart_count = 0
@@ -1942,6 +1952,13 @@ class Phase3ControlView(VisionActuator):
         except Exception:
             return False
 
+    def _position_source(self) -> str:
+        get = getattr(self._camera, "task_position_mode", None)
+        try:
+            return get() if callable(get) else "com"
+        except Exception:
+            return "com"
+
     def _mode_is_freeroam(self) -> bool:
         return self._mode in FREEROAM_TOKENS
 
@@ -2737,6 +2754,7 @@ class Phase3ControlView(VisionActuator):
             cue_mapping_source=cue_source,
             cue_mapping_overrides=cue_overrides,
             stimulus=self._current_stimulus(),
+            position_source=self._position_source(),
             animal=self._current_animal(),
             session_id=self._session_id,
             session_out_dir=self._session_out_dir,

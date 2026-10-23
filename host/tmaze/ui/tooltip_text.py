@@ -228,11 +228,19 @@ TIPS: Dict[str, Entry] = {
                               "body centre for 1 s, then the whole ROI (about half "
                               "the frame rate). "
                               "Takes up to ~2 min to start; can't be changed while "
-                              "recording. Preview only: the task still uses the "
-                              "body centre (ADR-0224, ADR-0225).",
+                              "recording. The task uses the body centre unless "
+                              "'Use head for task' is on (ADR-0224, ADR-0225, "
+                              "ADR-0230).",
     "tracker.dlc_head_show": "Draw the DeepLabCut-Live head centre (magenta dot) "
                              "and a nose-to-neck line on the previews. A hollow "
                              "dot = likelihood below the cutoff. Display only.",
+    "tracker.dlc_head_task": "Make DeepLabCut-Live's head centre the rat's position "
+                             "for the whole task (cue trigger, zones, behaviour "
+                             "stats). If DLC has no trusted head point, the last "
+                             "one is kept for task_hold_s (0.15 s), then the body "
+                             "centre is used. Each frame's source is recorded in the "
+                             "video sidecar (task_src). Needs DLC-Live ready; can't "
+                             "be changed while recording (ADR-0230).",
     "tracker.define_region": "Define the maze ROI by clicking a captured still "
                              "frame.",
     "tracker.clear_region": "Clear the maze ROI polygon.",

@@ -16,7 +16,9 @@ in the ``dlclivegui`` env), connects to it on 127.0.0.1, and from then on:
 
 Any failure (helper won't start, crashes, stops answering) turns the client to
 state ``error`` with a readable reason; the tracker and the task carry on with
-the centre of mass, which is still the task's position. See docs/decisions/0224.
+the centre of mass. See docs/decisions/0224. When the Tracking tab's "Use head
+for task" switch is on, ``newest()`` feeds the task-position selector
+(docs/decisions/0230).
 """
 
 from __future__ import annotations
@@ -36,6 +38,7 @@ from typing import Callable, Deque, Optional, Tuple
 
 from tmaze.core import dlc_head as DH
 from tmaze.core import dlc_head_protocol as P
+from tmaze.core import task_position as TP
 from tmaze.paths import host_dir
 
 CONFIG_FILE = "dlc_head.json"
@@ -60,6 +63,9 @@ class DlcHeadConfig:
     cpu_threads: int = 0
     hold_s: float = DH.DEFAULT_HOLD_S
     roi_fallback: bool = True
+    # Using the head as the task's position (docs/decisions/0230).
+    task_max_lag_frames: int = TP.DEFAULT_MAX_LAG_FRAMES
+    task_hold_s: float = TP.DEFAULT_HOLD_S
 
 
 def load_config(path: Optional[str] = None) -> DlcHeadConfig:
@@ -332,6 +338,14 @@ class DlcHeadClient:
     def latest(self, max_age_s: float = 0.5) -> Optional[DH.DlcHeadSample]:
         """The newest answered frame, if recent (for the preview overlay)."""
         if self.state != STATE_READY or time.monotonic() - self._latest_mono > max_age_s:
+            return None
+        return self._latest
+
+    def newest(self) -> Optional[DH.DlcHeadSample]:
+        """The newest answered frame, however old, or None when the helper isn't
+        ready. The task-position selector judges freshness itself, by
+        ``block_id`` (docs/decisions/0230)."""
+        if self.state != STATE_READY:
             return None
         return self._latest
 

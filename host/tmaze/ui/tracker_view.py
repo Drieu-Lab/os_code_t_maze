@@ -322,9 +322,10 @@ class TrackerControlView:
         self._head_status = tk.StringVar(value="head: off")
         ttk.Label(head, textvariable=self._head_status).pack(side=tk.LEFT, padx=6)
 
-        # DeepLabCut-Live head preview (docs/decisions/0224): a helper process in
-        # the dlclivegui env; display + its own file only, never the task's position.
-        dlc = ttk.LabelFrame(controls, text="Head tracking (DeepLabCut-Live preview)")
+        # DeepLabCut-Live head tracking (docs/decisions/0224): a helper process in
+        # the dlclivegui env, recorded to its own file; the task's position only
+        # when "Use head for task" is on (docs/decisions/0230).
+        dlc = ttk.LabelFrame(controls, text="Head tracking (DeepLabCut-Live)")
         dlc.pack(side=tk.TOP, fill=tk.X, **pad)
         self._dlc_client = None
         self._dlc_var = tk.BooleanVar(value=False)
@@ -338,6 +339,15 @@ class TrackerControlView:
                                       command=self._on_dlc_show)
         dlc_show_cb.pack(side=tk.LEFT, padx=(12, 2))
         tip(dlc_show_cb, "tracker.dlc_head_show")
+        # The task's position: DLC's head_center with a CoM fallback, instead of
+        # the CoM (docs/decisions/0230).
+        self._dlc_task_var = tk.BooleanVar(value=False)
+        self._dlc_task_cb = ttk.Checkbutton(dlc, text="Use head for task (CoM fallback)",
+                                            variable=self._dlc_task_var,
+                                            command=self._on_dlc_task_toggle,
+                                            state=tk.DISABLED)
+        self._dlc_task_cb.pack(side=tk.LEFT, padx=(12, 2))
+        tip(self._dlc_task_cb, "tracker.dlc_head_task")
         self._dlc_status = tk.StringVar(value="dlc: off")
         ttk.Label(dlc, textvariable=self._dlc_status).pack(side=tk.LEFT, padx=6)
 
@@ -1041,19 +1051,80 @@ class TrackerControlView:
             threading.Thread(target=client.close, daemon=True).start()
         self._dlc_var.set(False)
         self._dlc_status.set(status)
+        # Mid-recording the head switch stays on, so the rest of the file is
+        # logged as com_fallback; _poll_dlc clears it once recording stops.
+        if not self._recording():
+            self._set_dlc_task(False)
+
+    # ------------------------------------- DLC head as the task's position
+    def _on_dlc_task_toggle(self) -> None:
+        want = self._dlc_task_var.get()
+        client = self._dlc_client
+        if self._recording():
+            self._dlc_task_var.set(not want)
+            self._dlc_status.set("dlc: can't change the task's position while recording")
+            return
+        if want and (client is None or not client.ready):
+            self._dlc_task_var.set(False)
+            self._dlc_status.set("dlc: wait until DLC-Live is ready")
+            return
+        sel = self._task_selector()
+        if want and sel is not None:
+            sel.configure(client.cfg.task_max_lag_frames, client.cfg.task_hold_s)
+        self._set_dlc_task(want)
+
+    def _task_selector(self):
+        get = getattr(self._tracker, "task_position", None)
+        return get() if callable(get) else None
+
+    def _task_on_head(self) -> bool:
+        sel = self._task_selector()
+        return sel is not None and sel.enabled
+
+    def _set_dlc_task(self, on: bool) -> None:
+        sel = self._task_selector()
+        if sel is not None:
+            sel.set_enabled(on)
+            sel.reset_counts()
+        self._dlc_task_var.set(on and sel is not None)
+
+    def _task_position_text(self) -> str:
+        sel = self._task_selector()
+        if sel is None or not sel.enabled:
+            return ""
+        counts = sel.counts()
+        total = sum(counts.values())
+        if not total:
+            return " | task: head"
+        share = ", ".join(f"{src} {100 * n / total:.0f}%"
+                          for src, n in counts.items() if n)
+        return f" | task: head ({share})"
 
     def _poll_dlc(self) -> None:
+        recording = self._recording()
+        client = self._dlc_client
         try:
-            self._dlc_cb.configure(state=(tk.DISABLED if self._recording() else tk.NORMAL))
+            self._dlc_cb.configure(state=(tk.DISABLED if recording else tk.NORMAL))
+            can_task = not recording and client is not None and client.ready
+            self._dlc_task_cb.configure(state=(tk.NORMAL if can_task else tk.DISABLED))
         except tk.TclError:
             pass
-        client = self._dlc_client
         if client is None:
+            if self._task_on_head():
+                if recording:   # DLC died mid-recording: the task is on the CoM
+                    self._dlc_status.set("dlc: off - task on CoM fallback until "
+                                         "recording stops")
+                else:
+                    self._set_dlc_task(False)
             return
         if client.state == "error":
             err = client.error.splitlines()[0] if client.error else "unknown error"
+            on_head = self._task_on_head()
             self._stop_dlc(f"dlc: off - {err}")
-            messagebox.showwarning("DLC-Live head", f"DLC-Live switched off:\n{client.error}",
+            note = ("\n\nThe task now uses the centre of mass (logged as "
+                    "com_fallback)." if on_head else "")
+            messagebox.showwarning("DLC-Live head",
+                                   f"DLC-Live switched off:\n{client.error}{note}",
                                    parent=self.frame)
         elif client.state == "starting":
             self._dlc_status.set("dlc: starting helper (up to ~2 min)...")
@@ -1062,7 +1133,8 @@ class TrackerControlView:
             lat = "-" if st["latency_ms"] is None else f"{st['latency_ms']:.0f} ms"
             rec = " - recording" if client.recording else ""
             self._dlc_status.set(f"dlc: ready - {lat}/frame, "
-                                 f"{100 * st['skipped_frac']:.0f}% frames skipped (helper busy){rec}")
+                                 f"{100 * st['skipped_frac']:.0f}% frames skipped (helper busy){rec}"
+                                 f"{self._task_position_text()}")
 
     # --------------------------------------------------------- poll loop
     def _on_show_mask(self) -> None:

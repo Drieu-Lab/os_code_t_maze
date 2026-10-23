@@ -79,6 +79,7 @@ from dataclasses import asdict, dataclass, field, fields, replace
 from typing import List, Optional, Tuple
 
 from tmaze.core.head_filter import HeadSample
+from tmaze.core.task_position import TaskPoint, TaskPositionSelector
 
 try:
     import cv2  # type: ignore
@@ -707,6 +708,9 @@ class TrackResult:
     # Learned head points (full px), only while head tracking is on (set_head;
     # see docs/decisions/0219). None = head tracking off, or no background yet.
     head: Optional["HeadSample"] = None
+    # The point the task uses this frame, set by the camera's track worker after
+    # process() (task_position.TaskPositionSelector; docs/decisions/0230).
+    task_point: Optional[TaskPoint] = None
 
 
 # Shared column set for per-frame track rows (video sidecar + standalone log).
@@ -793,6 +797,9 @@ class RatTracker:
         # process() never calls it. See docs/decisions/0224.
         self._dlc_head = None
         self._dlc_head_overlay = True
+        # Which point the task uses (CoM, or the DLC head with a CoM fallback).
+        # The camera's track worker runs it after process(); see docs/decisions/0230.
+        self._task_position = TaskPositionSelector()
 
         # Tracking state machine (touched only inside process()).
         self._kalman = self._make_kalman()
@@ -920,6 +927,10 @@ class RatTracker:
     def dlc_head_overlay(self) -> bool:
         with self._lock:
             return self._dlc_head_overlay
+
+    def task_position(self) -> TaskPositionSelector:
+        """The task-position selector (docs/decisions/0230); it locks itself."""
+        return self._task_position
 
     def reset(self) -> None:
         """Drop the current track (kalman + path) but keep reference + ROI + model."""

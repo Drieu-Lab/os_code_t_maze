@@ -1,5 +1,5 @@
 {
-  "_doc": "DeepLabCut-Live head preview settings (docs/decisions/0224). python = the dlclivegui env's interpreter (the helper runs there, not in drieu_t_maze); model_path is relative to host/ unless absolute; port is on 127.0.0.1 only; cpu_threads caps the helper's CPU threads (2 measured best: faster model and less load on the tracker than the default). When the tracker has no centre of mass: hold_s = seconds to keep cropping around the last good one, then roi_fallback = crop the ROI's bounding box (~12 answers/s instead of 25; docs/decisions/0225).",
+  "_doc": "DeepLabCut-Live head preview settings (docs/decisions/0224). python = the dlclivegui env's interpreter (the helper runs there, not in drieu_t_maze); model_path is relative to host/ unless absolute; port is on 127.0.0.1 only; cpu_threads caps the helper's CPU threads (2 measured best: faster model and less load on the tracker than the default). When the tracker has no centre of mass: hold_s = seconds to keep cropping around the last good one, then roi_fallback = crop the ROI's bounding box (~12 answers/s instead of 25; docs/decisions/0225). With the Tracking tab's 'Use head for task' switch on (docs/decisions/0230): task_max_lag_frames = how many camera frames old a head_center answer may be and still drive the task; task_hold_s = how long the last trusted head_center is kept before the task falls back to the centre of mass.",
   "python": "C:/Users/Celine/anaconda3/envs/dlclivegui/python.exe",
   "model_path": "head_models/dlc/iteration1_shuffle1_snapshot-best-140_dlclive.pt",
   "port": 5560,
@@ -9,5 +9,7 @@
   "start_timeout_s": 120,
   "cpu_threads": 2,
   "hold_s": 1.0,
-  "roi_fallback": true
+  "roi_fallback": true,
+  "task_max_lag_frames": 2,
+  "task_hold_s": 0.15
 }
