@@ -50,6 +50,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 from tmaze.core import protocol  # shared serial-line parser (pure stdlib; see docs/decisions/0024)
+from tmaze.core import task_position
 # The well-reward "how" (WellDispenser) and "why" (RewardTrigger) live in the
 # pure reward_dispenser core (see docs/decisions/0068, FW-0009). The shared
 # reward primitives (FireReward / LogEvent / LickAt / CONJUNCTION_FRESH_S) are
@@ -564,6 +565,11 @@ class RulesEngine:
             smoothed = getattr(track_result, "smoothed", None)
             raw = getattr(track_result, "centroid", None)
             centroid = smoothed if smoothed is not None else raw
+            # Same rule as MazeStateEstimator._extract (docs/decisions/0230).
+            dlc = task_position.dlc_override(track_result)
+            if dlc is not None:
+                centroid, state = dlc.xy, STATE_TRACKING
+                confidence = float(dlc.likelihood or 0.0)
         return Frame(centroid, tuple(frame_size), confidence, state, now,
                      landmarks or [], scale, task)
 

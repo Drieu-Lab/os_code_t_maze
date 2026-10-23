@@ -5,6 +5,7 @@
 # block_size=6 max_same_run=3 max_alt_run=0 max_trials=6 planned_trials=6 reward_incorrect=False reward_pulse_ms=500 max_topups=0
 # reward_pulse_source=config daily_water_ml=
 # generator=balanced
+# position_source=com
 # session_t0_iso=2026-01-01T12:00:00.000-05:00 session_t0_wall=1000000.0 session_t0_mono=2.0
 # session_start_iso=2026-01-01T11:59:55.000-05:00
 # note: session_t0_* is the canonical session anchor (Start Session; host wall+mono+iso) shared by every stream; session_start_iso is the gate-arm time (may precede t0). see docs/decisions/0124

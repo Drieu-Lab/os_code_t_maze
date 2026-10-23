@@ -1,5 +1,5 @@
 {
-  "format_version": 6,
+  "format_version": 7,
   "proto": 13,
   "firmware_proto": 8,
   "sensor_polarity": "corrected",
@@ -119,5 +119,10 @@
     "left_ear_x": "rat's left ear x (full-frame px, learned head network)",
     "left_ear_y": "rat's left ear y (full-frame px, learned head network)",
     "head_dir_deg": "head direction neck -> head centre, degrees, image axes (0 = right, 90 = down)"
+  },
+  "sidecar_task_columns": {
+    "task_src": "which point the task used: com (switch off) / dlc (DLC-Live head_center) / dlc_hold (last head_center, <= hold_s old) / com_fallback (switch on, no trusted head); blank = no track result",
+    "task_x": "x of the point the task used (full-frame px); blank = none",
+    "task_y": "y of the point the task used (full-frame px); blank = none"
   }
 }

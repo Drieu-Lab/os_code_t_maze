@@ -592,6 +592,17 @@ camera LED, serial echo) even if some frames were dropped — a self-identifying
 standard Allen / Open Ephys form is 32 bits at 10 ms per bit; a camera needs a
 slower variant. See FW-0018.
 
+### Task position (CoM fallback)
+The single point the task treats as "where the rat is": the cue trigger, the
+maze zones, the behaviour stats and the state log all read it. By default it is
+the tracker's centre of mass (CoM, the middle of the body blob). With the
+Tracking tab's "Use head for task" switch on it is
+[DeepLabCut-Live](#deeplabcut--deeplabcut-live)'s head centre instead, and the
+CoM becomes the *fallback*: the point used when the preferred one is missing.
+If DLC has no trusted head point, the last one is kept for a moment (0.15 s),
+then the CoM takes over. Every video frame records which source was used
+(`task_src` in the video sidecar). See ADR-0230.
+
 ### TCP client / TCP
 TCP is a standard way for programs to talk over a network connection. A "TCP
 client" here is a tool (a GUI) that connects to the [broker](#broker) to send

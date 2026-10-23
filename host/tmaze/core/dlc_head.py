@@ -16,7 +16,8 @@ network code, so they are unit-tested here and shared by both processes:
   ``<session>_dlc_head.csv``. It is a separate file, NOT part of the video
   sidecar, so the bundle format is unchanged while this is a trial.
 
-The task's position is not touched: the CoM is still what the rules use.
+Whether the task uses the head centre instead of the CoM is decided in
+``tmaze.core.task_position`` (docs/decisions/0230), not here.
 """
 
 from __future__ import annotations

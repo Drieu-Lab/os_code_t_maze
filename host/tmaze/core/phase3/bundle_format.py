@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-from tmaze.core import head_columns, maze_state
+from tmaze.core import head_columns, maze_state, task_position
 from tmaze.core.cue_command import STIMULI
 from tmaze.core.phase3 import phase3_log
 from tmaze.core.phase3.phase3_task import ABANDONED, CORRECT, INCORRECT, UNCUED
@@ -52,7 +52,11 @@ from tmaze.core.phase3.trial_sequence import HIGH, LEFT, LOW, RIGHT
 # tones. The trial CSV (proto 13) gains a ``# cue_stimulus`` header line and the
 # trailing ``choice_cue_seed`` / ``return_cue_seed`` columns; this manifest gains
 # ``cue_stimuli``. HIGH/LOW keep their meaning: in an AM session HIGH = the fast rate.
-FORMAT_VERSION = 6
+# v7 (ADR-0230): the task's position may be DeepLabCut-Live's head_center instead
+# of the CoM. The camera sidecar gains trailing ``task_src`` / ``task_x`` /
+# ``task_y`` columns + ``task_position*`` header lines (documented here as
+# ``sidecar_task_columns``), and the trial CSV a ``# position_source`` line.
+FORMAT_VERSION = 7
 
 # The firmware serial protocol version at/after which the body-beam (S) and lick
 # (L) state bit is CORRECTED (1 = broken/contact); below it the recorded meaning
@@ -220,6 +224,7 @@ def format_manifest(firmware_proto: Optional[int] = None) -> Dict[str, Any]:
         "stream_notes": dict(_STREAM_NOTES),
         "sync": _sync(),
         "sidecar_head_columns": head_columns.column_doc(),
+        "sidecar_task_columns": task_position.column_doc(),
     }
 
 

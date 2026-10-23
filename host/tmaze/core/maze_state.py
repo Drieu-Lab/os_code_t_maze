@@ -53,6 +53,7 @@ from collections import deque
 from dataclasses import dataclass, field, replace
 from typing import Deque, List, Optional, Sequence, Tuple
 
+from tmaze.core import task_position
 from tmaze.paths import host_dir
 
 # ============================== zone vocabulary ==============================
@@ -473,6 +474,11 @@ class MazeStateEstimator:
             frame_size = (int(frame_size[0]), int(frame_size[1]))
         except (TypeError, ValueError, IndexError):
             frame_size = (0, 0)
+        # A DLC head point already passed DLC's own likelihood cutoff, so it
+        # counts as tracked even while the blob tracker coasts (docs/decisions/0230).
+        dlc = task_position.dlc_override(track_result)
+        if dlc is not None:
+            return STATE_TRACKING, float(dlc.likelihood or 0.0), dlc.xy, frame_size
         return state, confidence, centroid, frame_size
 
     def _commit(self, new_zone: str, now: float):

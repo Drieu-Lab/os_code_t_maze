@@ -393,8 +393,13 @@ class Phase3Log:
                  session_cap=None, reward_pulse_source: str = "config",
                  daily_water_ml: Optional[float] = None,
                  stimulus: Optional[CueStimulus] = None,
-                 noise_gain_pct: Optional[int] = None) -> None:
+                 noise_gain_pct: Optional[int] = None,
+                 position_source: str = "com") -> None:
         self.animal = animal
+        # Which point the task used as the rat's position (docs/decisions/0230):
+        # "com" (tracker centre of mass) or "dlc_head" (DeepLabCut-Live
+        # head_center with a CoM fallback; per frame in the video sidecar).
+        self.position_source = str(position_source or "com")
         # The cue stimulus this run plays + the AM noise level sent (docs/
         # decisions/0222); recorded in the header and the snapshot.
         self.stimulus = stimulus if stimulus is not None else CueStimulus()
@@ -870,6 +875,7 @@ class Phase3Log:
             # from + the daily target it was derived from ("" when none).
             f"# reward_pulse_source={self.reward_pulse_source} daily_water_ml={daily}",
             f"# generator={c.generator}",
+            f"# position_source={self.position_source}",
         ]
         # Session cap (docs/decisions/0190): keys are ``session_cap_``-prefixed so
         # the offline header parser reads them unambiguously (``max_trials`` above

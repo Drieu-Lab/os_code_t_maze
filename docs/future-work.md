@@ -133,10 +133,10 @@ criteria).
 | [FW-0081](#fw-0081-head-points-in-the-offline-re-track) | Offline re-track writes the learned head-point columns too | `tools/offline_track`, `vision/offline_tracker.py` | Proposed |
 | [FW-0083](#fw-0083-give-the-slow-am-cue-enough-time-in-the-cue-zone) | Give the slow (2 Hz) AM-noise cue enough time: measure cue-zone dwell vs the cue's first loudness peak, and lengthen the zone or hold the choice if needed | `zones.json`, `core/phase3/*`, `drieu_lab_analysis.cue_latency` | Proposed |
 | [FW-0084](#fw-0084-neutral-cue-a--cue-b-names-across-both-repos) | Replace HIGH/LOW (and `high_tone_is_left`) with neutral cue A / cue B names across both repos, so the data no longer names a tone | `core/phase3/*`, `animals.json`, `drieu_lab_analysis` | Proposed |
-| [FW-0085](#fw-0085-trigger-the-cue-from-deeplabcut-lives-head-centre) | Trigger the cue from DeepLabCut-Live's head centre: read the preview files, then a `position_source` setting with a CoM fallback | `io/dlc_head_client`, `core/maze_state`, `drieu_lab_analysis.cue_latency` | Proposed |
 | [FW-0086](#fw-0086-check-whether-windows-power-throttling-slows-the-rig-gui) | Check whether Windows power throttling slows the rig GUI when its window is in the background | `ui/experiment_control.py` | Proposed |
 | [FW-0087](#fw-0087-warn-live-when-the-camera-starts-losing-frames) | Warn live when the camera starts losing frames (incomplete frames / packet resends climbing), instead of leaving the operator to infer it from the fps number | `ui/camera_view.py` | Proposed |
 | [FW-0088](#fw-0088-give-the-rigs-head-direction-the-analysis-convention) | Give the rig's live `head_dir_deg` (image axes, clockwise, 0 = image right) the analysis convention (counter-clockwise, 0 = along the stem hub -> junction) | `core/head_columns.py`, bundle format, `drieu_lab_analysis` | Proposed |
+| [FW-0089](#fw-0089-check-the-head-driven-task-against-recorded-sessions) | Check the head-driven task (ADR-0230) on recorded sessions: head vs CoM zone entries, how often the fallback is used, and make the analysis `cue_latency` replay read the sidecar's `task_*` point | `drieu_lab_analysis` (`cue_latency`, a `_dlc_head.csv` reader) | Proposed |
 
 ## Entries
 
@@ -3966,39 +3966,6 @@ in a dedicated change.
 
 **ADR needed?** Yes - a vocabulary and format change in both repos.
 
-### FW-0085: Trigger the cue from DeepLabCut-Live's head centre
-
-- **Status:** Proposed
-- **Date added:** 2026-10-20
-- **Author / Agent:** Agent (Cursor) on behalf of Celine
-- **Area / modules:** `io/dlc_head_client.py`, `core/maze_state.py` / `core/cue_gate.py`
-  (the position the cue rule reads), `ui/camera_view.py` (track worker); in
-  `drieu_lab_analysis`: a reader for `<session>_dlc_head.csv` and
-  `tmaze_analysis.cue_latency` (its replay of the cue rule)
-- **Related ADRs:** [ADR-0224](decisions/0224-dlc-live-head-preview.md),
-  [ADR-0219](decisions/0219-learned-head-point.md), ADR-0045 (vision cue)
-
-**Motivation / context.** ADR-0224 runs DLC-Live as a preview only; the lab's
-next step is to fire the CHOICE cue when the HEAD, not the body centre, enters
-the cue zone.
-
-**Sketch of approach.** First read the preview sessions' `_dlc_head.csv` in the
-analysis repo (join on `cam_block_id`) and compare head-centre zone entries with
-the CoM's. Then add a `position_source` setting (CoM / DLC head) that feeds the
-chosen point into the maze-state estimator, with a fallback to the CoM for
-`low` / `skipped` / `no_blob` frames, recorded in the trial-CSV header. The
-answer arrives ~20 ms after its frame; the half-size model (12 ms) is the option
-if that matters.
-
-**Evaluation / acceptance.** On recorded sessions: cue-onset latency relative
-to the head's zone entry, how often the fallback is used, and no change to the
-CoM path when the setting is off.
-
-**Effort / risk.** Medium; touches the task's trigger, so it needs a bench test
-before a real session.
-
-**ADR needed?** Yes - it changes what triggers the task.
-
 ### FW-0086: Check whether Windows power throttling slows the rig GUI
 
 - **Status:** Proposed
@@ -4097,6 +4064,40 @@ must take together.
 
 **ADR needed?** Yes (format change).
 
+### FW-0089: Check the head-driven task against recorded sessions
+
+- **Status:** Proposed
+- **Date added:** 2026-10-22
+- **Author / Agent:** Agent (Cursor) on behalf of Celine
+- **Area / modules:** `drieu_lab_analysis`: a reader for `<session>_dlc_head.csv`,
+  `tmaze_analysis.cue_latency` (its replay of the cue rule); rig: `host/dlc_head.json`
+  (`task_max_lag_frames`, `task_hold_s`)
+- **Related ADRs:** [ADR-0230](decisions/0230-dlc-head-as-task-position.md),
+  [ADR-0224](decisions/0224-dlc-live-head-preview.md), analysis ADR-0166 (cue latency)
+
+**Motivation / context.** ADR-0230 lets the head centre drive the task, and
+FW-0085's offline half was deferred: nobody has yet compared, on real
+sessions, where the head and the CoM enter each zone, or checked how often the
+CoM fallback is used. The analysis repo's `cue_latency` replays the cue rule
+from the CoM, so on a head-driven session it would replay the wrong point.
+
+**Sketch of approach.** In the analysis repo, read `_dlc_head.csv` (join on
+`cam_block_id`) and the sidecar's `task_src` / `task_x` / `task_y`. Per
+session: the share of frames per source, the time and distance between head
+and CoM zone entries, and the cue-onset latency relative to the head's entry.
+Make `cue_latency` replay from `task_x` / `task_y` when `position_source` is
+`dlc_head`. Tune `task_hold_s` / `task_max_lag_frames` if the fallback share or
+the zone flicker is high.
+
+**Evaluation / acceptance.** The replay reproduces the recorded cue frames on a
+head-driven session as well as it does on CoM sessions.
+
+**Effort / risk.** Medium, analysis-only; no change to the rig unless the
+numbers argue for new defaults.
+
+**ADR needed?** Only if the defaults change (in the rig) or the replay rule
+changes (in the analysis repo).
+
 ## Completed
 
 Implemented items are removed from the active backlog above; their reasoning now
@@ -4105,6 +4106,7 @@ referenced from those ADRs resolve.
 
 | ID | Title | Implemented in |
 |----|-------|----------------|
+| FW-0085 | Trigger the cue from DeepLabCut-Live's head centre - a Tracking-tab switch makes the head centre the task's position (CoM fallback, per-frame source in the sidecar, format 7); the offline comparison moved to FW-0089 | [ADR-0230](decisions/0230-dlc-head-as-task-position.md) |
 | FW-0002 | Head-vs-body orientation (heading) from the tracker - done as a learned head direction, recorded live when head tracking is on | [ADR-0219](decisions/0219-learned-head-point.md), [ADR-0220](decisions/0220-record-head-points.md) |
 | FW-0082 | Run Phase 3 with the amplitude-modulated noise cue - per-session cue type, fractional rates, seed logging, format 6 in both repos | [ADR-0222](decisions/0222-phase3-cue-type-per-session.md) |
 | FW-0004 | Position-based task-rule engine over landmarks | [ADR-0023](decisions/0023-position-based-rules-engine.md) |
