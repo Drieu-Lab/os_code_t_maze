@@ -14,9 +14,12 @@ done and is not retried.
     python -m tmaze.tools.dlc_offline --dry-run          what would run
     python -m tmaze.tools.dlc_offline                    run everything not done
     python -m tmaze.tools.dlc_offline --limit 1 --session 602_20260916_145627
+    python -m tmaze.tools.dlc_offline --from 2026-09-20 --animal 600 --animal 601
+    python -m tmaze.tools.dlc_offline --redo --session 600_20261027_152320
     python -m tmaze.tools.dlc_offline --stop             ask a running job to stop
     python -m tmaze.tools.dlc_offline --adopt DIR        build from earlier pickles
 
+Only sessions whose animal is in ``animals.json`` are run (docs/decisions/0232).
 Runs newest session first, is safe to interrupt (a session stopped half-way
 is redone next time), and never runs while the rig GUI
 (``tmaze.ui.experiment_control``) is open: it refuses to start, and stops the
@@ -168,14 +171,78 @@ def sidecar_rows(bundle: str, sid: str) -> Optional[int]:
     return max(n - 1, 0)
 
 
+_SID_RE = re.compile(r"^([^_]+)_(\d{8})_\d{6}$")
+
+
+def session_animal_date(sid: str) -> Tuple[str, str]:
+    """(animal id, ``YYYYMMDD``) from ``<animal>_<YYYYMMDD>_<HHMMSS>``; ("", "")
+    for an id not in that form."""
+    m = _SID_RE.match(sid)
+    return (m.group(1), m.group(2)) if m else ("", "")
+
+
+def parse_day(text: str) -> str:
+    """``YYYY-MM-DD`` -> ``YYYYMMDD``; blank -> blank (no limit). Raises
+    ValueError on a bad date."""
+    if not text.strip():
+        return ""
+    return datetime.strptime(text.strip(), "%Y-%m-%d").strftime("%Y%m%d")
+
+
+def unknown_animal(sids: Iterable[str], known: Optional[Iterable[str]]) -> List[str]:
+    """The sessions whose animal is not in ``animals.json`` (none when the list
+    couldn't be read: ``known`` is None)."""
+    if known is None:
+        return []
+    keep = set(known)
+    return [s for s in sids if session_animal_date(s)[0] not in keep]
+
+
+def select(states: Dict[str, str], *, known: Optional[Iterable[str]] = None,
+           animals: Sequence[str] = (), date_from: str = "", date_to: str = "",
+           sessions: Sequence[str] = ()) -> Dict[str, str]:
+    """The sessions the operator asked for, any state: animal in ``known``
+    (docs/decisions/0232), in ``animals`` if given, recorded between
+    ``date_from`` and ``date_to`` (``YYYYMMDD``, both inclusive, blank = open)
+    and in ``sessions`` if given."""
+    drop = set(unknown_animal(states, known))
+    wanted = set(sessions)
+    pick = set(animals)
+    out = {}
+    for sid, st in states.items():
+        animal, day = session_animal_date(sid)
+        if sid in drop or (wanted and sid not in wanted) or (pick and animal not in pick):
+            continue
+        if (date_from and day < date_from) or (date_to and day > date_to):
+            continue
+        out[sid] = st
+    return out
+
+
 def choose(states: Dict[str, str], *, sessions: Sequence[str] = (), include_stale: bool = True,
-           limit: Optional[int] = None) -> List[str]:
+           limit: Optional[int] = None, known: Optional[Iterable[str]] = None,
+           animals: Sequence[str] = (), date_from: str = "", date_to: str = "",
+           redo: bool = False) -> List[str]:
+    """What to run, newest first. ``redo`` also runs DONE sessions, and only
+    the ones named in ``sessions``: a date range never redoes anything."""
     include = [D.STATE_PENDING, D.STATE_PARTIAL] + ([D.STATE_STALE] if include_stale else [])
-    if sessions:
-        wanted = set(sessions)
-        states = {s: st for s, st in states.items() if s in wanted}
+    if redo and sessions:
+        include.append(D.STATE_DONE)
+    states = select(states, known=known, animals=animals, date_from=date_from,
+                    date_to=date_to, sessions=sessions)
     todo = D.to_run(states, include)
     return todo[:limit] if limit else todo
+
+
+def known_animals() -> Optional[List[str]]:
+    """The ids in ``animals.json``, or None (with a warning) when it can't be
+    read, so a missing resources repo never blocks a run."""
+    from tmaze.core.records.animals import load_registry
+    reg = load_registry()
+    if not reg.available:
+        print("warning: animals.json not readable; not filtering sessions by animal")
+        return None
+    return reg.ids()
 
 
 # ------------------------------------------------------------ rig guard
@@ -451,6 +518,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--root", help="derived-data root (default: host/derivatives_root.json)")
     ap.add_argument("--dry-run", action="store_true", help="list what would run, then exit")
     ap.add_argument("--session", action="append", default=[], help="only this session (repeatable)")
+    ap.add_argument("--from", dest="date_from", type=parse_day, default="", metavar="YYYY-MM-DD",
+                    help="only sessions recorded on or after this day")
+    ap.add_argument("--to", dest="date_to", type=parse_day, default="", metavar="YYYY-MM-DD",
+                    help="only sessions recorded on or before this day")
+    ap.add_argument("--animal", action="append", default=[], help="only this animal (repeatable)")
+    ap.add_argument("--redo", action="store_true",
+                    help="with --session: also rerun sessions that already have a result")
     ap.add_argument("--limit", type=int, help="at most this many sessions")
     ap.add_argument("--no-stale", action="store_true",
                     help="skip sessions whose video changed since their result")
@@ -460,6 +534,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--adopt", metavar="DIR",
                     help="build results from _assemblies.pickle files made earlier by the same model")
     a = ap.parse_args(argv)
+    if a.redo and not a.session:
+        ap.error("--redo needs --session: only sessions named one by one are redone")
 
     cfg = load_config(a.config)
     if a.no_raw:
@@ -475,11 +551,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     sessions = dlc_sessions(DIO.session_bundles())
     states = DIO.session_states(root, cfg.pipeline,
                                 {s: current_inputs(b, v) for s, (b, v) in sessions.items()})
-    todo = choose(states, sessions=a.session, include_stale=not a.no_stale, limit=a.limit)
+    known = known_animals()
+    todo = choose(states, sessions=a.session, include_stale=not a.no_stale, limit=a.limit,
+                  known=known, animals=a.animal, date_from=a.date_from, date_to=a.date_to,
+                  redo=a.redo)
     c = D.counts(states)
     print(f"{cfg.pipeline} in {root}: {len(sessions)} sessions with video - "
           f"{c['done']} done, {c['stale']} stale, {c['partial']} partial, "
           f"{c['pending']} pending; {len(todo)} to run")
+    asked = select(states, animals=a.animal, date_from=a.date_from, date_to=a.date_to,
+                   sessions=a.session)
+    skipped = unknown_animal([s for s, st in asked.items() if a.redo or st != D.STATE_DONE], known)
+    if skipped:
+        print(f"  not run, animal not in animals.json: {', '.join(sorted(skipped))}")
+    missing = [s for s in a.session if s not in states]
+    if missing:
+        print(f"  no bundle with a video: {', '.join(missing)}")
     if a.dry_run:
         for sid in todo:
             print(f"  {sid}  ({states[sid]})")

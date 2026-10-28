@@ -1,5 +1,7 @@
 """Tests for tmaze.tools.dlc_offline (no DeepLabCut: the worker is faked)."""
 
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -80,6 +82,36 @@ class TestChecks(unittest.TestCase):
                                             "602_20260830_100000"])
         self.assertEqual(O.choose(states, include_stale=False, limit=1), ["601_20260903_100000"])
         self.assertEqual(O.choose(states, sessions=["600_20260901_100000"]), [])
+
+    def test_choose_by_date_animal_and_known(self):
+        states = {"600_20260919_100000": D.STATE_PENDING, "600_20260920_100000": D.STATE_PENDING,
+                  "601_20260925_100000": D.STATE_PENDING, "602_20261001_100000": D.STATE_DONE,
+                  "000_20260922_163830": D.STATE_PENDING, "odd_name": D.STATE_PENDING}
+        known = ["600", "601", "602"]
+        self.assertEqual(O.choose(states, known=known, date_from=O.parse_day("2026-09-20")),
+                         ["601_20260925_100000", "600_20260920_100000"])
+        self.assertEqual(O.choose(states, known=known, date_to="20260919"),
+                         ["600_20260919_100000"])
+        self.assertEqual(O.choose(states, known=known, animals=["601"]), ["601_20260925_100000"])
+        self.assertIn("000_20260922_163830", O.choose(states, known=None))
+        self.assertEqual(O.unknown_animal(states, known), ["000_20260922_163830", "odd_name"])
+        self.assertEqual(O.unknown_animal(states, None), [])
+        self.assertEqual(len(O.select(states, known=known, date_from="20260920")), 3)
+        self.assertEqual(O.parse_day(""), "")
+        with self.assertRaises(ValueError):
+            O.parse_day("2026-13-01")
+
+    def test_redo_only_for_named_sessions(self):
+        states = {"600_20260920_100000": D.STATE_DONE, "601_20260921_100000": D.STATE_DONE,
+                  "000_20260922_100000": D.STATE_DONE}
+        self.assertEqual(O.choose(states, redo=True), [])
+        self.assertEqual(O.choose(states, sessions=["600_20260920_100000"], redo=True,
+                                  known=["600", "601"]), ["600_20260920_100000"])
+        self.assertEqual(O.choose(states, sessions=["000_20260922_100000"], redo=True,
+                                  known=["600"]), [])
+        with contextlib.redirect_stderr(io.StringIO()) as err, self.assertRaises(SystemExit):
+            O.main(["--redo", "--dry-run"])
+        self.assertIn("--redo needs --session", err.getvalue())
 
     def test_rig_running(self):
         class P:
@@ -173,6 +205,14 @@ class TestRunSession(unittest.TestCase):
     def test_no_raw(self):
         self._run(lambda cfg, job, log: FakeWorker(job), cfg=_cfg(keep_raw=False))
         self.assertEqual(sorted(os.listdir(self.folder)), [f"{SID}_dlc.csv", "manifest.json"])
+
+    def test_redo_not_reached_keeps_its_result(self):
+        self._run(lambda cfg, job, log: FakeWorker(job))
+        open(self.stop, "w").close()
+        rc = O._run_all(_cfg(), self.root, [SID], {SID: (self.bundle, self.video)},
+                        {"snapshot": "s.pt"}, self.logs, self.stop)
+        self.assertEqual(rc, O.EXIT_STOPPED)
+        self.assertIsNotNone(DIO.read_manifest(self.folder))
 
     def test_stop_kills_and_leaves_partial(self):
         open(self.stop, "w").close()
