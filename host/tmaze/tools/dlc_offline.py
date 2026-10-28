@@ -474,6 +474,90 @@ def status(cfg: OfflineConfig, root: str) -> Tuple[Dict[str, int], Optional[int]
     return D.counts(all_states(cfg, root)), running_pid(D.pipeline_dir(root, cfg.pipeline))
 
 
+# ------------------------------------------------------- live progress
+_RUN_LINE_RE = re.compile(r"^\[(\d+)/(\d+)\] (\S+): (start|done|stopped|FAILED)", re.MULTILINE)
+_FRAMES_RE = re.compile(r"(\d+)/(\d+) \[(\d+(?::\d+)+)<")
+_STAMP_LEN = len("_20261028_170505.log")
+
+
+def run_position(text: str) -> Optional[Tuple[int, int, str, str]]:
+    """(i, n, session, what) from the last ``[i/n] <sid>: start|done|...`` line
+    of a run log, or None."""
+    found = _RUN_LINE_RE.findall(text)
+    if not found:
+        return None
+    i, n, sid, what = found[-1]
+    return int(i), int(n), sid, what
+
+
+def frame_position(text: str) -> Optional[Tuple[int, int, float]]:
+    """(frames done, frames in the video, seconds so far) from the last
+    progress-bar update in a worker log, or None before the first one."""
+    found = _FRAMES_RE.findall(text)
+    if not found:
+        return None
+    done, total, elapsed = found[-1]
+    secs = 0
+    for part in elapsed.split(":"):
+        secs = secs * 60 + int(part)
+    return int(done), int(total), float(secs)
+
+
+def progress_text(sid: str, run: Optional[Tuple[int, int]],
+                  frames: Optional[Tuple[int, int, float]]) -> str:
+    """One line for the Records Manager while a run is going. Time left comes
+    from the average speed so far (the progress bar's own estimate swings)."""
+    head = "DLC running: " + (f"{run[0]}/{run[1]} " if run else "") + sid
+    if frames is None:
+        return head + " - loading the model"
+    done, total, secs = frames
+    if total and done >= total:
+        return head + " - 100%, writing the results"
+    pct = 100 * done // total if total else 0
+    if done and secs > 0:
+        left = secs * (total - done) / done / 60
+        return head + f" - {pct}%, about {left:.0f} min left on this one"
+    return head + f" - {pct}%"
+
+
+def _tail(path: str, nbytes: int = 4096) -> str:
+    with open(path, "rb") as fh:
+        fh.seek(0, os.SEEK_END)
+        fh.seek(max(0, fh.tell() - nbytes))
+        return fh.read().decode("utf-8", errors="replace")
+
+
+def live_progress(pdir: str) -> Optional[str]:
+    """What a running job is doing, from the newest logs in ``_logs/`` (a run
+    started from a terminal writes no run log, so the count is then left out)."""
+    logs = os.path.join(pdir, LOGS_NAME)
+    try:
+        entries = [e for e in os.scandir(logs) if e.is_file() and e.name.endswith(".log")]
+    except OSError:
+        return None
+    workers = [e for e in entries if not e.name.startswith("run_") and "_adopt_" not in e.name]
+    if not workers:
+        return None
+    worker = max(workers, key=lambda e: e.stat().st_mtime)
+    sid = worker.name[:-_STAMP_LEN]
+    try:
+        frames = frame_position(_tail(worker.path))
+    except OSError:
+        frames = None
+    run = None
+    runs = [e for e in entries if e.name.startswith("run_")]
+    if runs:
+        try:
+            with open(max(runs, key=lambda e: e.stat().st_mtime).path, encoding="utf-8",
+                      errors="replace") as fh:
+                pos = run_position(fh.read())
+        except OSError:
+            pos = None
+        if pos and pos[2] == sid and pos[3] == "start":
+            run = (pos[0], pos[1])
+    return progress_text(sid, run, frames)
+
+
 def request_stop(cfg: OfflineConfig, root: str) -> str:
     pdir = D.pipeline_dir(root, cfg.pipeline)
     os.makedirs(pdir, exist_ok=True)

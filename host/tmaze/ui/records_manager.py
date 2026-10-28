@@ -119,6 +119,8 @@ _BUILDER_TIMEOUT_S = 180
 # it a generous ceiling before we call the subprocess hung (docs/decisions/0188).
 _FIT_ALL_TIMEOUT_S = 3600
 _DLC_STATUS_MS = 5 * 60 * 1000
+# The progress line only reads the newest log tails on Z:, so it can run often.
+_DLC_PROGRESS_MS = 10 * 1000
 
 # How often the UI thread checks the background-result queue (ms). 100 ms is
 # imperceptible to the operator but keeps the poll loop cheap (docs/decisions/0163).
@@ -466,7 +468,12 @@ class RecordsManager:
         ttk.Button(bar, text="Stop DLC", command=self._on_stop_dlc).pack(side="left", padx=(6, 0))
         self.dlc_var = tk.StringVar(value="DLC: ...")
         ttk.Label(bar, textvariable=self.dlc_var).pack(side="left", padx=(6, 0))
+        # The label shows the done / to-do counts, or the live progress while
+        # a run is going.
+        self._dlc_counts_text = "DLC: ..."
+        self._dlc_progress_text = ""
         self.root.after(1000, self._refresh_dlc_status)
+        self.root.after(1500, self._poll_dlc_progress)
         # These are the buttons locked while a build runs (Reload stays live).
         self._toolbar_buttons = [b_generate, b_import, b_integrity, b_fit]
         # Operator: WHO is editing. Required before any save/import; every
@@ -3041,9 +3048,10 @@ class RecordsManager:
             text + "\n\nRun 'Generate files' to refresh the registry's sync "
             "columns.", ok)
 
-    def _refresh_dlc_status(self) -> None:
+    def _refresh_dlc_status(self, repeat: bool = True) -> None:
         """Update the DLC status label off the UI thread (scanning the bundles
-        on Z: takes seconds), then again every few minutes."""
+        on Z: takes seconds), then again every few minutes unless ``repeat`` is
+        off (a one-off refresh beside the running loop)."""
         if getattr(self, "_dlc_status_running", False):
             return
         self._dlc_status_running = True
@@ -3065,8 +3073,42 @@ class RecordsManager:
                 self.root.after(_ASYNC_POLL_MS, drain)
                 return
             self._dlc_status_running = False
-            self.dlc_var.set(text)
-            self.root.after(_DLC_STATUS_MS, self._refresh_dlc_status)
+            self._dlc_counts_text = text
+            self.dlc_var.set(self._dlc_progress_text or text)
+            if repeat:
+                self.root.after(_DLC_STATUS_MS, self._refresh_dlc_status)
+
+        threading.Thread(target=worker, daemon=True).start()
+        self.root.after(_ASYNC_POLL_MS, drain)
+
+    def _poll_dlc_progress(self) -> None:
+        """Every few seconds: if a DLC run is going, show which session it is on
+        and how far through (from its logs); when it ends, refresh the counts."""
+        result: "queue.Queue" = queue.Queue()
+
+        def worker():
+            try:
+                from tmaze.core import derivatives as D
+                from tmaze.paths import derivatives_root
+                from tmaze.tools import dlc_offline as DO
+                pdir = D.pipeline_dir(str(derivatives_root()), DO.load_config().pipeline)
+                result.put((DO.live_progress(pdir) or "DLC running")
+                           if DO.running_pid(pdir) else "")
+            except Exception:  # a missing share or config must not break the window
+                result.put("")
+
+        def drain():
+            try:
+                text = result.get_nowait()
+            except queue.Empty:
+                self.root.after(_ASYNC_POLL_MS, drain)
+                return
+            was_running = bool(self._dlc_progress_text)
+            self._dlc_progress_text = text
+            self.dlc_var.set(text or self._dlc_counts_text)
+            if was_running and not text:
+                self._refresh_dlc_status(repeat=False)
+            self.root.after(_DLC_PROGRESS_MS, self._poll_dlc_progress)
 
         threading.Thread(target=worker, daemon=True).start()
         self.root.after(_ASYNC_POLL_MS, drain)
@@ -3146,7 +3188,7 @@ class RecordsManager:
             messagebox.showwarning(title, f"Could not start DLC:\n{e}")
             return
         self._set_status(f"DLC started; log: {log_path}")
-        self.root.after(5000, self._refresh_dlc_status)
+        self.root.after(5000, lambda: self._refresh_dlc_status(repeat=False))
 
     def _on_run_dlc(self) -> None:
         """Choose sessions by date and animal, then start DLC (docs/decisions/0232)."""

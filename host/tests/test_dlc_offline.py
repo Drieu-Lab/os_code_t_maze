@@ -117,6 +117,33 @@ class TestChecks(unittest.TestCase):
                          ["--session", "a", "--session", "b", "--redo"])
         self.assertEqual(O.run_args(redo=True), [])
 
+    def test_live_progress(self):
+        run_log = ("dlc_best_iter1 in Z:: 217 sessions\n"
+                   "[1/86] 600_20261028_153815: start 17:05:05\n")
+        bar = (" 28%|##8       | 11070/38914 [15:19<31:40, 14.65it/s]"
+               " 28%|##8       | 11074/38914 [15:20<41:38, 11.14it/s]")
+        self.assertEqual(O.run_position(run_log), (1, 86, "600_20261028_153815", "start"))
+        self.assertIsNone(O.run_position("nothing yet"))
+        self.assertEqual(O.frame_position(bar), (11074, 38914, 920.0))
+        self.assertEqual(O.frame_position("[1:02:03<"), None)
+        self.assertEqual(O.frame_position("5/10 [1:02:03<00:01"), (5, 10, 3723.0))
+        self.assertEqual(O.progress_text("s", (1, 86), (11074, 38914, 920.0)),
+                         "DLC running: 1/86 s - 28%, about 39 min left on this one")
+        self.assertEqual(O.progress_text("s", None, None), "DLC running: s - loading the model")
+        self.assertIn("writing the results", O.progress_text("s", None, (10, 10, 5.0)))
+
+        pdir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, pdir)
+        self.assertIsNone(O.live_progress(pdir))
+        logs = os.path.join(pdir, O.LOGS_NAME)
+        os.makedirs(logs)
+        with open(os.path.join(logs, "run_20261028_170454.log"), "w") as fh:
+            fh.write(run_log)
+        with open(os.path.join(logs, "600_20261028_153815_20261028_170505.log"), "w") as fh:
+            fh.write("Running pose prediction\n" + bar)
+        self.assertEqual(O.live_progress(pdir), "DLC running: 1/86 600_20261028_153815 - 28%, "
+                                                "about 39 min left on this one")
+
     def test_redo_only_for_named_sessions(self):
         states = {"600_20260920_100000": D.STATE_DONE, "601_20260921_100000": D.STATE_DONE,
                   "000_20260922_100000": D.STATE_DONE}
