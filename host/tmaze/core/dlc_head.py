@@ -177,7 +177,9 @@ def header_lines(info: Dict[str, object], crop_px: int, pcutoff: float,
     video sidecar). ``info`` is the helper's hello (model file, sha256, versions)."""
     fields = {
         "dlc_head": "DeepLabCut-Live head preview (docs/decisions/0224, 0225)",
-        "join_key": "cam_block_id = the video sidecar's cam_block_id",
+        "join_key": ("cam_block_id = the video sidecar's cam_block_id; it restarts at 0 "
+                     "after 65535, so count the restarts in both files before joining "
+                     "(tmaze.core.dlc_frame_pick.unwrap_block_ids)"),
         "crop_px": crop_px,
         "pcutoff": pcutoff,
         "crop_src": "com = tracker CoM; hold = last CoM <= hold_s old; roi = ROI bounding box",
