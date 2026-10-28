@@ -1314,6 +1314,10 @@ class RecordsManager:
         self.s_filter_box.pack(side="left", padx=(4, 0))
         self.s_filter_box.bind("<<ComboboxSelected>>",
                                lambda _e: self._refresh_sessions())
+        ttk.Button(filt, text="Run DLC on selected",
+                   command=self._on_run_dlc_selected).pack(side="right")
+        ttk.Label(filt, text="Ctrl/Shift-click to pick several",
+                  foreground="#555").pack(side="right", padx=(0, 6))
 
         listwrap = ttk.Frame(tab)
         listwrap.pack(side="top", fill="x", pady=(4, 0))
@@ -1326,7 +1330,7 @@ class RecordsManager:
                   "trials": 74, "accuracy": 50, "task_ml": 64, "manual_ml": 64,
                   "stage": 96, "annot": 54}
         self.s_tree = ttk.Treeview(listwrap, columns=cols, show="headings",
-                                   height=9)
+                                   height=9, selectmode="extended")
         for c in cols:
             self.s_tree.heading(c, text=heads.get(c, c))
             self.s_tree.column(c, width=widths.get(c, 80),
@@ -1504,8 +1508,13 @@ class RecordsManager:
         sel = self.s_tree.selection()
         if not sel:
             return
-        row = self._session_row_by_item.get(sel[0], {})
+        # With several rows highlighted (for Run DLC on selected) the editor
+        # follows the row clicked last.
+        focus = self.s_tree.focus()
+        row = self._session_row_by_item.get(focus if focus in sel else sel[0], {})
         new_sid = str(row.get("session_id", "")).strip()
+        if len(sel) > 1 and new_sid == self.current_session_id:
+            return
         if (self.current_session_id and new_sid != self.current_session_id
                 and self._annotation_dirty()
                 and not self._confirm_discard(
@@ -3062,34 +3071,67 @@ class RecordsManager:
         threading.Thread(target=worker, daemon=True).start()
         self.root.after(_ASYNC_POLL_MS, drain)
 
-    def _on_run_dlc(self) -> None:
-        """Start ``tmaze.tools.dlc_offline`` as a separate background process,
-        its output in the pipeline's ``_logs/`` (docs/decisions/0227)."""
+    def _dlc_ready(self, title: str) -> Optional[str]:
+        """The pipeline folder if DLC may start now, else None (after telling
+        the operator why)."""
         from tmaze.core import derivatives as D
-        from tmaze.paths import derivatives_root, host_dir
+        from tmaze.paths import derivatives_root
         from tmaze.tools import dlc_offline as DO
         try:
             cfg = DO.load_config()
-            root = str(derivatives_root())
-            pdir = D.pipeline_dir(root, cfg.pipeline)
+            pdir = D.pipeline_dir(str(derivatives_root()), cfg.pipeline)
             running = DO.running_pid(pdir)
             rig = DO.rig_running()
         except Exception as e:
-            messagebox.showwarning("Run DLC", f"Could not check the DLC setup:\n{e}")
-            return
+            messagebox.showwarning(title, f"Could not check the DLC setup:\n{e}")
+            return None
         if running:
-            messagebox.showinfo("Run DLC", f"DLC is already running (pid {running}).")
-            return
+            messagebox.showinfo(title, f"DLC is already running (pid {running}).")
+            return None
         if rig:
-            messagebox.showinfo("Run DLC", "The rig GUI is open. DLC only runs while the "
+            messagebox.showinfo(title, "The rig GUI is open. DLC only runs while the "
                                 "rig is not in use; close the rig GUI first.")
-            return
-        if not messagebox.askyesno(
-                "Run DLC", "Run DeepLabCut on every session that has no result yet, "
-                "newest first?\n\nIt takes about an hour per session on the GPU and keeps "
-                "going after this window is closed. It stops by itself if the rig GUI "
-                "is opened (that session is redone next time); 'Stop DLC' stops it too."):
-            return
+            return None
+        return pdir
+
+    def _with_dlc_states(self, title: str, then) -> None:
+        """Scan every session's DLC state off the UI thread (seconds, on Z:),
+        then call ``then(states)`` on the UI thread."""
+        result: "queue.Queue" = queue.Queue()
+
+        def worker():
+            try:
+                from tmaze.paths import derivatives_root
+                from tmaze.tools import dlc_offline as DO
+                result.put(DO.all_states(DO.load_config(), str(derivatives_root())))
+            except Exception as e:  # a missing share or config must not break the window
+                result.put(e)
+
+        def drain():
+            try:
+                got = result.get_nowait()
+            except queue.Empty:
+                self.root.after(_ASYNC_POLL_MS, drain)
+                return
+            self._set_status("")
+            if isinstance(got, Exception):
+                messagebox.showwarning(title, f"Could not read the DLC results:\n{got}")
+                return
+            then(got)
+
+        self._set_status("Checking which sessions have DLC results...")
+        threading.Thread(target=worker, daemon=True).start()
+        self.root.after(_ASYNC_POLL_MS, drain)
+
+    def _dlc_known(self) -> Optional[List[str]]:
+        """The animals DLC may run on (docs/decisions/0232); None = no filter."""
+        return [str(r["id"]) for r in self.roster] or None
+
+    def _start_dlc(self, title: str, pdir: str, args: List[str]) -> None:
+        """Start ``tmaze.tools.dlc_offline`` as a separate background process,
+        its output in the pipeline's ``_logs/`` (docs/decisions/0227)."""
+        from tmaze.paths import host_dir
+        from tmaze.tools import dlc_offline as DO
         logs = os.path.join(pdir, DO.LOGS_NAME)
         try:
             os.makedirs(logs, exist_ok=True)
@@ -3097,14 +3139,149 @@ class RecordsManager:
             with open(log_path, "w", encoding="utf-8") as log:
                 flags = (getattr(subprocess, "DETACHED_PROCESS", 0)
                          | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
-                subprocess.Popen([sys.executable, "-u", "-m", "tmaze.tools.dlc_offline"],
+                subprocess.Popen([sys.executable, "-u", "-m", "tmaze.tools.dlc_offline"] + args,
                                  stdout=log, stderr=subprocess.STDOUT, cwd=str(host_dir()),
                                  creationflags=flags)
         except OSError as e:
-            messagebox.showwarning("Run DLC", f"Could not start DLC:\n{e}")
+            messagebox.showwarning(title, f"Could not start DLC:\n{e}")
             return
         self._set_status(f"DLC started; log: {log_path}")
         self.root.after(5000, self._refresh_dlc_status)
+
+    def _on_run_dlc(self) -> None:
+        """Choose sessions by date and animal, then start DLC (docs/decisions/0232)."""
+        if self._dlc_ready("Run DLC") is None:
+            return
+        self._with_dlc_states("Run DLC", self._dlc_dialog)
+
+    def _dlc_dialog(self, states: Dict[str, str]) -> None:
+        from tmaze.tools import dlc_offline as DO
+        known = self._dlc_known()
+        all_ids = known or sorted({DO.session_animal_date(s)[0] for s in states})
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Run DLC")
+        dlg.transient(self.root)
+        dlg.geometry(f"+{self.root.winfo_rootx() + 80}+{self.root.winfo_rooty() + 60}")
+        dlg.grab_set()
+        body = ttk.Frame(dlg, padding=10)
+        body.pack(fill="both", expand=True)
+        v_from, v_to = tk.StringVar(), tk.StringVar()
+        v_animals = {a: tk.BooleanVar(value=True) for a in all_ids}
+        v_stale = tk.BooleanVar(value=True)
+        for r, (label, var) in enumerate((("From (YYYY-MM-DD, blank = all)", v_from),
+                                          ("To (YYYY-MM-DD, blank = today)", v_to))):
+            ttk.Label(body, text=label).grid(row=r, column=0, sticky="e", padx=6, pady=3)
+            ttk.Entry(body, textvariable=var, width=14).grid(row=r, column=1, sticky="w", padx=6)
+        ttk.Label(body, text="Animals").grid(row=2, column=0, sticky="e", padx=6, pady=3)
+        ticks = ttk.Frame(body)
+        ticks.grid(row=2, column=1, sticky="w", padx=6)
+        for a in all_ids:
+            ttk.Checkbutton(ticks, text=a, variable=v_animals[a]).pack(side="left", padx=(0, 6))
+        ttk.Checkbutton(body, text="Redo sessions whose video changed since their result",
+                        variable=v_stale).grid(row=3, column=0, columnspan=2, sticky="w",
+                                               padx=6, pady=3)
+        count = ttk.Label(body, text="", wraplength=380, justify="left")
+        count.grid(row=4, column=0, columnspan=2, sticky="w", padx=6, pady=(6, 3))
+        btns = ttk.Frame(body)
+        btns.grid(row=5, column=0, columnspan=2, pady=(8, 6))
+        b_start = ttk.Button(btns, text="Start")
+        b_start.pack(side="left")
+        ttk.Button(btns, text="Cancel", command=dlg.destroy).pack(side="left", padx=(6, 0))
+
+        def choices():
+            """(args for dlc_offline, run count) or (None, why not)."""
+            try:
+                d_from, d_to = DO.parse_day(v_from.get()), DO.parse_day(v_to.get())
+            except ValueError:
+                return None, "Dates must be YYYY-MM-DD (or blank)."
+            animals = [a for a in all_ids if v_animals[a].get()]
+            if not animals:
+                return None, "Tick at least one animal."
+            n, done = DO.selection_counts(states, known=known, animals=animals,
+                                          date_from=d_from, date_to=d_to,
+                                          include_stale=v_stale.get())
+            if not n:
+                return None, f"Nothing to run ({done} chosen sessions already done)."
+            args = DO.run_args(date_from=v_from.get().strip(), date_to=v_to.get().strip(),
+                               animals=animals, all_animals=all_ids,
+                               include_stale=v_stale.get())
+            return args, (f"{n} session{'' if n == 1 else 's'} to run, newest first "
+                          f"(about {n} h on the GPU); {done} already done.")
+
+        def update(*_):
+            args, text = choices()
+            count.configure(text=text, foreground="#555" if args is not None else "#9C0006")
+            b_start.state(["!disabled"] if args is not None else ["disabled"])
+
+        def start():
+            args, _text = choices()
+            if args is None:
+                return
+            dlg.destroy()
+            pdir = self._dlc_ready("Run DLC")
+            if pdir is not None:
+                self._start_dlc("Run DLC", pdir, args)
+
+        b_start.configure(command=start)
+        for var in [v_from, v_to, v_stale] + list(v_animals.values()):
+            var.trace_add("write", update)
+        update()
+        ttk.Label(body, text="It keeps going after this window is closed, stops by itself "
+                  "if the rig GUI is opened (that session is redone next time), and "
+                  "'Stop DLC' stops it too.", wraplength=380, foreground="#555").grid(
+            row=6, column=0, columnspan=2, sticky="w", padx=6, pady=(0, 6))
+
+    def _on_run_dlc_selected(self) -> None:
+        """DLC on the rows highlighted in the Sessions table (docs/decisions/0232)."""
+        title = "Run DLC on selected"
+        sids = [str(self._session_row_by_item.get(i, {}).get("session_id", "")).strip()
+                for i in self.s_tree.selection()]
+        sids = [s for s in sids if s]
+        if not sids:
+            messagebox.showinfo(title, "Highlight one or more sessions first "
+                                "(Ctrl-click or Shift-click to pick several).")
+            return
+        if self._dlc_ready(title) is None:
+            return
+        self._with_dlc_states(title, lambda states: self._run_dlc_on(title, sids, states))
+
+    def _run_dlc_on(self, title: str, sids: List[str], states: Dict[str, str]) -> None:
+        from tmaze.core import derivatives as D
+        from tmaze.tools import dlc_offline as DO
+        known = self._dlc_known()
+        no_video = [s for s in sids if s not in states]
+        unknown = DO.unknown_animal([s for s in sids if s in states], known)
+        ok = [s for s in sids if s in states and s not in unknown]
+        done = [s for s in ok if states[s] == D.STATE_DONE]
+        new = DO.choose(states, sessions=ok, known=known)
+        notes = []
+        if no_video:
+            notes.append(f"no video: {', '.join(no_video)}")
+        if unknown:
+            notes.append(f"animal not in the roster: {', '.join(unknown)}")
+        redo = False
+        if done:
+            answer = messagebox.askyesnocancel(
+                title, f"{len(done)} of the selected session{'s' if len(done) > 1 else ''} "
+                "already have a DLC result. Redo them?\n\nEach old result is replaced "
+                "only when that session's rerun starts, so a stopped run keeps the "
+                "results it didn't reach.\n\nNo = run only the sessions without a result.")
+            if answer is None:
+                return
+            redo = answer
+        n = len(new) + (len(done) if redo else 0)
+        extra = ("\n\nNot run - " + "; ".join(notes)) if notes else ""
+        if not n:
+            messagebox.showinfo(title, "Nothing to run." + extra)
+            return
+        if not messagebox.askyesno(
+                title, f"Run DeepLabCut on {n} session{'' if n == 1 else 's'}, newest first "
+                f"(about {n} h on the GPU)?{extra}\n\nIt keeps going after this window is "
+                "closed, stops by itself if the rig GUI is opened, and 'Stop DLC' stops it."):
+            return
+        pdir = self._dlc_ready(title)
+        if pdir is not None:
+            self._start_dlc(title, pdir, DO.run_args(sessions=ok, redo=redo))
 
     def _on_stop_dlc(self) -> None:
         from tmaze.paths import derivatives_root

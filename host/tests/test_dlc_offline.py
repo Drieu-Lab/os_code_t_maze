@@ -101,6 +101,22 @@ class TestChecks(unittest.TestCase):
         with self.assertRaises(ValueError):
             O.parse_day("2026-13-01")
 
+    def test_records_manager_counts_and_args(self):
+        states = {"600_20260920_100000": D.STATE_DONE, "600_20260921_100000": D.STATE_STALE,
+                  "601_20260921_100000": D.STATE_PENDING, "000_20260922_100000": D.STATE_PENDING}
+        known = ["600", "601"]
+        self.assertEqual(O.selection_counts(states, known=known), (2, 1))
+        self.assertEqual(O.selection_counts(states, known=known, include_stale=False), (1, 1))
+        self.assertEqual(O.selection_counts(states, known=known, animals=["600"],
+                                            date_from="20260921"), (1, 0))
+        self.assertEqual(O.run_args(animals=["600", "601"], all_animals=["600", "601"]), [])
+        self.assertEqual(O.run_args(date_from="2026-09-20", animals=["601"],
+                                    all_animals=["600", "601"], include_stale=False),
+                         ["--from", "2026-09-20", "--animal", "601", "--no-stale"])
+        self.assertEqual(O.run_args(sessions=["a", "b"], redo=True),
+                         ["--session", "a", "--session", "b", "--redo"])
+        self.assertEqual(O.run_args(redo=True), [])
+
     def test_redo_only_for_named_sessions(self):
         states = {"600_20260920_100000": D.STATE_DONE, "601_20260921_100000": D.STATE_DONE,
                   "000_20260922_100000": D.STATE_DONE}

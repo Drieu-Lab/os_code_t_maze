@@ -234,6 +234,38 @@ def choose(states: Dict[str, str], *, sessions: Sequence[str] = (), include_stal
     return todo[:limit] if limit else todo
 
 
+def selection_counts(states: Dict[str, str], *, known: Optional[Iterable[str]] = None,
+                     animals: Sequence[str] = (), date_from: str = "", date_to: str = "",
+                     include_stale: bool = True) -> Tuple[int, int]:
+    """(sessions a run with these choices would do, of the chosen ones already done)."""
+    chosen = select(states, known=known, animals=animals, date_from=date_from, date_to=date_to)
+    todo = choose(states, include_stale=include_stale, known=known, animals=animals,
+                  date_from=date_from, date_to=date_to)
+    return len(todo), sum(1 for st in chosen.values() if st == D.STATE_DONE)
+
+
+def run_args(*, date_from: str = "", date_to: str = "", animals: Sequence[str] = (),
+             all_animals: Sequence[str] = (), include_stale: bool = True,
+             sessions: Sequence[str] = (), redo: bool = False) -> List[str]:
+    """The command-line options for a run the Records Manager starts. Dates are
+    ``YYYY-MM-DD``; ``--animal`` is left out when every animal is ticked."""
+    out: List[str] = []
+    if date_from:
+        out += ["--from", date_from]
+    if date_to:
+        out += ["--to", date_to]
+    if set(animals) != set(all_animals):
+        for a in animals:
+            out += ["--animal", a]
+    if not include_stale:
+        out.append("--no-stale")
+    for s in sessions:
+        out += ["--session", s]
+    if redo and sessions:
+        out.append("--redo")
+    return out
+
+
 def known_animals() -> Optional[List[str]]:
     """The ids in ``animals.json``, or None (with a warning) when it can't be
     read, so a missing resources repo never blocks a run."""
@@ -429,12 +461,17 @@ def status_text(counts: Dict[str, int], running: Optional[int]) -> str:
     return text + (f" - running (pid {running})" if running else "")
 
 
+def all_states(cfg: OfflineConfig, root: str) -> Dict[str, str]:
+    """{session_id: state} for every session bundle with a video (a scan of the
+    recordings roots and the pipeline folder; takes seconds)."""
+    sessions = dlc_sessions(DIO.session_bundles())
+    return DIO.session_states(root, cfg.pipeline,
+                              {s: current_inputs(b, v) for s, (b, v) in sessions.items()})
+
+
 def status(cfg: OfflineConfig, root: str) -> Tuple[Dict[str, int], Optional[int]]:
     """(state counts over the sessions with video, pid of a running job)."""
-    sessions = dlc_sessions(DIO.session_bundles())
-    states = DIO.session_states(root, cfg.pipeline,
-                                {s: current_inputs(b, v) for s, (b, v) in sessions.items()})
-    return D.counts(states), running_pid(D.pipeline_dir(root, cfg.pipeline))
+    return D.counts(all_states(cfg, root)), running_pid(D.pipeline_dir(root, cfg.pipeline))
 
 
 def request_stop(cfg: OfflineConfig, root: str) -> str:
