@@ -2,9 +2,10 @@
 test_phase3_probe_blocks.py - headless tests for unrewarded probe blocks.
 
 Covers the pure core for the acquisition/expression dissociation (docs/decisions/
-0115-probe) with the correct-choice WINDOW trigger (docs/decisions/0134): the
+0115-probe) with the correct-choice trigger (docs/decisions/0134) after a random
+start drawn in each initiation window (docs/decisions/0233): the
 ``ProbeBlockController`` state machine (probe_blocks.py) that fires on the first
-correct choice inside a configured trial-number window, its integration into
+correct choice at or after the drawn start, its integration into
 ``TrialSequence`` (the trigger trial is an already-committed spine trial reclassified
 at scoring; the following ``block_len`` trials insert on top of the spine WITHOUT
 consuming it, take priority over the intervention stack, and are flagged in
@@ -21,7 +22,7 @@ import types
 import unittest
 
 from tmaze.core.phase3.probe_blocks import (
-    ProbeBlockConfig, ProbeBlockController)
+    ProbeBlockConfig, ProbeBlockController, probe_start_trials)
 from tmaze.core.phase3.phase3_task import (
     CORRECT, INCORRECT, Phase3Config, Phase3Task)
 from tmaze.core.phase3.trial_sequence import (
@@ -40,7 +41,7 @@ def _drain_block(ctrl):
 
 
 class TestProbeBlockController(unittest.TestCase):
-    def _ctrl(self, block_len=10, seed=1, windows=((40, 60),),
+    def _ctrl(self, block_len=10, seed=1, windows=((40, 40),),
              max_same_run=0, max_alt_run=0):
         return ProbeBlockController(
             ProbeBlockConfig(enabled=True, block_len=block_len, windows=windows),
@@ -56,7 +57,7 @@ class TestProbeBlockController(unittest.TestCase):
         self.assertFalse(c.active)
 
     def test_correct_choice_in_window_fires(self):
-        c = self._ctrl(windows=((40, 60),))
+        c = self._ctrl(windows=((40, 40),))
         # Just inside the window, a correct non-intervention choice fires.
         self.assertTrue(c.on_scored(trial_no=40, correct=True,
                                     intervention_active=False))
@@ -79,7 +80,7 @@ class TestProbeBlockController(unittest.TestCase):
         self.assertFalse(c.active)
 
     def test_window_fires_at_most_once(self):
-        c = self._ctrl(windows=((40, 60),))
+        c = self._ctrl(windows=((40, 40),))
         self.assertTrue(c.on_scored(trial_no=41, correct=True,
                                     intervention_active=False))
         _drain_block(c)                      # finish the block, back to NORMAL
@@ -90,7 +91,7 @@ class TestProbeBlockController(unittest.TestCase):
         self.assertFalse(c.active)
 
     def test_multiple_windows_each_fire_once(self):
-        c = self._ctrl(windows=((40, 60), (120, 160)))
+        c = self._ctrl(windows=((40, 40), (120, 120)))
         self.assertTrue(c.on_scored(trial_no=42, correct=True,
                                     intervention_active=False))
         _drain_block(c)
@@ -180,7 +181,7 @@ class TestProbeBlockController(unittest.TestCase):
         self.assertTrue(saw_long_run)
 
     def test_second_block_increments_id_and_differs(self):
-        c = self._ctrl(block_len=10, windows=((40, 60), (120, 160)))
+        c = self._ctrl(block_len=10, windows=((40, 40), (120, 120)))
         c.on_scored(trial_no=40, correct=True, intervention_active=False)
         first = _drain_block(c)
         c.on_scored(trial_no=120, correct=True, intervention_active=False)
@@ -198,7 +199,7 @@ class TestProbeBlockController(unittest.TestCase):
         self.assertEqual(_drain_block(a), _drain_block(b))
 
     def test_no_fire_while_active(self):
-        c = self._ctrl(windows=((40, 60),))
+        c = self._ctrl(windows=((40, 40),))
         c.on_scored(trial_no=40, correct=True, intervention_active=False)
         # Another correct choice while a probe is running does not start a second.
         self.assertFalse(c.on_scored(trial_no=41, correct=True,
@@ -222,7 +223,7 @@ class TestProbeBlockController(unittest.TestCase):
         self.assertFalse(c.ever_disarmed)
 
     def test_disarmed_never_fires_in_window(self):
-        c = self._ctrl(windows=((40, 60),))
+        c = self._ctrl(windows=((40, 40),))
         c.set_armed(False)
         self.assertFalse(c.armed)
         self.assertTrue(c.ever_disarmed)
@@ -231,7 +232,7 @@ class TestProbeBlockController(unittest.TestCase):
         self.assertFalse(c.active)
 
     def test_rearm_allows_a_later_window(self):
-        c = self._ctrl(windows=((40, 60), (120, 160)))
+        c = self._ctrl(windows=((40, 40), (120, 120)))
         c.set_armed(False)
         self.assertFalse(c.on_scored(trial_no=45, correct=True,
                                      intervention_active=False))
@@ -240,6 +241,12 @@ class TestProbeBlockController(unittest.TestCase):
         self.assertTrue(c.on_scored(trial_no=130, correct=True,
                                     intervention_active=False))
         self.assertTrue(c.active)
+        # The later window fired; the earlier, never-fired one was skipped rather
+        # than queued up to fire right after this block (docs/decisions/0233).
+        self.assertEqual(c.fired_trials, (0, 130))
+        _drain_block(c)
+        self.assertFalse(c.on_scored(trial_no=150, correct=True,
+                                     intervention_active=False))
 
     def test_disarm_aborts_running_block(self):
         c = self._ctrl(block_len=10)
@@ -260,8 +267,83 @@ class TestProbeBlockController(unittest.TestCase):
         self.assertFalse(c.ever_disarmed)
 
 
+class TestRandomProbeStart(unittest.TestCase):
+    """The start trial drawn at random inside each initiation window
+    (docs/decisions/0233)."""
+
+    def _ctrl(self, seed=1, windows=((50, 120),)):
+        return ProbeBlockController(
+            ProbeBlockConfig(enabled=True, block_len=10, windows=windows),
+            seed=seed)
+
+    def test_start_lies_inside_its_window(self):
+        for seed in range(200):
+            starts = probe_start_trials(((50, 120), (150, 160)), seed)
+            self.assertEqual(len(starts), 2)
+            self.assertTrue(50 <= starts[0] <= 120, f"seed={seed}: {starts}")
+            self.assertTrue(150 <= starts[1] <= 160, f"seed={seed}: {starts}")
+
+    def test_same_seed_same_start_and_controller_matches_helper(self):
+        self.assertEqual(probe_start_trials(((50, 120),), 42),
+                         probe_start_trials(((50, 120),), 42))
+        self.assertEqual(self._ctrl(seed=42).start_trials,
+                         probe_start_trials(((50, 120),), 42))
+
+    def test_starts_spread_across_the_window(self):
+        # Not stuck at the window's first trial: across seeds the draw covers both
+        # halves of the window.
+        starts = {probe_start_trials(((50, 120),), s)[0] for s in range(300)}
+        self.assertTrue(any(t < 85 for t in starts))
+        self.assertTrue(any(t > 85 for t in starts))
+        self.assertGreater(len(starts), 30)
+
+    def test_correct_before_start_does_not_fire(self):
+        c = self._ctrl(seed=3)
+        (start,) = c.start_trials
+        for t in range(1, start):
+            self.assertFalse(c.on_scored(trial_no=t, correct=True,
+                                         intervention_active=False), f"t={t}")
+        self.assertTrue(c.on_scored(trial_no=start, correct=True,
+                                    intervention_active=False))
+        self.assertEqual(c.fired_trials, (start,))
+
+    def test_first_correct_after_start_fires_even_past_window_end(self):
+        c = self._ctrl(windows=((50, 50),))
+        self.assertEqual(c.start_trials, (50,))
+        # Wrong choices (and an intervention-trial correct) until past the window.
+        for t in range(50, 60):
+            self.assertFalse(c.on_scored(trial_no=t, correct=False,
+                                         intervention_active=False))
+        self.assertFalse(c.on_scored(trial_no=60, correct=True,
+                                     intervention_active=True))
+        self.assertTrue(c.on_scored(trial_no=61, correct=True,
+                                    intervention_active=False))
+        self.assertEqual(c.fired_trials, (61,))
+
+    def test_reset_redraws_the_same_start_and_clears_fired(self):
+        c = self._ctrl(seed=9)
+        before = c.start_trials
+        c.on_scored(trial_no=before[0], correct=True, intervention_active=False)
+        c.reset()
+        self.assertEqual(c.start_trials, before)
+        self.assertEqual(c.fired_trials, (0,))
+
+    def test_two_windows_fire_in_order(self):
+        c = self._ctrl(windows=((10, 10), (40, 40)))
+        self.assertFalse(c.on_scored(trial_no=9, correct=True,
+                                     intervention_active=False))
+        self.assertTrue(c.on_scored(trial_no=12, correct=True,
+                                    intervention_active=False))
+        _drain_block(c)
+        self.assertFalse(c.on_scored(trial_no=30, correct=True,
+                                     intervention_active=False))
+        self.assertTrue(c.on_scored(trial_no=41, correct=True,
+                                    intervention_active=False))
+        self.assertEqual(c.fired_trials, (12, 41))
+
+
 class TestTrialSequenceProbe(unittest.TestCase):
-    def _seq(self, seed=7, block_len=10, enabled=True, windows=((1, 40),)):
+    def _seq(self, seed=7, block_len=10, enabled=True, windows=((1, 1),)):
         cfg = TrialConfig(
             max_trials=60, block_size=20, max_same_run=3,
             probe=ProbeBlockConfig(enabled=enabled, block_len=block_len,
@@ -281,7 +363,7 @@ class TestTrialSequenceProbe(unittest.TestCase):
         self.assertEqual(seq.probe_state(), "NORMAL")
 
     def test_correct_choice_trigger_reclassifies_and_inserts_block(self):
-        seq = self._seq(block_len=10, windows=((1, 40),))
+        seq = self._seq(block_len=10, windows=((1, 1),))
         seq.commit(0)                        # a normal spine trigger candidate
         self.assertFalse(seq.trial_meta(0)["probe"])
         # The animal is correct on trial 0 (1-based trial_no 1, inside [1,40]).
@@ -320,7 +402,7 @@ class TestTrialSequenceProbe(unittest.TestCase):
         # index) must show the probe block's planned sides, then the next spine
         # sides after it - matching what commit() later hands out, for every seed.
         for seed in range(1, 20):
-            seq = self._seq(seed=seed, block_len=10, windows=((1, 40),))
+            seq = self._seq(seed=seed, block_len=10, windows=((1, 1),))
             seq.commit(0)
             seq.probe_trigger_on_score(0, correct=True, intervention_active=False)
             predicted = [seq.correct_arm(i) for i in range(1, 14)]
@@ -329,7 +411,7 @@ class TestTrialSequenceProbe(unittest.TestCase):
 
     def test_provisional_side_mid_block(self):
         # Re-previewing partway through still lines up with the remaining plan.
-        seq = self._seq(seed=5, block_len=10, windows=((1, 40),))
+        seq = self._seq(seed=5, block_len=10, windows=((1, 1),))
         seq.commit(0)
         seq.probe_trigger_on_score(0, correct=True, intervention_active=False)
         for i in range(1, 5):
@@ -340,7 +422,7 @@ class TestTrialSequenceProbe(unittest.TestCase):
 
     def test_provisional_side_after_operator_end_walks_spine(self):
         # Ending the probe clears its preview: upcoming trials read the spine.
-        seq = self._seq(seed=5, block_len=10, windows=((1, 40),))
+        seq = self._seq(seed=5, block_len=10, windows=((1, 1),))
         seq.commit(0)
         seq.probe_trigger_on_score(0, correct=True, intervention_active=False)
         seq.commit(1)
@@ -352,7 +434,7 @@ class TestTrialSequenceProbe(unittest.TestCase):
         # _seq() sets max_same_run=3; the forced probe block should inherit it
         # (docs/decisions/0138), across several seeds.
         for seed in range(1, 20):
-            seq = self._seq(seed=seed, block_len=10, windows=((1, 40),))
+            seq = self._seq(seed=seed, block_len=10, windows=((1, 1),))
             seq.commit(0)
             seq.probe_trigger_on_score(0, correct=True, intervention_active=False)
             sides = []
@@ -363,7 +445,7 @@ class TestTrialSequenceProbe(unittest.TestCase):
                             f"seed={seed} run cap violated: {sides}")
 
     def test_incorrect_or_out_of_window_does_not_trigger(self):
-        seq = self._seq(windows=((1, 40),))
+        seq = self._seq(windows=((1, 1),))
         seq.commit(0)
         self.assertFalse(seq.probe_trigger_on_score(0, correct=False,
                                                     intervention_active=False))
@@ -386,7 +468,7 @@ class TestTrialSequenceProbe(unittest.TestCase):
         self.assertFalse(seq.trial_meta(0)["probe"])
 
     def test_set_probe_armed_gates_trigger(self):
-        seq = self._seq(windows=((1, 40),))
+        seq = self._seq(windows=((1, 1),))
         self.assertTrue(seq.probe_armed)
         self.assertFalse(seq.probe_ever_disarmed)
         seq.set_probe_armed(False)           # operator disables mid-session
@@ -424,7 +506,7 @@ def _frame(**kw):
 
 class TestPhase3TaskProbeReward(unittest.TestCase):
     def _task(self, *, reward_incorrect=False, block_len=10, seed=7,
-              windows=((1, 40),)):
+              windows=((1, 1),)):
         cfg = TrialConfig(
             max_trials=60, block_size=20, max_same_run=3,
             probe=ProbeBlockConfig(enabled=True, block_len=block_len,
@@ -485,7 +567,7 @@ class TestPhase3TaskProbeReward(unittest.TestCase):
         self.assertTrue(dec.reward, "a correct reinforced trial should pay out")
 
     def test_disarm_prevents_trigger_and_pays_out(self):
-        task = self._task(windows=((1, 40),))
+        task = self._task(windows=((1, 1),))
         task.set_probe_armed(False)          # operator turns probes off
         dec = self._score_correct(task)
         self.assertFalse(dec.probe)

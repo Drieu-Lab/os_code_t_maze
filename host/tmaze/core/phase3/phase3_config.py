@@ -87,9 +87,10 @@ _SCHEMA = {
              "'enabled' interventions in 'debias_blocks' and/or 'alternation_blocks' "
              "run concurrently, one active at a time). 'probe_blocks' adds "
              "unrewarded, internally-counterbalanced probe blocks (block_len trials) "
-             "AUTO-triggered by a correct choice inside a 'windows' trial-number "
-             "range; they work under ANY generator and read out latent cue->side "
-             "knowledge (docs/decisions/0115-probe, 0134). 'session_cap' ends "
+             "AUTO-triggered by the first correct choice at or after a random start "
+             "drawn inside each 'windows' initiation range; they work under ANY "
+             "generator and read out latent cue->side knowledge (docs/decisions/"
+             "0115-probe, 0134, 0233). 'session_cap' ends "
              "cueing/reward after max_trials SCORED trials or max_minutes since "
              "Session Start, whichever comes first (soft stop: the operator still "
              "clicks Stop; docs/decisions/0190); water_at_chance_fraction sizes the "
@@ -372,9 +373,10 @@ def _to_probe_config(d: dict) -> ProbeBlockConfig:
     ``sequence.probe_blocks`` sub-section (missing keys fall back to defaults).
     ``block_len`` must be > 0; there is no upper bound beyond the session length
     (a probe that runs off the end simply ends with the session). ``windows`` is a
-    list of ``[start, end]`` inclusive 1-based trial-number ranges (each
-    ``1 <= start <= end``) in which a correct choice arms a probe (docs/decisions/
-    0134); an empty list means the feature never fires."""
+    list of ``[start, end]`` inclusive 1-based trial-number initiation ranges (each
+    ``1 <= start <= end``): a random start trial is drawn in each, and the first
+    correct choice at or after it arms a probe (docs/decisions/0134, 0233); an
+    empty list means the feature never fires."""
     pb = ProbeBlockConfig()
     enabled = bool(d.get("enabled", pb.enabled))
     block_len = int(d.get("block_len", pb.block_len))

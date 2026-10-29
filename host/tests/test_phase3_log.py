@@ -699,6 +699,24 @@ class TestProbeDisableLogging(unittest.TestCase):
         # No manual-disable caveat until the operator actually disables.
         self.assertFalse(any("manually DISABLED" in ln for ln in header))
 
+    def test_header_records_drawn_start_trial(self):
+        # The random start drawn in each window is in the header (ADR-0233).
+        log, seq = _probe_log(windows=((30, 70),))
+        (start,) = seq.probe_start_trials
+        self.assertTrue(30 <= start <= 70)
+        header = [ln for ln in log.render_csv().split("\n") if ln.startswith("#")]
+        self.assertTrue(any("probe_start_rule=random_start" in ln for ln in header))
+        self.assertTrue(any(f"probe_start_trials={start}" in ln for ln in header))
+
+    def test_snapshot_carries_probe_start_and_fired(self):
+        log, seq = _probe_log(windows=((5, 5),))
+        snap = log.snapshot(0, armed=True)
+        self.assertEqual(snap.probe_start_trials, (5,))
+        self.assertEqual(snap.probe_fired_trials, (0,))
+        seq.commit(6)
+        seq.probe_trigger_on_score(6, correct=True, intervention_active=False)
+        self.assertEqual(log.snapshot(7, armed=True).probe_fired_trials, (7,))
+
     def test_header_flags_manual_disable(self):
         log, seq = _probe_log()
         seq.set_probe_armed(False)

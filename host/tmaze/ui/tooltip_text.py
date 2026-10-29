@@ -547,13 +547,15 @@ TIPS: Dict[str, Entry] = {
                            "this session. In a probe the cue plays and the choice is "
                            "scored normally, but no water is given - a read-out of "
                            "what the animal KNOWS vs what it works for. Probes fire "
-                           "AUTOMATICALLY: the first correct choice inside a configured "
-                           "trial 'window' withholds reward (the trigger trial) and "
-                           "starts a counterbalanced unrewarded block on the following "
-                           "trials. There is no manual start; this toggle DISABLES the "
-                           "trigger (no window will fire, and any running block is "
-                           "aborted) or re-ENABLES it. Restart re-arms. Works under any "
-                           "generator (see docs/decisions/0115-probe, 0134, 0137).",
+                           "AUTOMATICALLY: a random start trial is drawn in each "
+                           "configured initiation 'window' from the session seed, and "
+                           "the first correct normal choice at or after that start "
+                           "withholds reward (the trigger trial) and starts a "
+                           "counterbalanced unrewarded block on the following trials. "
+                           "There is no manual start; this toggle DISABLES the trigger "
+                           "(no window will fire, and any running block is aborted) or "
+                           "re-ENABLES it. Restart re-arms. Works under any generator "
+                           "(see docs/decisions/0115-probe, 0134, 0137, 0233).",
 
     # ---- phase3_traces_view.py: Metrics tab (live rolling traces) ----
     "phase3.traces": "Live rolling traces of the current Phase 3 session, plotted "

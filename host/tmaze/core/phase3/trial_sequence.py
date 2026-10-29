@@ -420,8 +420,8 @@ class TrialSequence:
         fires, the just-scored TRIGGER trial (``index``) is reclassified as a probe
         trial - flagged both ``probe`` and ``probe_trigger`` - and the following
         ``block_len`` trials become a forced counterbalanced probe block handed out
-        by :meth:`_commit_one`. ``index`` is 0-based; the window is checked against
-        the 1-based trial number. Returns whether a probe just fired; a no-op (False)
+        by :meth:`_commit_one`. ``index`` is 0-based; the drawn window start is
+        checked against the 1-based trial number (docs/decisions/0233). Returns whether a probe just fired; a no-op (False)
         when probe blocks are not enabled this run. See probe_blocks.py /
         docs/decisions/0134."""
         if self._probe is None:
@@ -527,6 +527,18 @@ class TrialSequence:
         window may never have fired (recorded in the CSV header; docs/decisions/0137).
         False when probe blocks were not built this run."""
         return self._probe.ever_disarmed if self._probe is not None else False
+
+    @property
+    def probe_start_trials(self) -> Tuple[int, ...]:
+        """The drawn 1-based probe start trial of each window (docs/decisions/0233);
+        empty when probe blocks were not built this run."""
+        return self._probe.start_trials if self._probe is not None else ()
+
+    @property
+    def probe_fired_trials(self) -> Tuple[int, ...]:
+        """Per window, the 1-based trial its probe fired on (0 = not fired);
+        empty when probe blocks were not built this run."""
+        return self._probe.fired_trials if self._probe is not None else ()
 
     def probe_state(self) -> str:
         """Probe scheduler state for the snapshot/readout: ``ACTIVE`` while a probe

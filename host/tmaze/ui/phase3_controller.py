@@ -74,6 +74,7 @@ from tmaze.core.phase3.phase3_config import (
     DEFAULT_MAX_TOPUPS, default_config, load_phase3_config, resolve_seed,
     save_phase3_config, to_cue_stimulus, to_session_cap_config, to_trial_config,
     validate_phase3_config, with_reward_pulse_used)
+from tmaze.core.phase3.probe_blocks import probe_start_trials
 from tmaze.core.phase3 import session_cap
 from tmaze.core.phase3.session_cap import SessionCapConfig
 from tmaze.core.phase3.trial_sequence import (
@@ -2297,15 +2298,16 @@ class Phase3ControlView(VisionActuator):
         seed = s.get("seed")
         seed_txt = "random each launch" if seed is None else str(seed)
         # Read-only probe-block summary (params are file-only per ADR-0070, like the
-        # tones/seed; the only live control is the Rig-view abort button). Probes fire
-        # automatically on a correct choice inside a context window (docs/decisions/
-        # 0134), so summarise the windows. See probe_blocks.py / docs/decisions/0115.
+        # tones/seed; the only live control is the Rig-view abort button). A random
+        # start trial is drawn in each window at arm from the seed (docs/decisions/
+        # 0233; superseding the first-correct-in-window trigger of 0134). The
+        # session's drawn start is shown on the next line by _refresh_probe_start.
         pb = s.get("probe_blocks", {})
         if pb.get("enabled", False):
             windows = pb.get("windows", []) or []
             win_txt = (",".join(f"{int(w[0])}-{int(w[1])}" for w in windows)
                        if windows else "no windows")
-            probe_txt = f" \u00b7 probe {int(pb.get('block_len', 10))} @ {win_txt}"
+            probe_txt = f" \u00b7 probe {int(pb.get('block_len', 10))}, start drawn in {win_txt}"
         else:
             probe_txt = " \u00b7 probe off"
         # Read-only session cap (file-only like the schedule params; ADR-0190).
@@ -2327,6 +2329,52 @@ class Phase3ControlView(VisionActuator):
             f"trials {s['max_trials']} \u00b7 block {s['block_size']} \u00b7 "
             f"max-run {s['max_same_run']} \u00b7 {cue_txt} \u00b7 seed {seed_txt}"
             f"{probe_txt}{cap_txt}")
+        self._refresh_probe_start()
+
+    def _refresh_probe_start(self) -> None:
+        """Update the Task tab's probe-start line (docs/decisions/0233): before
+        arming, preview the start drawn from the Seed field; once armed, read the
+        published snapshot's drawn start and whether the probe is waiting, has
+        fired, or was disabled."""
+        var = getattr(self, "_probe_start_var", None)
+        if var is None:
+            return
+        s = self._config.get("sequence", {})
+        pb = s.get("probe_blocks", {})
+        if not pb.get("enabled", False):
+            var.set("Probe: off in phase3.json")
+            return
+        raw_win = pb.get("windows", []) or []
+        try:
+            windows = [(int(w[0]), int(w[1])) for w in raw_win if 1 <= int(w[0]) <= int(w[1])]
+        except Exception:
+            windows = []
+        if not windows:
+            var.set("Probe: enabled, but no windows configured")
+            return
+        win_txt = ", ".join(f"{a}-{b}" for a, b in windows)
+        pinned = ( "  [seed pinned in phase3.json - same start every session]"
+                   if s.get("seed") is not None else "")
+        st = self._state
+        if st is not None and st.armed and getattr(st, "probe_enabled", False):
+            if not getattr(st, "probe_armed", True):
+                var.set("Probe: disabled by operator")
+                return
+            starts = tuple(getattr(st, "probe_start_trials", ()) or ())
+            fired = tuple(getattr(st, "probe_fired_trials", ()) or ())
+            parts = []
+            for start, f in zip(starts, fired):
+                if f:
+                    parts.append(f"fired at trial {f} (scheduled {start})")
+                else:
+                    parts.append(
+                        f"trial {start} - waiting for first correct normal trial >= {start}")
+            if parts:
+                var.set("Probe start: " + "; ".join(parts) + pinned)
+                return
+        starts = probe_start_trials(windows, self._current_seed())
+        start_txt = ", ".join(f"trial {t}" for t in starts)
+        var.set(f"Probe start: {start_txt} (window {win_txt}; preview from seed){pinned}")
 
     def _sync_stimulus_lock(self) -> None:
         """Tk poll: the cue-type choice is fixed for an armed run, so grey it out
@@ -2497,10 +2545,14 @@ class Phase3ControlView(VisionActuator):
         self._seq_info_var = tk.StringVar(value="")
         ttk.Label(box, textvariable=self._seq_info_var, foreground="#555",
                   wraplength=440, justify="left").grid(
-            row=0, column=0, columnspan=2, sticky="w", padx=6, pady=3)
+            row=0, column=0, columnspan=2, sticky="w", padx=6, pady=(3, 1))
+        self._probe_start_var = tk.StringVar(value="")
+        ttk.Label(box, textvariable=self._probe_start_var, foreground="#0b5d69",
+                  wraplength=440, justify="left").grid(
+            row=1, column=0, columnspan=2, sticky="w", padx=6, pady=(0, 3))
         tip(box, "phase3.sequence_config")
         self._refresh_seq_info()
-        self._build_debias_ui(box, row=1)
+        self._build_debias_ui(box, row=2)
 
         btns = ttk.Frame(root)
         btns.grid(row=row + 1, column=0, columnspan=2, sticky="w", padx=6, pady=3)
@@ -2727,6 +2779,7 @@ class Phase3ControlView(VisionActuator):
             self._sync_stimulus_lock()
             self._status_var.set(self._status_text)
             self._refresh_reward_readout()
+            self._refresh_probe_start()
             self._refresh_progress()
         except tk.TclError:
             return

@@ -8,10 +8,19 @@ SCORED exactly as normal but NO reward is delivered (no prime, no lick top-ups,
 paid) reads out cue->action knowledge separately from reward-driven performance -
 the acquisition/expression dissociation of Drieu et al. 2025 (see the ADRs).
 
-Trigger: CORRECT-CHOICE within a context WINDOW (docs/decisions/0134, superseding
-the manual boundary-start of ADR-0115). The config gives one or more trial-number
-windows (e.g. trials 40-60). Inside an un-fired window, the FIRST correct choice on
-a NORMAL trial (not an intervention trial, not already a probe) fires a probe:
+Trigger: CORRECT-CHOICE after a RANDOM START drawn in an initiation WINDOW
+(docs/decisions/0233, refining the correct-choice trigger of ADR-0134, which itself
+superseded the manual boundary-start of ADR-0115). The config gives one or more
+trial-number windows (e.g. trials 50-120). When the sequence is built (Phase 3 arm /
+Restart), one START trial is drawn uniformly inside each window from the session
+seed (:func:`probe_start_trials`), so the probe does not land at a fixed point the
+animal could learn to expect. The FIRST correct choice on a NORMAL trial (not an
+intervention trial, not already a probe) whose trial number is AT OR AFTER a
+window's drawn start fires that window's probe - even past the window's end: the
+window bounds only where the start may be drawn, and the session cap (which does
+not count probe trials, ADR-0205) is what ends the session. Once a later window's
+start is reached, an earlier window that never fired is skipped, so two windows
+cannot fire back to back. The probe:
   - that TRIGGER trial's reward is withheld (it is flagged ``probe_trigger``); it is
     the gating event and, being always-correct by construction, is NOT part of the
     measured block - stats/analysis exclude it from probe accuracy;
@@ -19,9 +28,8 @@ a NORMAL trial (not an intervention trial, not already a probe) fires a probe:
     all unrewarded (precedent: Current Biology S0960-9822(24)00457-3). So the
     unrewarded run is ``block_len + 1`` trials.
 An incorrect choice does not trigger; a correct choice made DURING an intervention
-block does not trigger (windows can be generous so interventions / a run of wrong
-choices just mean the probe does not fire that session); each window fires at most
-one probe.
+block does not trigger (it just waits for the next eligible correct choice); each
+window fires at most one probe.
 
 Relationship to the debias / de-alternation interventions (debias.py,
 alternation.py, intervention_stack.py): the ``block_len`` forced block INSERTS on
@@ -40,10 +48,11 @@ evaluated at SCORING time via :meth:`on_scored`, not at commit time. The followi
 block trials are then handed out at commit time via :meth:`advance`. There is no
 manual START (the window trigger is automatic), but an operator can DISABLE probes
 mid-session (:meth:`set_armed` - no further window fires, and any running block is
-aborted) and re-enable them, as well as abort just a running probe (:meth:`end_block`);
-see docs/decisions/0137. Placement is not reproducible from the seed alone (it
-depends on when the animal happens to be correct); the CSV records where each probe
-landed and flags a session the operator disabled.
+aborted) and re-enable them (a window that had not fired yet can then still fire), as well as abort just a running probe (:meth:`end_block`);
+see docs/decisions/0137. The drawn START is reproducible from the seed, but the
+trigger trial is not (it depends on when the animal happens to be correct); the CSV
+header records the drawn starts, the rows record where each probe landed, and the
+header flags a session the operator disabled.
 
 Pure and single-threaded (the Phase 3 actuation thread), like the other cores: no
 Tk/serial, no locks. Headless tests: python -m unittest test_phase3_probe_blocks.
@@ -53,7 +62,7 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass, field
-from typing import List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from tmaze.core.phase3.trial_sequence import (
     LEFT, RIGHT, generate_balanced,
@@ -65,6 +74,19 @@ from tmaze.core.phase3.trial_sequence import (
 # seed-reproducible (it is outcome-triggered); only the WITHIN-block 5/5 pattern
 # for the k-th probe of a session is deterministic given the seed.
 _PROBE_SALT = 0x9E3779B9
+# Separate offset for the per-window START draw (docs/decisions/0233), so the start
+# is independent of both the schedule streams and the within-block plans above.
+_START_SALT = 0x85EBCA6B
+
+
+def probe_start_trials(windows, seed: int) -> Tuple[int, ...]:
+    """The drawn 1-based START trial of each ``(start, end)`` window, in window
+    order: uniform in ``[start, end]`` (inclusive), deterministic from ``seed``.
+
+    Shared by :class:`ProbeBlockController` and the Phase 3 panel's pre-arm preview
+    so the two can never disagree (docs/decisions/0233)."""
+    rng = random.Random((int(seed) & 0xFFFFFFFF) ^ _START_SALT)
+    return tuple(rng.randint(int(s), int(e)) for s, e in windows)
 
 
 @dataclass(frozen=True)
@@ -75,8 +97,9 @@ class ProbeBlockConfig:
     ``block_len`` is the number of FORCED trials in the block that follows the
     trigger trial (default 10, matching the paper); it is internally L/R
     counterbalanced, so an even length gives an exact 5/5 balance. ``windows`` is
-    the list of ``(start, end)`` inclusive 1-based trial-number ranges in which a
-    correct choice arms a probe (empty = the feature never fires)."""
+    the list of ``(start, end)`` inclusive 1-based trial-number INITIATION windows:
+    a random start trial is drawn in each, and the first correct choice at or after
+    it fires a probe (docs/decisions/0233; empty = the feature never fires)."""
     enabled: bool = False
     block_len: int = 10
     windows: Tuple[Tuple[int, int], ...] = ()
@@ -127,7 +150,13 @@ class ProbeBlockController:
         self._pos = 0                 # forced block trials issued so far
         self._plan: List[int] = []    # the current block's counterbalanced sides
         self._manual_end = False
-        self._fired: Set[int] = set()  # indices of windows that already fired
+        # Indices of windows that are used up: fired, or skipped because a later
+        # window's start was reached first (docs/decisions/0233).
+        self._fired: Set[int] = set()
+        # window index -> the 1-based trial number its probe actually fired on.
+        self._fired_at: Dict[int, int] = {}
+        # Same seed -> same draw, so a Restart re-draws the same starts.
+        self._start_trials = probe_start_trials(self.cfg.windows, self.seed)
         # Runtime arm gate (docs/decisions/0137), separate from cfg.enabled (the
         # load-time build switch): the operator can disable probes mid-session so no
         # further window ever fires. ``_ever_disarmed`` records that a disable
@@ -157,6 +186,19 @@ class ProbeBlockController:
         window may never have fired even though the config armed one. Recorded in
         the CSV header so the data file is self-describing (docs/decisions/0137)."""
         return self._ever_disarmed
+
+    @property
+    def start_trials(self) -> Tuple[int, ...]:
+        """The drawn 1-based start trial of each window, in window order
+        (docs/decisions/0233)."""
+        return self._start_trials
+
+    @property
+    def fired_trials(self) -> Tuple[int, ...]:
+        """Per window, the 1-based trial its probe fired on, or 0 if it has not
+        fired (yet, or was skipped)."""
+        return tuple(self._fired_at.get(i, 0)
+                     for i in range(len(self._start_trials)))
 
     def state(self) -> str:
         """A compact state token for the snapshot/readout: ``ACTIVE`` while a probe
@@ -206,12 +248,18 @@ class ProbeBlockController:
         self._armed = armed
 
     # ---------------------------------------------------------- trigger (scoring)
-    def _window_of(self, trial_no: int) -> Optional[int]:
-        """The index of the (first) window containing 1-based ``trial_no``, else None."""
-        for i, (start, end) in enumerate(self.cfg.windows):
-            if start <= trial_no <= end:
-                return i
-        return None
+    def _due_window(self, trial_no: int) -> Optional[int]:
+        """The un-used window whose drawn start is the LATEST one at or before
+        1-based ``trial_no``, else None. Earlier un-used windows whose start has
+        also passed are marked used (skipped) so they cannot fire back to back with
+        it (docs/decisions/0233)."""
+        due = [i for i, start in enumerate(self._start_trials)
+               if start <= trial_no and i not in self._fired]
+        if not due:
+            return None
+        latest = max(due, key=lambda i: self._start_trials[i])
+        self._fired.update(i for i in due if i != latest)
+        return latest
 
     def on_scored(self, *, trial_no: int, correct: bool,
                   intervention_active: bool) -> bool:
@@ -222,14 +270,15 @@ class ProbeBlockController:
         intervention-block trial. Fires (and returns True) iff the feature is
         enabled, ARMED (not disabled mid-session; docs/decisions/0137), no probe is
         already running, the choice was correct, this was NOT an intervention trial,
-        and ``trial_no`` lands in a window that has not fired yet. On firing it arms
-        the ``block_len`` forced block for the following trials and marks the window
-        used."""
+        and ``trial_no`` is at or after the drawn start of a window that has not
+        fired yet (docs/decisions/0233). On firing it arms the ``block_len`` forced
+        block for the following trials and marks the window used."""
         if not self._active and self.cfg.enabled and self._armed and correct \
                 and not intervention_active:
-            wi = self._window_of(trial_no)
-            if wi is not None and wi not in self._fired:
+            wi = self._due_window(trial_no)
+            if wi is not None:
                 self._fired.add(wi)
+                self._fired_at[wi] = int(trial_no)
                 self._active = True
                 self._manual_end = False
                 self._block_id += 1

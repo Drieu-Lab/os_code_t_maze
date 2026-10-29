@@ -1349,6 +1349,43 @@ class SessionPhase3WiringTest(unittest.TestCase):
         cur = st.rows[st.current_index]
         self.assertEqual(cur.sched_state, "INTERVENTION")
 
+    def test_probe_start_readout_previews_from_seed_then_tracks_state(self):
+        """docs/decisions/0233: the Task tab shows the scheduled probe start drawn
+        from the Seed field before arming, then switches to waiting / fired /
+        disabled once armed."""
+        from tmaze.core.phase3.probe_blocks import probe_start_trials
+        from tmaze.core.phase3.trial_sequence import LEFT
+
+        self.phase3._stimulus_var.set("tone")
+        self.phase3._config["sequence"]["probe_blocks"] = {
+            "enabled": True, "block_len": 10, "windows": [[1, 1]],
+        }
+        self.phase3._seed_var.set("12345")
+        self.phase3._refresh_seq_info()
+        (want,) = probe_start_trials(((1, 1),), 12345)
+        self.assertEqual(want, 1)
+        self.assertIn("preview from seed", self.phase3._probe_start_var.get())
+        self.assertIn("trial 1", self.phase3._probe_start_var.get())
+
+        self.phase3._current_trial_config = lambda: TrialConfig(
+            max_trials=40, block_size=20, max_same_run=4,
+            probe=ProbeBlockConfig(enabled=True, block_len=10, windows=((1, 1),)))
+        self._arm()
+        self.phase3._refresh_probe_start()
+        self.assertIn("waiting for first correct normal trial >= 1",
+                      self.phase3._probe_start_var.get())
+
+        side = ("left" if self.phase3._seq.correct_arm(0) == LEFT else "right")
+        self._run_full_trial(side)
+        self.phase3._refresh_probe_start()
+        self.assertIn("fired at trial 1 (scheduled 1)",
+                      self.phase3._probe_start_var.get())
+
+        self.phase3.toggle_probe_armed()
+        self._settle()
+        self.phase3._refresh_probe_start()
+        self.assertIn("disabled by operator", self.phase3._probe_start_var.get())
+
 
 if __name__ == "__main__":
     unittest.main()

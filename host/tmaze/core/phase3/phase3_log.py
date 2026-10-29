@@ -314,6 +314,10 @@ class Phase3StateSnapshot:
     probe_enabled: bool = False
     probe_state: str = "NORMAL"
     probe_armed: bool = True
+    # Per window: the drawn random start trial and the trial its probe fired on
+    # (0 = not yet), for the Task tab's probe-start line (docs/decisions/0233).
+    probe_start_trials: Tuple[int, ...] = ()
+    probe_fired_trials: Tuple[int, ...] = ()
     # Whether the return-arm cue is played this run (CueParams.return_enabled). The
     # planned return-cue columns are always generated/recorded, so panels use this
     # to suppress the return-cue readout when it is off (nothing is actually cued).
@@ -826,6 +830,8 @@ class Phase3Log:
             alt_window_samples=seq.alt_samples(),
             probe_enabled=seq.probe_enabled, probe_state=seq.probe_state(),
             probe_armed=seq.probe_armed,
+            probe_start_trials=seq.probe_start_trials,
+            probe_fired_trials=seq.probe_fired_trials,
             return_enabled=self.return_enabled,
             intervention_next=seq.intervention_will_continue(),
             probe_upcoming=seq.probe_upcoming(),
@@ -919,9 +925,14 @@ class Phase3Log:
         pb = getattr(c, "probe", None)
         if pb is not None and pb.enabled:
             win = ",".join(f"{int(s)}-{int(e)}" for s, e in pb.windows) or "none"
+            # The drawn random start per window (docs/decisions/0233); its absence
+            # marks an older file written under the first-correct-in-window rule.
+            starts = ",".join(
+                str(t) for t in self._sequence.probe_start_trials) or "none"
             lines.append(
                 f"# probe_blocks probe_enabled=True "
-                f"probe_block_len={pb.block_len} probe_windows={win}")
+                f"probe_block_len={pb.block_len} probe_windows={win} "
+                f"probe_start_rule=random_start probe_start_trials={starts}")
             if self._sequence.probe_ever_disarmed:
                 lines.append(
                     "# note: probe blocks were manually DISABLED by the operator "
