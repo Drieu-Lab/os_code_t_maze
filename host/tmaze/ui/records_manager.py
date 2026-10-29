@@ -472,6 +472,10 @@ class RecordsManager:
         # a run is going.
         self._dlc_counts_text = "DLC: ..."
         self._dlc_progress_text = ""
+        # Per-session DLC states from the last status scan (the Sessions
+        # table's DLC column) and the session a run is on now.
+        self._dlc_states: Optional[Dict[str, str]] = None
+        self._dlc_running_sid = ""
         self.root.after(1000, self._refresh_dlc_status)
         self.root.after(1500, self._poll_dlc_progress)
         # These are the buttons locked while a build runs (Reload stays live).
@@ -1328,14 +1332,14 @@ class RecordsManager:
 
         listwrap = ttk.Frame(tab)
         listwrap.pack(side="top", fill="x", pady=(4, 0))
-        cols = session_detail.list_columns() + ["annot"]
+        cols = session_detail.list_columns() + ["annot", "dlc"]
         heads = {"date": "Date", "time": "Time", "animal": "Animal",
                  "duration": "Duration", "trials": "Trials", "accuracy": "Acc",
                  "task_ml": "Task mL", "manual_ml": "Man mL", "stage": "Stage",
-                 "annot": "Annot"}
+                 "annot": "Annot", "dlc": "DLC"}
         widths = {"date": 92, "time": 54, "animal": 60, "duration": 74,
                   "trials": 74, "accuracy": 50, "task_ml": 64, "manual_ml": 64,
-                  "stage": 96, "annot": 54}
+                  "stage": 96, "annot": 54, "dlc": 110}
         self.s_tree = ttk.Treeview(listwrap, columns=cols, show="headings",
                                    height=9, selectmode="extended")
         for c in cols:
@@ -1460,7 +1464,7 @@ class RecordsManager:
         for r in self._session_rows_filtered():
             sid = str(r.get("session_id", "")).strip()
             vals = list(session_detail.list_row(r)) + [
-                "yes" if sid in annotated else ""]
+                "yes" if sid in annotated else "", self._dlc_label(sid)]
             iid = self.s_tree.insert("", "end", values=vals)
             self._session_row_by_item[iid] = r
             if sid and sid == prev:
@@ -3059,22 +3063,28 @@ class RecordsManager:
 
         def worker():
             try:
+                from tmaze.core import derivatives as D
                 from tmaze.paths import derivatives_root
                 from tmaze.tools import dlc_offline as DO
-                counts, pid = DO.status(DO.load_config(), str(derivatives_root()))
-                result.put(DO.status_text(counts, pid))
+                cfg, root = DO.load_config(), str(derivatives_root())
+                states = DO.all_states(cfg, root)
+                pid = DO.running_pid(D.pipeline_dir(root, cfg.pipeline))
+                result.put((DO.status_text(D.counts(states), pid), states))
             except Exception as e:  # a missing share or config must not break the window
-                result.put(f"DLC: status unavailable ({type(e).__name__})")
+                result.put((f"DLC: status unavailable ({type(e).__name__})", None))
 
         def drain():
             try:
-                text = result.get_nowait()
+                text, states = result.get_nowait()
             except queue.Empty:
                 self.root.after(_ASYNC_POLL_MS, drain)
                 return
             self._dlc_status_running = False
             self._dlc_counts_text = text
             self.dlc_var.set(self._dlc_progress_text or text)
+            if states is not None:
+                self._dlc_states = states
+                self._apply_dlc_column()
             if repeat:
                 self.root.after(_DLC_STATUS_MS, self._refresh_dlc_status)
 
@@ -3092,26 +3102,48 @@ class RecordsManager:
                 from tmaze.paths import derivatives_root
                 from tmaze.tools import dlc_offline as DO
                 pdir = D.pipeline_dir(str(derivatives_root()), DO.load_config().pipeline)
-                result.put((DO.live_progress(pdir) or "DLC running")
-                           if DO.running_pid(pdir) else "")
+                if DO.running_pid(pdir):
+                    sid, text = DO.live_session(pdir) or ("", "DLC running")
+                    result.put((text, sid))
+                else:
+                    result.put(("", ""))
             except Exception:  # a missing share or config must not break the window
-                result.put("")
+                result.put(("", ""))
 
         def drain():
             try:
-                text = result.get_nowait()
+                text, sid = result.get_nowait()
             except queue.Empty:
                 self.root.after(_ASYNC_POLL_MS, drain)
                 return
             was_running = bool(self._dlc_progress_text)
             self._dlc_progress_text = text
             self.dlc_var.set(text or self._dlc_counts_text)
-            if was_running and not text:
+            if sid != self._dlc_running_sid:
+                # A session finished (or a run began / ended): rescan so its row
+                # shows the new state.
+                self._dlc_running_sid = sid
+                self._apply_dlc_column()
+                self._refresh_dlc_status(repeat=False)
+            elif was_running and not text:
                 self._refresh_dlc_status(repeat=False)
             self.root.after(_DLC_PROGRESS_MS, self._poll_dlc_progress)
 
         threading.Thread(target=worker, daemon=True).start()
         self.root.after(_ASYNC_POLL_MS, drain)
+
+    def _dlc_label(self, sid: str) -> str:
+        from tmaze.tools import dlc_offline as DO
+        return DO.state_label(sid, self._dlc_states, self._dlc_running_sid, self._dlc_known())
+
+    def _apply_dlc_column(self) -> None:
+        """Rewrite the Sessions table's DLC cells in place (no reload, so the
+        selection and the annotation editor are left alone)."""
+        tree = getattr(self, "s_tree", None)
+        if tree is None:
+            return
+        for iid, row in self._session_row_by_item.items():
+            tree.set(iid, "dlc", self._dlc_label(str(row.get("session_id", "")).strip()))
 
     def _dlc_ready(self, title: str) -> Optional[str]:
         """The pipeline folder if DLC may start now, else None (after telling

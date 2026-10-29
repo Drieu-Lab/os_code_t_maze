@@ -144,6 +144,20 @@ class TestChecks(unittest.TestCase):
         self.assertEqual(O.live_progress(pdir), "DLC running: 1/86 600_20261028_153815 - 28%, "
                                                 "about 39 min left on this one")
 
+    def test_state_label(self):
+        states = {"600_20260920_100000": D.STATE_DONE, "601_20260921_100000": D.STATE_PENDING,
+                  "602_20260922_100000": D.STATE_PARTIAL, "600_20260923_100000": D.STATE_STALE,
+                  "000_20260922_163830": D.STATE_PENDING}
+        known = ["600", "601", "602"]
+        lab = {s: O.state_label(s, states, "601_20260921_100000", known) for s in states}
+        self.assertEqual(lab, {"600_20260920_100000": "done", "601_20260921_100000": "running",
+                               "602_20260922_100000": "stopped part-way",
+                               "600_20260923_100000": "video changed",
+                               "000_20260922_163830": "not run"})
+        self.assertEqual(O.state_label("600_20260920_100000", None), "")
+        self.assertEqual(O.state_label("no_video", states), "")
+        self.assertEqual(O.state_label("601_20260921_100000", states), "to do")
+
     def test_redo_only_for_named_sessions(self):
         states = {"600_20260920_100000": D.STATE_DONE, "601_20260921_100000": D.STATE_DONE,
                   "000_20260922_100000": D.STATE_DONE}

@@ -530,6 +530,29 @@ def _tail(path: str, nbytes: int = 4096) -> str:
 def live_progress(pdir: str) -> Optional[str]:
     """What a running job is doing, from the newest logs in ``_logs/`` (a run
     started from a terminal writes no run log, so the count is then left out)."""
+    found = live_session(pdir)
+    return found[1] if found else None
+
+
+_STATE_LABELS = {D.STATE_DONE: "done", D.STATE_PENDING: "to do",
+                 D.STATE_PARTIAL: "stopped part-way", D.STATE_STALE: "video changed"}
+
+
+def state_label(sid: str, states: Optional[Dict[str, str]], running: str = "",
+                known: Optional[Iterable[str]] = None) -> str:
+    """The Sessions table's DLC cell: blank before the first scan or for a
+    session with no video; 'not run' for an animal outside animals.json."""
+    if not states or sid not in states:
+        return ""
+    if sid == running:
+        return "running"
+    if unknown_animal([sid], known):
+        return "not run"
+    return _STATE_LABELS.get(states[sid], states[sid])
+
+
+def live_session(pdir: str) -> Optional[Tuple[str, str]]:
+    """(session being processed, progress line) from the newest logs, or None."""
     logs = os.path.join(pdir, LOGS_NAME)
     try:
         entries = [e for e in os.scandir(logs) if e.is_file() and e.name.endswith(".log")]
@@ -555,7 +578,7 @@ def live_progress(pdir: str) -> Optional[str]:
             pos = None
         if pos and pos[2] == sid and pos[3] == "start":
             run = (pos[0], pos[1])
-    return progress_text(sid, run, frames)
+    return sid, progress_text(sid, run, frames)
 
 
 def request_stop(cfg: OfflineConfig, root: str) -> str:
